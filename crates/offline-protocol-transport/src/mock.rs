@@ -173,6 +173,3 @@ impl Transport for MockTransport {
     }
 }
 
-// Add rand dependency for packet loss simulation
-use rand::Rng;
-

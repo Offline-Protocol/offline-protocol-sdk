@@ -1,6 +1,6 @@
 //! Retry queue with exponential backoff
 
-use offline_protocol_core::{MessageEnvelope, MessageId, Priority};
+use offline_protocol_core::{MessageEnvelope, MessageId};
 use parking_lot::RwLock;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;

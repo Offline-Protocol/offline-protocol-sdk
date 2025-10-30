@@ -39,7 +39,7 @@ pub unsafe extern "C" fn offline_protocol_new(
             return ptr::null_mut();
         }
 
-        let config_str = match CStr::from_ptr(config_json).to_str() {
+        let _config_str = match CStr::from_ptr(config_json).to_str() {
             Ok(s) => s,
             Err(_) => return ptr::null_mut(),
         };

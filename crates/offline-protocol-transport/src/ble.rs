@@ -1,12 +1,12 @@
 //! BLE mesh transport implementation
 
 use crate::{
-    LinkQuality, Neighbor, NeighborRole, Result, Transport, TransportEvent, TransportMetrics,
+    LinkQuality, Neighbor, Result, Transport, TransportEvent, TransportMetrics,
     TransportType,
 };
 use async_trait::async_trait;
 use btleplug::api::{
-    Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+    Central, Manager as _, Peripheral as _, ScanFilter,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use offline_protocol_core::{ControlMessage, DeviceId, Message, MessageEnvelope, UserId};
@@ -15,16 +15,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // Custom service UUID for offline protocol
+#[allow(dead_code)]
 const SERVICE_UUID: Uuid = Uuid::from_u128(0x0000FE00_0000_1000_8000_00805F9B34FB);
+#[allow(dead_code)]
 const MESSAGE_TX_CHAR_UUID: Uuid = Uuid::from_u128(0x0000FE01_0000_1000_8000_00805F9B34FB);
+#[allow(dead_code)]
 const MESSAGE_RX_CHAR_UUID: Uuid = Uuid::from_u128(0x0000FE02_0000_1000_8000_00805F9B34FB);
+#[allow(dead_code)]
 const BEACON_CHAR_UUID: Uuid = Uuid::from_u128(0x0000FE03_0000_1000_8000_00805F9B34FB);
 
 const NEIGHBOR_TIMEOUT: Duration = Duration::from_secs(30);
+#[allow(dead_code)]
 const BEACON_INTERVAL: Duration = Duration::from_secs(5);
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -86,7 +91,6 @@ impl BleTransport {
     /// Start beacon broadcasting
     async fn start_beacon_broadcast(&self) {
         let config = self.config.clone();
-        let event_tx = self.event_tx.clone();
         let running = Arc::clone(&self.running);
         let paused = Arc::clone(&self.paused);
 
@@ -101,7 +105,7 @@ impl BleTransport {
                 }
 
                 // Create beacon message
-                let beacon = MessageEnvelope::new(
+                let _beacon = MessageEnvelope::new(
                     config.device_id,
                     config.user_id.clone(),
                     None, // Broadcast
@@ -283,12 +287,12 @@ impl Transport for BleTransport {
         }
 
         // Get the peripheral for this device
-        let peripheral = {
+        let _peripheral = {
             let peripherals = self.peripherals.read();
             peripherals.get(&device_id).cloned()
         };
 
-        let peripheral = peripheral.ok_or_else(|| {
+        let _peripheral = _peripheral.ok_or_else(|| {
             crate::Error::NeighborNotFound(device_id.to_string())
         })?;
 

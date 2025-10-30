@@ -24,7 +24,7 @@ pub struct WiFiDirectTransportConfig {
 /// - iOS: Not available (iOS doesn't support Wi-Fi Direct)
 pub struct WiFiDirectTransport {
     _config: WiFiDirectTransportConfig,
-    event_rx: Option<mpsc::UnboundedReceiver<TransportEvent>>,
+    _event_rx: Option<mpsc::UnboundedReceiver<TransportEvent>>,
 }
 
 impl WiFiDirectTransport {
@@ -33,7 +33,7 @@ impl WiFiDirectTransport {
         
         Self {
             _config: config,
-            event_rx: Some(event_rx),
+            _event_rx: Some(event_rx),
         }
     }
 }

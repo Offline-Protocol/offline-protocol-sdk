@@ -1,7 +1,7 @@
 //! Event types emitted by the SDK
 
 use chrono::{DateTime, Utc};
-use offline_protocol_core::{DeviceId, MessageId, UserId};
+use offline_protocol_core::{DeviceId, MessageId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

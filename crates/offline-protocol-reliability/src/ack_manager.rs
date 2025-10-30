@@ -18,9 +18,9 @@ pub struct AckInfo {
 
 /// Pending message awaiting ACK
 struct PendingMessage {
-    message_id: MessageId,
+    _message_id: MessageId,
     sent_at: Instant,
-    timeout: Duration,
+    _timeout: Duration,
     ack_tx: Option<oneshot::Sender<AckInfo>>,
 }
 
@@ -62,9 +62,9 @@ impl AckManager {
         let (ack_tx, ack_rx) = oneshot::channel();
 
         let pending_msg = PendingMessage {
-            message_id,
+            _message_id: message_id,
             sent_at: Instant::now(),
-            timeout: self.config.ack_timeout,
+            _timeout: self.config.ack_timeout,
             ack_tx: Some(ack_tx),
         };
 

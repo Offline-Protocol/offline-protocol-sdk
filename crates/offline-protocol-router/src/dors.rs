@@ -48,7 +48,7 @@ impl Default for DorsConfig {
 
 /// Per-message retry tracking
 struct MessageRetryInfo {
-    message_id: MessageId,
+    _message_id: MessageId,
     transport_type: TransportType,
     retry_count: u32,
     last_attempt: Instant,
@@ -130,7 +130,7 @@ impl DorsEngine {
         let mut retries = self.message_retries.write();
         
         let retry_info = retries.entry(message_id).or_insert(MessageRetryInfo {
-            message_id,
+            _message_id: message_id,
             transport_type,
             retry_count: 0,
             last_attempt: Instant::now(),

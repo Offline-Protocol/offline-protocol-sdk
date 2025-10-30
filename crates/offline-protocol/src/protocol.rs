@@ -43,14 +43,14 @@ pub struct OfflineProtocol {
     // Core components
     router: Arc<Router>,
     relay_manager: Arc<RelayManager>,
-    dors_engine: Arc<DorsEngine>,
+    _dors_engine: Arc<DorsEngine>,
     ack_manager: Arc<AckManager>,
     retry_queue: Arc<RetryQueue>,
-    deduplicator: Arc<Deduplicator>,
+    _deduplicator: Arc<Deduplicator>,
     file_manager: Arc<FileTransferManager>,
     
     // Event handling
-    event_tx: Sender<Event>,
+    _event_tx: Sender<Event>,
     event_rx: Arc<RwLock<Option<Receiver<Event>>>>,
     
     // Background tasks
@@ -124,12 +124,12 @@ impl OfflineProtocol {
             paused: Arc::new(RwLock::new(false)),
             router,
             relay_manager,
-            dors_engine,
+            _dors_engine: dors_engine,
             ack_manager,
             retry_queue,
-            deduplicator,
+            _deduplicator: deduplicator,
             file_manager,
-            event_tx,
+            _event_tx: event_tx,
             event_rx: Arc::new(RwLock::new(Some(event_rx))),
             tasks: Arc::new(RwLock::new(Vec::new())),
         })
