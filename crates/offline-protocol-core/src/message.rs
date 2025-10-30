@@ -1,181 +1,275 @@
-//! Message types and envelope structures
+//! Message types and structures.
 
-use crate::types::{DeviceId, MessageId, Priority, UserId};
-use chrono::{DateTime, Utc};
+use crate::types::{AppId, HopCount, Timestamp, UserId, TTL};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
+use uuid::Uuid;
 
-/// Type of message content
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum MessageType {
-    Text = 0,
-    File = 1,
-    FileChunk = 2,
-    Control = 3,
+/// Unique message identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MessageId(Uuid);
+
+impl MessageId {
+    /// Generates a new random message ID.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Creates a message ID from a UUID.
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
+    }
+
+    /// Returns the message ID as a string.
+    pub fn as_str(&self) -> String {
+        self.0.to_string()
+    }
 }
 
-/// Text message content
+impl Default for MessageId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for MessageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Message priority levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessagePriority {
+    /// Low priority - can be delayed or dropped under congestion.
+    Low,
+    /// Medium priority - default for most messages.
+    Medium,
+    /// High priority - important messages that should be delivered quickly.
+    High,
+    /// Critical priority - emergency messages, highest delivery guarantee.
+    Critical,
+}
+
+impl Default for MessagePriority {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+impl MessagePriority {
+    /// Returns a numeric score for the priority (higher = more important).
+    pub fn score(&self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Critical => 4,
+        }
+    }
+}
+
+/// A message in the Offline Protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TextMessage {
-    pub text: String,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+pub struct Message {
+    /// Unique message identifier.
+    pub id: MessageId,
+
+    /// Sender's user ID.
+    pub sender: UserId,
+
+    /// Recipient's user ID.
+    pub recipient: UserId,
+
+    /// Application ID that this message belongs to.
+    pub app_id: AppId,
+
+    /// Message priority.
+    pub priority: MessagePriority,
+
+    /// Time-to-live: maximum hops remaining.
+    pub ttl: TTL,
+
+    /// Number of hops this message has traversed.
+    pub hop_count: HopCount,
+
+    /// Timestamp when the message was created.
+    pub timestamp: Timestamp,
+
+    /// Message content (text, JSON, etc.).
+    pub content: String,
+
+    /// Optional metadata for application-specific use.
+    #[serde(default)]
     pub metadata: HashMap<String, String>,
+
+    /// Whether this message requires an ACK.
+    #[serde(default = "default_requires_ack")]
+    pub requires_ack: bool,
 }
 
-/// File message metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileMessage {
-    pub name: String,
-    pub size: u64,
-    pub mime_type: String,
-    pub total_chunks: u32,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, String>,
-}
-
-/// Individual file chunk
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileChunk {
-    pub file_id: MessageId,
-    pub chunk_index: u32,
-    pub total_chunks: u32,
-    pub data: Vec<u8>,
-    pub checksum: u32,
-}
-
-/// Control message types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ControlMessage {
-    /// Acknowledgment of message receipt
-    Ack {
-        message_id: MessageId,
-        hop_count: u8,
-    },
-    /// Beacon for neighbor discovery
-    Beacon {
-        device_id: DeviceId,
-        username: UserId,
-        is_relay: bool,
-        connection_count: u8,
-    },
-    /// Request for missing file chunks
-    ChunkRequest {
-        file_id: MessageId,
-        chunk_indices: Vec<u32>,
-    },
-}
-
-/// Message content variants
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Message {
-    Text(TextMessage),
-    File(FileMessage),
-    FileChunk(FileChunk),
-    Control(ControlMessage),
+fn default_requires_ack() -> bool {
+    true
 }
 
 impl Message {
-    /// Get the message type
-    pub fn message_type(&self) -> MessageType {
-        match self {
-            Message::Text(_) => MessageType::Text,
-            Message::File(_) => MessageType::File,
-            Message::FileChunk(_) => MessageType::FileChunk,
-            Message::Control(_) => MessageType::Control,
-        }
-    }
-
-    /// Check if this is a control message
-    pub fn is_control(&self) -> bool {
-        matches!(self, Message::Control(_))
-    }
-}
-
-/// Message envelope containing routing and metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageEnvelope {
-    /// Unique message identifier
-    pub message_id: MessageId,
-    
-    /// Sender's device ID
-    pub sender_device_id: DeviceId,
-    
-    /// Sender's user ID
-    pub sender_user_id: UserId,
-    
-    /// Recipient's user ID (None for broadcast)
-    pub recipient_user_id: Option<UserId>,
-    
-    /// Time-to-live (decremented at each hop)
-    pub ttl: u8,
-    
-    /// Number of hops taken
-    pub hop_count: u8,
-    
-    /// Message priority
-    pub priority: Priority,
-    
-    /// Timestamp when message was created
-    pub timestamp: DateTime<Utc>,
-    
-    /// The actual message content
-    pub message: Message,
-}
-
-impl MessageEnvelope {
-    /// Create a new message envelope
+    /// Creates a new message.
+    ///
+    /// # Arguments
+    ///
+    /// * `sender` - Sender's user ID
+    /// * `recipient` - Recipient's user ID
+    /// * `app_id` - Application ID
+    /// * `content` - Message content
     pub fn new(
-        sender_device_id: DeviceId,
-        sender_user_id: UserId,
-        recipient_user_id: Option<UserId>,
-        message: Message,
-        priority: Priority,
-        ttl: u8,
+        sender: UserId,
+        recipient: UserId,
+        app_id: AppId,
+        content: impl Into<String>,
     ) -> Self {
         Self {
-            message_id: MessageId::new(),
-            sender_device_id,
-            sender_user_id,
-            recipient_user_id,
-            ttl,
-            hop_count: 0,
-            priority,
-            timestamp: Utc::now(),
-            message,
+            id: MessageId::new(),
+            sender,
+            recipient,
+            app_id,
+            priority: MessagePriority::default(),
+            ttl: TTL::default(),
+            hop_count: HopCount::new(),
+            timestamp: Timestamp::now(),
+            content: content.into(),
+            metadata: HashMap::new(),
+            requires_ack: true,
         }
     }
 
-    /// Serialize the envelope to MessagePack bytes
-    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
-        rmp_serde::to_vec(self).map_err(Into::into)
+    /// Creates a message builder for more control over message creation.
+    pub fn builder(sender: UserId, recipient: UserId, app_id: AppId) -> MessageBuilder {
+        MessageBuilder::new(sender, recipient, app_id)
     }
 
-    /// Deserialize an envelope from MessagePack bytes
-    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
-        rmp_serde::from_slice(bytes).map_err(Into::into)
-    }
-
-    /// Decrement TTL and increment hop count for forwarding
-    pub fn forward(&mut self) -> crate::Result<()> {
-        if self.ttl == 0 {
-            return Err(crate::Error::TtlExceeded);
-        }
-        self.ttl -= 1;
-        self.hop_count += 1;
+    /// Increments the hop count.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful, `Err` if hop count overflows.
+    pub fn increment_hop(&mut self) -> crate::Result<()> {
+        self.hop_count = self
+            .hop_count
+            .increment()
+            .ok_or(crate::Error::InvalidHopCount(u8::MAX))?;
         Ok(())
     }
 
-    /// Check if TTL has expired
-    pub fn is_expired(&self) -> bool {
-        self.ttl == 0
+    /// Decrements the TTL.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if successful, `Err` if TTL is exhausted.
+    pub fn decrement_ttl(&mut self) -> crate::Result<()> {
+        self.ttl = self.ttl.decrement().ok_or(crate::Error::InvalidTTL(0))?;
+        Ok(())
     }
 
-    /// Get the size of the serialized envelope in bytes
-    pub fn size(&self) -> crate::Result<usize> {
-        Ok(self.to_bytes()?.len())
+    /// Checks if the message's TTL is exhausted.
+    pub fn is_ttl_exhausted(&self) -> bool {
+        self.ttl.is_exhausted()
+    }
+
+    /// Serializes the message to JSON.
+    pub fn to_json(&self) -> crate::Result<String> {
+        serde_json::to_string(self).map_err(|e| crate::Error::SerializationError(e.to_string()))
+    }
+
+    /// Deserializes a message from JSON.
+    pub fn from_json(json: &str) -> crate::Result<Self> {
+        serde_json::from_str(json).map_err(|e| crate::Error::DeserializationError(e.to_string()))
+    }
+
+    /// Serializes the message to binary (MessagePack-like JSON bytes).
+    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|e| crate::Error::SerializationError(e.to_string()))
+    }
+
+    /// Deserializes a message from binary.
+    pub fn from_bytes(bytes: &[u8]) -> crate::Result<Self> {
+        serde_json::from_slice(bytes).map_err(|e| crate::Error::DeserializationError(e.to_string()))
+    }
+}
+
+/// Builder for creating messages with custom settings.
+pub struct MessageBuilder {
+    sender: UserId,
+    recipient: UserId,
+    app_id: AppId,
+    content: String,
+    priority: MessagePriority,
+    ttl: TTL,
+    metadata: HashMap<String, String>,
+    requires_ack: bool,
+}
+
+impl MessageBuilder {
+    /// Creates a new message builder.
+    pub fn new(sender: UserId, recipient: UserId, app_id: AppId) -> Self {
+        Self {
+            sender,
+            recipient,
+            app_id,
+            content: String::new(),
+            priority: MessagePriority::default(),
+            ttl: TTL::default(),
+            metadata: HashMap::new(),
+            requires_ack: true,
+        }
+    }
+
+    /// Sets the message content.
+    pub fn content(mut self, content: impl Into<String>) -> Self {
+        self.content = content.into();
+        self
+    }
+
+    /// Sets the message priority.
+    pub fn priority(mut self, priority: MessagePriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Sets the TTL.
+    pub fn ttl(mut self, ttl: TTL) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    /// Adds metadata to the message.
+    pub fn metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets whether the message requires an ACK.
+    pub fn requires_ack(mut self, requires_ack: bool) -> Self {
+        self.requires_ack = requires_ack;
+        self
+    }
+
+    /// Builds the message.
+    pub fn build(self) -> Message {
+        Message {
+            id: MessageId::new(),
+            sender: self.sender,
+            recipient: self.recipient,
+            app_id: self.app_id,
+            priority: self.priority,
+            ttl: self.ttl,
+            hop_count: HopCount::new(),
+            timestamp: Timestamp::now(),
+            content: self.content,
+            metadata: self.metadata,
+            requires_ack: self.requires_ack,
+        }
     }
 }
 
@@ -183,54 +277,84 @@ impl MessageEnvelope {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_message_envelope_serialization() {
-        let envelope = MessageEnvelope::new(
-            DeviceId::new(),
-            UserId::new("user-123"),
-            Some(UserId::new("user-456")),
-            Message::Text(TextMessage {
-                text: "Hello, World!".to_string(),
-                metadata: HashMap::new(),
-            }),
-            Priority::High,
-            8,
-        );
-
-        let bytes = envelope.to_bytes().unwrap();
-        let deserialized = MessageEnvelope::from_bytes(&bytes).unwrap();
-
-        assert_eq!(envelope.message_id, deserialized.message_id);
-        assert_eq!(envelope.sender_device_id, deserialized.sender_device_id);
-        assert_eq!(envelope.priority, deserialized.priority);
+    fn create_test_message() -> Message {
+        Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "Hello, Bob!",
+        )
     }
 
     #[test]
-    fn test_ttl_decrement() {
-        let mut envelope = MessageEnvelope::new(
-            DeviceId::new(),
-            UserId::new("user-123"),
-            Some(UserId::new("user-456")),
-            Message::Text(TextMessage {
-                text: "Test".to_string(),
-                metadata: HashMap::new(),
-            }),
-            Priority::Medium,
-            2,
-        );
+    fn test_message_creation() {
+        let msg = create_test_message();
+        assert_eq!(msg.sender.as_str(), "alice");
+        assert_eq!(msg.recipient.as_str(), "bob");
+        assert_eq!(msg.content, "Hello, Bob!");
+        assert_eq!(msg.priority, MessagePriority::Medium);
+        assert_eq!(msg.hop_count.value(), 0);
+    }
 
-        assert_eq!(envelope.ttl, 2);
-        assert_eq!(envelope.hop_count, 0);
+    #[test]
+    fn test_message_builder() {
+        let msg = Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content("Test message")
+        .priority(MessagePriority::High)
+        .metadata("key1", "value1")
+        .requires_ack(false)
+        .build();
 
-        envelope.forward().unwrap();
-        assert_eq!(envelope.ttl, 1);
-        assert_eq!(envelope.hop_count, 1);
+        assert_eq!(msg.content, "Test message");
+        assert_eq!(msg.priority, MessagePriority::High);
+        assert_eq!(msg.metadata.get("key1").unwrap(), "value1");
+        assert!(!msg.requires_ack);
+    }
 
-        envelope.forward().unwrap();
-        assert_eq!(envelope.ttl, 0);
-        assert_eq!(envelope.hop_count, 2);
+    #[test]
+    fn test_message_hop_operations() {
+        let mut msg = create_test_message();
+        assert_eq!(msg.hop_count.value(), 0);
 
-        assert!(envelope.forward().is_err());
+        msg.increment_hop().unwrap();
+        assert_eq!(msg.hop_count.value(), 1);
+    }
+
+    #[test]
+    fn test_message_ttl_operations() {
+        let mut msg = create_test_message();
+        let initial_ttl = msg.ttl.value();
+
+        msg.decrement_ttl().unwrap();
+        assert_eq!(msg.ttl.value(), initial_ttl - 1);
+    }
+
+    #[test]
+    fn test_message_serialization() {
+        let msg = create_test_message();
+
+        // JSON serialization
+        let json = msg.to_json().unwrap();
+        let deserialized = Message::from_json(&json).unwrap();
+        assert_eq!(msg.id, deserialized.id);
+        assert_eq!(msg.sender, deserialized.sender);
+        assert_eq!(msg.content, deserialized.content);
+
+        // Binary serialization
+        let bytes = msg.to_bytes().unwrap();
+        let deserialized = Message::from_bytes(&bytes).unwrap();
+        assert_eq!(msg.id, deserialized.id);
+    }
+
+    #[test]
+    fn test_message_priority_score() {
+        assert_eq!(MessagePriority::Low.score(), 1);
+        assert_eq!(MessagePriority::Medium.score(), 2);
+        assert_eq!(MessagePriority::High.score(), 3);
+        assert_eq!(MessagePriority::Critical.score(), 4);
     }
 }
-

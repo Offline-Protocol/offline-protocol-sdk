@@ -5,29 +5,17 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-
-[lib]
-crate-type = ["cdylib", "staticlib"]
+rust-version.workspace = true
+description = "C FFI bindings for the Offline Protocol SDK"
 
 [dependencies]
-offline-protocol = { path = "../offline-protocol" }
-offline-protocol-core = { path = "../offline-protocol-core" }
-
-# FFI
-libc = "0.2"
-
-# Async runtime for FFI
-tokio = { workspace = true }
-
-# Error handling
-anyhow = { workspace = true }
-
-# Serialization for passing data across FFI
+offline-protocol = { workspace = true }
+offline-protocol-core = { workspace = true }
 serde_json = { workspace = true }
-
-# Logging
-tracing = { workspace = true }
 
 [build-dependencies]
 cbindgen = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
 

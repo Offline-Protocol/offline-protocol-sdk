@@ -5,34 +5,15 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+description = "Transport abstraction layer for the Offline Protocol SDK"
 
 [dependencies]
-offline-protocol-core = { path = "../offline-protocol-core" }
-
-# Async
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-async-trait = { workspace = true }
-futures = { workspace = true }
-
-# BLE
-btleplug = { workspace = true }
-
-# Error handling
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-
-# Collections
-uuid = { workspace = true }
-parking_lot = { workspace = true }
-crossbeam-channel = { workspace = true }
-
-# Serialization
+offline-protocol-core = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }
 
-# Logging
-tracing = { workspace = true }
+[dev-dependencies]
 
-# Random for mock transport
-rand = "0.8"
+[lib]
 

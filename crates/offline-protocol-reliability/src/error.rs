@@ -1,24 +1,26 @@
-//! Reliability layer error types
+//! Reliability layer errors.
 
 use thiserror::Error;
 
+/// Result type alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Error, Debug)]
+/// Reliability layer errors.
+#[derive(Debug, Error)]
 pub enum Error {
-    #[error("Message not found: {0}")]
-    MessageNotFound(String),
+    /// ACK timeout.
+    #[error("ACK timeout for message {0}")]
+    AckTimeout(String),
 
-    #[error("ACK timeout")]
-    AckTimeout,
-
-    #[error("Max retries exceeded")]
+    /// Maximum retries exceeded.
+    #[error("Maximum retries exceeded")]
     MaxRetriesExceeded,
 
-    #[error("Queue full")]
-    QueueFull,
-
-    #[error("Core protocol error: {0}")]
+    /// Core error.
+    #[error("Core error: {0}")]
     Core(#[from] offline_protocol_core::Error),
-}
 
+    /// Generic error.
+    #[error("{0}")]
+    Other(String),
+}

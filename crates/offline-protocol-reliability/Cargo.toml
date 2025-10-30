@@ -5,28 +5,16 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+description = "Reliability layer with ACK, retry, and deduplication for the Offline Protocol SDK"
 
 [dependencies]
-offline-protocol-core = { path = "../offline-protocol-core" }
-
-# Async
-tokio = { workspace = true, features = ["time", "sync"] }
-futures = { workspace = true }
-
-# Error handling
-thiserror = { workspace = true }
-
-# Collections
-uuid = { workspace = true }
-lru = { workspace = true }
-parking_lot = { workspace = true }
-
-# Serialization
+offline-protocol-core = { workspace = true }
 serde = { workspace = true }
-
-# Time
+thiserror = { workspace = true }
 chrono = { workspace = true }
 
-# Logging
-tracing = { workspace = true }
+[dev-dependencies]
+
+[lib]
 

@@ -1,47 +1,48 @@
-//! Error types for the offline protocol
+//! Error types for the Offline Protocol SDK.
 
 use thiserror::Error;
 
-/// Result type for offline protocol operations
+/// Result type alias using the core Error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Errors that can occur in the offline protocol
-#[derive(Error, Debug, Clone)]
+/// Core errors that can occur in the Offline Protocol SDK.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum Error {
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-
-    #[error("Deserialization error: {0}")]
-    Deserialization(String),
-
+    /// Invalid message format or content.
     #[error("Invalid message: {0}")]
     InvalidMessage(String),
 
-    #[error("Message too large: {0} bytes (max: {1})")]
-    MessageTooLarge(usize, usize),
-
-    #[error("Invalid device ID: {0}")]
-    InvalidDeviceId(String),
-
+    /// Invalid user ID format.
     #[error("Invalid user ID: {0}")]
     InvalidUserId(String),
 
-    #[error("TTL exceeded")]
-    TtlExceeded,
+    /// Invalid app ID format.
+    #[error("Invalid app ID: {0}")]
+    InvalidAppId(String),
 
-    #[error("Unknown message type: {0}")]
-    UnknownMessageType(u8),
+    /// Invalid TTL value (must be > 0).
+    #[error("Invalid TTL: {0}")]
+    InvalidTTL(u8),
+
+    /// Invalid hop count value.
+    #[error("Invalid hop count: {0}")]
+    InvalidHopCount(u8),
+
+    /// Message serialization failed.
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+
+    /// Message deserialization failed.
+    #[error("Deserialization error: {0}")]
+    DeserializationError(String),
+
+    /// Generic error with custom message.
+    #[error("{0}")]
+    Other(String),
 }
 
-impl From<rmp_serde::encode::Error> for Error {
-    fn from(err: rmp_serde::encode::Error) -> Self {
-        Error::Serialization(err.to_string())
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Error::SerializationError(err.to_string())
     }
 }
-
-impl From<rmp_serde::decode::Error> for Error {
-    fn from(err: rmp_serde::decode::Error) -> Self {
-        Error::Deserialization(err.to_string())
-    }
-}
-

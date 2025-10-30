@@ -5,28 +5,17 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+description = "DORS routing and relay management for the Offline Protocol SDK"
 
 [dependencies]
-offline-protocol-core = { path = "../offline-protocol-core" }
-offline-protocol-transport = { path = "../offline-protocol-transport" }
-
-# Async
-tokio = { workspace = true }
-async-trait = { workspace = true }
-
-# Error handling
-thiserror = { workspace = true }
-
-# Collections
-uuid = { workspace = true }
-parking_lot = { workspace = true }
-
-# Serialization
+offline-protocol-core = { workspace = true }
+offline-protocol-transport = { workspace = true }
 serde = { workspace = true }
-
-# Time
+thiserror = { workspace = true }
 chrono = { workspace = true }
 
-# Logging
-tracing = { workspace = true }
+[dev-dependencies]
+
+[lib]
 

@@ -1,18 +1,18 @@
-//! Transport layer for offline protocol
+//! Transport abstraction layer for the Offline Protocol SDK.
 //!
-//! This crate provides the transport abstraction and implementations
-//! for BLE mesh, Wi-Fi Direct, and mock transports.
+//! This crate defines the transport trait and types for different
+//! transport mechanisms (BLE, Wi-Fi Direct, Internet).
+//!
+//! All code in this crate is 100% safe Rust with no unsafe blocks.
 
-pub mod ble;
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
+
 pub mod error;
 pub mod mock;
 pub mod traits;
 pub mod types;
-pub mod wifidirect;
 
 pub use error::{Error, Result};
-pub use traits::{Transport, TransportEvent};
-pub use types::{
-    LinkQuality, Neighbor, NeighborRole, TransportMetrics, TransportType,
-};
-
+pub use traits::{Transport, TransportStatus};
+pub use types::{LinkQuality, TransportMetrics, TransportType};

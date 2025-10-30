@@ -1,15 +1,19 @@
-//! Routing layer for offline protocol
+//! DORS routing and relay management for the Offline Protocol SDK.
 //!
-//! This crate provides DORS (Dynamic Offline Routing Strategy), relay management,
-//! and multi-hop routing logic.
+//! This crate implements the Dynamic Offline Relay Switch (DORS) system
+//! for intelligent transport selection and relay management.
+//!
+//! All code in this crate is 100% safe Rust with no unsafe blocks.
+
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod dors;
 pub mod error;
 pub mod relay;
 pub mod router;
 
-pub use dors::{DorsConfig, DorsEngine};
+pub use dors::TransportSelector;
 pub use error::{Error, Result};
-pub use relay::{RelayManager, RelayManagerConfig};
-pub use router::{Router, RouterConfig};
-
+pub use relay::RelayManager;
+pub use router::PathSelector;

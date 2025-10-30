@@ -1,173 +1,131 @@
-//! Transport-related types
+//! Transport types and data structures.
 
-use offline_protocol_core::{DeviceId, UserId};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime};
 
-/// Type of transport
+/// Types of transports available in the Offline Protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportType {
+    /// Internet transport (online connectivity).
+    Internet,
+    /// Bluetooth Low Energy mesh transport.
     BLE,
+    /// Wi-Fi Direct transport (Android only).
     WiFiDirect,
-    Mock,
 }
 
-impl std::fmt::Display for TransportType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TransportType::BLE => write!(f, "ble"),
-            TransportType::WiFiDirect => write!(f, "wifidirect"),
-            TransportType::Mock => write!(f, "mock"),
-        }
-    }
-}
-
-/// Role of a neighbor in the network
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NeighborRole {
-    Peer,
-    Relay,
-}
-
-/// Link quality assessment
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct LinkQuality {
-    /// RSSI (Received Signal Strength Indicator) in dBm
-    pub rssi: Option<i16>,
-    
-    /// Packet delivery ratio (0.0 to 1.0)
-    pub delivery_ratio: f64,
-    
-    /// Average latency in milliseconds
-    pub avg_latency_ms: u64,
-    
-    /// Number of packets sent
-    pub packets_sent: u64,
-    
-    /// Number of packets successfully delivered (ACKed)
-    pub packets_delivered: u64,
-}
-
-impl LinkQuality {
-    pub fn new() -> Self {
-        Self {
-            rssi: None,
-            delivery_ratio: 1.0,
-            avg_latency_ms: 0,
-            packets_sent: 0,
-            packets_delivered: 0,
-        }
-    }
-
-    /// Update delivery ratio based on a new packet result
-    pub fn update_delivery(&mut self, delivered: bool) {
-        self.packets_sent += 1;
-        if delivered {
-            self.packets_delivered += 1;
-        }
-        self.delivery_ratio = self.packets_delivered as f64 / self.packets_sent as f64;
-    }
-
-    /// Update average latency with a new sample
-    pub fn update_latency(&mut self, latency_ms: u64) {
-        if self.packets_delivered == 0 {
-            self.avg_latency_ms = latency_ms;
-        } else {
-            // Exponential moving average
-            self.avg_latency_ms = (self.avg_latency_ms * 7 + latency_ms) / 8;
-        }
-    }
-
-    /// Check if the link quality is good enough
-    pub fn is_good(&self) -> bool {
-        self.delivery_ratio >= 0.7 && self.rssi.map_or(true, |r| r >= -85)
-    }
-}
-
-impl Default for LinkQuality {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Information about a discovered neighbor
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Neighbor {
-    pub device_id: DeviceId,
-    pub user_id: UserId,
-    pub role: NeighborRole,
-    pub link_quality: LinkQuality,
-    pub last_seen: SystemTime,
-    pub connection_count: u8,
-}
-
-impl Neighbor {
-    pub fn new(device_id: DeviceId, user_id: UserId, role: NeighborRole) -> Self {
-        Self {
-            device_id,
-            user_id,
-            role,
-            link_quality: LinkQuality::new(),
-            last_seen: SystemTime::now(),
-            connection_count: 0,
-        }
-    }
-
-    /// Check if the neighbor has timed out
-    pub fn is_timed_out(&self, timeout: Duration) -> bool {
-        SystemTime::now()
-            .duration_since(self.last_seen)
-            .map_or(false, |elapsed| elapsed > timeout)
-    }
-
-    /// Update last seen timestamp
-    pub fn update_last_seen(&mut self) {
-        self.last_seen = SystemTime::now();
-    }
-}
-
-/// Metrics for a transport
+/// Transport metrics for monitoring and decision making.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportMetrics {
-    /// Transport type
-    pub transport_type: TransportType,
-    
-    /// Average RSSI in dBm
-    pub avg_rssi: Option<i16>,
-    
-    /// Average latency in milliseconds
-    pub avg_latency_ms: u64,
-    
-    /// Overall delivery ratio (0.0 to 1.0)
-    pub delivery_ratio: f64,
-    
-    /// Available bandwidth estimate in bytes/second
+    /// Received Signal Strength Indicator in dBm.
+    pub rssi: Option<i16>,
+    /// Average latency in milliseconds.
+    pub latency_ms: Option<u32>,
+    /// Estimated bandwidth in bytes per second.
     pub bandwidth_bps: Option<u64>,
-    
-    /// Number of active neighbors
-    pub neighbor_count: usize,
-    
-    /// Total messages sent
-    pub messages_sent: u64,
-    
-    /// Total messages received
-    pub messages_received: u64,
+    /// Congestion level (0.0 to 1.0, where 1.0 is fully congested).
+    pub congestion: f32,
+    /// Number of messages in send queue.
+    pub queue_depth: usize,
+    /// Number of successful sends in last minute.
+    pub success_count: u32,
+    /// Number of failed sends in last minute.
+    pub failure_count: u32,
 }
 
-impl TransportMetrics {
-    pub fn new(transport_type: TransportType) -> Self {
+impl Default for TransportMetrics {
+    fn default() -> Self {
         Self {
-            transport_type,
-            avg_rssi: None,
-            avg_latency_ms: 0,
-            delivery_ratio: 1.0,
+            rssi: None,
+            latency_ms: None,
             bandwidth_bps: None,
-            neighbor_count: 0,
-            messages_sent: 0,
-            messages_received: 0,
+            congestion: 0.0,
+            queue_depth: 0,
+            success_count: 0,
+            failure_count: 0,
         }
     }
 }
 
+/// Link quality score (0-100, where 100 is perfect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LinkQuality(u8);
+
+impl LinkQuality {
+    /// Maximum link quality value.
+    pub const MAX: u8 = 100;
+    /// Minimum link quality value.
+    pub const MIN: u8 = 0;
+
+    /// Creates a new LinkQuality, clamping to valid range [0, 100].
+    pub fn new(value: u8) -> Self {
+        Self(value.min(Self::MAX))
+    }
+
+    /// Returns the quality value.
+    pub fn value(&self) -> u8 {
+        self.0
+    }
+
+    /// Calculates link quality from RSSI.
+    ///
+    /// RSSI scale (typical for BLE/WiFi):
+    /// - Above -50 dBm: Excellent (90-100)
+    /// - -50 to -70 dBm: Good (70-90)
+    /// - -70 to -85 dBm: Fair (40-70)
+    /// - Below -85 dBm: Poor (0-40)
+    pub fn from_rssi(rssi: i16) -> Self {
+        let quality = if rssi >= -50 {
+            100
+        } else if rssi >= -70 {
+            // Linear interpolation between 70 and 100
+            70 + ((rssi + 70) * 30 / 20) as u8
+        } else if rssi >= -85 {
+            // Linear interpolation between 40 and 70
+            40 + ((rssi + 85) * 30 / 15) as u8
+        } else {
+            // Below -85 dBm
+            ((rssi + 100).max(0) * 40 / 15) as u8
+        };
+        Self::new(quality)
+    }
+
+    /// Checks if the link quality is good (>= 70).
+    pub fn is_good(&self) -> bool {
+        self.0 >= 70
+    }
+
+    /// Checks if the link quality is poor (<= 40).
+    pub fn is_poor(&self) -> bool {
+        self.0 <= 40
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_link_quality_from_rssi() {
+        let excellent = LinkQuality::from_rssi(-40);
+        assert_eq!(excellent.value(), 100);
+        assert!(excellent.is_good());
+
+        let good = LinkQuality::from_rssi(-60);
+        assert!(good.value() >= 70 && good.value() <= 90);
+        assert!(good.is_good());
+
+        let fair = LinkQuality::from_rssi(-75);
+        assert!(fair.value() >= 40 && fair.value() <= 70);
+
+        let poor = LinkQuality::from_rssi(-90);
+        assert!(poor.value() <= 40);
+        assert!(poor.is_poor());
+    }
+
+    #[test]
+    fn test_link_quality_clamping() {
+        let quality = LinkQuality::new(150);
+        assert_eq!(quality.value(), 100);
+    }
+}

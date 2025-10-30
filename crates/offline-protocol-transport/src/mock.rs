@@ -1,175 +1,122 @@
-//! Mock transport for testing
+//! Mock transport for testing.
 
-use crate::{
-    LinkQuality, Neighbor, NeighborRole, Result, Transport, TransportEvent, TransportMetrics,
-    TransportType,
-};
-use async_trait::async_trait;
-use offline_protocol_core::{DeviceId, MessageEnvelope, UserId};
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
+use offline_protocol_core::Message;
+use std::sync::{Arc, Mutex};
 
-/// Configuration for mock transport
+/// Mock transport for testing purposes.
+///
+/// This transport simulates message sending and receiving without actual network operations.
 #[derive(Debug, Clone)]
-pub struct MockTransportConfig {
-    pub device_id: DeviceId,
-    pub user_id: UserId,
-    pub latency_ms: u64,
-    pub packet_loss_rate: f64,
-}
-
-/// Mock transport implementation for testing
 pub struct MockTransport {
-    config: MockTransportConfig,
-    running: Arc<RwLock<bool>>,
-    paused: Arc<RwLock<bool>>,
-    neighbors: Arc<RwLock<HashMap<DeviceId, Neighbor>>>,
-    metrics: Arc<RwLock<TransportMetrics>>,
-    event_tx: mpsc::UnboundedSender<TransportEvent>,
-    event_rx: Arc<RwLock<Option<mpsc::UnboundedReceiver<TransportEvent>>>>,
+    transport_type: TransportType,
+    status: Arc<Mutex<TransportStatus>>,
+    sent_messages: Arc<Mutex<Vec<Message>>>,
+    receive_queue: Arc<Mutex<Vec<Message>>>,
+    metrics: Arc<Mutex<TransportMetrics>>,
 }
 
 impl MockTransport {
-    pub fn new(config: MockTransportConfig) -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        
+    /// Creates a new mock transport.
+    pub fn new(transport_type: TransportType) -> Self {
         Self {
-            config,
-            running: Arc::new(RwLock::new(false)),
-            paused: Arc::new(RwLock::new(false)),
-            neighbors: Arc::new(RwLock::new(HashMap::new())),
-            metrics: Arc::new(RwLock::new(TransportMetrics::new(TransportType::Mock))),
-            event_tx,
-            event_rx: Arc::new(RwLock::new(Some(event_rx))),
+            transport_type,
+            status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
+            sent_messages: Arc::new(Mutex::new(Vec::new())),
+            receive_queue: Arc::new(Mutex::new(Vec::new())),
+            metrics: Arc::new(Mutex::new(TransportMetrics::default())),
         }
     }
 
-    /// Add a mock neighbor for testing
-    pub fn add_neighbor(&mut self, device_id: DeviceId, user_id: UserId, role: NeighborRole) {
-        let mut neighbors = self.neighbors.write();
-        let neighbor = Neighbor::new(device_id, user_id, role);
-        neighbors.insert(device_id, neighbor.clone());
-        let _ = self.event_tx.send(TransportEvent::NeighborDiscovered(neighbor));
+    /// Adds a message to the receive queue for testing.
+    pub fn queue_message(&self, message: Message) {
+        let mut queue = self.receive_queue.lock().unwrap();
+        queue.push(message);
     }
 
-    /// Remove a mock neighbor
-    pub fn remove_neighbor(&mut self, device_id: DeviceId) {
-        let mut neighbors = self.neighbors.write();
-        if neighbors.remove(&device_id).is_some() {
-            let _ = self.event_tx.send(TransportEvent::NeighborLost(device_id));
-        }
+    /// Returns all messages that were sent through this transport.
+    pub fn sent_messages(&self) -> Vec<Message> {
+        self.sent_messages.lock().unwrap().clone()
     }
 
-    /// Simulate receiving a message
-    pub fn simulate_receive(&self, envelope: MessageEnvelope) {
-        let mut metrics = self.metrics.write();
-        metrics.messages_received += 1;
-        let _ = self.event_tx.send(TransportEvent::MessageReceived(envelope));
+    /// Clears the sent messages buffer.
+    pub fn clear_sent_messages(&self) {
+        self.sent_messages.lock().unwrap().clear();
+    }
+
+    /// Sets custom metrics for testing.
+    pub fn set_metrics(&self, metrics: TransportMetrics) {
+        *self.metrics.lock().unwrap() = metrics;
     }
 }
 
-#[async_trait]
 impl Transport for MockTransport {
-    async fn start(&mut self) -> Result<()> {
-        let mut running = self.running.write();
-        if *running {
-            return Err(crate::Error::AlreadyStarted);
-        }
-        *running = true;
-        let _ = self.event_tx.send(TransportEvent::Started);
-        Ok(())
+    fn transport_type(&self) -> TransportType {
+        self.transport_type
     }
 
-    async fn stop(&mut self) -> Result<()> {
-        let mut running = self.running.write();
-        *running = false;
-        let _ = self.event_tx.send(TransportEvent::Stopped);
-        Ok(())
+    fn status(&self) -> TransportStatus {
+        *self.status.lock().unwrap()
     }
 
-    async fn pause(&mut self) -> Result<()> {
-        let mut paused = self.paused.write();
-        *paused = true;
-        Ok(())
+    fn metrics(&self) -> TransportMetrics {
+        self.metrics.lock().unwrap().clone()
     }
 
-    async fn resume(&mut self) -> Result<()> {
-        let mut paused = self.paused.write();
-        *paused = false;
-        Ok(())
-    }
-
-    async fn send(&mut self, device_id: DeviceId, _message: &MessageEnvelope) -> Result<()> {
-        if !*self.running.read() {
-            return Err(crate::Error::NotStarted);
-        }
-
-        // Check if neighbor exists
-        {
-            let neighbors = self.neighbors.read();
-            if !neighbors.contains_key(&device_id) {
-                return Err(crate::Error::NeighborNotFound(device_id.to_string()));
-            }
-        }
-
-        // Simulate latency
-        if self.config.latency_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(self.config.latency_ms)).await;
-        }
-
-        // Simulate packet loss
-        if rand::random::<f64>() < self.config.packet_loss_rate {
-            return Err(crate::Error::SendFailed("Simulated packet loss".to_string()));
-        }
+    fn send(&self, message: &Message) -> Result<()> {
+        let mut sent = self.sent_messages.lock().unwrap();
+        sent.push(message.clone());
 
         // Update metrics
-        let mut metrics = self.metrics.write();
-        metrics.messages_sent += 1;
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.success_count += 1;
+        metrics.queue_depth = metrics.queue_depth.saturating_sub(1);
 
         Ok(())
     }
 
-    async fn broadcast(&mut self, message: &MessageEnvelope) -> Result<()> {
-        let neighbors: Vec<DeviceId> = self.neighbors.read().keys().copied().collect();
-        
-        for device_id in neighbors {
-            // Ignore send errors in broadcast
-            let _ = self.send(device_id, message).await;
-        }
-        
+    fn receive(&self) -> Result<Option<Message>> {
+        let mut queue = self.receive_queue.lock().unwrap();
+        Ok(queue.pop())
+    }
+
+    fn start(&mut self) -> Result<()> {
+        *self.status.lock().unwrap() = TransportStatus::Available;
         Ok(())
     }
 
-    async fn get_neighbors(&self) -> Vec<Neighbor> {
-        self.neighbors.read().values().cloned().collect()
-    }
-
-    async fn get_link_quality(&self, device_id: DeviceId) -> Option<LinkQuality> {
-        self.neighbors.read().get(&device_id).map(|n| n.link_quality)
-    }
-
-    async fn get_metrics(&self) -> TransportMetrics {
-        let mut metrics = self.metrics.read().clone();
-        metrics.neighbor_count = self.neighbors.read().len();
-        metrics
-    }
-
-    fn event_channel(&self) -> mpsc::UnboundedReceiver<TransportEvent> {
-        self.event_rx
-            .write()
-            .take()
-            .expect("Event channel already taken")
-    }
-
-    fn is_running(&self) -> bool {
-        *self.running.read()
-    }
-
-    fn is_paused(&self) -> bool {
-        *self.paused.read()
+    fn stop(&mut self) -> Result<()> {
+        *self.status.lock().unwrap() = TransportStatus::Disconnected;
+        Ok(())
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use offline_protocol_core::{AppId, UserId};
+
+    #[test]
+    fn test_mock_transport_send_receive() {
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+
+        assert_eq!(transport.status(), TransportStatus::Available);
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "Test message",
+        );
+
+        // Send a message
+        transport.send(&message).unwrap();
+        assert_eq!(transport.sent_messages().len(), 1);
+
+        // Queue a message for receiving
+        transport.queue_message(message.clone());
+        let received = transport.receive().unwrap();
+        assert!(received.is_some());
+    }
+}

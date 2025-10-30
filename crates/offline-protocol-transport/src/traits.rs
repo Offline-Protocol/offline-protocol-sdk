@@ -1,69 +1,59 @@
-//! Transport trait and related types
+//! Transport trait definitions.
 
-use crate::{LinkQuality, Neighbor, Result, TransportMetrics};
-use async_trait::async_trait;
-use offline_protocol_core::{DeviceId, MessageEnvelope};
-use tokio::sync::mpsc;
+use crate::{Result, TransportMetrics, TransportType};
+use offline_protocol_core::Message;
 
-/// Events emitted by transports
-#[derive(Debug, Clone)]
-pub enum TransportEvent {
-    /// A neighbor was discovered
-    NeighborDiscovered(Neighbor),
-    
-    /// A neighbor was lost (timed out)
-    NeighborLost(DeviceId),
-    
-    /// A message was received
-    MessageReceived(MessageEnvelope),
-    
-    /// Transport started successfully
-    Started,
-    
-    /// Transport stopped
-    Stopped,
-    
-    /// Transport error occurred
-    Error(String),
+/// Status of a transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportStatus {
+    /// Transport is available and ready to use.
+    Available,
+    /// Transport is unavailable (not supported or disabled).
+    Unavailable,
+    /// Transport is connecting or initializing.
+    Connecting,
+    /// Transport is disconnected.
+    Disconnected,
+    /// Transport encountered an error.
+    Error,
 }
 
-/// Transport trait defining the interface for all transport implementations
-#[async_trait]
+/// Trait for transport implementations.
+///
+/// This trait defines the interface that all transport implementations must follow.
+/// Implementations handle the platform-specific details of sending and receiving messages.
 pub trait Transport: Send + Sync {
-    /// Start the transport
-    async fn start(&mut self) -> Result<()>;
+    /// Returns the type of this transport.
+    fn transport_type(&self) -> TransportType;
 
-    /// Stop the transport
-    async fn stop(&mut self) -> Result<()>;
+    /// Returns the current status of the transport.
+    fn status(&self) -> TransportStatus;
 
-    /// Pause the transport (reduced operations for battery saving)
-    async fn pause(&mut self) -> Result<()>;
+    /// Gets current metrics for this transport.
+    fn metrics(&self) -> TransportMetrics;
 
-    /// Resume the transport from paused state
-    async fn resume(&mut self) -> Result<()>;
+    /// Sends a message through this transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to send
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the message was sent successfully, `Err` otherwise.
+    fn send(&self, message: &Message) -> Result<()>;
 
-    /// Send a message to a specific neighbor
-    async fn send(&mut self, device_id: DeviceId, message: &MessageEnvelope) -> Result<()>;
+    /// Attempts to receive a message from this transport.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(Some(Message))` if a message was received, `Ok(None)` if no message
+    /// is available, or `Err` if an error occurred.
+    fn receive(&self) -> Result<Option<Message>>;
 
-    /// Broadcast a message to all neighbors
-    async fn broadcast(&mut self, message: &MessageEnvelope) -> Result<()>;
+    /// Starts the transport.
+    fn start(&mut self) -> Result<()>;
 
-    /// Get the list of current neighbors
-    async fn get_neighbors(&self) -> Vec<Neighbor>;
-
-    /// Get link quality for a specific neighbor
-    async fn get_link_quality(&self, device_id: DeviceId) -> Option<LinkQuality>;
-
-    /// Get transport metrics
-    async fn get_metrics(&self) -> TransportMetrics;
-
-    /// Get a channel to receive transport events
-    fn event_channel(&self) -> mpsc::UnboundedReceiver<TransportEvent>;
-
-    /// Check if the transport is currently running
-    fn is_running(&self) -> bool;
-
-    /// Check if the transport is paused
-    fn is_paused(&self) -> bool;
+    /// Stops the transport.
+    fn stop(&mut self) -> Result<()>;
 }
-
