@@ -1,0 +1,33 @@
+[package]
+name = "offline-protocol-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+offline-protocol = { path = "../offline-protocol" }
+offline-protocol-core = { path = "../offline-protocol-core" }
+
+# FFI
+libc = "0.2"
+
+# Async runtime for FFI
+tokio = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+# Serialization for passing data across FFI
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[build-dependencies]
+cbindgen = { workspace = true }
+

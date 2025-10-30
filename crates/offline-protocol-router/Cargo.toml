@@ -1,0 +1,32 @@
+[package]
+name = "offline-protocol-router"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+offline-protocol-core = { path = "../offline-protocol-core" }
+offline-protocol-transport = { path = "../offline-protocol-transport" }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Collections
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+

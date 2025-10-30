@@ -1,0 +1,40 @@
+[package]
+name = "offline-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Offline mesh networking SDK with BLE and Wi-Fi Direct support"
+
+[dependencies]
+offline-protocol-core = { path = "../offline-protocol-core" }
+offline-protocol-transport = { path = "../offline-protocol-transport" }
+offline-protocol-router = { path = "../offline-protocol-router" }
+offline-protocol-reliability = { path = "../offline-protocol-reliability" }
+
+# Async
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Collections
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+

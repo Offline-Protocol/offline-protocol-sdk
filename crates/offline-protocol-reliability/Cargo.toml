@@ -1,0 +1,32 @@
+[package]
+name = "offline-protocol-reliability"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+offline-protocol-core = { path = "../offline-protocol-core" }
+
+# Async
+tokio = { workspace = true, features = ["time", "sync"] }
+futures = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Collections
+uuid = { workspace = true }
+lru = { workspace = true }
+parking_lot = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+

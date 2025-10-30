@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/offline-protocol-core",
+    "crates/offline-protocol-transport",
+    "crates/offline-protocol-router",
+    "crates/offline-protocol-reliability",
+    "crates/offline-protocol-ffi",
+    "crates/offline-protocol",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Offline Protocol Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/offline-protocol/sdk"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rmp-serde = "1.3"
+
+# BLE
+btleplug = "0.11"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Collections and utilities
+uuid = { version = "1.10", features = ["v4", "serde"] }
+lru = "0.12"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+# FFI
+cbindgen = "0.27"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Storage
+sled = "0.34"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+

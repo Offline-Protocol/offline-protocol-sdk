@@ -1,0 +1,38 @@
+[package]
+name = "offline-protocol-transport"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+offline-protocol-core = { path = "../offline-protocol-core" }
+
+# Async
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# BLE
+btleplug = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Collections
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Random for mock transport
+rand = "0.8"
+
