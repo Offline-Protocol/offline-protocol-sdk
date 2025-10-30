@@ -196,7 +196,7 @@ impl RetryQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use offline_protocol_core::{DeviceId, Message, TextMessage, UserId};
+    use offline_protocol_core::{DeviceId, Message, Priority, TextMessage, UserId};
     use std::collections::HashMap;
 
     #[test]
