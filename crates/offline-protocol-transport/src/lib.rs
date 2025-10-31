@@ -14,5 +14,6 @@ pub mod traits;
 pub mod types;
 
 pub use error::{Error, Result};
+pub use mock::MockTransport;
 pub use traits::{Transport, TransportStatus};
 pub use types::{LinkQuality, TransportMetrics, TransportType};
