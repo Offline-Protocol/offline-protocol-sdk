@@ -13,7 +13,7 @@ pub mod deduplicator;
 pub mod error;
 pub mod retry_queue;
 
-pub use ack_manager::AckManager;
-pub use deduplicator::Deduplicator;
+pub use ack_manager::{AckConfig, AckManager};
+pub use deduplicator::{Deduplicator, DeduplicatorConfig};
 pub use error::{Error, Result};
-pub use retry_queue::RetryQueue;
+pub use retry_queue::{RetryConfig, RetryQueue};

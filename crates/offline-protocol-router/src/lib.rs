@@ -13,7 +13,7 @@ pub mod error;
 pub mod relay;
 pub mod router;
 
-pub use dors::TransportSelector;
+pub use dors::{DorsConfig, TransportSelector};
 pub use error::{Error, Result};
-pub use relay::RelayManager;
-pub use router::PathSelector;
+pub use relay::{RelayConfig, RelayManager};
+pub use router::{PathConfig, PathSelector};
