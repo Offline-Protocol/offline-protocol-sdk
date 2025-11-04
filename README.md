@@ -2,7 +2,7 @@
 
 A high-performance, cross-platform SDK for offline-first messaging with intelligent transport switching. Built in Rust with bindings for Android, iOS, React Native, and Web.
 
-## 🌟 Features
+## Features
 
 - **DORS (Dynamic Offline Relay Switch)**: Automatically switches between Internet, BLE Mesh, and Wi-Fi Direct based on real-time network conditions
 - **Offline-First**: Messages delivered even without internet connectivity using mesh networking
@@ -12,7 +12,7 @@ A high-performance, cross-platform SDK for offline-first messaging with intellig
 - **High Performance**: Near-native performance on all platforms
 - **Battery Efficient**: Smart relay selection and transport switching minimize power usage
 
-## 📦 Installation
+## Installation
 
 ### React Native
 
@@ -40,7 +40,7 @@ pod 'OfflineProtocolSDK', '~> 0.1'
 implementation 'com.offlineprotocol:sdk:0.1.0'
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ### React Native
 
@@ -103,7 +103,7 @@ const messageId = await protocol.sendMessage(
 );
 ```
 
-## 📱 Example Apps
+## Example Apps
 
 ### React Native Example
 
@@ -116,16 +116,16 @@ npm run ios  # or npm run android
 ```
 
 **Features:**
-- ✅ Full protocol lifecycle management
-- ✅ Message sending with all priority levels
-- ✅ Real-time event monitoring
-- ✅ Network metrics visualization
-- ✅ Transport switching demonstration
-- ✅ Relay promotion/demotion tracking
+- Full protocol lifecycle management
+- Message sending with all priority levels
+- Real-time event monitoring
+- Network metrics visualization
+- Transport switching demonstration
+- Relay promotion/demotion tracking
 
 **[View Example App →](examples/react-native-app/README.md)**
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -192,7 +192,7 @@ npm run ios  # or npm run android
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## 🎯 How DORS Works
+## How DORS Works
 
 DORS (Dynamic Offline Relay Switch) intelligently selects the best transport:
 
@@ -211,7 +211,7 @@ DORS (Dynamic Offline Relay Switch) intelligently selects the best transport:
 - **Hysteresis**: 15-point threshold prevents rapid switching
 - **Cooldown**: 20-second wait after switching
 
-## 📊 Performance & Testing
+## Performance & Testing
 
 - **110 tests** passing (98 safe Rust + 12 FFI)
 - **Zero unsafe code** in core logic (95% of codebase)
@@ -220,15 +220,15 @@ DORS (Dynamic Offline Relay Switch) intelligently selects the best transport:
 - **Fast**: <1ms message send overhead
 - **Efficient**: 32KB default chunk size for files
 
-## 🔒 Safety Guarantees
+## Safety Guarantees
 
 ### Safe Rust Core (95%)
 All core protocol logic is **100% safe Rust**:
-- ✅ No buffer overflows
-- ✅ No null pointer dereferences  
-- ✅ No data races
-- ✅ No use-after-free bugs
-- ✅ No memory leaks
+- No buffer overflows
+- No null pointer dereferences  
+- No data races
+- No use-after-free bugs
+- No memory leaks
 
 Enforced with `#![deny(unsafe_code)]` in 5 out of 6 crates.
 
@@ -239,25 +239,25 @@ Unsafe code is **isolated to the FFI crate only**:
 - Panics caught with `catch_unwind()`
 - Defensive programming at language boundaries
 
-## 📱 Platform Support
+## Platform Support
 
 | Platform | Internet | BLE | Wi-Fi Direct | Status |
 |----------|----------|-----|--------------|--------|
-| **Android** | ✅ | ✅ | ✅ | Full support |
-| **iOS** | ✅ | ✅ | ❌ | No Wi-Fi Direct |
-| **React Native** | ✅ | ✅ | ✅ (Android only) | Full support |
-| **Web** | ✅ | ❌ | ❌ | Internet only |
+| **Android** | Yes | Yes | Yes | Full support |
+| **iOS** | Yes | Yes | No | No Wi-Fi Direct |
+| **React Native** | Yes | Yes | Yes (Android only) | Full support |
+| **Web** | Yes | No | No | Internet only |
 
-## 📚 Documentation
+## Documentation
 
 - [React Native Integration](bindings/react-native/README.md)
 - [Android Integration](docs/android-integration.md)
 - [iOS Integration](docs/ios-integration.md)
 - [Web/WASM Integration](bindings/web/README.md)
-- **[React Native Example App](examples/react-native-app/README.md)** ⭐ Complete working example
+- **[React Native Example App](examples/react-native-app/README.md)** - Complete working example
 - [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md)
 
-## 🏃 Building from Source
+## Building from Source
 
 ### Prerequisites
 
@@ -302,7 +302,7 @@ cd bindings/web
 wasm-pack build --target web --out-dir pkg
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### Example Configurations
 
@@ -350,25 +350,25 @@ wasm-pack build --target web --out-dir pkg
 }
 ```
 
-## 📈 Project Status
+## Project Status
 
 **Completed** (as of v0.1.0):
-- ✅ Core message types and protocol types
-- ✅ Transport abstraction layer
-- ✅ DORS intelligent transport selection
-- ✅ Relay management with battery awareness
-- ✅ Path selection and load balancing
-- ✅ ACK manager with timeout tracking
-- ✅ Retry queue with exponential backoff
-- ✅ Message deduplication
-- ✅ Configuration system
-- ✅ Event system
-- ✅ File transfer with chunking
-- ✅ Main protocol API
-- ✅ C FFI bindings
-- ✅ React Native bindings
-- ✅ Web/WASM bindings
-- ✅ Android/iOS integration guides
+- Core message types and protocol types
+- Transport abstraction layer
+- DORS intelligent transport selection
+- Relay management with battery awareness
+- Path selection and load balancing
+- ACK manager with timeout tracking
+- Retry queue with exponential backoff
+- Message deduplication
+- Configuration system
+- Event system
+- File transfer with chunking
+- Main protocol API
+- C FFI bindings
+- React Native bindings
+- Web/WASM bindings
+- Android/iOS integration guides
 
 **Future Roadmap**:
 - [ ] Real BLE transport implementation
@@ -379,7 +379,7 @@ wasm-pack build --target web --out-dir pkg
 - [ ] Performance benchmarks
 - [x] React Native example app
 
-## 🧪 Testing
+## Testing
 
 All tests pass with zero errors:
 
@@ -396,7 +396,7 @@ cargo test --all
 - FFI: 12 tests
 - **Total: 110 tests**
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! Please ensure:
 1. All tests pass: `cargo test --all`
@@ -404,13 +404,13 @@ Contributions welcome! Please ensure:
 3. Code formatted: `cargo fmt --all`
 4. Follow conventional commits
 
-## 📄 License
+## License
 
 Dual-licensed under MIT OR Apache-2.0
 
 ---
 
-## 🎓 Key Concepts
+## Key Concepts
 
 ### DORS (Dynamic Offline Relay Switch)
 
@@ -455,7 +455,7 @@ Devices are demoted when:
 - 1-hour retention
 - Prevents duplicate processing
 
-## 🌐 Use Cases
+## Use Cases
 
 1. **Emergency Response**: Offline-only mode for disaster scenarios
 2. **Remote Areas**: Mesh networking where internet is unavailable
@@ -463,7 +463,7 @@ Devices are demoted when:
 4. **Large File Sharing**: Automatic chunking for photos/videos
 5. **Group Messaging**: Multi-hop relay for wider coverage
 
-## 📊 Benchmarks
+## Benchmarks
 
 *(To be added)*
 
@@ -473,14 +473,14 @@ Preliminary performance characteristics:
 - DORS scoring: <0.5ms per transport
 - Memory: ~5MB baseline
 
-## 🔗 Links
+## Links
 
 - [GitHub Repository](https://github.com/offline-protocol/sdk)
 - [Documentation](https://docs.offlineprotocol.org)
 - [Examples](examples/)
 - [API Reference](docs/api-reference.md)
 
-## 💬 Support
+## Support
 
 - Issues: [GitHub Issues](https://github.com/offline-protocol/sdk/issues)
 - Discussions: [GitHub Discussions](https://github.com/offline-protocol/sdk/discussions)

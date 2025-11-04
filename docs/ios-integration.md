@@ -147,9 +147,9 @@ Rust Core (100% safe)
 ## Platform Limitations
 
 iOS does **not** support Wi-Fi Direct. Available transports:
-- ✅ Bluetooth Low Energy
-- ✅ Internet
-- ❌ Wi-Fi Direct (Android only)
+- Bluetooth Low Energy
+- Internet
+- Wi-Fi Direct (Android only) - Not available
 
 ## Performance
 

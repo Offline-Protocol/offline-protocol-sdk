@@ -2,7 +2,7 @@
 
 Offline-first messaging SDK with intelligent transport switching for React Native. Built with Rust for maximum performance and reliability.
 
-## ✨ Features
+## Features
 
 - **Offline-First**: Messages delivered even without internet connectivity
 - **Intelligent Transport Switching**: Automatically switches between Internet, BLE Mesh, and Wi-Fi Direct
@@ -11,7 +11,7 @@ Offline-first messaging SDK with intelligent transport switching for React Nativ
 - **Event-Driven**: Real-time event notifications
 - **Plug & Play**: Pre-built binaries included - no Rust toolchain needed!
 
-## 📦 Installation
+## Installation
 
 ```bash
 npm install @offlineprotocol/react-native
@@ -31,7 +31,7 @@ That's it! The pre-built library is automatically linked.
 
 No additional setup needed! The pre-built `.so` files are automatically included in your APK.
 
-## 🚀 Quick Start
+## Quick Start
 
 ```typescript
 import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
@@ -72,7 +72,7 @@ await protocol.stop();
 await protocol.destroy();
 ```
 
-## 📚 API Reference
+## API Reference
 
 ### `OfflineProtocol`
 
@@ -314,7 +314,7 @@ enum MessagePriority {
 }
 ```
 
-## 🎯 Example Use Cases
+## Example Use Cases
 
 ### Chat Application
 
@@ -391,7 +391,7 @@ const protocol = new OfflineProtocol({
 });
 ```
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### iOS
 
@@ -417,7 +417,7 @@ cd .. && react-native run-android
 
 **Solution**: The pre-built libraries are compatible with NDK 21-26. Update your `android/build.gradle` if needed.
 
-## 🏗️ Building from Source (For SDK Maintainers)
+## Building from Source (For SDK Maintainers)
 
 If you need to rebuild the native libraries:
 
@@ -443,15 +443,15 @@ npm run build:all
 npm run prepublishOnly
 ```
 
-## 📄 License
+## License
 
 Dual-licensed under MIT OR Apache-2.0
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! Please see [CONTRIBUTING.md](../../CONTRIBUTING.md) in the main repository.
 
-## 🔗 Links
+## Links
 
 - [Main Repository](https://github.com/offline-protocol/sdk)
 - [Documentation](https://github.com/offline-protocol/sdk/tree/main/docs)

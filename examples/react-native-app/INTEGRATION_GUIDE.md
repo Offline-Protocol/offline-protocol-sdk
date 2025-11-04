@@ -496,7 +496,7 @@ protocol.on('message_received', (event: MessageReceivedEvent) => {
 
 ## Common Pitfalls
 
-### ❌ Not Requesting Permissions
+### Not Requesting Permissions
 
 **Problem:**
 ```typescript
@@ -509,7 +509,7 @@ await requestPermissions();
 await protocol.start();
 ```
 
-### ❌ Creating Multiple Instances
+### Creating Multiple Instances
 
 **Problem:**
 ```typescript
@@ -523,7 +523,7 @@ const protocol2 = new OfflineProtocol(config); // Don't do this!
 // Manage it with a hook or context
 ```
 
-### ❌ Not Cleaning Up
+### Not Cleaning Up
 
 **Problem:**
 ```typescript
@@ -546,7 +546,7 @@ useEffect(() => {
 }, []);
 ```
 
-### ❌ Sending Messages Before Starting
+### Sending Messages Before Starting
 
 **Problem:**
 ```typescript
@@ -561,7 +561,7 @@ await protocol.start();
 await protocol.sendMessage({ ... });
 ```
 
-### ❌ Ignoring Events
+### Ignoring Events
 
 **Problem:**
 ```typescript
@@ -576,7 +576,7 @@ protocol.on('all', (event) => {
 });
 ```
 
-### ❌ Hardcoding User IDs
+### Hardcoding User IDs
 
 **Problem:**
 ```typescript

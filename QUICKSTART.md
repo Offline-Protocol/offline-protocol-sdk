@@ -2,7 +2,7 @@
 
 Get started with the Offline Protocol SDK in 5 minutes.
 
-> **💡 Want to see a complete working example?** Check out the [React Native Example App](examples/react-native-app/README.md) that demonstrates all SDK features.
+> **Want to see a complete working example?** Check out the [React Native Example App](examples/react-native-app/README.md) that demonstrates all SDK features.
 
 ## For React Native Developers
 
@@ -156,7 +156,7 @@ let messageId = try protocol.sendMessage(
 
 ## Next Steps
 
-- **[React Native Example App](examples/react-native-app/README.md)** - Complete working example ⭐
+- **[React Native Example App](examples/react-native-app/README.md)** - Complete working example
 - [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step setup
 - [Complete API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)

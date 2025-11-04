@@ -109,7 +109,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 - SAFETY comments on every `unsafe` block
 - Error codes instead of exceptions
 
-**Safety**: ⚠️ Contains `unsafe` code (~5% of codebase)
+**Safety**: Contains `unsafe` code (~5% of codebase)
 - This is the **ONLY** crate with unsafe code
 - All unsafe blocks documented
 - Defensive programming at language boundaries

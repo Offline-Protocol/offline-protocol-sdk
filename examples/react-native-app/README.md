@@ -6,14 +6,14 @@ A complete React Native example application demonstrating the offline-protocol S
 
 This example app is designed to help developers understand how to integrate and use the `@offlineprotocol/react-native` SDK in their own applications. It demonstrates:
 
-- ✅ Protocol initialization and lifecycle management
-- ✅ Sending and receiving messages with different priority levels
-- ✅ Real-time event monitoring
-- ✅ Network status and metrics visualization
-- ✅ Transport switching (Internet, BLE, Wi-Fi Direct)
-- ✅ Relay promotion/demotion
-- ✅ Neighbor discovery
-- ✅ Error handling
+- Protocol initialization and lifecycle management
+- Sending and receiving messages with different priority levels
+- Real-time event monitoring
+- Network status and metrics visualization
+- Transport switching (Internet, BLE, Wi-Fi Direct)
+- Relay promotion/demotion
+- Neighbor discovery
+- Error handling
 
 ## Prerequisites
 
