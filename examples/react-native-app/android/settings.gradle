@@ -1,0 +1,10 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+rootProject.name = 'OfflineProtocolExample'
+include ':app'
+includeBuild('../node_modules/@react-native/gradle-plugin')
+
+// Manually include the local OfflineProtocol SDK
+include ':offlineprotocol_react-native'
+project(':offlineprotocol_react-native').projectDir = new File(rootProject.projectDir, '../../../bindings/react-native/android')
