@@ -69,13 +69,13 @@ const messageId = await protocol.sendMessage({
 });
 
 // Listen for incoming messages
-protocol.on('message:received', (event) => {
+protocol.on('message_received', (event) => {
   console.log(`From ${event.sender}: ${event.content}`);
-  console.log(`Delivered via ${event.transport} in ${event.hopCount} hops`);
+  console.log(`Delivered via ${event.transport} in ${event.hop_count} hops`);
 });
 
 // Monitor transport switching
-protocol.on('transport:switched', (event) => {
+protocol.on('transport_switched', (event) => {
   console.log(`Switched from ${event.from} to ${event.to}`);
 });
 ```
@@ -102,6 +102,28 @@ const messageId = await protocol.sendMessage(
   MessagePriority.Medium
 );
 ```
+
+## 📱 Example Apps
+
+### React Native Example
+
+A complete example app demonstrating all SDK features:
+
+```bash
+cd examples/react-native-app
+npm install
+npm run ios  # or npm run android
+```
+
+**Features:**
+- ✅ Full protocol lifecycle management
+- ✅ Message sending with all priority levels
+- ✅ Real-time event monitoring
+- ✅ Network metrics visualization
+- ✅ Transport switching demonstration
+- ✅ Relay promotion/demotion tracking
+
+**[View Example App →](examples/react-native-app/README.md)**
 
 ## 🏗️ Architecture
 
@@ -232,7 +254,8 @@ Unsafe code is **isolated to the FFI crate only**:
 - [Android Integration](docs/android-integration.md)
 - [iOS Integration](docs/ios-integration.md)
 - [Web/WASM Integration](bindings/web/README.md)
-- [Example Usage](bindings/react-native/example-usage.tsx)
+- **[React Native Example App](examples/react-native-app/README.md)** ⭐ Complete working example
+- [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md)
 
 ## 🏃 Building from Source
 
@@ -354,7 +377,7 @@ wasm-pack build --target web --out-dir pkg
 - [ ] Persistent storage for outbox
 - [ ] Network visualization tools
 - [ ] Performance benchmarks
-- [ ] Example apps for each platform
+- [x] React Native example app
 
 ## 🧪 Testing
 

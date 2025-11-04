@@ -1,223 +1,219 @@
 /**
- * Type definitions for the Offline Protocol SDK React Native bindings.
+ * TypeScript type definitions for Offline Protocol SDK
  */
 
 /**
- * Transport configuration options.
- */
-export interface TransportConfig {
-  /** Whether BLE transport is enabled. */
-  bleEnabled: boolean;
-  /** Whether Wi-Fi Direct transport is enabled (Android only). */
-  wifiDirectEnabled: boolean;
-  /** Whether Internet transport is enabled. */
-  internetEnabled: boolean;
-}
-
-/**
- * Main protocol configuration.
- */
-export interface ProtocolConfig {
-  /** Application identifier (required). */
-  appId: string;
-  /** User identifier (required). */
-  userId: string;
-  /** Transport configuration. */
-  transport?: TransportConfig;
-  /** Initial TTL (Time-To-Live) for messages. Default: 8 */
-  initialTtl?: number;
-}
-
-/**
- * Message priority levels.
+ * Message priority levels
  */
 export enum MessagePriority {
-  /** Low priority - can be delayed or dropped under congestion. */
   Low = 0,
-  /** Medium priority - default for most messages. */
   Medium = 1,
-  /** High priority - important messages that should be delivered quickly. */
   High = 2,
-  /** Critical priority - emergency messages, highest delivery guarantee. */
   Critical = 3,
 }
 
 /**
- * Base event interface.
+ * Protocol configuration
  */
-export interface Event {
-  /** Event type identifier. */
-  type: string;
-  /** Timestamp when the event occurred (milliseconds since epoch). */
-  timestamp?: number;
+export interface ProtocolConfig {
+  /** Application identifier */
+  appId: string;
+  /** User identifier */
+  userId: string;
+  /** Transport configuration (optional) */
+  transport?: {
+    /** Enable BLE transport */
+    bleEnabled?: boolean;
+    /** Enable Wi-Fi Direct transport (Android only) */
+    wifiDirectEnabled?: boolean;
+    /** Enable Internet transport */
+    internetEnabled?: boolean;
+  };
+  /** DORS configuration (optional) */
+  dors?: {
+    /** Prefer online mode */
+    preferOnline?: boolean;
+  };
+  /** Relay configuration (optional) */
+  relay?: {
+    /** Allow device to act as relay */
+    allowRelay?: boolean;
+    /** Minimum battery level for relaying */
+    minBatteryForRelay?: number;
+    /** Connection threshold for relay promotion */
+    relayThreshold?: number;
+  };
+  /** Network configuration (optional) */
+  network?: {
+    /** Initial TTL (time-to-live) */
+    initialTtl?: number;
+  };
 }
 
 /**
- * Message received event.
+ * Parameters for sending a message
  */
-export interface MessageReceivedEvent extends Event {
-  type: 'message:received';
-  /** ID of the received message. */
-  messageId: string;
-  /** Sender's user ID. */
-  sender: string;
-  /** Recipient's user ID. */
+export interface SendMessageParams {
+  /** Recipient's user ID */
   recipient: string;
-  /** Message content. */
+  /** Message content */
   content: string;
-  /** Number of hops the message traversed. */
-  hopCount: number;
-  /** Transport used for final delivery. */
-  transport: string;
-  /** When the message was received. */
+  /** Message priority (optional, defaults to Medium) */
+  priority?: MessagePriority;
+}
+
+/**
+ * Base event interface
+ */
+interface BaseEvent {
+  type: string;
+}
+
+/**
+ * Message sent event
+ */
+export interface MessageSentEvent extends BaseEvent {
+  type: 'message_sent';
+  message_id: string;
   timestamp: number;
 }
 
 /**
- * Message delivered event (ACK received).
+ * Message received event
  */
-export interface MessageDeliveredEvent extends Event {
-  type: 'message:delivered';
-  /** ID of the delivered message. */
-  messageId: string;
-  /** Latency in milliseconds. */
-  latencyMs: number;
-  /** Number of hops traversed. */
-  hopCount: number;
-  /** Transport used. */
-  transport: string;
-}
-
-/**
- * Message failed event.
- */
-export interface MessageFailedEvent extends Event {
-  type: 'message:failed';
-  /** ID of the failed message. */
-  messageId: string;
-  /** Reason for failure. */
-  reason: string;
-  /** Number of retries attempted. */
-  retryCount: number;
-}
-
-/**
- * Transport switched event.
- */
-export interface TransportSwitchedEvent extends Event {
-  type: 'transport:switched';
-  /** Previous transport (if any). */
-  from?: string;
-  /** New transport. */
-  to: string;
-  /** Reason for switch. */
-  reason: string;
-}
-
-/**
- * Relay promoted event.
- */
-export interface RelayPromotedEvent extends Event {
-  type: 'relay:promoted';
-  /** Number of connections when promoted. */
-  connectionCount: number;
-  /** Battery level when promoted (0-100). */
-  batteryLevel: number;
-}
-
-/**
- * Relay demoted event.
- */
-export interface RelayDemotedEvent extends Event {
-  type: 'relay:demoted';
-  /** Reason for demotion. */
-  reason: string;
-}
-
-/**
- * File transfer progress event.
- */
-export interface FileProgressEvent extends Event {
-  type: 'file:progress';
-  /** File identifier. */
-  fileId: string;
-  /** Number of chunks sent so far. */
-  chunksSent: number;
-  /** Total number of chunks. */
-  totalChunks: number;
-  /** Progress percentage (0-100). */
-  percentage: number;
-}
-
-/**
- * File received event.
- */
-export interface FileReceivedEvent extends Event {
-  type: 'file:received';
-  /** File identifier. */
-  fileId: string;
-  /** File name. */
-  fileName: string;
-  /** File size in bytes. */
-  fileSize: number;
-  /** Sender's user ID. */
+export interface MessageReceivedEvent extends BaseEvent {
+  type: 'message_received';
+  message_id: string;
   sender: string;
+  recipient: string;
+  content: string;
+  hop_count: number;
+  transport: string;
+  timestamp: number;
 }
 
 /**
- * Neighbor discovered event.
+ * Message delivered event
  */
-export interface NeighborDiscoveredEvent extends Event {
-  type: 'neighbor:discovered';
-  /** Peer ID of the neighbor. */
-  peerId: string;
-  /** Transport used to discover. */
+export interface MessageDeliveredEvent extends BaseEvent {
+  type: 'message_delivered';
+  message_id: string;
+  latency_ms: number;
+  hop_count: number;
   transport: string;
-  /** RSSI signal strength (if available). */
+}
+
+/**
+ * Message failed event
+ */
+export interface MessageFailedEvent extends BaseEvent {
+  type: 'message_failed';
+  message_id: string;
+  reason: string;
+  retry_count: number;
+}
+
+/**
+ * Transport switched event
+ */
+export interface TransportSwitchedEvent extends BaseEvent {
+  type: 'transport_switched';
+  from: string | null;
+  to: string;
+  reason: string;
+}
+
+/**
+ * Relay promoted event
+ */
+export interface RelayPromotedEvent extends BaseEvent {
+  type: 'relay_promoted';
+  connection_count: number;
+  battery_level: number;
+}
+
+/**
+ * Relay demoted event
+ */
+export interface RelayDemotedEvent extends BaseEvent {
+  type: 'relay_demoted';
+  reason: string;
+}
+
+/**
+ * Neighbor discovered event
+ */
+export interface NeighborDiscoveredEvent extends BaseEvent {
+  type: 'neighbor_discovered';
+  peer_id: string;
+  transport: string;
   rssi?: number;
 }
 
 /**
- * Neighbor lost event.
+ * Neighbor lost event
  */
-export interface NeighborLostEvent extends Event {
-  type: 'neighbor:lost';
-  /** Peer ID of the lost neighbor. */
-  peerId: string;
+export interface NeighborLostEvent extends BaseEvent {
+  type: 'neighbor_lost';
+  peer_id: string;
 }
 
 /**
- * Network metrics event.
+ * Network metrics event
  */
-export interface NetworkMetricsEvent extends Event {
-  type: 'network:metrics';
-  /** Number of active neighbors. */
-  neighborCount: number;
-  /** Number of active relays. */
-  relayCount: number;
-  /** Message delivery ratio (0.0-1.0). */
-  deliveryRatio: number;
-  /** Average message latency in milliseconds. */
-  avgLatencyMs: number;
+export interface NetworkMetricsEvent extends BaseEvent {
+  type: 'network_metrics';
+  neighbor_count: number;
+  relay_count: number;
+  delivery_ratio: number;
+  avg_latency_ms: number;
 }
 
 /**
- * Union type of all possible events.
+ * File progress event
+ */
+export interface FileProgressEvent extends BaseEvent {
+  type: 'file_progress';
+  file_id: string;
+  chunks_sent: number;
+  total_chunks: number;
+  percentage: number;
+}
+
+/**
+ * File received event
+ */
+export interface FileReceivedEvent extends BaseEvent {
+  type: 'file_received';
+  file_id: string;
+  file_name: string;
+  file_size: number;
+  sender: string;
+}
+
+/**
+ * Union type of all events
  */
 export type ProtocolEvent =
+  | MessageSentEvent
   | MessageReceivedEvent
   | MessageDeliveredEvent
   | MessageFailedEvent
   | TransportSwitchedEvent
   | RelayPromotedEvent
   | RelayDemotedEvent
-  | FileProgressEvent
-  | FileReceivedEvent
   | NeighborDiscoveredEvent
   | NeighborLostEvent
-  | NetworkMetricsEvent;
+  | NetworkMetricsEvent
+  | FileProgressEvent
+  | FileReceivedEvent;
 
 /**
- * Event listener function type.
+ * Event listener type
  */
-export type EventListener<T extends Event = ProtocolEvent> = (event: T) => void;
+export type EventListener<T extends ProtocolEvent = ProtocolEvent> = (event: T) => void;
+
+/**
+ * Event type names
+ */
+export type EventType = ProtocolEvent['type'];

@@ -1,33 +1,41 @@
 {
   "name": "@offlineprotocol/react-native",
   "version": "0.1.0",
-  "description": "React Native bindings for the Offline Protocol SDK - offline-first messaging with automatic transport switching",
+  "description": "Offline-first messaging SDK with intelligent transport switching for React Native",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
+  "files": [
+    "lib/",
+    "ios/",
+    "android/",
+    "src/",
+    "scripts/",
+    "react-native.config.js",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc",
     "prepare": "tsc",
-    "prepublishOnly": "npm run build && npm run build:rust",
-    "build:rust": "npm run build:android && npm run build:ios",
-    "build:android": "bash scripts/build-android.sh",
+    "build": "tsc",
     "build:ios": "bash scripts/build-ios.sh",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build:android": "bash scripts/build-android.sh",
+    "build:all": "bash scripts/build-all.sh",
+    "prepublishOnly": "npm run build && bash scripts/prepare-npm.sh",
+    "clean": "rm -rf lib/"
   },
   "keywords": [
+    "react-native",
     "offline",
     "messaging",
     "p2p",
-    "ble",
-    "bluetooth",
-    "wifi-direct",
     "mesh",
-    "mesh-network",
-    "react-native",
-    "offline-first",
-    "sdk",
-    "protocol"
+    "ble",
+    "wifi-direct",
+    "dors",
+    "relay",
+    "offline-first"
   ],
-  "author": "Offline Protocol Contributors",
+  "author": "Offline Protocol Team",
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
@@ -38,22 +46,14 @@
   "bugs": {
     "url": "https://github.com/offline-protocol/sdk/issues"
   },
-  "engines": {
-    "node": ">=14.0.0"
-  },
   "peerDependencies": {
+    "react": ">=16.8.0",
     "react-native": ">=0.70.0"
   },
   "devDependencies": {
+    "@types/react": "^18.0.0",
     "@types/react-native": "^0.72.0",
-    "react-native": "^0.72.0",
     "typescript": "^5.0.0"
   },
-  "files": [
-    "lib",
-    "android",
-    "ios",
-    "README.md",
-    "react-native.config.js"
-  ]
+  "react-native": "src/index.ts"
 }

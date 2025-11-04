@@ -15,9 +15,10 @@
 
 use offline_protocol::{OfflineProtocol, ProtocolConfig};
 use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 use std::panic;
 use std::ptr;
+use std::sync::{Arc, Mutex};
 
 /// Success code.
 pub const SUCCESS: i32 = 0;
@@ -46,14 +47,54 @@ pub const ERROR_PANIC: i32 = -99;
 /// Error: Other unspecified error.
 pub const ERROR_OTHER: i32 = -100;
 
+/// Event callback function type.
+///
+/// # Arguments
+///
+/// * `event_json` - JSON string representing the event
+/// * `user_data` - Opaque pointer to user data passed to set_event_callback
+///
+/// # Safety
+///
+/// The callback must be C ABI compatible and thread-safe.
+pub type EventCallback = extern "C" fn(event_json: *const c_char, user_data: *mut c_void);
+
+/// Thread-safe wrapper for callback data.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The callback function pointer is thread-safe
+/// - The user_data pointer remains valid for the lifetime of the protocol
+/// - The user_data pointer can be safely accessed from any thread
+struct CallbackData {
+    callback: EventCallback,
+    user_data: *mut c_void,
+}
+
+// SAFETY: The caller of set_event_callback is responsible for ensuring
+// that the callback function is thread-safe and that user_data can be
+// safely accessed from any thread. This is documented in the function's
+// safety contract.
+unsafe impl Send for CallbackData {}
+unsafe impl Sync for CallbackData {}
+
+/// Wrapper for OfflineProtocol with event callback support.
+///
+/// This is an opaque type used only via pointers in the FFI interface.
+pub struct ProtocolHandle {
+    protocol: OfflineProtocol,
+    callback: Arc<Mutex<Option<CallbackData>>>,
+}
+
 /// Creates a new OfflineProtocol instance from JSON configuration.
 ///
 /// # Safety
 ///
 /// `config_json` must be a valid null-terminated C string.
-/// Returns a pointer to OfflineProtocol on success, or null on failure.
+/// Returns a pointer to ProtocolHandle on success, or null on failure.
 #[no_mangle]
-pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut OfflineProtocol {
+pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut ProtocolHandle {
     // Validate pointer
     if config_json.is_null() {
         return ptr::null_mut();
@@ -94,7 +135,13 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Of
 
         // Create protocol instance
         match OfflineProtocol::new(protocol_config) {
-            Ok(protocol) => Box::into_raw(Box::new(protocol)),
+            Ok(protocol) => {
+                let handle = ProtocolHandle {
+                    protocol,
+                    callback: Arc::new(Mutex::new(None)),
+                };
+                Box::into_raw(Box::new(handle))
+            }
             Err(_) => ptr::null_mut(),
         }
     });
@@ -109,14 +156,14 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Of
 /// `handle` must be a valid pointer returned by `offline_protocol_create`.
 /// After calling this function, the handle is invalid and must not be used.
 #[no_mangle]
-pub extern "C" fn offline_protocol_destroy(handle: *mut OfflineProtocol) {
+pub extern "C" fn offline_protocol_destroy(handle: *mut ProtocolHandle) {
     if handle.is_null() {
         return;
     }
 
     unsafe {
         // SAFETY: We validated handle is non-null. The caller must ensure
-        // this is a valid OfflineProtocol pointer created by offline_protocol_create.
+        // this is a valid ProtocolHandle pointer created by offline_protocol_create.
         let _ = Box::from_raw(handle);
         // Box is dropped here, freeing the memory
     }
@@ -132,17 +179,17 @@ pub extern "C" fn offline_protocol_destroy(handle: *mut OfflineProtocol) {
 ///
 /// Returns SUCCESS on success, or an error code on failure.
 #[no_mangle]
-pub extern "C" fn offline_protocol_start(handle: *mut OfflineProtocol) -> i32 {
+pub extern "C" fn offline_protocol_start(handle: *mut ProtocolHandle) -> i32 {
     if handle.is_null() {
         return ERROR_NULL_POINTER;
     }
 
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated handle is non-null and it was created by
-        // offline_protocol_create, so we know it's a valid OfflineProtocol.
-        let protocol = &mut *handle;
+        // offline_protocol_create, so we know it's a valid ProtocolHandle.
+        let handle_ref = &mut *handle;
 
-        match protocol.start() {
+        match handle_ref.protocol.start() {
             Ok(_) => SUCCESS,
             Err(offline_protocol::Error::AlreadyStarted) => ERROR_ALREADY_STARTED,
             Err(_) => ERROR_OTHER,
@@ -162,17 +209,17 @@ pub extern "C" fn offline_protocol_start(handle: *mut OfflineProtocol) -> i32 {
 ///
 /// Returns SUCCESS on success, or an error code on failure.
 #[no_mangle]
-pub extern "C" fn offline_protocol_stop(handle: *mut OfflineProtocol) -> i32 {
+pub extern "C" fn offline_protocol_stop(handle: *mut ProtocolHandle) -> i32 {
     if handle.is_null() {
         return ERROR_NULL_POINTER;
     }
 
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated handle is non-null and it was created by
-        // offline_protocol_create, so we know it's a valid OfflineProtocol.
-        let protocol = &mut *handle;
+        // offline_protocol_create, so we know it's a valid ProtocolHandle.
+        let handle_ref = &mut *handle;
 
-        match protocol.stop() {
+        match handle_ref.protocol.stop() {
             Ok(_) => SUCCESS,
             Err(offline_protocol::Error::NotStarted) => ERROR_NOT_STARTED,
             Err(_) => ERROR_OTHER,
@@ -195,7 +242,7 @@ pub extern "C" fn offline_protocol_stop(handle: *mut OfflineProtocol) -> i32 {
 /// Returns SUCCESS and writes message ID to `out_message_id`, or an error code.
 #[no_mangle]
 pub extern "C" fn offline_protocol_send_message(
-    handle: *mut OfflineProtocol,
+    handle: *mut ProtocolHandle,
     recipient: *const c_char,
     content: *const c_char,
     priority: i32,
@@ -210,7 +257,7 @@ pub extern "C" fn offline_protocol_send_message(
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated all pointers are non-null above.
         // The caller must ensure they point to valid data.
-        let protocol = &mut *handle;
+        let handle_ref = &mut *handle;
 
         // Convert C strings to Rust strings
         let recipient_str = match CStr::from_ptr(recipient).to_str() {
@@ -233,7 +280,10 @@ pub extern "C" fn offline_protocol_send_message(
         };
 
         // Send message
-        let message_id = match protocol.send_message(recipient_str, content_str, Some(priority)) {
+        let message_id = match handle_ref
+            .protocol
+            .send_message(recipient_str, content_str, Some(priority))
+        {
             Ok(id) => id,
             Err(offline_protocol::Error::NotStarted) => return ERROR_NOT_STARTED,
             Err(_) => return ERROR_SEND_FAILED,
@@ -269,7 +319,7 @@ pub extern "C" fn offline_protocol_send_message(
 /// Returns SUCCESS if an event was retrieved, 0 if no event available, or an error code.
 #[no_mangle]
 pub extern "C" fn offline_protocol_poll_event(
-    handle: *mut OfflineProtocol,
+    handle: *mut ProtocolHandle,
     out_event_json: *mut c_char,
     _out_len: usize,
 ) -> i32 {
@@ -280,6 +330,71 @@ pub extern "C" fn offline_protocol_poll_event(
     // For now, return 0 (no event) as event polling needs more infrastructure
     // This will be properly implemented when integrating with platform event loops
     0
+}
+
+/// Sets an event callback to receive protocol events.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `callback` must be a valid C function pointer with the EventCallback signature.
+/// - `user_data` is an opaque pointer that will be passed back to the callback.
+/// - The callback must be thread-safe as it may be invoked from any thread.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_set_event_callback(
+    handle: *mut ProtocolHandle,
+    callback: Option<EventCallback>,
+    user_data: *mut c_void,
+) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated handle is non-null and it was created by
+        // offline_protocol_create, so we know it's a valid ProtocolHandle.
+        let handle_ref = &mut *handle;
+
+        // Store the callback
+        let mut cb = handle_ref.callback.lock().unwrap();
+        *cb = callback.map(|f| CallbackData {
+            callback: f,
+            user_data,
+        });
+        drop(cb);
+
+        // Register the event handler with the protocol
+        let callback_arc = handle_ref.callback.clone();
+        handle_ref.protocol.on_event(move |event| {
+            // Serialize event to JSON
+            let event_json = match event.to_json() {
+                Ok(json) => json,
+                Err(_) => return, // Skip if serialization fails
+            };
+
+            // Convert to C string
+            let c_str = match CString::new(event_json) {
+                Ok(s) => s,
+                Err(_) => return, // Skip if contains null bytes
+            };
+
+            // Call the callback if set
+            let cb_guard = callback_arc.lock().unwrap();
+            if let Some(ref cb_data) = *cb_guard {
+                // SAFETY: The callback function pointer must be valid and the user_data
+                // pointer must remain valid for the lifetime of the protocol.
+                (cb_data.callback)(c_str.as_ptr(), cb_data.user_data);
+            }
+        });
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
 }
 
 /// Frees a string allocated by the FFI layer.
@@ -335,6 +450,52 @@ mod tests {
         let config = CString::new(r#"{"appId": "test-app"}"#).unwrap();
         let handle = offline_protocol_create(config.as_ptr());
         assert!(handle.is_null()); // Missing userId
+    }
+
+    #[test]
+    fn test_event_callback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let config = r#"{"appId": "test-app", "userId": "user123"}"#;
+        let config_c = CString::new(config).unwrap();
+
+        let handle = offline_protocol_create(config_c.as_ptr());
+        assert!(!handle.is_null());
+
+        // Set up callback
+        static CALLBACK_CALLED: AtomicBool = AtomicBool::new(false);
+
+        extern "C" fn test_callback(event_json: *const c_char, _user_data: *mut c_void) {
+            assert!(!event_json.is_null());
+            CALLBACK_CALLED.store(true, Ordering::SeqCst);
+        }
+
+        let result = offline_protocol_set_event_callback(handle, Some(test_callback), ptr::null_mut());
+        assert_eq!(result, SUCCESS);
+
+        // Start protocol and send message (which should trigger callback)
+        offline_protocol_start(handle);
+        
+        let recipient = CString::new("bob").unwrap();
+        let content = CString::new("Hello!").unwrap();
+        let mut out_buffer = vec![0u8; 256];
+
+        offline_protocol_send_message(
+            handle,
+            recipient.as_ptr(),
+            content.as_ptr(),
+            1,
+            out_buffer.as_mut_ptr() as *mut c_char,
+            out_buffer.len(),
+        );
+
+        // Give callback a moment to execute
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Verify callback was called
+        assert!(CALLBACK_CALLED.load(Ordering::SeqCst));
+
+        offline_protocol_destroy(handle);
     }
 
     #[test]

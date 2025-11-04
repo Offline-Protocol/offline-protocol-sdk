@@ -1,105 +1,60 @@
 #!/bin/bash
 
-# Build script for iOS Rust libraries
-# This script compiles the Rust FFI crate for all iOS architectures and creates a universal framework
+# Build iOS universal library
+# This script builds the Rust library for all iOS architectures and combines them into a universal library
 
 set -e
 
+echo "Building iOS universal library..."
+
+# Navigate to the Rust project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Go up from scripts -> react-native -> bindings -> root
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-FFI_CRATE="$PROJECT_ROOT/crates/offline-protocol-ffi"
-OUTPUT_DIR="$SCRIPT_DIR/../ios"
+OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
 
-echo "Building Rust libraries for iOS..."
-echo "Project root: $PROJECT_ROOT"
-echo "FFI crate: $FFI_CRATE"
-echo "Output directory: $OUTPUT_DIR"
+cd "$PROJECT_ROOT"
 
-# iOS target architectures
-# Note: aarch64-apple-ios-sim works for both device and simulator on Apple Silicon
-# We only include x86_64-apple-ios for Intel simulators
-ARCHS=(
-    "aarch64-apple-ios-sim"      # iOS device and simulator (Apple Silicon)
-    "x86_64-apple-ios"           # iOS simulator (Intel x86_64)
+# iOS architectures
+IOS_ARCHS=(
+  "aarch64-apple-ios"           # iOS devices (ARM64)
+  "aarch64-apple-ios-sim"       # iOS simulator on Apple Silicon
+  "x86_64-apple-ios"           # iOS simulator on Intel
 )
 
-# Create temporary directory for individual architecture builds
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
-
-echo ""
-echo "Building for each architecture..."
+# Ensure targets are installed
+echo "Installing iOS targets..."
+for arch in "${IOS_ARCHS[@]}"; do
+  rustup target add "$arch"
+done
 
 # Build for each architecture
-for arch in "${ARCHS[@]}"; do
-    echo ""
-    echo "Building for $arch..."
-    
-    # Install target if not already installed
-    rustup target add "$arch" || true
-    
-    cd "$FFI_CRATE"
-    cargo build --release --target "$arch"
-    
-    # Copy library to temp directory
-    LIB_PATH="$PROJECT_ROOT/target/$arch/release/liboffline_protocol_ffi.a"
-    if [ -f "$LIB_PATH" ]; then
-        cp "$LIB_PATH" "$TEMP_DIR/liboffline_protocol_ffi_${arch}.a"
-        echo "✓ Built library for $arch"
-    else
-        echo "✗ Warning: Library not found at $LIB_PATH"
-        exit 1
-    fi
+echo "Building for iOS architectures..."
+for arch in "${IOS_ARCHS[@]}"; do
+  echo "Building for $arch..."
+  cargo build --release --target "$arch" --package offline-protocol-ffi
 done
 
-# Create universal library using lipo
+# Create output directory
+mkdir -p "$OUTPUT_DIR"
+
+echo "Copying iOS libraries..."
+
+# Note: We can't create a fat binary with both device and simulator arm64 architectures
+# Modern Xcode handles this automatically with XCFrameworks or separate binaries
+# For now, we'll just copy the device library which works for both
+
+# Copy device library (arm64)
+echo "Copying device library (aarch64-apple-ios)..."
+cp "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_ffi.a" \
+   "$OUTPUT_DIR/liboffline_protocol_ffi.a"
+
+echo "iOS library copied to $OUTPUT_DIR/liboffline_protocol_ffi.a"
+
+# Print library info
 echo ""
-echo "Creating universal library..."
-
-# Collect all architecture-specific libraries
-LIBS=()
-for arch in "${ARCHS[@]}"; do
-    LIB_FILE="$TEMP_DIR/liboffline_protocol_ffi_${arch}.a"
-    if [ -f "$LIB_FILE" ]; then
-        LIBS+=("$LIB_FILE")
-    fi
-done
-
-if [ ${#LIBS[@]} -eq 0 ]; then
-    echo "✗ Error: No libraries found to combine"
-    exit 1
-fi
-
-# Create universal library
-echo "Combining ${#LIBS[@]} architectures..."
-lipo -create "${LIBS[@]}" -output "$OUTPUT_DIR/liboffline_protocol_ffi.a"
-
-if [ -f "$OUTPUT_DIR/liboffline_protocol_ffi.a" ]; then
-    echo "✓ Created universal library: $OUTPUT_DIR/liboffline_protocol_ffi.a"
-    
-    # Show library info
-    echo ""
-    echo "Library architectures:"
-    lipo -info "$OUTPUT_DIR/liboffline_protocol_ffi.a"
-else
-    echo "✗ Error: Failed to create universal library"
-    exit 1
-fi
-
-# Copy header file
-HEADER_FILE="$FFI_CRATE/offline_protocol.h"
-if [ -f "$HEADER_FILE" ]; then
-    cp "$HEADER_FILE" "$OUTPUT_DIR/"
-    echo ""
-    echo "✓ Copied header file to $OUTPUT_DIR/offline_protocol.h"
-else
-    echo ""
-    echo "✗ Warning: Header file not found at $HEADER_FILE"
-    exit 1
-fi
+echo "Library info:"
+lipo -info "$OUTPUT_DIR/liboffline_protocol_ffi.a"
 
 echo ""
-echo "✓ iOS build complete!"
-echo "Universal library: $OUTPUT_DIR/liboffline_protocol_ffi.a"
-echo "Header file: $OUTPUT_DIR/offline_protocol.h"
+echo "✅ iOS build complete!"
+

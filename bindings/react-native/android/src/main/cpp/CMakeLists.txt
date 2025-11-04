@@ -1,42 +1,31 @@
-cmake_minimum_required(VERSION 3.22.1)
+cmake_minimum_required(VERSION 3.18)
 
 project(offline_protocol_jni)
 
-# Set C++ standard
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Find React Native
+set(REACT_NATIVE_DIR ${CMAKE_SOURCE_DIR}/../../../../../node_modules/react-native)
+set(BUILD_DIR ${CMAKE_SOURCE_DIR}/build)
 
-# Find required packages
-find_library(log-lib log)
-find_library(jnigraphics-lib jnigraphics)
-
-# Include directories
-# The header file should be copied to android/src/main/cpp/ during build
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-# Source files
-set(SOURCES
+# Add JNI wrapper
+add_library(offline_protocol_jni SHARED
     offline_protocol_jni.cpp
 )
 
-# Create shared library
-add_library(
-    offline_protocol_ffi
-    SHARED
-    ${SOURCES}
+# Add pre-built Rust library
+add_library(offline_protocol_ffi SHARED IMPORTED)
+set_target_properties(offline_protocol_ffi PROPERTIES
+    IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/liboffline_protocol_ffi.so
 )
 
-# Link against the pre-built offline_protocol_ffi library
-# The library should be in jniLibs directory for each architecture
-# The .so file will be loaded at runtime via System.loadLibrary()
-target_link_libraries(
+# Link libraries
+target_link_libraries(offline_protocol_jni
     offline_protocol_ffi
-    ${log-lib}
-    ${jnigraphics-lib}
+    log
+    android
 )
 
-# Copy header file if needed
-# The header should be available from the FFI crate
+# Include directories
+target_include_directories(offline_protocol_jni PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
 

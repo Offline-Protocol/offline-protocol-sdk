@@ -53,15 +53,24 @@
  */
 #define ERROR_OTHER -100
 
+typedef struct Option_EventCallback Option_EventCallback;
+
+/**
+ * Wrapper for OfflineProtocol with event callback support.
+ *
+ * This is an opaque type used only via pointers in the FFI interface.
+ */
+typedef struct ProtocolHandle ProtocolHandle;
+
 /**
  * Creates a new OfflineProtocol instance from JSON configuration.
  *
  * # Safety
  *
  * `config_json` must be a valid null-terminated C string.
- * Returns a pointer to OfflineProtocol on success, or null on failure.
+ * Returns a pointer to ProtocolHandle on success, or null on failure.
  */
-OfflineProtocol *offline_protocol_create(const char *config_json);
+struct ProtocolHandle *offline_protocol_create(const char *config_json);
 
 /**
  * Destroys an OfflineProtocol instance and frees its memory.
@@ -71,7 +80,7 @@ OfflineProtocol *offline_protocol_create(const char *config_json);
  * `handle` must be a valid pointer returned by `offline_protocol_create`.
  * After calling this function, the handle is invalid and must not be used.
  */
-void offline_protocol_destroy(OfflineProtocol *handle);
+void offline_protocol_destroy(struct ProtocolHandle *handle);
 
 /**
  * Starts the protocol.
@@ -84,7 +93,7 @@ void offline_protocol_destroy(OfflineProtocol *handle);
  *
  * Returns SUCCESS on success, or an error code on failure.
  */
-int32_t offline_protocol_start(OfflineProtocol *handle);
+int32_t offline_protocol_start(struct ProtocolHandle *handle);
 
 /**
  * Stops the protocol.
@@ -97,7 +106,7 @@ int32_t offline_protocol_start(OfflineProtocol *handle);
  *
  * Returns SUCCESS on success, or an error code on failure.
  */
-int32_t offline_protocol_stop(OfflineProtocol *handle);
+int32_t offline_protocol_stop(struct ProtocolHandle *handle);
 
 /**
  * Sends a message.
@@ -112,7 +121,7 @@ int32_t offline_protocol_stop(OfflineProtocol *handle);
  *
  * Returns SUCCESS and writes message ID to `out_message_id`, or an error code.
  */
-int32_t offline_protocol_send_message(OfflineProtocol *handle,
+int32_t offline_protocol_send_message(struct ProtocolHandle *handle,
                                       const char *recipient,
                                       const char *content,
                                       int32_t priority,
@@ -131,9 +140,27 @@ int32_t offline_protocol_send_message(OfflineProtocol *handle,
  *
  * Returns SUCCESS if an event was retrieved, 0 if no event available, or an error code.
  */
-int32_t offline_protocol_poll_event(OfflineProtocol *handle,
+int32_t offline_protocol_poll_event(struct ProtocolHandle *handle,
                                     char *out_event_json,
                                     uintptr_t _out_len);
+
+/**
+ * Sets an event callback to receive protocol events.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `callback` must be a valid C function pointer with the EventCallback signature.
+ * - `user_data` is an opaque pointer that will be passed back to the callback.
+ * - The callback must be thread-safe as it may be invoked from any thread.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_set_event_callback(struct ProtocolHandle *handle,
+                                            struct Option_EventCallback callback,
+                                            void *user_data);
 
 /**
  * Frees a string allocated by the FFI layer.

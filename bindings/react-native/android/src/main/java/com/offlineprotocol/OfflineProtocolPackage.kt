@@ -5,9 +5,6 @@ import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ViewManager
 
-/**
- * React Native package that registers the OfflineProtocol module.
- */
 class OfflineProtocolPackage : ReactPackage {
     override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
         return listOf(OfflineProtocolModule(reactContext))
@@ -17,4 +14,3 @@ class OfflineProtocolPackage : ReactPackage {
         return emptyList()
     }
 }
-

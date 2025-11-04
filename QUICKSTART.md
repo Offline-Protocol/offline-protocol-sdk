@@ -2,6 +2,8 @@
 
 Get started with the Offline Protocol SDK in 5 minutes.
 
+> **💡 Want to see a complete working example?** Check out the [React Native Example App](examples/react-native-app/README.md) that demonstrates all SDK features.
+
 ## For React Native Developers
 
 ### 1. Install
@@ -37,7 +39,7 @@ const messageId = await protocol.sendMessage({
 ### 4. Receive Messages
 
 ```typescript
-protocol.on('message:received', (event) => {
+protocol.on('message_received', (event) => {
   console.log(`From ${event.sender}: ${event.content}`);
   // Update your UI here
 });
@@ -46,11 +48,11 @@ protocol.on('message:received', (event) => {
 ### 5. Monitor Status
 
 ```typescript
-protocol.on('transport:switched', (event) => {
+protocol.on('transport_switched', (event) => {
   console.log(`Now using ${event.to}`);
 });
 
-protocol.on('relay:promoted', () => {
+protocol.on('relay_promoted', () => {
   console.log('This device is now a relay!');
 });
 ```
@@ -154,6 +156,8 @@ let messageId = try protocol.sendMessage(
 
 ## Next Steps
 
+- **[React Native Example App](examples/react-native-app/README.md)** - Complete working example ⭐
+- [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step setup
 - [Complete API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
@@ -181,7 +185,8 @@ Make sure to call `await init()` before creating the protocol.
 
 ## Getting Help
 
+- [React Native Example App](examples/react-native-app/README.md) - See complete implementation
+- [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Detailed setup instructions
 - [GitHub Issues](https://github.com/offline-protocol/sdk/issues)
 - [Documentation](docs/)
-- [Examples](bindings/react-native/example-usage.tsx)
 

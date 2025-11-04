@@ -1,51 +1,47 @@
+# NPM Ignore
+# This file specifies what NOT to include in the npm package
+# IMPORTANT: Pre-built binaries MUST be included for plug-and-play installation
+
 # Source files (only compiled lib/ is needed)
 src/
 tsconfig.json
 
-# Build scripts (keep scripts for CI/CD but exclude from package)
-scripts/
-PUBLISHING.md
-NPM_CHECKLIST.md
+# Build artifacts (don't ignore scripts - maintainers need them)
+*.log
+*.tgz
 
 # Development files
-.git/
-.gitignore
-.gitattributes
+.git
+.github
+.vscode
+.idea
 
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Testing
+__tests__/
+__mocks__/
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+coverage/
+
+# Documentation (keep README.md)
+docs/
+*.md
+!README.md
+
+# Example apps
+example/
+ExampleApp/
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Dependencies
-node_modules/
-
-# Test files
-*.test.ts
-*.test.tsx
-*.spec.ts
-*.spec.tsx
-__tests__/
-coverage/
-
-# Build artifacts (but keep Rust libraries)
-*.tsbuildinfo
-
-# Temporary files
-*.tmp
-*.temp
-
-# Note: Rust libraries (.so, .a, .dylib) in android/src/main/jniLibs/ and ios/ are INCLUDED
+# CRITICAL: Make sure pre-built binaries ARE included
+# (by default they will be included, but explicitly state what to keep)
+# We DO NOT ignore:
+# - ios/libs/**/*.a
+# - android/src/main/jniLibs/**/*.so
+# - lib/ (compiled TypeScript)
 

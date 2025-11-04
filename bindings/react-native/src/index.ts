@@ -1,56 +1,20 @@
 /**
  * Offline Protocol SDK for React Native
- * 
- * This package provides React Native bindings for the Offline Protocol SDK,
- * enabling offline-first messaging with automatic transport switching between
- * Internet, BLE Mesh, and Wi-Fi Direct.
- * 
- * @example
- * ```typescript
- * import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
- * 
- * const protocol = new OfflineProtocol({
- *   appId: 'my-app',
- *   userId: 'user123',
- *   transport: {
- *     bleEnabled: true,
- *     wifiDirectEnabled: true,
- *     internetEnabled: true,
- *   }
- * });
- * 
- * // Start the protocol
- * await protocol.start();
- * 
- * // Send a message
- * const messageId = await protocol.sendMessage({
- *   recipient: 'user456',
- *   content: 'Hello!',
- *   priority: MessagePriority.High,
- * });
- * 
- * // Listen for events
- * protocol.on('message:received', (event) => {
- *   console.log('Received message:', event.content);
- * });
- * ```
+ *
+ * @packageDocumentation
  */
 
-import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
+import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription } from 'react-native';
 import type {
   ProtocolConfig,
-  MessagePriority,
-  Event,
+  SendMessageParams,
+  ProtocolEvent,
   EventListener,
-  MessageReceivedEvent,
-  MessageDeliveredEvent,
-  MessageFailedEvent,
-  TransportSwitchedEvent,
-  RelayPromotedEvent,
-  RelayDemotedEvent,
-  FileProgressEvent,
-  FileReceivedEvent,
+  EventType,
 } from './types';
+import { MessagePriority } from './types';
+
+export * from './types';
 
 const LINKING_ERROR =
   `The package '@offlineprotocol/react-native' doesn't seem to be linked. Make sure: \n\n` +
@@ -58,8 +22,8 @@ const LINKING_ERROR =
   '- You rebuilt the app after installing the package\n' +
   '- You are not using Expo Go\n';
 
-const OfflineProtocolNative = NativeModules.OfflineProtocol
-  ? NativeModules.OfflineProtocol
+const OfflineProtocolNativeModule = NativeModules.OfflineProtocolModule
+  ? NativeModules.OfflineProtocolModule
   : new Proxy(
       {},
       {
@@ -69,172 +33,246 @@ const OfflineProtocolNative = NativeModules.OfflineProtocol
       }
     );
 
-const eventEmitter = new NativeEventEmitter(OfflineProtocolNative);
-
 /**
  * Main Offline Protocol class
+ *
+ * @example
+ * ```typescript
+ * const protocol = new OfflineProtocol({
+ *   appId: 'my-app',
+ *   userId: 'user123',
+ * });
+ *
+ * // Listen for events
+ * protocol.on('message_received', (event) => {
+ *   console.log(`From ${event.sender}: ${event.content}`);
+ * });
+ *
+ * // Start protocol
+ * await protocol.start();
+ *
+ * // Send message
+ * const messageId = await protocol.sendMessage({
+ *   recipient: 'user456',
+ *   content: 'Hello!',
+ *   priority: MessagePriority.High,
+ * });
+ *
+ * // Stop protocol
+ * await protocol.stop();
+ * ```
  */
 export class OfflineProtocol {
+  private eventEmitter: NativeEventEmitter;
+  private eventSubscription: EmitterSubscription | null = null;
+  private eventListeners: Map<EventType | 'all', Set<EventListener>> = new Map();
   private config: ProtocolConfig;
-  private eventListeners: Map<string, Set<EventListener>> = new Map();
-  private nativeSubscriptions: any[] = [];
+  private isCreated: boolean = false;
 
   /**
    * Creates a new OfflineProtocol instance
-   * 
+   *
    * @param config - Protocol configuration
    */
   constructor(config: ProtocolConfig) {
     this.config = config;
-    this.setupNativeEventListeners();
+    this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
+    this.setupEventSubscription();
   }
 
   /**
-   * Starts the protocol
+   * Sets up the native event subscription
    */
-  async start(): Promise<void> {
-    const configJson = JSON.stringify(this.config);
-    await OfflineProtocolNative.start(configJson);
+  private setupEventSubscription(): void {
+    this.eventSubscription = this.eventEmitter.addListener(
+      'OfflineProtocol_Event',
+      (data: { eventJson: string }) => {
+        try {
+          const event = JSON.parse(data.eventJson) as ProtocolEvent;
+          this.emitEvent(event);
+        } catch (error) {
+          console.error('Failed to parse event JSON:', error);
+        }
+      }
+    );
   }
 
   /**
-   * Stops the protocol
+   * Emits an event to all registered listeners
    */
-  async stop(): Promise<void> {
-    await OfflineProtocolNative.stop();
-    this.cleanup();
-  }
+  private emitEvent(event: ProtocolEvent): void {
+    // Call event-specific listeners
+    const specificListeners = this.eventListeners.get(event.type);
+    if (specificListeners) {
+      specificListeners.forEach((listener) => {
+        try {
+          listener(event);
+        } catch (error) {
+          console.error(`Error in event listener for ${event.type}:`, error);
+        }
+      });
+    }
 
-  /**
-   * Pauses the protocol (for background mode)
-   */
-  async pause(): Promise<void> {
-    await OfflineProtocolNative.pause();
-  }
-
-  /**
-   * Resumes the protocol from pause
-   */
-  async resume(): Promise<void> {
-    await OfflineProtocolNative.resume();
-  }
-
-  /**
-   * Sends a message
-   * 
-   * @param params - Message parameters
-   * @returns Promise resolving to the message ID
-   */
-  async sendMessage(params: {
-    recipient: string;
-    content: string;
-    priority?: MessagePriority;
-  }): Promise<string> {
-    const { recipient, content, priority = MessagePriority.Medium } = params;
-    return await OfflineProtocolNative.sendMessage(recipient, content, priority);
-  }
-
-  /**
-   * Sends a file
-   * 
-   * @param params - File parameters
-   * @returns Promise resolving to the file ID
-   */
-  async sendFile(params: {
-    recipient: string;
-    filePath: string;
-    priority?: MessagePriority;
-  }): Promise<string> {
-    const { recipient, filePath, priority = MessagePriority.Medium } = params;
-    return await OfflineProtocolNative.sendFile(recipient, filePath, priority);
+    // Call 'all' event listeners
+    const allListeners = this.eventListeners.get('all');
+    if (allListeners) {
+      allListeners.forEach((listener) => {
+        try {
+          listener(event);
+        } catch (error) {
+          console.error('Error in event listener for all events:', error);
+        }
+      });
+    }
   }
 
   /**
    * Registers an event listener
-   * 
-   * @param event - Event name
-   * @param listener - Event handler function
+   *
+   * @param eventType - Event type to listen for, or 'all' for all events
+   * @param listener - Callback function
+   * @returns This instance for chaining
+   *
+   * @example
+   * ```typescript
+   * protocol.on('message_received', (event) => {
+   *   console.log('Message received:', event);
+   * });
+   *
+   * protocol.on('all', (event) => {
+   *   console.log('Any event:', event);
+   * });
+   * ```
    */
-  on(event: 'message:received', listener: EventListener<MessageReceivedEvent>): void;
-  on(event: 'message:delivered', listener: EventListener<MessageDeliveredEvent>): void;
-  on(event: 'message:failed', listener: EventListener<MessageFailedEvent>): void;
-  on(event: 'transport:switched', listener: EventListener<TransportSwitchedEvent>): void;
-  on(event: 'relay:promoted', listener: EventListener<RelayPromotedEvent>): void;
-  on(event: 'relay:demoted', listener: EventListener<RelayDemotedEvent>): void;
-  on(event: 'file:progress', listener: EventListener<FileProgressEvent>): void;
-  on(event: 'file:received', listener: EventListener<FileReceivedEvent>): void;
-  on(event: string, listener: EventListener): void {
-    const listeners = this.eventListeners.get(event) || new Set();
-    listeners.add(listener);
-    this.eventListeners.set(event, listeners);
+  on<T extends ProtocolEvent = ProtocolEvent>(
+    eventType: EventType | 'all',
+    listener: EventListener<T>
+  ): this {
+    if (!this.eventListeners.has(eventType)) {
+      this.eventListeners.set(eventType, new Set());
+    }
+    this.eventListeners.get(eventType)!.add(listener as EventListener);
+    return this;
   }
 
   /**
    * Removes an event listener
-   * 
-   * @param event - Event name
-   * @param listener - Event handler to remove
+   *
+   * @param eventType - Event type
+   * @param listener - Callback function to remove
+   * @returns This instance for chaining
    */
-  off(event: string, listener: EventListener): void {
-    const listeners = this.eventListeners.get(event);
+  off<T extends ProtocolEvent = ProtocolEvent>(
+    eventType: EventType | 'all',
+    listener: EventListener<T>
+  ): this {
+    const listeners = this.eventListeners.get(eventType);
     if (listeners) {
-      listeners.delete(listener);
+      listeners.delete(listener as EventListener);
       if (listeners.size === 0) {
-        this.eventListeners.delete(event);
+        this.eventListeners.delete(eventType);
       }
     }
+    return this;
   }
 
   /**
-   * Sets up native event listeners
+   * Registers a one-time event listener
+   *
+   * @param eventType - Event type to listen for
+   * @param listener - Callback function
+   * @returns This instance for chaining
    */
-  private setupNativeEventListeners(): void {
-    // Listen for all events from native side
-    const subscription = eventEmitter.addListener('OfflineProtocolEvent', (event: any) => {
-      this.handleNativeEvent(event);
-    });
-    
-    this.nativeSubscriptions.push(subscription);
-  }
-
-  /**
-   * Handles events from the native side
-   */
-  private handleNativeEvent(event: any): void {
-    // Map event types to listener names
-    const eventTypeMap: Record<string, string> = {
-      'message:sent': 'message:sent',
-      'message:received': 'message:received',
-      'message:delivered': 'message:delivered',
-      'message:failed': 'message:failed',
-      'transport:switched': 'transport:switched',
-      'relay:promoted': 'relay:promoted',
-      'relay:demoted': 'relay:demoted',
-      'neighbor:discovered': 'neighbor:discovered',
-      'neighbor:lost': 'neighbor:lost',
-      'network:metrics': 'network:metrics',
-      'file:progress': 'file:progress',
-      'file:received': 'file:received',
+  once<T extends ProtocolEvent = ProtocolEvent>(
+    eventType: EventType | 'all',
+    listener: EventListener<T>
+  ): this {
+    const onceWrapper: EventListener<T> = (event) => {
+      this.off(eventType, onceWrapper as EventListener);
+      listener(event);
     };
-
-    const listenerName = eventTypeMap[event.type] || event.type;
-    if (listenerName) {
-      const listeners = this.eventListeners.get(listenerName);
-      if (listeners) {
-        listeners.forEach(listener => listener(event.data || event));
-      }
-    }
+    this.on(eventType, onceWrapper as EventListener);
+    return this;
   }
 
   /**
-   * Cleans up resources
+   * Removes all listeners for a specific event type, or all listeners if no type specified
+   *
+   * @param eventType - Optional event type. If not provided, removes all listeners.
+   * @returns This instance for chaining
    */
-  private cleanup(): void {
-    this.nativeSubscriptions.forEach(sub => sub.remove());
-    this.nativeSubscriptions = [];
-    this.eventListeners.clear();
+  removeAllListeners(eventType?: EventType | 'all'): this {
+    if (eventType) {
+      this.eventListeners.delete(eventType);
+    } else {
+      this.eventListeners.clear();
+    }
+    return this;
+  }
+
+  /**
+   * Starts the protocol
+   *
+   * @throws Error if protocol is already started or fails to start
+   */
+  async start(): Promise<void> {
+    // Create protocol instance if not already created
+    if (!this.isCreated) {
+      await OfflineProtocolNativeModule.create(JSON.stringify(this.config));
+      this.isCreated = true;
+    }
+
+    await OfflineProtocolNativeModule.start();
+  }
+
+  /**
+   * Stops the protocol
+   *
+   * @throws Error if protocol is not started or fails to stop
+   */
+  async stop(): Promise<void> {
+    await OfflineProtocolNativeModule.stop();
+  }
+
+  /**
+   * Sends a message
+   *
+   * @param params - Message parameters
+   * @returns Message ID
+   * @throws Error if message fails to send
+   */
+  async sendMessage(params: SendMessageParams): Promise<string> {
+    const priority = params.priority ?? MessagePriority.Medium;
+    const messageId = await OfflineProtocolNativeModule.sendMessage(
+      params.recipient,
+      params.content,
+      priority
+    );
+    return messageId;
+  }
+
+  /**
+   * Destroys the protocol instance and cleans up resources
+   */
+  async destroy(): Promise<void> {
+    // Remove all event listeners
+    this.removeAllListeners();
+
+    // Remove native event subscription
+    if (this.eventSubscription) {
+      this.eventSubscription.remove();
+      this.eventSubscription = null;
+    }
+
+    // Destroy native protocol instance
+    if (this.isCreated) {
+      await OfflineProtocolNativeModule.destroy();
+      this.isCreated = false;
+    }
   }
 }
 
-// Re-export types
-export * from './types';
+/**
+ * Default export
+ */
+export default OfflineProtocol;

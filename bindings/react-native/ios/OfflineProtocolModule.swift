@@ -1,272 +1,206 @@
+//
+//  OfflineProtocolModule.swift
+//  OfflineProtocol
+//
+//  React Native module for Offline Protocol SDK
+//
+
 import Foundation
 import React
 
-/**
- * React Native module for Offline Protocol SDK.
- * Bridges JavaScript calls to the native C FFI library.
- */
 @objc(OfflineProtocolModule)
 class OfflineProtocolModule: RCTEventEmitter {
-
     private var protocolHandle: OpaquePointer?
-    private var eventPollingTimer: Timer?
-    private var isPolling = false
-
+    private var eventCallbackContext: UnsafeMutableRawPointer?
+    
+    // Event names
+    private enum Events {
+        static let onEvent = "OfflineProtocol_Event"
+    }
+    
     override init() {
         super.init()
     }
-
-    override static func requiresMainQueueSetup() -> Bool {
-        return false
-    }
-
-    override func supportedEvents() -> [String]! {
-        return ["OfflineProtocolEvent"]
-    }
-
-    /**
-     * Starts the protocol with the given configuration.
-     */
-    @objc
-    func start(_ configJson: String, resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
-        if protocolHandle != nil {
-            reject("ALREADY_STARTED", "Protocol is already started", nil)
-            return
-        }
-
-        guard let configCString = configJson.cString(using: .utf8) else {
-            reject("INVALID_CONFIG", "Failed to convert config to C string", nil)
-            return
-        }
-
-        // Create protocol instance
-        let handle = offline_protocol_create(configCString)
-        if handle == nil {
-            reject("CREATE_FAILED", "Failed to create protocol instance", nil)
-            return
-        }
-
-        // Start the protocol
-        let result = offline_protocol_start(handle)
-        if result != SUCCESS {
-            offline_protocol_destroy(handle)
-            reject("START_FAILED", "Failed to start protocol: error code \(result)", nil)
-            return
-        }
-
-        protocolHandle = handle
-        startEventPolling()
-        resolve(nil)
-    }
-
-    /**
-     * Stops the protocol.
-     */
-    @objc
-    func stop(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
-        guard let handle = protocolHandle else {
-            reject("NOT_STARTED", "Protocol is not started", nil)
-            return
-        }
-
-        stopEventPolling()
-
-        let result = offline_protocol_stop(handle)
-        if result != SUCCESS {
-            reject("STOP_FAILED", "Failed to stop protocol: error code \(result)", nil)
-            return
-        }
-
-        offline_protocol_destroy(handle)
-        protocolHandle = nil
-        resolve(nil)
-    }
-
-    /**
-     * Pauses the protocol (for background mode).
-     */
-    @objc
-    func pause(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
-        guard protocolHandle != nil else {
-            reject("NOT_STARTED", "Protocol is not started", nil)
-            return
-        }
-
-        stopEventPolling()
-        resolve(nil)
-    }
-
-    /**
-     * Resumes the protocol from pause.
-     */
-    @objc
-    func resume(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
-        guard protocolHandle != nil else {
-            reject("NOT_STARTED", "Protocol is not started", nil)
-            return
-        }
-
-        startEventPolling()
-        resolve(nil)
-    }
-
-    /**
-     * Sends a message.
-     */
-    @objc
-    func sendMessage(_ recipient: String, content: String, priority: NSNumber, resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
-        guard let handle = protocolHandle else {
-            reject("NOT_STARTED", "Protocol is not started", nil)
-            return
-        }
-
-        guard let recipientCString = recipient.cString(using: .utf8),
-              let contentCString = content.cString(using: .utf8) else {
-            reject("INVALID_UTF8", "Failed to convert strings to UTF-8", nil)
-            return
-        }
-
-        // Allocate buffer for message ID
-        let messageIdBufferSize = 256
-        let messageIdBuffer = UnsafeMutablePointer<CChar>.allocate(capacity: messageIdBufferSize)
-        defer { messageIdBuffer.deallocate() }
-        messageIdBuffer.initialize(repeating: 0, count: messageIdBufferSize)
-
-        let result = offline_protocol_send_message(
-            handle,
-            recipientCString,
-            contentCString,
-            priority.int32Value,
-            messageIdBuffer,
-            messageIdBufferSize
-        )
-
-        if result != SUCCESS {
-            reject("SEND_FAILED", "Failed to send message: error code \(result)", nil)
-            return
-        }
-
-        // Extract message ID from buffer
-        let messageId = String(cString: messageIdBuffer)
-        resolve(messageId)
-    }
-
-    /**
-     * Sends a file.
-     * Note: File transfer functionality is not yet implemented in the FFI layer.
-     */
-    @objc
-    func sendFile(_ recipient: String, filePath: String, priority: NSNumber, resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
-        reject("NOT_IMPLEMENTED", "File transfer is not yet implemented", nil)
-    }
-
-    /**
-     * Starts polling for events from the native layer.
-     */
-    private func startEventPolling() {
-        if isPolling {
-            return
-        }
-
-        isPolling = true
-        eventPollingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.pollAndEmitEvents()
-        }
-    }
-
-    /**
-     * Stops event polling.
-     */
-    private func stopEventPolling() {
-        eventPollingTimer?.invalidate()
-        eventPollingTimer = nil
-        isPolling = false
-    }
-
-    /**
-     * Polls for events and emits them to JavaScript.
-     */
-    private func pollAndEmitEvents() {
-        guard let handle = protocolHandle else {
-            return
-        }
-
-        // Allocate buffer for event JSON
-        let eventBufferSize = 4096
-        let eventBuffer = UnsafeMutablePointer<CChar>.allocate(capacity: eventBufferSize)
-        defer { eventBuffer.deallocate() }
-        eventBuffer.initialize(repeating: 0, count: eventBufferSize)
-
-        let result = offline_protocol_poll_event(handle, eventBuffer, eventBufferSize)
-
-        if result == 0 {
-            // No event available
-            return
-        }
-
-        if result < 0 {
-            // Error occurred
-            return
-        }
-
-        // Extract event JSON from buffer
-        let eventJson = String(cString: eventBuffer)
-        if !eventJson.isEmpty {
-            do {
-                guard let jsonData = eventJson.data(using: .utf8),
-                      let jsonObject = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                    return
-                }
-
-                let eventType = jsonObject["type"] as? String ?? ""
-                
-                // Map snake_case event types to JavaScript event names
-                let jsEventType = mapEventType(eventType)
-
-                var eventDict: [String: Any] = [
-                    "type": jsEventType
-                ]
-
-                // Copy all other fields from JSON
-                for (key, value) in jsonObject {
-                    if key != "type" {
-                        eventDict[key] = value
-                    }
-                }
-
-                // Emit event to JavaScript
-                sendEvent(withName: "OfflineProtocolEvent", body: eventDict)
-            } catch {
-                // Ignore parsing errors
-            }
-        }
-    }
-
-    /**
-     * Maps Rust event types (snake_case) to JavaScript event names.
-     */
-    private func mapEventType(_ rustType: String) -> String {
-        switch rustType {
-        case "message_sent": return "message:sent"
-        case "message_received": return "message:received"
-        case "message_delivered": return "message:delivered"
-        case "message_failed": return "message:failed"
-        case "transport_switched": return "transport:switched"
-        case "relay_promoted": return "relay:promoted"
-        case "relay_demoted": return "relay:demoted"
-        case "neighbor_discovered": return "neighbor:discovered"
-        case "neighbor_lost": return "neighbor:lost"
-        case "network_metrics": return "network:metrics"
-        case "file_progress": return "file:progress"
-        case "file_received": return "file:received"
-        default: return rustType
-        }
-    }
-
+    
     deinit {
-        stopEventPolling()
+        // Clean up protocol handle if not already destroyed
         if let handle = protocolHandle {
             offline_protocol_destroy(handle)
+            protocolHandle = nil
+        }
+        
+        // Clean up callback context
+        if let context = eventCallbackContext {
+            Unmanaged<OfflineProtocolModule>.fromOpaque(context).release()
+            eventCallbackContext = nil
         }
     }
+    
+    override class func requiresMainQueueSetup() -> Bool {
+        return false
+    }
+    
+    override func supportedEvents() -> [String]! {
+        return [Events.onEvent]
+    }
+    
+    // MARK: - Exported Methods
+    
+    @objc func create(_ configJson: String,
+                     resolver: @escaping RCTPromiseResolveBlock,
+                     rejecter: @escaping RCTPromiseRejectBlock) {
+        // Clean up existing handle if any
+        if let handle = protocolHandle {
+            offline_protocol_destroy(handle)
+            protocolHandle = nil
+        }
+        
+        // Create new protocol instance
+        guard let handle = configJson.withCString({ offline_protocol_create($0) }) else {
+            rejecter("ERROR_CREATE_FAILED", "Failed to create protocol instance", nil)
+            return
+        }
+        
+        protocolHandle = handle
+        
+        // Set up event callback
+        let unmanagedSelf = Unmanaged.passRetained(self)
+        eventCallbackContext = unmanagedSelf.toOpaque()
+        
+        let result = offline_protocol_set_event_callback(
+            handle,
+            eventCallbackHandler,
+            eventCallbackContext
+        )
+        
+        if result != SUCCESS {
+            Unmanaged<OfflineProtocolModule>.fromOpaque(eventCallbackContext!).release()
+            eventCallbackContext = nil
+            offline_protocol_destroy(handle)
+            protocolHandle = nil
+            rejecter("ERROR_CALLBACK_FAILED", "Failed to set event callback", nil)
+            return
+        }
+        
+        resolver(nil)
+    }
+    
+    @objc func destroy(_ resolver: @escaping RCTPromiseResolveBlock,
+                      rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        offline_protocol_destroy(handle)
+        protocolHandle = nil
+        
+        // Clean up callback context
+        if let context = eventCallbackContext {
+            Unmanaged<OfflineProtocolModule>.fromOpaque(context).release()
+            eventCallbackContext = nil
+        }
+        
+        resolver(nil)
+    }
+    
+    @objc func start(_ resolver: @escaping RCTPromiseResolveBlock,
+                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        let result = offline_protocol_start(handle)
+        
+        switch result {
+        case SUCCESS:
+            resolver(nil)
+        case ERROR_ALREADY_STARTED:
+            rejecter("ERROR_ALREADY_STARTED", "Protocol already started", nil)
+        default:
+            rejecter("ERROR_START_FAILED", "Failed to start protocol", nil)
+        }
+    }
+    
+    @objc func stop(_ resolver: @escaping RCTPromiseResolveBlock,
+                   rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        let result = offline_protocol_stop(handle)
+        
+        switch result {
+        case SUCCESS:
+            resolver(nil)
+        case ERROR_NOT_STARTED:
+            rejecter("ERROR_NOT_STARTED", "Protocol not started", nil)
+        default:
+            rejecter("ERROR_STOP_FAILED", "Failed to stop protocol", nil)
+        }
+    }
+    
+    @objc func sendMessage(_ recipient: String,
+                          content: String,
+                          priority: NSNumber,
+                          resolver: @escaping RCTPromiseResolveBlock,
+                          rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 256)
+        defer { buffer.deallocate() }
+        
+        let result = recipient.withCString { recipientPtr in
+            content.withCString { contentPtr in
+                offline_protocol_send_message(
+                    handle,
+                    recipientPtr,
+                    contentPtr,
+                    priority.int32Value,
+                    buffer,
+                    256
+                )
+            }
+        }
+        
+        switch result {
+        case SUCCESS:
+            let messageId = String(cString: buffer)
+            resolver(messageId)
+        case ERROR_NOT_STARTED:
+            rejecter("ERROR_NOT_STARTED", "Protocol not started", nil)
+        case ERROR_SEND_FAILED:
+            rejecter("ERROR_SEND_FAILED", "Failed to send message", nil)
+        default:
+            rejecter("ERROR_UNKNOWN", "Unknown error occurred", nil)
+        }
+    }
+    
+    // MARK: - Event Callback
+    
+    fileprivate func handleEvent(_ eventJson: String) {
+        sendEvent(withName: Events.onEvent, body: ["eventJson": eventJson])
+    }
 }
+
+// Global event callback function
+private func eventCallbackHandler(eventJson: UnsafePointer<CChar>?, userData: UnsafeMutableRawPointer?) {
+    guard let eventJson = eventJson,
+          let userData = userData else {
+        return
+    }
+    
+    let jsonString = String(cString: eventJson)
+    let module = Unmanaged<OfflineProtocolModule>.fromOpaque(userData).takeUnretainedValue()
+    
+    // Dispatch to main queue or use a serial queue
+    DispatchQueue.main.async {
+        module.handleEvent(jsonString)
+    }
+}
+

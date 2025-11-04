@@ -1,17 +1,17 @@
-# Offline Protocol SDK - React Native Bindings
+# @offlineprotocol/react-native
 
-React Native bindings for the Offline Protocol SDK, enabling offline-first messaging with automatic transport switching between Internet, BLE Mesh, and Wi-Fi Direct.
+Offline-first messaging SDK with intelligent transport switching for React Native. Built with Rust for maximum performance and reliability.
 
-## Installation
+## ✨ Features
 
-### Prerequisites
+- **Offline-First**: Messages delivered even without internet connectivity
+- **Intelligent Transport Switching**: Automatically switches between Internet, BLE Mesh, and Wi-Fi Direct
+- **Cross-Platform**: Works on iOS and Android
+- **Type-Safe**: Full TypeScript support
+- **Event-Driven**: Real-time event notifications
+- **Plug & Play**: Pre-built binaries included - no Rust toolchain needed!
 
-- React Native 0.70.0 or higher
-- For iOS: Xcode 14+ with iOS 12.0+ deployment target
-- For Android: Android SDK 21+ (Android 5.0+)
-- Rust toolchain (for building native libraries - see Building from Source below)
-
-### Install the Package
+## 📦 Installation
 
 ```bash
 npm install @offlineprotocol/react-native
@@ -19,56 +19,38 @@ npm install @offlineprotocol/react-native
 yarn add @offlineprotocol/react-native
 ```
 
-**Good news**: The pre-built Rust FFI libraries are included in the npm package, so you don't need to build them separately!
-
 ### iOS Setup
 
-1. Install CocoaPods dependencies:
 ```bash
-cd ios
-pod install
-cd ..
+cd ios && pod install
 ```
 
-The Rust library (`liboffline_protocol_ffi.a`) and header file (`offline_protocol.h`) are already included in the package.
+That's it! The pre-built library is automatically linked.
 
 ### Android Setup
 
-The Rust libraries for all Android architectures are already included in:
-- `android/src/main/jniLibs/arm64-v8a/liboffline_protocol_ffi.so`
-- `android/src/main/jniLibs/armeabi-v7a/liboffline_protocol_ffi.so`
-- `android/src/main/jniLibs/x86_64/liboffline_protocol_ffi.so`
-- `android/src/main/jniLibs/x86/liboffline_protocol_ffi.so`
+No additional setup needed! The pre-built `.so` files are automatically included in your APK.
 
-No additional setup required!
-
-2. Ensure your `android/app/build.gradle` includes:
-```gradle
-android {
-    defaultConfig {
-        ndk {
-            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
-        }
-    }
-}
-```
-
-## Usage
-
-### Basic Example
+## 🚀 Quick Start
 
 ```typescript
 import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
 
-// Create and configure the protocol
+// Create protocol instance
 const protocol = new OfflineProtocol({
   appId: 'my-app',
   userId: 'user123',
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: true,  // Android only
-    internetEnabled: true,
-  },
+});
+
+// Listen for incoming messages
+protocol.on('message_received', (event) => {
+  console.log(`From ${event.sender}: ${event.content}`);
+  console.log(`Delivered via ${event.transport} in ${event.hop_count} hops`);
+});
+
+// Listen for all events
+protocol.on('all', (event) => {
+  console.log('Event:', event.type, event);
 });
 
 // Start the protocol
@@ -81,69 +63,20 @@ const messageId = await protocol.sendMessage({
   priority: MessagePriority.High,
 });
 
-// Listen for incoming messages
-protocol.on('message:received', (event) => {
-  console.log(`From ${event.sender}: ${event.content}`);
-  console.log(`Delivered via ${event.transport} in ${event.hopCount} hops`);
-});
+console.log('Message sent:', messageId);
 
-// Monitor transport switching
-protocol.on('transport:switched', (event) => {
-  console.log(`Switched from ${event.from || 'none'} to ${event.transport}`);
-  console.log(`Reason: ${event.reason}`);
-});
-
-// Stop when done
+// Stop the protocol
 await protocol.stop();
+
+// Clean up
+await protocol.destroy();
 ```
 
-### Event Types
-
-The SDK emits various events that you can listen to:
-
-- **`message:received`** - A message was received
-- **`message:delivered`** - A message was successfully delivered (ACK received)
-- **`message:failed`** - A message failed to deliver
-- **`transport:switched`** - Transport was switched by DORS
-- **`relay:promoted`** - This device was promoted to relay role
-- **`relay:demoted`** - This device was demoted from relay role
-- **`file:progress`** - File transfer progress update
-- **`file:received`** - A file was completely received
-- **`neighbor:discovered`** - A new neighbor was discovered
-- **`neighbor:lost`** - A neighbor was lost (disconnected)
-- **`network:metrics`** - Network metrics update
-
-### Message Priorities
-
-```typescript
-import { MessagePriority } from '@offlineprotocol/react-native';
-
-// Low priority - can be delayed or dropped under congestion
-MessagePriority.Low
-
-// Medium priority - default for most messages
-MessagePriority.Medium
-
-// High priority - important messages that should be delivered quickly
-MessagePriority.High
-
-// Critical priority - emergency messages, highest delivery guarantee
-MessagePriority.Critical
-```
-
-### Background Mode
-
-```typescript
-// Pause when app goes to background
-await protocol.pause();
-
-// Resume when app comes to foreground
-await protocol.resume();
-```
-
-## API Reference
+## 📚 API Reference
 
 ### `OfflineProtocol`
+
+Main class for interacting with the SDK.
 
 #### Constructor
 
@@ -151,88 +84,376 @@ await protocol.resume();
 new OfflineProtocol(config: ProtocolConfig)
 ```
 
-Creates a new protocol instance.
+**Parameters:**
+
+```typescript
+interface ProtocolConfig {
+  appId: string;                // Application identifier
+  userId: string;               // User identifier
+  transport?: {                 // Optional transport configuration
+    bleEnabled?: boolean;       // Enable BLE transport (default: true)
+    wifiDirectEnabled?: boolean; // Enable Wi-Fi Direct (Android only, default: true)
+    internetEnabled?: boolean;  // Enable Internet transport (default: true)
+  };
+  dors?: {                      // DORS configuration
+    preferOnline?: boolean;     // Prefer online mode (default: true)
+  };
+  relay?: {                     // Relay configuration
+    allowRelay?: boolean;       // Allow device to act as relay (default: true)
+    minBatteryForRelay?: number; // Min battery % for relaying (default: 30)
+    relayThreshold?: number;    // Connections needed for relay (default: 3)
+  };
+  network?: {
+    initialTtl?: number;        // Initial TTL for messages (default: 8)
+  };
+}
+```
 
 #### Methods
 
-- **`start()`** - Starts the protocol
-- **`stop()`** - Stops the protocol
-- **`pause()`** - Pauses the protocol (for background mode)
-- **`resume()`** - Resumes from pause
-- **`sendMessage(params)`** - Sends a message
-  - `params.recipient: string` - Recipient user ID
-  - `params.content: string` - Message content
-  - `params.priority?: MessagePriority` - Message priority (default: Medium)
-  - Returns: `Promise<string>` - Message ID
-- **`sendFile(params)`** - Sends a file (not yet implemented)
-  - `params.recipient: string` - Recipient user ID
-  - `params.filePath: string` - Path to file
-  - `params.priority?: MessagePriority` - Message priority
-  - Returns: `Promise<string>` - File ID
-- **`on(event, listener)`** - Registers an event listener
-- **`off(event, listener)`** - Removes an event listener
+##### `start(): Promise<void>`
 
-## Building from Source
+Starts the protocol.
 
-The npm package includes pre-built Rust FFI libraries for all supported platforms. However, if you need to build from source (for example, to use a custom build or different architecture), you can do so using the build scripts.
+```typescript
+await protocol.start();
+```
+
+##### `stop(): Promise<void>`
+
+Stops the protocol gracefully.
+
+```typescript
+await protocol.stop();
+```
+
+##### `sendMessage(params: SendMessageParams): Promise<string>`
+
+Sends a message and returns the message ID.
+
+```typescript
+const messageId = await protocol.sendMessage({
+  recipient: 'user456',
+  content: 'Hello!',
+  priority: MessagePriority.Medium, // Optional, defaults to Medium
+});
+```
+
+##### `on(eventType: EventType | 'all', listener: EventListener): this`
+
+Registers an event listener.
+
+```typescript
+protocol.on('message_received', (event) => {
+  console.log('Received:', event);
+});
+
+// Listen to all events
+protocol.on('all', (event) => {
+  console.log('Any event:', event);
+});
+```
+
+##### `off(eventType: EventType | 'all', listener: EventListener): this`
+
+Removes an event listener.
+
+```typescript
+const handler = (event) => console.log(event);
+protocol.on('message_sent', handler);
+protocol.off('message_sent', handler);
+```
+
+##### `once(eventType: EventType | 'all', listener: EventListener): this`
+
+Registers a one-time event listener.
+
+```typescript
+protocol.once('message_delivered', (event) => {
+  console.log('First delivery:', event);
+});
+```
+
+##### `removeAllListeners(eventType?: EventType | 'all'): this`
+
+Removes all listeners for an event type, or all listeners if no type specified.
+
+```typescript
+protocol.removeAllListeners('message_received');
+protocol.removeAllListeners(); // Remove all
+```
+
+##### `destroy(): Promise<void>`
+
+Destroys the protocol instance and cleans up resources.
+
+```typescript
+await protocol.destroy();
+```
+
+### Events
+
+#### Message Events
+
+**`message_sent`**
+```typescript
+{
+  type: 'message_sent';
+  message_id: string;
+  timestamp: number;
+}
+```
+
+**`message_received`**
+```typescript
+{
+  type: 'message_received';
+  message_id: string;
+  sender: string;
+  recipient: string;
+  content: string;
+  hop_count: number;
+  transport: string;        // 'BLE' | 'WiFiDirect' | 'Internet'
+  timestamp: number;
+}
+```
+
+**`message_delivered`**
+```typescript
+{
+  type: 'message_delivered';
+  message_id: string;
+  latency_ms: number;
+  hop_count: number;
+  transport: string;
+}
+```
+
+**`message_failed`**
+```typescript
+{
+  type: 'message_failed';
+  message_id: string;
+  reason: string;
+  retry_count: number;
+}
+```
+
+#### Transport Events
+
+**`transport_switched`**
+```typescript
+{
+  type: 'transport_switched';
+  from: string | null;
+  to: string;
+  reason: string;
+}
+```
+
+#### Relay Events
+
+**`relay_promoted`**
+```typescript
+{
+  type: 'relay_promoted';
+  connection_count: number;
+  battery_level: number;
+}
+```
+
+**`relay_demoted`**
+```typescript
+{
+  type: 'relay_demoted';
+  reason: string;
+}
+```
+
+#### Network Events
+
+**`neighbor_discovered`**
+```typescript
+{
+  type: 'neighbor_discovered';
+  peer_id: string;
+  transport: string;
+  rssi?: number;
+}
+```
+
+**`neighbor_lost`**
+```typescript
+{
+  type: 'neighbor_lost';
+  peer_id: string;
+}
+```
+
+**`network_metrics`**
+```typescript
+{
+  type: 'network_metrics';
+  neighbor_count: number;
+  relay_count: number;
+  delivery_ratio: number;   // 0.0 - 1.0
+  avg_latency_ms: number;
+}
+```
+
+### Enums
+
+#### `MessagePriority`
+
+```typescript
+enum MessagePriority {
+  Low = 0,
+  Medium = 1,
+  High = 2,
+  Critical = 3,
+}
+```
+
+## 🎯 Example Use Cases
+
+### Chat Application
+
+```typescript
+import React, { useEffect, useState } from 'react';
+import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
+
+function ChatScreen({ userId, recipientId }) {
+  const [protocol, setProtocol] = useState(null);
+  const [messages, setMessages] = useState([]);
+
+  useEffect(() => {
+    const proto = new OfflineProtocol({
+      appId: 'chat-app',
+      userId,
+    });
+
+    proto.on('message_received', (event) => {
+      if (event.sender === recipientId) {
+        setMessages((prev) => [...prev, {
+          id: event.message_id,
+          text: event.content,
+          sender: event.sender,
+          timestamp: event.timestamp,
+        }]);
+      }
+    });
+
+    proto.start();
+    setProtocol(proto);
+
+    return () => {
+      proto.destroy();
+    };
+  }, [userId, recipientId]);
+
+  const sendMessage = async (text) => {
+    if (protocol) {
+      await protocol.sendMessage({
+        recipient: recipientId,
+        content: text,
+        priority: MessagePriority.High,
+      });
+    }
+  };
+
+  return (
+    // Your UI here
+  );
+}
+```
+
+### Offline-First Mode (Emergency App)
+
+```typescript
+const protocol = new OfflineProtocol({
+  appId: 'emergency-app',
+  userId: 'responder-123',
+  transport: {
+    bleEnabled: true,
+    wifiDirectEnabled: true,
+    internetEnabled: false,  // Offline only!
+  },
+  dors: {
+    preferOnline: false,
+  },
+  relay: {
+    allowRelay: true,
+    minBatteryForRelay: 15,  // Lower threshold for emergencies
+  },
+  network: {
+    initialTtl: 10,  // Higher TTL for wider coverage
+  },
+});
+```
+
+## 🔧 Troubleshooting
+
+### iOS
+
+**Issue**: Build fails with "library not found"
+
+**Solution**: Run `pod install` in the `ios` directory.
+
+**Issue**: Multiple architecture errors
+
+**Solution**: Clean build folder (`Cmd+Shift+K`) and rebuild.
+
+### Android
+
+**Issue**: "could not find liboffline_protocol_ffi.so"
+
+**Solution**: Clean and rebuild:
+```bash
+cd android && ./gradlew clean
+cd .. && react-native run-android
+```
+
+**Issue**: NDK version mismatch
+
+**Solution**: The pre-built libraries are compatible with NDK 21-26. Update your `android/build.gradle` if needed.
+
+## 🏗️ Building from Source (For SDK Maintainers)
+
+If you need to rebuild the native libraries:
 
 ### Prerequisites
 
 - Rust toolchain (`rustup`)
-- Android NDK (for Android builds)
-- Xcode (for iOS builds)
+- For iOS: Xcode
+- For Android: Android NDK
 
-### Building Rust Libraries
-
-If you have the full SDK repository:
+### Build Commands
 
 ```bash
-# Clone the main SDK repository
-git clone https://github.com/offline-protocol/sdk.git
-cd sdk/bindings/react-native
+# Build for iOS
+npm run build:ios
 
-# Build for Android (all architectures)
-./scripts/build-android.sh
+# Build for Android
+npm run build:android
 
-# Build for iOS (universal library)
-./scripts/build-ios.sh
+# Build for all platforms
+npm run build:all
+
+# Validate before publishing
+npm run prepublishOnly
 ```
 
-The build scripts will place the libraries in the correct locations:
-- **Android**: `android/src/main/jniLibs/{arch}/liboffline_protocol_ffi.so`
-- **iOS**: `ios/liboffline_protocol_ffi.a` and `ios/offline_protocol.h`
+## 📄 License
 
-**Note**: The published npm package already includes these pre-built libraries, so building from source is only needed if you're developing the SDK itself or need custom builds.
+Dual-licensed under MIT OR Apache-2.0
 
-## Troubleshooting
+## 🤝 Contributing
 
-### iOS: "Module 'OfflineProtocol' not found"
+Contributions welcome! Please see [CONTRIBUTING.md](../../CONTRIBUTING.md) in the main repository.
 
-1. Run `pod install` in the `ios` directory
-2. Clean and rebuild: `cd ios && xcodebuild clean`
-3. Ensure the podspec path is correct in `react-native.config.js`
+## 🔗 Links
 
-### Android: "UnsatisfiedLinkError: dlopen failed"
-
-1. Ensure the native libraries are in `android/src/main/jniLibs/`
-2. Check that your `build.gradle` includes the correct ABI filters
-3. Rebuild the app after adding the libraries
-
-### Build Script Errors
-
-**Android NDK not found:**
-- Set `ANDROID_NDK_HOME` environment variable
-- Or install NDK via Android Studio → SDK Manager → SDK Tools
-
-**iOS build fails:**
-- Ensure Xcode command-line tools are installed: `xcode-select --install`
-- Verify Rust iOS targets are installed: `rustup target add aarch64-apple-ios`
-
-## License
-
-MIT OR Apache-2.0
-
-## Contributing
-
-See [CONTRIBUTING.md](../../CONTRIBUTING.md) for details.
+- [Main Repository](https://github.com/offline-protocol/sdk)
+- [Documentation](https://github.com/offline-protocol/sdk/tree/main/docs)
+- [Issues](https://github.com/offline-protocol/sdk/issues)
 
