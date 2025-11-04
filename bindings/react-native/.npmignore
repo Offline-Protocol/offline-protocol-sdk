@@ -1,0 +1,51 @@
+# Source files (only compiled lib/ is needed)
+src/
+tsconfig.json
+
+# Build scripts (keep scripts for CI/CD but exclude from package)
+scripts/
+PUBLISHING.md
+NPM_CHECKLIST.md
+
+# Development files
+.git/
+.gitignore
+.gitattributes
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Dependencies
+node_modules/
+
+# Test files
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+__tests__/
+coverage/
+
+# Build artifacts (but keep Rust libraries)
+*.tsbuildinfo
+
+# Temporary files
+*.tmp
+*.temp
+
+# Note: Rust libraries (.so, .a, .dylib) in android/src/main/jniLibs/ and ios/ are INCLUDED
+

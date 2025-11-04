@@ -18,15 +18,19 @@ RCT_EXTERN_METHOD(resume:(RCTPromiseResolveBlock)resolve
 
 RCT_EXTERN_METHOD(sendMessage:(NSString *)recipient
                   content:(NSString *)content
-                  priority:(NSInteger)priority
+                  priority:(NSNumber *)priority
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(sendFile:(NSString *)recipient
                   filePath:(NSString *)filePath
-                  priority:(NSInteger)priority
+                  priority:(NSNumber *)priority
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-@end
++ (BOOL)requiresMainQueueSetup
+{
+    return NO;
+}
 
+@end

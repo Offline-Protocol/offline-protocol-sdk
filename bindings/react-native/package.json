@@ -1,25 +1,46 @@
 {
   "name": "@offlineprotocol/react-native",
   "version": "0.1.0",
-  "description": "React Native bindings for the Offline Protocol SDK",
+  "description": "React Native bindings for the Offline Protocol SDK - offline-first messaging with automatic transport switching",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "test": "jest"
+    "prepublishOnly": "npm run build && npm run build:rust",
+    "build:rust": "npm run build:android && npm run build:ios",
+    "build:android": "bash scripts/build-android.sh",
+    "build:ios": "bash scripts/build-ios.sh",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
     "offline",
     "messaging",
     "p2p",
     "ble",
+    "bluetooth",
     "wifi-direct",
     "mesh",
-    "react-native"
+    "mesh-network",
+    "react-native",
+    "offline-first",
+    "sdk",
+    "protocol"
   ],
   "author": "Offline Protocol Contributors",
   "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/offline-protocol/sdk.git",
+    "directory": "bindings/react-native"
+  },
+  "homepage": "https://github.com/offline-protocol/sdk#readme",
+  "bugs": {
+    "url": "https://github.com/offline-protocol/sdk/issues"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
   "peerDependencies": {
     "react-native": ">=0.70.0"
   },
@@ -29,12 +50,10 @@
     "typescript": "^5.0.0"
   },
   "files": [
-    "src",
     "lib",
     "android",
     "ios",
-    "*.podspec",
-    "README.md"
+    "README.md",
+    "react-native.config.js"
   ]
 }
-

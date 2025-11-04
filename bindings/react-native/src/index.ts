@@ -190,7 +190,7 @@ export class OfflineProtocol {
    */
   private setupNativeEventListeners(): void {
     // Listen for all events from native side
-    const subscription = eventEmitter.addListener('OfflineProtocolEvent', (event: Event) => {
+    const subscription = eventEmitter.addListener('OfflineProtocolEvent', (event: any) => {
       this.handleNativeEvent(event);
     });
     
@@ -200,28 +200,28 @@ export class OfflineProtocol {
   /**
    * Handles events from the native side
    */
-  private handleNativeEvent(event: Event): void {
+  private handleNativeEvent(event: any): void {
     // Map event types to listener names
     const eventTypeMap: Record<string, string> = {
-      'message_sent': 'message:sent',
-      'message_received': 'message:received',
-      'message_delivered': 'message:delivered',
-      'message_failed': 'message:failed',
-      'transport_switched': 'transport:switched',
-      'relay_promoted': 'relay:promoted',
-      'relay_demoted': 'relay:demoted',
-      'neighbor_discovered': 'neighbor:discovered',
-      'neighbor_lost': 'neighbor:lost',
-      'network_metrics': 'network:metrics',
-      'file_progress': 'file:progress',
-      'file_received': 'file:received',
+      'message:sent': 'message:sent',
+      'message:received': 'message:received',
+      'message:delivered': 'message:delivered',
+      'message:failed': 'message:failed',
+      'transport:switched': 'transport:switched',
+      'relay:promoted': 'relay:promoted',
+      'relay:demoted': 'relay:demoted',
+      'neighbor:discovered': 'neighbor:discovered',
+      'neighbor:lost': 'neighbor:lost',
+      'network:metrics': 'network:metrics',
+      'file:progress': 'file:progress',
+      'file:received': 'file:received',
     };
 
-    const listenerName = eventTypeMap[event.type];
+    const listenerName = eventTypeMap[event.type] || event.type;
     if (listenerName) {
       const listeners = this.eventListeners.get(listenerName);
       if (listeners) {
-        listeners.forEach(listener => listener(event));
+        listeners.forEach(listener => listener(event.data || event));
       }
     }
   }
@@ -238,4 +238,3 @@ export class OfflineProtocol {
 
 // Re-export types
 export * from './types';
-
