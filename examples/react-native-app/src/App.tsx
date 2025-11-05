@@ -26,10 +26,12 @@ export default function App() {
     isStarted,
     error,
     events,
+    permissionsGranted,
     start,
     stop,
     sendMessage,
     clearEvents,
+    requestPermissions,
   } = useOfflineProtocol({
     appId: 'offline-protocol-example',
     userId,
@@ -50,6 +52,10 @@ export default function App() {
       initialTtl: 10,
     },
   });
+
+  const handleRequestPermissions = async () => {
+    await requestPermissions();
+  };
 
   const handleStartStop = async () => {
     if (isStarted) {
@@ -110,6 +116,22 @@ export default function App() {
 
       <View style={styles.content}>
         <StatusBar isStarted={isStarted} error={error} />
+
+        {!permissionsGranted && (
+          <View style={styles.permissionWarning}>
+            <Text style={styles.permissionWarningText}>
+              ⚠️ Bluetooth permissions required for offline messaging
+            </Text>
+            <TouchableOpacity
+              style={styles.permissionButton}
+              onPress={handleRequestPermissions}
+            >
+              <Text style={styles.permissionButtonText}>
+                Grant Permissions
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <TouchableOpacity
           style={[styles.controlButton, isStarted ? styles.stopButton : styles.startButton]}
@@ -190,6 +212,32 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     padding: 16,
+  },
+  permissionWarning: {
+    backgroundColor: '#fff3cd',
+    borderWidth: 1,
+    borderColor: '#ffc107',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
+  },
+  permissionWarningText: {
+    color: '#856404',
+    fontSize: 14,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  permissionButton: {
+    backgroundColor: '#ffc107',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  permissionButtonText: {
+    color: '#856404',
+    fontSize: 14,
+    fontWeight: '600',
   },
   controlButton: {
     paddingVertical: 14,

@@ -233,6 +233,34 @@ For full testing, use two or more devices:
 
 ## Troubleshooting
 
+### App Crashes on Android (Android 12+)
+
+**Problem:** App crashes immediately on launch or when starting the protocol.
+
+**Cause:** On Android 12+ (API 31+), Bluetooth permissions must be requested at runtime. If the app tries to use Bluetooth before permissions are granted, it will crash with a `SecurityException`.
+
+**Solution:**
+
+1. **Grant Permissions First:** When you tap "Start Protocol", the app will automatically request the required permissions. You must grant:
+   - **Bluetooth** permissions (BLUETOOTH_SCAN, BLUETOOTH_CONNECT, BLUETOOTH_ADVERTISE)
+   - **Location** permission (required by Android for BLE scanning)
+
+2. **Permission Warning:** If you see a yellow warning banner saying "⚠️ Bluetooth permissions required", tap the "Grant Permissions" button before starting the protocol.
+
+3. **Manual Permission Grant:** If you denied permissions, go to:
+   - Settings → Apps → Offline Protocol Example → Permissions
+   - Enable "Nearby devices" (or "Bluetooth") and "Location"
+
+4. **Clean Reinstall:** If the app continues to crash:
+   ```bash
+   cd android
+   ./gradlew clean
+   cd ..
+   npm run android
+   ```
+
+**Note:** Location permission is required by Android for BLE scanning but your location is never tracked or stored by this app.
+
 ### App Won't Build
 
 **iOS:**
@@ -246,10 +274,26 @@ For full testing, use two or more devices:
 
 ### Protocol Won't Start
 
-- Check permissions are granted (Bluetooth, Location)
-- Verify User ID is not empty
-- Check error message in status bar
-- Look for errors in console logs
+**Common Issues:**
+
+1. **Permissions Not Granted** (Most Common)
+   - Symptom: Error message about permissions, or app crashes
+   - Solution: Tap "Grant Permissions" button and allow all permissions
+   - On Android 12+, you need Bluetooth AND Location permissions
+
+2. **Bluetooth Disabled**
+   - Symptom: Error message "Bluetooth must be enabled"
+   - Solution: Enable Bluetooth in your device settings
+   - The app will prompt you automatically
+
+3. **Invalid Configuration**
+   - Symptom: "Protocol not initialized" error
+   - Solution: Verify User ID is not empty and valid
+   - Check error message in status bar for details
+
+4. **Check Console Logs**
+   - Run `npx react-native log-android` or `npx react-native log-ios`
+   - Look for error messages from "OfflineProtocolModule"
 
 ### Messages Not Sending
 
@@ -264,19 +308,72 @@ For full testing, use two or more devices:
 - Grant Bluetooth permission in Settings
 - Ensure Bluetooth is enabled
 - Use a physical device (not simulator)
+- The system will automatically prompt for Bluetooth permission when needed
 
-**Android:**
-- Grant Bluetooth and Location permissions
-- Enable Bluetooth and Location services
-- Use Android 12+ for best BLE support
-- Test on physical device
+**Android (especially Android 12+):**
+
+1. **Grant All Required Permissions:**
+   - Open the app and tap "Grant Permissions"
+   - Allow "Nearby devices" or "Bluetooth" permission
+   - Allow "Location" permission (required for BLE scanning)
+
+2. **Enable Bluetooth:**
+   - Make sure Bluetooth is turned ON in device settings
+   - The app will prompt you if Bluetooth is disabled
+
+3. **Enable Location Services:**
+   - Settings → Location → Turn ON
+   - Required for BLE scanning on Android (security requirement)
+
+4. **Check Android Version:**
+   - Android 12+ (API 31+): Uses new Bluetooth permissions
+   - Android 10-11: Uses legacy Bluetooth + Location permissions
+   - Best support on Android 12 and higher
+
+5. **Test on Physical Device:**
+   - BLE doesn't work reliably on emulators
+   - Use two physical devices for testing
+
+**Common Android BLE Issues:**
+
+- **"SecurityException" in logs:** Permissions not granted → Restart app and grant permissions
+- **"Bluetooth adapter not found":** Device doesn't support BLE → Use a different device
+- **Scanning not finding devices:** Location services disabled → Enable in Settings
 
 ### No Neighbors Discovered
 
-- Ensure both devices have protocol started
-- Devices must be within BLE range (~10-30 meters)
-- Check that Bluetooth is enabled
-- Verify permissions are granted
+**Troubleshooting Steps:**
+
+1. **Both Devices Running:**
+   - Ensure protocol is started on BOTH devices (green status bar)
+   - Both should show "Protocol started successfully" in logs
+
+2. **Permissions Granted:**
+   - Both devices need Bluetooth + Location permissions
+   - Check for yellow warning banner on either device
+
+3. **Bluetooth Enabled:**
+   - Verify Bluetooth is ON on both devices
+   - Try toggling Bluetooth OFF and ON again
+
+4. **Proximity:**
+   - Devices must be within BLE range (~10-30 meters / 30-100 feet)
+   - Keep devices closer together initially (< 5 meters)
+   - Remove obstacles between devices
+
+5. **Wait for Discovery:**
+   - BLE discovery can take 10-30 seconds
+   - Check the "Events" tab for "neighbor_discovered" events
+
+6. **Check Event Log:**
+   - Go to "Events" tab on both devices
+   - Look for scanning/advertising events
+   - Any errors will appear here
+
+7. **Restart Protocol:**
+   - Stop protocol on both devices
+   - Wait 5 seconds
+   - Start again on both devices
 
 ## Development Notes
 

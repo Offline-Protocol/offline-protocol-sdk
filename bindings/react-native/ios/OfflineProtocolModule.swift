@@ -12,6 +12,8 @@ import React
 class OfflineProtocolModule: RCTEventEmitter {
     private var protocolHandle: OpaquePointer?
     private var eventCallbackContext: UnsafeMutableRawPointer?
+    private var bleManager: BleManager?
+    private var deviceId: String = ""
     
     // Event names
     private enum Events {
@@ -55,6 +57,20 @@ class OfflineProtocolModule: RCTEventEmitter {
             protocolHandle = nil
         }
         
+        // Parse config to extract userId
+        if let jsonData = configJson.data(using: .utf8),
+           let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            deviceId = (config["userId"] as? String) ?? (config["user_id"] as? String) ?? ""
+        }
+        
+        if deviceId.isEmpty {
+            rejecter("ERROR_INVALID_CONFIG", "userId is required", nil)
+            return
+        }
+        
+        // Initialize BLE manager
+        initializeBleManager()
+        
         // Create new protocol instance
         guard let handle = configJson.withCString({ offline_protocol_create($0) }) else {
             rejecter("ERROR_CREATE_FAILED", "Failed to create protocol instance", nil)
@@ -92,6 +108,10 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         
+        // Stop and cleanup BLE
+        bleManager?.stop()
+        bleManager = nil
+        
         offline_protocol_destroy(handle)
         protocolHandle = nil
         
@@ -108,6 +128,14 @@ class OfflineProtocolModule: RCTEventEmitter {
                     rejecter: @escaping RCTPromiseRejectBlock) {
         guard let handle = protocolHandle else {
             rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        // Start BLE operations
+        let bleStarted = bleManager?.start() ?? false
+        if !bleStarted {
+            NSLog("[OfflineProtocol] Failed to start BLE")
+            rejecter("ERROR_BLE_START_FAILED", "Failed to start BLE. Check permissions and Bluetooth state.", nil)
             return
         }
         
@@ -129,6 +157,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
             return
         }
+        
+        // Stop BLE first
+        bleManager?.stop()
         
         let result = offline_protocol_stop(handle)
         
@@ -185,6 +216,130 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     fileprivate func handleEvent(_ eventJson: String) {
         sendEvent(withName: Events.onEvent, body: ["eventJson": eventJson])
+    }
+    
+    // MARK: - BLE Manager
+    
+    private func initializeBleManager() {
+        if bleManager != nil {
+            return // Already initialized
+        }
+        
+        let manager = BleManager(deviceId: deviceId)
+        
+        manager.onPeerDiscovered = { [weak self] peerId, address, rssi in
+            NSLog("[OfflineProtocol] Peer discovered: \(peerId) at \(address) (RSSI: \(rssi))")
+            
+            // Notify the Rust transport layer
+            if let handle = self?.protocolHandle {
+                peerId.withCString { peerIdPtr in
+                    address.withCString { addressPtr in
+                        let result = offline_protocol_ble_peer_discovered(handle, peerIdPtr, addressPtr, Int16(rssi))
+                        if result != SUCCESS {
+                            NSLog("[OfflineProtocol] Failed to notify BLE transport of peer discovery: \(result)")
+                        } else {
+                            NSLog("[OfflineProtocol] Successfully notified Rust transport of peer: \(peerId)")
+                        }
+                    }
+                }
+            }
+            
+            // Emit neighbor_discovered event (matches NetworkScreen expectations)
+            let eventJson = """
+            {
+                "type": "neighbor_discovered",
+                "peer_id": "\(peerId)",
+                "transport": "ble",
+                "rssi": \(rssi),
+                "timestamp": \(Date().timeIntervalSince1970 * 1000)
+            }
+            """
+            
+            self?.handleEvent(eventJson)
+        }
+        
+        manager.onPeerLost = { [weak self] peerId in
+            NSLog("[OfflineProtocol] Peer lost: \(peerId)")
+            
+            // Notify the Rust transport layer
+            if let handle = self?.protocolHandle {
+                peerId.withCString { peerIdPtr in
+                    let result = offline_protocol_ble_peer_lost(handle, peerIdPtr)
+                    if result != SUCCESS {
+                        NSLog("[OfflineProtocol] Failed to notify BLE transport of peer loss: \(result)")
+                    }
+                }
+            }
+            
+            // Emit neighbor_lost event (matches NetworkScreen expectations)
+            let eventJson = """
+            {
+                "type": "neighbor_lost",
+                "peer_id": "\(peerId)",
+                "timestamp": \(Date().timeIntervalSince1970 * 1000)
+            }
+            """
+            
+            self?.handleEvent(eventJson)
+        }
+        
+        manager.onMessageReceived = { [weak self] messageData in
+            NSLog("[OfflineProtocol] Message received: \(messageData.count) bytes")
+            
+            if let messageJson = String(data: messageData, encoding: .utf8) {
+                self?.handleEvent(messageJson)
+            }
+        }
+        
+        manager.onStatusChanged = { [weak self] status in
+            NSLog("[OfflineProtocol] BLE status changed: \(status.rawValue)")
+            
+            // Notify the Rust transport layer
+            if let handle = self?.protocolHandle {
+                let statusCode: Int32
+                switch status {
+                case .unavailable:
+                    statusCode = 0
+                case .available, .scanning, .advertising, .connected:
+                    statusCode = 1
+                case .disconnected:
+                    statusCode = 2
+                }
+                
+                let result = offline_protocol_ble_status_changed(handle, statusCode)
+                if result != SUCCESS {
+                    NSLog("[OfflineProtocol] Failed to notify BLE transport of status change: \(result)")
+                }
+            }
+            
+            // Emit transport_switched event when BLE becomes available
+            if status == .available || status == .scanning || status == .advertising {
+                let eventJson = """
+                {
+                    "type": "transport_switched",
+                    "from": null,
+                    "to": "ble",
+                    "reason": "BLE transport became available",
+                    "timestamp": \(Date().timeIntervalSince1970 * 1000)
+                }
+                """
+                self?.handleEvent(eventJson)
+            } else if status == .disconnected {
+                let eventJson = """
+                {
+                    "type": "transport_switched",
+                    "from": "ble",
+                    "to": "none",
+                    "reason": "BLE transport disconnected",
+                    "timestamp": \(Date().timeIntervalSince1970 * 1000)
+                }
+                """
+                self?.handleEvent(eventJson)
+            }
+        }
+        
+        bleManager = manager
+        NSLog("[OfflineProtocol] BLE manager initialized for device: \(deviceId)")
     }
 }
 

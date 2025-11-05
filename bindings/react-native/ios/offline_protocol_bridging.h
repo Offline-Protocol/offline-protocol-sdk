@@ -46,5 +46,16 @@ int32_t offline_protocol_set_event_callback(ProtocolHandle *handle,
                                             void *user_data);
 void offline_protocol_free_string(char *s);
 
+// BLE transport notification functions
+int32_t offline_protocol_ble_peer_discovered(ProtocolHandle *handle,
+                                              const char *device_id,
+                                              const char *address,
+                                              int16_t rssi);
+int32_t offline_protocol_ble_peer_lost(ProtocolHandle *handle,
+                                        const char *device_id);
+int32_t offline_protocol_ble_status_changed(ProtocolHandle *handle,
+                                             int32_t status);
+int32_t offline_protocol_ble_get_peer_count(ProtocolHandle *handle);
+
 #endif /* offline_protocol_bridging_h */
 

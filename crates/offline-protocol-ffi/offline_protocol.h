@@ -171,4 +171,65 @@ int32_t offline_protocol_set_event_callback(struct ProtocolHandle *handle,
  */
 void offline_protocol_free_string(char *s);
 
+/**
+ * Notifies the BLE transport that a peer has been discovered.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `device_id` and `address` must be valid null-terminated C strings.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_ble_peer_discovered(struct ProtocolHandle *handle,
+                                             const char *device_id,
+                                             const char *address,
+                                             int16_t rssi);
+
+/**
+ * Notifies the BLE transport that a peer has been lost.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `device_id` must be a valid null-terminated C string.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_ble_peer_lost(struct ProtocolHandle *handle, const char *device_id);
+
+/**
+ * Notifies the BLE transport of a status change.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ *
+ * # Arguments
+ *
+ * - `status`: 0 = Unavailable, 1 = Available, 2 = Disconnected
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_ble_status_changed(struct ProtocolHandle *handle, int32_t status);
+
+/**
+ * Gets the number of discovered peers.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ *
+ * # Returns
+ *
+ * Returns the number of discovered peers, or -1 on error.
+ */
+int32_t offline_protocol_ble_get_peer_count(struct ProtocolHandle *handle);
+
 #endif /* OFFLINE_PROTOCOL_H */

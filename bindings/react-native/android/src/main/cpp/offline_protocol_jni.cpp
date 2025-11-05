@@ -30,6 +30,17 @@ extern "C" {
                                                 EventCallback callback,
                                                 void* user_data);
     void offline_protocol_free_string(char* s);
+    
+    // BLE transport notification functions
+    int32_t offline_protocol_ble_peer_discovered(ProtocolHandle* handle,
+                                                  const char* device_id,
+                                                  const char* address,
+                                                  int16_t rssi);
+    int32_t offline_protocol_ble_peer_lost(ProtocolHandle* handle,
+                                            const char* device_id);
+    int32_t offline_protocol_ble_status_changed(ProtocolHandle* handle,
+                                                 int32_t status);
+    int32_t offline_protocol_ble_get_peer_count(ProtocolHandle* handle);
 }
 
 // Error codes
@@ -182,6 +193,70 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeSendMessage(
     }
     
     return env->NewStringUTF(messageId);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeBlePeerDiscovered(
+    JNIEnv* env, jobject thiz, jlong handlePtr,
+    jstring deviceId, jstring address, jshort rssi) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    const char* deviceIdStr = env->GetStringUTFChars(deviceId, nullptr);
+    const char* addressStr = env->GetStringUTFChars(address, nullptr);
+    
+    int32_t result = offline_protocol_ble_peer_discovered(
+        handle, deviceIdStr, addressStr, static_cast<int16_t>(rssi));
+    
+    env->ReleaseStringUTFChars(deviceId, deviceIdStr);
+    env->ReleaseStringUTFChars(address, addressStr);
+    
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeBlePeerLost(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jstring deviceId) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    const char* deviceIdStr = env->GetStringUTFChars(deviceId, nullptr);
+    int32_t result = offline_protocol_ble_peer_lost(handle, deviceIdStr);
+    env->ReleaseStringUTFChars(deviceId, deviceIdStr);
+    
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeBleStatusChanged(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jint status) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    return offline_protocol_ble_status_changed(handle, static_cast<int32_t>(status));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeBleGetPeerCount(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return -1;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    return offline_protocol_ble_get_peer_count(handle);
 }
 
 } // extern "C"

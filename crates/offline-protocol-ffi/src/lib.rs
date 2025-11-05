@@ -14,11 +14,13 @@
 #![warn(missing_docs)]
 
 use offline_protocol::{OfflineProtocol, ProtocolConfig};
+use offline_protocol_transport::{BleTransport, PeerDevice, TransportStatus};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::panic;
 use std::ptr;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 /// Success code.
 pub const SUCCESS: i32 = 0;
@@ -85,6 +87,7 @@ unsafe impl Sync for CallbackData {}
 pub struct ProtocolHandle {
     protocol: OfflineProtocol,
     callback: Arc<Mutex<Option<CallbackData>>>,
+    ble_transport: Arc<Mutex<Option<Arc<BleTransport>>>>,
 }
 
 /// Creates a new OfflineProtocol instance from JSON configuration.
@@ -136,9 +139,13 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
         // Create protocol instance
         match OfflineProtocol::new(protocol_config) {
             Ok(protocol) => {
+                // Create BLE transport
+                let ble_transport = Arc::new(BleTransport::new(user_id));
+                
                 let handle = ProtocolHandle {
                     protocol,
                     callback: Arc::new(Mutex::new(None)),
+                    ble_transport: Arc::new(Mutex::new(Some(ble_transport))),
                 };
                 Box::into_raw(Box::new(handle))
             }
@@ -414,6 +421,189 @@ pub extern "C" fn offline_protocol_free_string(s: *mut c_char) {
         let _ = CString::from_raw(s);
         // CString is dropped here, freeing the memory
     }
+}
+
+/// Notifies the BLE transport that a peer has been discovered.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `device_id` and `address` must be valid null-terminated C strings.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_ble_peer_discovered(
+    handle: *mut ProtocolHandle,
+    device_id: *const c_char,
+    address: *const c_char,
+    rssi: i16,
+) -> i32 {
+    if handle.is_null() || device_id.is_null() || address.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated all pointers are non-null above.
+        let handle_ref = &*handle;
+
+        // Convert C strings to Rust strings
+        let device_id_str = match CStr::from_ptr(device_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        let address_str = match CStr::from_ptr(address).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        // Get BLE transport
+        let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
+        if let Some(ref ble_transport) = *ble_transport_opt {
+            // Create peer device
+            let peer = PeerDevice {
+                device_id: device_id_str.to_string(),
+                address: address_str.to_string(),
+                rssi,
+                last_seen: SystemTime::now(),
+                connected: true,
+            };
+
+            // Notify transport
+            ble_transport.on_peer_discovered(peer);
+
+            SUCCESS
+        } else {
+            ERROR_OTHER
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Notifies the BLE transport that a peer has been lost.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `device_id` must be a valid null-terminated C string.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_ble_peer_lost(
+    handle: *mut ProtocolHandle,
+    device_id: *const c_char,
+) -> i32 {
+    if handle.is_null() || device_id.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated all pointers are non-null above.
+        let handle_ref = &*handle;
+
+        // Convert C string to Rust string
+        let device_id_str = match CStr::from_ptr(device_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        // Get BLE transport
+        let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
+        if let Some(ref ble_transport) = *ble_transport_opt {
+            ble_transport.on_peer_lost(device_id_str);
+            SUCCESS
+        } else {
+            ERROR_OTHER
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Notifies the BLE transport of a status change.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+///
+/// # Arguments
+///
+/// - `status`: 0 = Unavailable, 1 = Available, 2 = Disconnected
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_ble_status_changed(
+    handle: *mut ProtocolHandle,
+    status: i32,
+) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated handle is non-null above.
+        let handle_ref = &*handle;
+
+        // Map status code to TransportStatus
+        let transport_status = match status {
+            0 => TransportStatus::Unavailable,
+            1 => TransportStatus::Available,
+            2 => TransportStatus::Disconnected,
+            _ => TransportStatus::Unavailable,
+        };
+
+        // Get BLE transport
+        let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
+        if let Some(ref ble_transport) = *ble_transport_opt {
+            ble_transport.on_status_changed(transport_status);
+            SUCCESS
+        } else {
+            ERROR_OTHER
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets the number of discovered peers.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+///
+/// # Returns
+///
+/// Returns the number of discovered peers, or -1 on error.
+#[no_mangle]
+pub extern "C" fn offline_protocol_ble_get_peer_count(
+    handle: *mut ProtocolHandle,
+) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated handle is non-null above.
+        let handle_ref = &*handle;
+
+        // Get BLE transport
+        let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
+        if let Some(ref ble_transport) = *ble_transport_opt {
+            let peers = ble_transport.get_peers();
+            peers.len() as i32
+        } else {
+            -1
+        }
+    });
+
+    result.unwrap_or(-1)
 }
 
 #[cfg(test)]
