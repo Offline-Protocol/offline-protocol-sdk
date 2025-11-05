@@ -10,12 +10,16 @@
 
 pub mod ble;
 pub mod error;
+pub mod internet;
 pub mod mock;
 pub mod traits;
 pub mod types;
+pub mod wifi_direct;
 
 pub use ble::{BleTransport, BleTransportBuilder, PeerDevice};
 pub use error::{Error, Result};
+pub use internet::{InternetTransport, InternetConfig};
 pub use mock::MockTransport;
 pub use traits::{Transport, TransportStatus};
 pub use types::{LinkQuality, TransportMetrics, TransportType};
+pub use wifi_direct::{WifiDirectTransport, WifiDirectConfig, WifiDirectPeer};

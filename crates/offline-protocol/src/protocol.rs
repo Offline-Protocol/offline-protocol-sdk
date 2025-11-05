@@ -1,10 +1,9 @@
 //! Main protocol engine.
 
-use crate::{Event, EventCallback, ProtocolConfig, Result};
+use crate::{Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
-use offline_protocol_transport::{MockTransport, Transport};
 use std::sync::{Arc, Mutex};
 
 /// Protocol state.
@@ -55,9 +54,8 @@ pub struct OfflineProtocol {
     /// Configuration.
     config: ProtocolConfig,
 
-    /// Transport selector (DORS).
-    #[allow(dead_code)]
-    transport_selector: TransportSelector,
+    /// Transport manager (manages all transports with DORS).
+    transport_manager: TransportManager,
 
     /// Path selector for routing.
     #[allow(dead_code)]
@@ -75,9 +73,6 @@ pub struct OfflineProtocol {
 
     /// Deduplicator for preventing duplicates.
     deduplicator: Deduplicator,
-
-    /// Mock transport (for now - real transports would be added later).
-    mock_transport: MockTransport,
 
     /// Shared mutable state.
     shared_state: Arc<Mutex<SharedState>>,
@@ -97,8 +92,14 @@ impl OfflineProtocol {
         // Validate configuration
         config.validate()?;
 
+        // Create transport selector for DORS
+        let transport_selector = TransportSelector::with_config(config.dors.clone());
+        
+        // Create transport manager
+        let transport_manager = TransportManager::new(transport_selector);
+
         Ok(Self {
-            transport_selector: TransportSelector::with_config(config.dors.clone()),
+            transport_manager,
             path_selector: PathSelector::with_config(
                 config.path.clone(),
                 RelayManager::with_config(config.relay.clone()),
@@ -107,7 +108,6 @@ impl OfflineProtocol {
             ack_manager: AckManager::with_config(config.reliability.ack.clone()),
             retry_queue: RetryQueue::with_config(config.reliability.retry.clone()),
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),
-            mock_transport: MockTransport::new(offline_protocol_transport::TransportType::BLE),
             shared_state: Arc::new(Mutex::new(SharedState::new())),
             config,
         })
@@ -119,19 +119,19 @@ impl OfflineProtocol {
     ///
     /// Returns `Ok(())` if started successfully, `Err` if already started.
     pub fn start(&mut self) -> Result<()> {
-        let mut state = self.shared_state.lock().unwrap();
+        let state = self.shared_state.lock().unwrap();
 
         if state.state != ProtocolState::Stopped {
             return Err(crate::Error::AlreadyStarted);
         }
 
-        // Start mock transport
-        self.mock_transport.start()?;
+        // Start all transports
+        drop(state);
+        self.transport_manager.start()?;
+        let mut state = self.shared_state.lock().unwrap();
 
         state.state = ProtocolState::Running;
-        drop(state);
 
-        // Emit started event (could add a ProtocolStarted event type)
         Ok(())
     }
 
@@ -141,16 +141,19 @@ impl OfflineProtocol {
     ///
     /// Returns `Ok(())` if stopped successfully, `Err` if not started.
     pub fn stop(&mut self) -> Result<()> {
-        let mut state = self.shared_state.lock().unwrap();
+        let state = self.shared_state.lock().unwrap();
 
         if state.state == ProtocolState::Stopped {
-            return Err(crate::Error::NotStarted);
+            return Ok(()); // Already stopped
         }
 
-        // Stop mock transport
-        self.mock_transport.stop()?;
+        // Stop all transports
+        drop(state);
+        self.transport_manager.stop()?;
+        let mut state = self.shared_state.lock().unwrap();
 
         state.state = ProtocolState::Stopped;
+
         Ok(())
     }
 
@@ -226,8 +229,8 @@ impl OfflineProtocol {
         // Mark as seen
         self.deduplicator.mark_seen(message_id.clone());
 
-        // Send via transport (for now, using mock)
-        self.mock_transport.send(&message)?;
+        // Send via transport manager (DORS will select best transport)
+        self.transport_manager.send(&message)?;
 
         // Register for ACK if required
         if message.requires_ack {
@@ -259,8 +262,8 @@ impl OfflineProtocol {
 
         drop(state);
 
-        // Try to receive from transport
-        if let Ok(Some(message)) = self.mock_transport.receive() {
+        // Try to receive from transport manager
+        if let Ok(Some(message)) = self.transport_manager.receive() {
             // Check for duplicates
             if self.deduplicator.is_duplicate(&message.id) {
                 return None; // Skip duplicate
@@ -316,7 +319,7 @@ impl OfflineProtocol {
         // Check for retry-ready messages
         while let Some(entry) = self.retry_queue.dequeue_ready() {
             // Try to resend
-            if self.mock_transport.send(&entry.message).is_err() {
+            if self.transport_manager.send(&entry.message).is_err() {
                 // Re-enqueue with incremented retry count
                 let _ = self
                     .retry_queue
@@ -365,11 +368,24 @@ impl OfflineProtocol {
     pub fn config(&self) -> &ProtocolConfig {
         &self.config
     }
+
+    /// Gets a mutable reference to the transport manager.
+    ///
+    /// This allows external code (e.g., FFI) to add transports dynamically.
+    pub fn transport_manager_mut(&mut self) -> &mut TransportManager {
+        &mut self.transport_manager
+    }
+
+    /// Gets a reference to the transport manager.
+    pub fn transport_manager(&self) -> &TransportManager {
+        &self.transport_manager
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig::new("test-app", "user123")
@@ -420,6 +436,12 @@ mod tests {
     #[test]
     fn test_send_message() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        
+        // Add a mock transport
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
+        
         protocol.start().unwrap();
 
         let result = protocol.send_message("bob", "Hello!", None);
@@ -437,8 +459,10 @@ mod tests {
     #[test]
     fn test_receive_message() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        protocol.start().unwrap();
-
+        // Add a mock transport for testing
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        
         // Queue a message in the mock transport
         let message = Message::new(
             UserId::new("alice").unwrap(),
@@ -446,7 +470,10 @@ mod tests {
             AppId::new("test-app").unwrap(),
             "Test message",
         );
-        protocol.mock_transport.queue_message(message.clone());
+        mock_transport.queue_message(message.clone());
+        
+        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
 
         // Receive it
         let received = protocol.receive_message();
@@ -467,6 +494,12 @@ mod tests {
             }
         });
 
+        // Add a mock transport
+        use offline_protocol_transport::{MockTransport, TransportType};
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
+
         protocol.start().unwrap();
         protocol.send_message("bob", "Hello!", None).unwrap();
 
@@ -476,6 +509,12 @@ mod tests {
     #[test]
     fn test_deduplication() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        
+        // Add a mock transport
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
+        
         protocol.start().unwrap();
 
         // Send same message twice

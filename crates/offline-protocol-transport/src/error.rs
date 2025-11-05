@@ -24,6 +24,10 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     ConfigurationError(String),
 
+    /// Serialization/deserialization error.
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+
     /// Core error propagated from offline-protocol-core.
     #[error("Core error: {0}")]
     Core(#[from] offline_protocol_core::Error),

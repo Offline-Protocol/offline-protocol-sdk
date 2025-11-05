@@ -138,9 +138,47 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
 
         // Create protocol instance
         match OfflineProtocol::new(protocol_config) {
-            Ok(protocol) => {
+            Ok(mut protocol) => {
                 // Create BLE transport
                 let ble_transport = Arc::new(BleTransport::new(user_id));
+                
+                // Add BLE transport to protocol's transport manager
+                use offline_protocol_transport::{Transport, TransportType};
+                let ble_clone = ble_transport.clone();
+                
+                // We need to convert Arc<BleTransport> to Box<dyn Transport>
+                // Create a wrapper that holds the Arc
+                struct ArcBleTransport(Arc<BleTransport>);
+                impl Transport for ArcBleTransport {
+                    fn transport_type(&self) -> TransportType {
+                        self.0.transport_type()
+                    }
+                    fn status(&self) -> TransportStatus {
+                        self.0.status()
+                    }
+                    fn metrics(&self) -> offline_protocol_transport::TransportMetrics {
+                        self.0.metrics()
+                    }
+                    fn send(&self, message: &offline_protocol_core::Message) -> offline_protocol_transport::Result<()> {
+                        self.0.send(message)
+                    }
+                    fn receive(&self) -> offline_protocol_transport::Result<Option<offline_protocol_core::Message>> {
+                        self.0.receive()
+                    }
+                    fn start(&mut self) -> offline_protocol_transport::Result<()> {
+                        // Status will be updated via on_status_changed
+                        Ok(())
+                    }
+                    fn stop(&mut self) -> offline_protocol_transport::Result<()> {
+                        // Status will be updated via on_status_changed  
+                        Ok(())
+                    }
+                }
+                
+                protocol.transport_manager_mut().add_transport(
+                    TransportType::BLE,
+                    Box::new(ArcBleTransport(ble_clone))
+                );
                 
                 let handle = ProtocolHandle {
                     protocol,
@@ -572,6 +610,135 @@ pub extern "C" fn offline_protocol_ble_status_changed(
     result.unwrap_or(ERROR_PANIC)
 }
 
+/// Called when a BLE fragment is received from a peer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `fragment_data` must be a valid pointer to a byte array of length `data_len`.
+///
+/// # Arguments
+///
+/// - `fragment_data`: Pointer to the fragment byte array
+/// - `data_len`: Length of the fragment data
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_ble_fragment_received(
+    handle: *mut ProtocolHandle,
+    fragment_data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if handle.is_null() || fragment_data.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated pointers are non-null above.
+        let handle_ref = &*handle;
+
+        // Copy fragment data
+        let data_slice = std::slice::from_raw_parts(fragment_data, data_len);
+        let data_vec = data_slice.to_vec();
+
+        // Get BLE transport
+        let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
+        if let Some(ref ble_transport) = *ble_transport_opt {
+            match ble_transport.on_fragment_received(data_vec) {
+                Ok(()) => SUCCESS,
+                Err(_) => ERROR_OTHER,
+            }
+        } else {
+            ERROR_OTHER
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets the next BLE fragment to send.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `recipient_out` must be a valid pointer to a buffer of at least 256 bytes.
+/// - `fragment_out` must be a valid pointer to a buffer of at least `fragment_out_len` bytes.
+/// - `fragment_len_out` must be a valid pointer to store the actual fragment length.
+///
+/// # Arguments
+///
+/// - `recipient_out`: Buffer to write the recipient device ID (null-terminated)
+/// - `recipient_out_len`: Size of the recipient buffer
+/// - `fragment_out`: Buffer to write the fragment data
+/// - `fragment_out_len`: Size of the fragment buffer
+/// - `fragment_len_out`: Pointer to store the actual fragment length
+///
+/// # Returns
+///
+/// Returns SUCCESS if a fragment is available, 0 if no fragments, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_ble_get_next_fragment(
+    handle: *mut ProtocolHandle,
+    recipient_out: *mut c_char,
+    recipient_out_len: usize,
+    fragment_out: *mut u8,
+    fragment_out_len: usize,
+    fragment_len_out: *mut usize,
+) -> i32 {
+    if handle.is_null() || recipient_out.is_null() || fragment_out.is_null() || fragment_len_out.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated pointers are non-null above.
+        let handle_ref = &*handle;
+
+        // Get BLE transport
+        let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
+        if let Some(ref ble_transport) = *ble_transport_opt {
+            match ble_transport.get_next_fragment() {
+                Ok(Some((recipient, fragment_data))) => {
+                    // Write recipient
+                    let recipient_cstr = match CString::new(recipient) {
+                        Ok(s) => s,
+                        Err(_) => return ERROR_INVALID_UTF8,
+                    };
+                    let recipient_bytes = recipient_cstr.as_bytes_with_nul();
+                    if recipient_bytes.len() > recipient_out_len {
+                        return ERROR_OTHER;
+                    }
+                    ptr::copy_nonoverlapping(
+                        recipient_bytes.as_ptr(),
+                        recipient_out as *mut u8,
+                        recipient_bytes.len(),
+                    );
+
+                    // Write fragment data
+                    if fragment_data.len() > fragment_out_len {
+                        return ERROR_OTHER;
+                    }
+                    ptr::copy_nonoverlapping(
+                        fragment_data.as_ptr(),
+                        fragment_out,
+                        fragment_data.len(),
+                    );
+                    *fragment_len_out = fragment_data.len();
+
+                    SUCCESS
+                }
+                Ok(None) => 0, // No fragments available
+                Err(_) => ERROR_OTHER,
+            }
+        } else {
+            ERROR_OTHER
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
 /// Gets the number of discovered peers.
 ///
 /// # Safety
@@ -663,6 +830,18 @@ mod tests {
         let result = offline_protocol_set_event_callback(handle, Some(test_callback), ptr::null_mut());
         assert_eq!(result, SUCCESS);
 
+        // Add a mock transport for testing
+        unsafe {
+            use offline_protocol_transport::{MockTransport, Transport, TransportType};
+            let protocol_ref = &mut *(handle as *mut ProtocolHandle);
+            let mut mock_transport = MockTransport::new(TransportType::BLE);
+            mock_transport.start().unwrap();
+            protocol_ref.protocol.transport_manager_mut().add_transport(
+                TransportType::BLE, 
+                Box::new(mock_transport)
+            );
+        }
+
         // Start protocol and send message (which should trigger callback)
         offline_protocol_start(handle);
         
@@ -731,6 +910,19 @@ mod tests {
         let config_c = CString::new(config).unwrap();
 
         let handle = offline_protocol_create(config_c.as_ptr());
+        
+        // Add a mock transport for testing
+        unsafe {
+            use offline_protocol_transport::{MockTransport, Transport, TransportType};
+            let protocol_ref = &mut *(handle as *mut ProtocolHandle);
+            let mut mock_transport = MockTransport::new(TransportType::BLE);
+            mock_transport.start().unwrap();
+            protocol_ref.protocol.transport_manager_mut().add_transport(
+                TransportType::BLE, 
+                Box::new(mock_transport)
+            );
+        }
+        
         offline_protocol_start(handle);
 
         let recipient = CString::new("bob").unwrap();

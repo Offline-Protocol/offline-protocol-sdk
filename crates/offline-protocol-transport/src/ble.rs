@@ -5,11 +5,13 @@
 //! - Device discovery (advertising and scanning)
 //! - GATT server/client operations
 //! - Message transmission over BLE characteristics
+//! - Message fragmentation for large payloads
 
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, VecDeque};
+use std::time::SystemTime;
 
 /// UUID for the Offline Protocol GATT service
 pub const SERVICE_UUID: &str = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
@@ -21,7 +23,11 @@ pub const MESSAGE_CHAR_UUID: &str = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
 pub const DEVICE_ID_CHAR_UUID: &str = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 
 /// Maximum BLE payload size (MTU - overhead)
-pub const MAX_PAYLOAD_SIZE: usize = 512;
+/// Typical BLE MTU ranges from 23-251 bytes, we use conservative 185 bytes per fragment
+pub const MAX_FRAGMENT_SIZE: usize = 185;
+
+/// Fragment timeout - if fragments aren't all received within 30s, discard
+pub const FRAGMENT_TIMEOUT_SECS: u64 = 30;
 
 /// Peer device information
 #[derive(Debug, Clone)]
@@ -36,6 +42,30 @@ pub struct PeerDevice {
     pub last_seen: std::time::SystemTime,
     /// Connection status
     pub connected: bool,
+}
+
+/// Message fragment for BLE transmission
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct MessageFragment {
+    /// Message ID being fragmented
+    message_id: String,
+    /// Fragment index (0-based)
+    fragment_index: u16,
+    /// Total number of fragments
+    total_fragments: u16,
+    /// Fragment payload data
+    data: Vec<u8>,
+}
+
+/// Reassembly buffer for incoming fragments
+#[derive(Debug)]
+struct FragmentAssembly {
+    /// Total expected fragments
+    total_fragments: u16,
+    /// Received fragments (index -> data)
+    fragments: HashMap<u16, Vec<u8>>,
+    /// First fragment received time
+    started_at: SystemTime,
 }
 
 /// BLE transport implementation.
@@ -57,6 +87,10 @@ pub struct BleTransport {
     metrics: Arc<Mutex<TransportMetrics>>,
     /// Platform-specific handle (opaque pointer)
     platform_handle: Arc<Mutex<Option<usize>>>,
+    /// Fragment reassembly buffers
+    fragment_buffers: Arc<Mutex<HashMap<String, FragmentAssembly>>>,
+    /// Negotiated MTU size (set by platform)
+    mtu_size: Arc<Mutex<usize>>,
 }
 
 impl BleTransport {
@@ -70,7 +104,19 @@ impl BleTransport {
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             platform_handle: Arc::new(Mutex::new(None)),
+            fragment_buffers: Arc::new(Mutex::new(HashMap::new())),
+            mtu_size: Arc::new(Mutex::new(MAX_FRAGMENT_SIZE)),
         }
+    }
+
+    /// Sets the negotiated MTU size (called by platform after BLE MTU negotiation).
+    pub fn set_mtu(&self, mtu: usize) {
+        *self.mtu_size.lock().unwrap() = mtu.saturating_sub(3); // Reserve 3 bytes for ATT overhead
+    }
+
+    /// Gets the current MTU size.
+    pub fn mtu(&self) -> usize {
+        *self.mtu_size.lock().unwrap()
     }
 
     /// Sets the platform-specific handle.
@@ -140,6 +186,177 @@ impl BleTransport {
     pub fn has_pending_sends(&self) -> bool {
         let queue = self.send_queue.lock().unwrap();
         !queue.is_empty()
+    }
+
+    /// Serializes a message to bytes (JSON).
+    pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
+        serde_json::to_vec(message)
+            .map_err(|e| crate::Error::SerializationError(format!("Failed to serialize message: {}", e)))
+    }
+
+    /// Deserializes a message from bytes (JSON).
+    pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
+        serde_json::from_slice(data)
+            .map_err(|e| crate::Error::SerializationError(format!("Failed to deserialize message: {}", e)))
+    }
+
+    /// Fragments a message into chunks suitable for BLE transmission.
+    ///
+    /// Returns a vector of serialized fragments ready to send over BLE.
+    pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
+        // Serialize the message
+        let message_bytes = self.serialize_message(message)?;
+        
+        // Check if fragmentation is needed
+        let mtu = self.mtu();
+        if message_bytes.len() <= mtu {
+            // No fragmentation needed, send as single fragment
+            let fragment = MessageFragment {
+                message_id: message.id.as_str(),
+                fragment_index: 0,
+                total_fragments: 1,
+                data: message_bytes,
+            };
+            let fragment_bytes = serde_json::to_vec(&fragment)
+                .map_err(|e| crate::Error::SerializationError(format!("Failed to serialize fragment: {}", e)))?;
+            return Ok(vec![fragment_bytes]);
+        }
+
+        // Fragment the message
+        let total_fragments = (message_bytes.len() + mtu - 1) / mtu;
+        if total_fragments > u16::MAX as usize {
+            return Err(crate::Error::Other("Message too large to fragment".to_string()));
+        }
+
+        let mut fragments = Vec::new();
+        for (i, chunk) in message_bytes.chunks(mtu).enumerate() {
+            let fragment = MessageFragment {
+                message_id: message.id.as_str(),
+                fragment_index: i as u16,
+                total_fragments: total_fragments as u16,
+                data: chunk.to_vec(),
+            };
+            let fragment_bytes = serde_json::to_vec(&fragment)
+                .map_err(|e| crate::Error::SerializationError(format!("Failed to serialize fragment {}: {}", i, e)))?;
+            fragments.push(fragment_bytes);
+        }
+
+        Ok(fragments)
+    }
+
+    /// Processes an incoming fragment and reassembles if complete.
+    ///
+    /// Returns Ok(Some(Message)) if message is complete, Ok(None) if more fragments needed.
+    pub fn process_fragment(&self, fragment_data: &[u8]) -> Result<Option<Message>> {
+        // Deserialize fragment
+        let fragment: MessageFragment = serde_json::from_slice(fragment_data)
+            .map_err(|e| crate::Error::SerializationError(format!("Failed to deserialize fragment: {}", e)))?;
+
+        // If it's a single fragment message, deserialize directly
+        if fragment.total_fragments == 1 {
+            return Ok(Some(self.deserialize_message(&fragment.data)?));
+        }
+
+        // Multi-fragment message - add to reassembly buffer
+        let mut buffers = self.fragment_buffers.lock().unwrap();
+        
+        // Cleanup expired buffers first
+        let now = SystemTime::now();
+        buffers.retain(|_, assembly| {
+            now.duration_since(assembly.started_at)
+                .map(|d| d.as_secs() < FRAGMENT_TIMEOUT_SECS)
+                .unwrap_or(false)
+        });
+
+        // Get or create assembly buffer
+        let assembly = buffers.entry(fragment.message_id.clone()).or_insert_with(|| {
+            FragmentAssembly {
+                total_fragments: fragment.total_fragments,
+                fragments: HashMap::new(),
+                started_at: now,
+            }
+        });
+
+        // Validate fragment
+        if assembly.total_fragments != fragment.total_fragments {
+            return Err(crate::Error::Other(format!(
+                "Fragment count mismatch: expected {}, got {}",
+                assembly.total_fragments, fragment.total_fragments
+            )));
+        }
+
+        // Add fragment
+        assembly.fragments.insert(fragment.fragment_index, fragment.data);
+
+        // Check if complete
+        if assembly.fragments.len() == assembly.total_fragments as usize {
+            // Reassemble message
+            let mut complete_data = Vec::new();
+            for i in 0..assembly.total_fragments {
+                if let Some(data) = assembly.fragments.get(&i) {
+                    complete_data.extend_from_slice(data);
+                } else {
+                    return Err(crate::Error::Other(format!("Missing fragment {}", i)));
+                }
+            }
+
+            // Remove assembly buffer
+            buffers.remove(&fragment.message_id);
+            
+            // Deserialize complete message
+            return Ok(Some(self.deserialize_message(&complete_data)?));
+        }
+
+        // More fragments needed
+        Ok(None)
+    }
+
+    /// Called when raw fragment data is received from BLE (platform callback).
+    ///
+    /// This handles fragmentation reassembly and queues complete messages.
+    pub fn on_fragment_received(&self, fragment_data: Vec<u8>) -> Result<()> {
+        match self.process_fragment(&fragment_data) {
+            Ok(Some(message)) => {
+                // Message complete - queue it
+                let mut queue = self.receive_queue.lock().unwrap();
+                queue.push_back(message);
+                Ok(())
+            }
+            Ok(None) => {
+                // More fragments needed
+                Ok(())
+            }
+            Err(e) => {
+                // Log error but don't fail - just drop bad fragment
+                eprintln!("Error processing fragment: {}", e);
+                Ok(())
+            }
+        }
+    }
+
+    /// Gets the next fragment to send (for platform implementation).
+    ///
+    /// Returns (recipient, fragment_data) or None if no messages to send.
+    pub fn get_next_fragment(&self) -> Result<Option<(String, Vec<u8>)>> {
+        let (recipient, message) = {
+            let queue = self.send_queue.lock().unwrap();
+            match queue.front() {
+                Some((r, m)) => (r.clone(), m.clone()),
+                None => return Ok(None),
+            }
+        };
+
+        // Fragment the message
+        let fragments = self.fragment_message(&message)?;
+        
+        // For now, return first fragment and keep message in queue
+        // Platform should call this repeatedly until all fragments sent
+        // More sophisticated queuing can be added later
+        if let Some(fragment) = fragments.first() {
+            return Ok(Some((recipient, fragment.clone())));
+        }
+
+        Ok(None)
     }
 }
 

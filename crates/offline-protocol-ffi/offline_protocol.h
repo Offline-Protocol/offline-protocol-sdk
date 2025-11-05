@@ -220,6 +220,56 @@ int32_t offline_protocol_ble_peer_lost(struct ProtocolHandle *handle, const char
 int32_t offline_protocol_ble_status_changed(struct ProtocolHandle *handle, int32_t status);
 
 /**
+ * Called when a BLE fragment is received from a peer.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `fragment_data` must be a valid pointer to a byte array of length `data_len`.
+ *
+ * # Arguments
+ *
+ * - `fragment_data`: Pointer to the fragment byte array
+ * - `data_len`: Length of the fragment data
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_ble_fragment_received(struct ProtocolHandle *handle,
+                                               const uint8_t *fragment_data,
+                                               uintptr_t data_len);
+
+/**
+ * Gets the next BLE fragment to send.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `recipient_out` must be a valid pointer to a buffer of at least 256 bytes.
+ * - `fragment_out` must be a valid pointer to a buffer of at least `fragment_out_len` bytes.
+ * - `fragment_len_out` must be a valid pointer to store the actual fragment length.
+ *
+ * # Arguments
+ *
+ * - `recipient_out`: Buffer to write the recipient device ID (null-terminated)
+ * - `recipient_out_len`: Size of the recipient buffer
+ * - `fragment_out`: Buffer to write the fragment data
+ * - `fragment_out_len`: Size of the fragment buffer
+ * - `fragment_len_out`: Pointer to store the actual fragment length
+ *
+ * # Returns
+ *
+ * Returns SUCCESS if a fragment is available, 0 if no fragments, or an error code on failure.
+ */
+int32_t offline_protocol_ble_get_next_fragment(struct ProtocolHandle *handle,
+                                               char *recipient_out,
+                                               uintptr_t recipient_out_len,
+                                               uint8_t *fragment_out,
+                                               uintptr_t fragment_out_len,
+                                               uintptr_t *fragment_len_out);
+
+/**
  * Gets the number of discovered peers.
  *
  * # Safety

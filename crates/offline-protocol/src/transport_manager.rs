@@ -1,0 +1,233 @@
+//! Transport management for multi-transport protocol.
+//!
+//! This module provides the TransportManager which manages multiple transports
+//! and uses DORS (Dynamic Offline Relay Switch) to select the optimal transport
+//! for each message.
+
+use crate::{Error, Result};
+use offline_protocol_core::Message;
+use offline_protocol_router::TransportSelector;
+use offline_protocol_transport::{Transport, TransportMetrics, TransportStatus, TransportType};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+/// Manages multiple transports and handles transport selection.
+pub struct TransportManager {
+    /// Available transports mapped by type.
+    transports: HashMap<TransportType, Arc<Mutex<Box<dyn Transport>>>>,
+    
+    /// Current active transport.
+    current_transport: Option<TransportType>,
+    
+    /// Transport selector (DORS).
+    selector: TransportSelector,
+}
+
+impl TransportManager {
+    /// Creates a new transport manager with default configuration.
+    pub fn new(selector: TransportSelector) -> Self {
+        Self {
+            transports: HashMap::new(),
+            current_transport: None,
+            selector,
+        }
+    }
+
+    /// Adds a transport to the manager.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport_type` - Type of transport to add
+    /// * `transport` - The transport implementation
+    pub fn add_transport(
+        &mut self,
+        transport_type: TransportType,
+        transport: Box<dyn Transport>,
+    ) {
+        self.transports
+            .insert(transport_type, Arc::new(Mutex::new(transport)));
+    }
+
+    /// Selects the best transport for sending a message.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to send
+    ///
+    /// # Returns
+    ///
+    /// Returns the selected transport type, or None if no suitable transport.
+    pub fn select_transport(&mut self, message: &Message) -> Option<TransportType> {
+        let available_transports = self.get_available_transports();
+        self.selector
+            .select_transport(message, &available_transports)
+    }
+
+    /// Sends a message through the appropriate transport.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to send
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(()) if sent successfully, Err otherwise.
+    pub fn send(&mut self, message: &Message) -> Result<()> {
+        // Select transport
+        let transport_type = self
+            .select_transport(message)
+            .ok_or_else(|| Error::Other("No available transport".to_string()))?;
+
+        // Update current transport
+        self.current_transport = Some(transport_type);
+
+        // Get transport and send
+        let transport = self
+            .transports
+            .get(&transport_type)
+            .ok_or_else(|| Error::Other("Transport not found".to_string()))?;
+
+        let transport_lock = transport.lock().unwrap();
+        transport_lock
+            .send(message)
+            .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Attempts to receive a message from any transport.
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(Some(Message)) if a message was received, Ok(None) if no message available.
+    pub fn receive(&self) -> Result<Option<Message>> {
+        // Check all transports for messages
+        for transport in self.transports.values() {
+            let transport_lock = transport.lock().unwrap();
+            if let Ok(Some(message)) = transport_lock.receive() {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Gets metrics for all available transports.
+    ///
+    /// # Returns
+    ///
+    /// Returns a map of transport type to metrics.
+    pub fn get_available_transports(&self) -> HashMap<TransportType, TransportMetrics> {
+        let mut available = HashMap::new();
+
+        for (transport_type, transport) in &self.transports {
+            let transport_lock = transport.lock().unwrap();
+            if transport_lock.status() == TransportStatus::Available {
+                available.insert(*transport_type, transport_lock.metrics());
+            }
+        }
+
+        available
+    }
+
+    /// Gets the current active transport type.
+    pub fn current_transport(&self) -> Option<TransportType> {
+        self.current_transport
+    }
+
+    /// Starts all transports.
+    pub fn start(&mut self) -> Result<()> {
+        for transport in self.transports.values() {
+            let mut transport_lock = transport.lock().unwrap();
+            transport_lock
+                .start()
+                .map_err(|e| Error::Other(format!("Failed to start transport: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// Stops all transports.
+    pub fn stop(&mut self) -> Result<()> {
+        for transport in self.transports.values() {
+            let mut transport_lock = transport.lock().unwrap();
+            transport_lock
+                .stop()
+                .map_err(|e| Error::Other(format!("Failed to stop transport: {}", e)))?;
+        }
+        Ok(())
+    }
+
+    /// Gets a reference to a specific transport.
+    pub fn get_transport(
+        &self,
+        transport_type: TransportType,
+    ) -> Option<Arc<Mutex<Box<dyn Transport>>>> {
+        self.transports.get(&transport_type).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use offline_protocol_core::{AppId, UserId};
+    use offline_protocol_router::DorsConfig;
+    use offline_protocol_transport::MockTransport;
+
+    fn create_test_message() -> Message {
+        Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+            "Test message",
+        )
+    }
+
+    #[test]
+    fn test_transport_manager_creation() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let manager = TransportManager::new(selector);
+        assert_eq!(manager.transports.len(), 0);
+        assert!(manager.current_transport().is_none());
+    }
+
+    #[test]
+    fn test_add_transport() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let transport = Box::new(MockTransport::new(TransportType::BLE));
+        manager.add_transport(TransportType::BLE, transport);
+
+        assert_eq!(manager.transports.len(), 1);
+    }
+
+    #[test]
+    fn test_send_message() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        let message = create_test_message();
+        let result = manager.send(&message);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_receive_message() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        let message = create_test_message();
+        transport.queue_message(message.clone());
+
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        let received = manager.receive().unwrap();
+        assert!(received.is_some());
+    }
+}
+

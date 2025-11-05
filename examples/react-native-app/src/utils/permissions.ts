@@ -172,3 +172,4 @@ export function getPermissionDeniedMessage(deniedPermissions: string[]): string 
     'Please grant these permissions in Settings to use offline messaging features.';
 }
 
+

@@ -295,3 +295,4 @@ The React Native example app is **complete, tested, and ready for use** by inter
 **Platforms**: iOS 12.0+, Android API 21+
 **React Native**: 0.82.1
 
+

@@ -13,8 +13,12 @@ pub mod error;
 pub mod events;
 pub mod file_transfer;
 pub mod protocol;
+pub mod transport_manager;
+pub mod visualization;
 
 pub use config::ProtocolConfig;
 pub use error::{Error, Result};
 pub use events::{Event, EventCallback};
 pub use protocol::OfflineProtocol;
+pub use transport_manager::TransportManager;
+pub use visualization::{NetworkVisualizer, NetworkTopology, NetworkNode, NetworkLink, MessageStats, NodeRole};

@@ -37,6 +37,9 @@ tokio = { version = "1.35", features = ["full"] }
 # FFI
 cbindgen = "0.26"
 
+# Benchmarking
+criterion = "0.5"
+
 # Internal dependencies
 offline-protocol-core = { path = "crates/offline-protocol-core" }
 offline-protocol-transport = { path = "crates/offline-protocol-transport" }
