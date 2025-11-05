@@ -19,7 +19,10 @@ pub mod wifi_direct;
 pub use ble::{BleTransport, BleTransportBuilder, PeerDevice};
 pub use error::{Error, Result};
 pub use internet::{InternetTransport, InternetConfig};
-pub use mock::MockTransport;
 pub use traits::{Transport, TransportStatus};
 pub use types::{LinkQuality, TransportMetrics, TransportType};
 pub use wifi_direct::{WifiDirectTransport, WifiDirectConfig, WifiDirectPeer};
+
+// MockTransport is only available for testing
+#[cfg(test)]
+pub use mock::MockTransport;

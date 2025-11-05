@@ -19,30 +19,33 @@ fn create_transport_metrics() -> HashMap<TransportType, TransportMetrics> {
     let mut metrics = HashMap::new();
     
     metrics.insert(TransportType::BLE, TransportMetrics {
-        latency_ms: 50.0,
-        throughput_bps: 100_000.0,
-        error_rate: 0.01,
+        rssi: Some(-60),
+        latency_ms: Some(50),
+        bandwidth_bps: Some(100_000),
+        congestion: 0.2,
         queue_depth: 5,
-        battery_impact: 0.3,
-        signal_strength: 0.8,
+        success_count: 95,
+        failure_count: 5,
     });
     
     metrics.insert(TransportType::Internet, TransportMetrics {
-        latency_ms: 20.0,
-        throughput_bps: 10_000_000.0,
-        error_rate: 0.001,
+        rssi: Some(-40),
+        latency_ms: Some(20),
+        bandwidth_bps: Some(10_000_000),
+        congestion: 0.1,
         queue_depth: 0,
-        battery_impact: 0.5,
-        signal_strength: 1.0,
+        success_count: 99,
+        failure_count: 1,
     });
     
     metrics.insert(TransportType::WiFiDirect, TransportMetrics {
-        latency_ms: 30.0,
-        throughput_bps: 50_000_000.0,
-        error_rate: 0.005,
+        rssi: Some(-50),
+        latency_ms: Some(30),
+        bandwidth_bps: Some(50_000_000),
+        congestion: 0.15,
         queue_depth: 2,
-        battery_impact: 0.6,
-        signal_strength: 0.9,
+        success_count: 98,
+        failure_count: 2,
     });
     
     metrics
@@ -77,25 +80,6 @@ fn bench_transport_selection(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_transport_scoring(c: &mut Criterion) {
-    c.bench_function("transport_scoring", |b| {
-        let config = DorsConfig::default();
-        let selector = TransportSelector::with_config(config);
-        let message = create_test_message(MessagePriority::High);
-        let metrics = create_transport_metrics();
-        
-        b.iter(|| {
-            for (transport_type, transport_metrics) in &metrics {
-                black_box(selector.calculate_transport_score(
-                    *transport_type,
-                    &message,
-                    transport_metrics
-                ));
-            }
-        });
-    });
-}
-
-criterion_group!(benches, bench_transport_selection, bench_transport_scoring);
+criterion_group!(benches, bench_transport_selection);
 criterion_main!(benches);
 

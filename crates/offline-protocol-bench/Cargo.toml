@@ -1,0 +1,37 @@
+[package]
+name = "offline-protocol-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bench]]
+name = "message_throughput"
+harness = false
+path = "../../benches/message_throughput.rs"
+
+[[bench]]
+name = "protocol_performance"
+harness = false
+path = "../../benches/protocol_performance.rs"
+
+[[bench]]
+name = "dors_selection"
+harness = false
+path = "../../benches/dors_selection.rs"
+
+[[bench]]
+name = "ble_fragmentation"
+harness = false
+path = "../../benches/ble_fragmentation.rs"
+
+[dependencies]
+offline-protocol-core = { workspace = true }
+offline-protocol-transport = { workspace = true }
+offline-protocol-router = { workspace = true }
+offline-protocol = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+

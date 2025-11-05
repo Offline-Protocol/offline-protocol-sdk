@@ -163,6 +163,29 @@ impl TransportManager {
     ) -> Option<Arc<Mutex<Box<dyn Transport>>>> {
         self.transports.get(&transport_type).cloned()
     }
+
+    /// Removes a transport from the manager.
+    ///
+    /// # Arguments
+    ///
+    /// * `transport_type` - Type of transport to remove
+    pub fn remove_transport(&mut self, transport_type: TransportType) {
+        self.transports.remove(&transport_type);
+        
+        // Clear current transport if it was the one removed
+        if self.current_transport == Some(transport_type) {
+            self.current_transport = None;
+        }
+    }
+
+    /// Gets a list of all active transport types.
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of transport types that are currently added to the manager.
+    pub fn get_active_transports(&self) -> Vec<TransportType> {
+        self.transports.keys().copied().collect()
+    }
 }
 
 #[cfg(test)]
@@ -170,7 +193,7 @@ mod tests {
     use super::*;
     use offline_protocol_core::{AppId, UserId};
     use offline_protocol_router::DorsConfig;
-    use offline_protocol_transport::MockTransport;
+    use offline_protocol_transport::mock::MockTransport;
 
     fn create_test_message() -> Message {
         Message::new(

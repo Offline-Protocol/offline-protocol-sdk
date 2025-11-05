@@ -7,6 +7,7 @@ members = [
     "crates/offline-protocol-reliability",
     "crates/offline-protocol",
     "crates/offline-protocol-ffi",
+    "crates/offline-protocol-bench",
 ]
 
 [workspace.package]
@@ -65,4 +66,7 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[profile.bench]
+inherits = "release"
 

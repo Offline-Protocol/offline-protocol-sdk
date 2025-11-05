@@ -385,7 +385,7 @@ impl OfflineProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use offline_protocol_transport::{MockTransport, Transport, TransportType};
+    use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
 
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig::new("test-app", "user123")
@@ -495,7 +495,7 @@ mod tests {
         });
 
         // Add a mock transport
-        use offline_protocol_transport::{MockTransport, TransportType};
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
         let mut mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
         protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));

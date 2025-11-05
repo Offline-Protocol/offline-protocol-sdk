@@ -252,6 +252,39 @@ export class OfflineProtocol {
   }
 
   /**
+   * Gets the list of active transports
+   *
+   * @returns Array of active transport type names
+   */
+  async getActiveTransports(): Promise<TransportType[]> {
+    return await OfflineProtocolNativeModule.getActiveTransports();
+  }
+
+  /**
+   * Enables a transport with optional configuration
+   *
+   * @param type - Transport type to enable
+   * @param config - Optional transport configuration
+   * @throws Error if transport fails to enable
+   */
+  async enableTransport(
+    type: TransportType,
+    config?: InternetTransportConfig | WifiDirectTransportConfig
+  ): Promise<void> {
+    return await OfflineProtocolNativeModule.enableTransport(type, config);
+  }
+
+  /**
+   * Disables a transport
+   *
+   * @param type - Transport type to disable
+   * @throws Error if transport fails to disable
+   */
+  async disableTransport(type: TransportType): Promise<void> {
+    return await OfflineProtocolNativeModule.disableTransport(type);
+  }
+
+  /**
    * Destroys the protocol instance and cleans up resources
    */
   async destroy(): Promise<void> {

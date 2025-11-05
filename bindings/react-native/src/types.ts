@@ -13,6 +13,54 @@ export enum MessagePriority {
 }
 
 /**
+ * BLE transport configuration
+ */
+export interface BleTransportConfig {
+  /** Enable BLE transport */
+  enabled: boolean;
+}
+
+/**
+ * Internet transport configuration
+ */
+export interface InternetTransportConfig {
+  /** Enable Internet transport */
+  enabled: boolean;
+  /** Server address (WebSocket URL) */
+  serverAddress?: string;
+  /** Enable automatic reconnection */
+  autoReconnect?: boolean;
+  /** Reconnection delay in milliseconds */
+  reconnectDelay?: number;
+}
+
+/**
+ * WiFi Direct transport configuration
+ */
+export interface WifiDirectTransportConfig {
+  /** Enable WiFi Direct transport */
+  enabled: boolean;
+  /** Device name to advertise */
+  deviceName?: string;
+  /** Enable autonomous group owner negotiation */
+  autoAccept?: boolean;
+  /** Group owner intent (0-15, higher = more likely to be GO) */
+  groupOwnerIntent?: number;
+}
+
+/**
+ * Transport configuration
+ */
+export interface TransportsConfig {
+  /** BLE transport configuration */
+  ble?: BleTransportConfig;
+  /** Internet transport configuration */
+  internet?: InternetTransportConfig;
+  /** WiFi Direct transport configuration (Android only) */
+  wifiDirect?: WifiDirectTransportConfig;
+}
+
+/**
  * Protocol configuration
  */
 export interface ProtocolConfig {
@@ -21,14 +69,7 @@ export interface ProtocolConfig {
   /** User identifier */
   userId: string;
   /** Transport configuration (optional) */
-  transport?: {
-    /** Enable BLE transport */
-    bleEnabled?: boolean;
-    /** Enable Wi-Fi Direct transport (Android only) */
-    wifiDirectEnabled?: boolean;
-    /** Enable Internet transport */
-    internetEnabled?: boolean;
-  };
+  transports?: TransportsConfig;
   /** DORS configuration (optional) */
   dors?: {
     /** Prefer online mode */
@@ -49,6 +90,11 @@ export interface ProtocolConfig {
     initialTtl?: number;
   };
 }
+
+/**
+ * Transport type names
+ */
+export type TransportType = 'ble' | 'internet' | 'wifiDirect';
 
 /**
  * Parameters for sending a message

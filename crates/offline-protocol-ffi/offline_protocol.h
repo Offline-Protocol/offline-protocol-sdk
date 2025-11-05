@@ -282,4 +282,85 @@ int32_t offline_protocol_ble_get_next_fragment(struct ProtocolHandle *handle,
  */
 int32_t offline_protocol_ble_get_peer_count(struct ProtocolHandle *handle);
 
+/**
+ * Adds an Internet transport to the protocol.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `config_json` must be a valid null-terminated C string containing JSON configuration.
+ *
+ * Configuration JSON format:
+ * ```json
+ * {
+ *   "serverAddress": "wss://relay.example.com",
+ *   "autoReconnect": true,
+ *   "reconnectDelay": 5000
+ * }
+ * ```
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_add_internet_transport(struct ProtocolHandle *handle,
+                                                const char *config_json);
+
+/**
+ * Adds a WiFi Direct transport to the protocol.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `config_json` must be a valid null-terminated C string containing JSON configuration.
+ *
+ * Configuration JSON format:
+ * ```json
+ * {
+ *   "deviceName": "MyDevice",
+ *   "autoAccept": false,
+ *   "groupOwnerIntent": 7
+ * }
+ * ```
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_add_wifi_direct_transport(struct ProtocolHandle *handle,
+                                                   const char *config_json);
+
+/**
+ * Removes a transport from the protocol by type.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `transport_type` must be one of: 0 (Internet), 1 (BLE), 2 (WiFiDirect).
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_remove_transport(struct ProtocolHandle *handle, int32_t transport_type);
+
+/**
+ * Gets the list of active transports.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `out_buffer` must be a valid pointer to a buffer of at least `buffer_len` bytes.
+ *
+ * The output format is a JSON array of transport names, e.g.:
+ * `["ble", "internet"]`
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_get_active_transports(struct ProtocolHandle *handle,
+                                               char *out_buffer,
+                                               uintptr_t buffer_len);
+
 #endif /* OFFLINE_PROTOCOL_H */

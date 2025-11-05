@@ -4,8 +4,7 @@
 //! and exporting metrics for debugging and monitoring.
 
 use crate::{Error, Result};
-use offline_protocol_core::{MessageId, UserId};
-use offline_protocol_transport::{LinkQuality, TransportMetrics, TransportType};
+use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::SystemTime;

@@ -139,46 +139,98 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
         // Create protocol instance
         match OfflineProtocol::new(protocol_config) {
             Ok(mut protocol) => {
-                // Create BLE transport
+                use offline_protocol_transport::{Transport, TransportType, InternetTransport, InternetConfig, WifiDirectTransport, WifiDirectConfig};
+                
+                // Parse transports configuration
+                let transports_config = config_value.get("transports");
+                
+                // BLE transport (always created for FFI, but may not be enabled)
                 let ble_transport = Arc::new(BleTransport::new(user_id));
+                let ble_enabled = transports_config
+                    .and_then(|t| t.get("ble"))
+                    .and_then(|b| b.get("enabled"))
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(true); // Default: enabled
                 
-                // Add BLE transport to protocol's transport manager
-                use offline_protocol_transport::{Transport, TransportType};
-                let ble_clone = ble_transport.clone();
-                
-                // We need to convert Arc<BleTransport> to Box<dyn Transport>
-                // Create a wrapper that holds the Arc
-                struct ArcBleTransport(Arc<BleTransport>);
-                impl Transport for ArcBleTransport {
-                    fn transport_type(&self) -> TransportType {
-                        self.0.transport_type()
+                if ble_enabled {
+                    // We need to convert Arc<BleTransport> to Box<dyn Transport>
+                    // Create a wrapper that holds the Arc
+                    struct ArcBleTransport(Arc<BleTransport>);
+                    impl Transport for ArcBleTransport {
+                        fn transport_type(&self) -> TransportType {
+                            self.0.transport_type()
+                        }
+                        fn status(&self) -> TransportStatus {
+                            self.0.status()
+                        }
+                        fn metrics(&self) -> offline_protocol_transport::TransportMetrics {
+                            self.0.metrics()
+                        }
+                        fn send(&self, message: &offline_protocol_core::Message) -> offline_protocol_transport::Result<()> {
+                            self.0.send(message)
+                        }
+                        fn receive(&self) -> offline_protocol_transport::Result<Option<offline_protocol_core::Message>> {
+                            self.0.receive()
+                        }
+                        fn start(&mut self) -> offline_protocol_transport::Result<()> {
+                            // Status will be updated via on_status_changed
+                            Ok(())
+                        }
+                        fn stop(&mut self) -> offline_protocol_transport::Result<()> {
+                            // Status will be updated via on_status_changed  
+                            Ok(())
+                        }
                     }
-                    fn status(&self) -> TransportStatus {
-                        self.0.status()
-                    }
-                    fn metrics(&self) -> offline_protocol_transport::TransportMetrics {
-                        self.0.metrics()
-                    }
-                    fn send(&self, message: &offline_protocol_core::Message) -> offline_protocol_transport::Result<()> {
-                        self.0.send(message)
-                    }
-                    fn receive(&self) -> offline_protocol_transport::Result<Option<offline_protocol_core::Message>> {
-                        self.0.receive()
-                    }
-                    fn start(&mut self) -> offline_protocol_transport::Result<()> {
-                        // Status will be updated via on_status_changed
-                        Ok(())
-                    }
-                    fn stop(&mut self) -> offline_protocol_transport::Result<()> {
-                        // Status will be updated via on_status_changed  
-                        Ok(())
-                    }
+                    
+                    let ble_clone = ble_transport.clone();
+                    protocol.transport_manager_mut().add_transport(
+                        TransportType::BLE,
+                        Box::new(ArcBleTransport(ble_clone))
+                    );
                 }
                 
-                protocol.transport_manager_mut().add_transport(
-                    TransportType::BLE,
-                    Box::new(ArcBleTransport(ble_clone))
-                );
+                // Internet transport (optional)
+                if let Some(internet_cfg) = transports_config
+                    .and_then(|t| t.get("internet"))
+                    .filter(|i| i.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
+                {
+                    let mut config = InternetConfig::default();
+                    if let Some(addr) = internet_cfg.get("serverAddress").and_then(|v| v.as_str()) {
+                        config.server_address = addr.to_string();
+                    }
+                    if let Some(auto_reconnect) = internet_cfg.get("autoReconnect").and_then(|v| v.as_bool()) {
+                        config.auto_reconnect = auto_reconnect;
+                    }
+                    
+                    let transport = InternetTransport::with_config(user_id, config);
+                    protocol.transport_manager_mut().add_transport(
+                        TransportType::Internet,
+                        Box::new(transport)
+                    );
+                }
+                
+                // WiFi Direct transport (optional)
+                if let Some(wifi_cfg) = transports_config
+                    .and_then(|t| t.get("wifiDirect"))
+                    .filter(|w| w.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
+                {
+                    let mut config = WifiDirectConfig::default();
+                    if let Some(name) = wifi_cfg.get("deviceName").and_then(|v| v.as_str()) {
+                        config.device_name = name.to_string();
+                    }
+                    if let Some(auto_accept) = wifi_cfg.get("autoAccept").and_then(|v| v.as_bool()) {
+                        config.auto_accept = auto_accept;
+                    }
+                    if let Some(intent) = wifi_cfg.get("groupOwnerIntent").and_then(|v| v.as_u64()) {
+                        config.group_owner_intent = intent as u8;
+                    }
+                    
+                    let transport = WifiDirectTransport::with_config(user_id, config);
+                    protocol.transport_manager_mut().add_transport(
+                        TransportType::WiFiDirect,
+                        Box::new(transport)
+                    );
+                }
                 
                 let handle = ProtocolHandle {
                     protocol,
@@ -773,6 +825,277 @@ pub extern "C" fn offline_protocol_ble_get_peer_count(
     result.unwrap_or(-1)
 }
 
+/// Adds an Internet transport to the protocol.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `config_json` must be a valid null-terminated C string containing JSON configuration.
+///
+/// Configuration JSON format:
+/// ```json
+/// {
+///   "serverAddress": "wss://relay.example.com",
+///   "autoReconnect": true,
+///   "reconnectDelay": 5000
+/// }
+/// ```
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_add_internet_transport(
+    handle: *mut ProtocolHandle,
+    config_json: *const c_char,
+) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated handle is non-null above.
+        let handle_ref = &mut *(handle as *mut ProtocolHandle);
+
+        // Parse config if provided
+        let config = if config_json.is_null() {
+            offline_protocol_transport::InternetConfig::default()
+        } else {
+            let config_str = match CStr::from_ptr(config_json).to_str() {
+                Ok(s) => s,
+                Err(_) => return ERROR_INVALID_UTF8,
+            };
+
+            let config_value: serde_json::Value = match serde_json::from_str(config_str) {
+                Ok(v) => v,
+                Err(_) => return ERROR_INVALID_CONFIG,
+            };
+
+            let mut config = offline_protocol_transport::InternetConfig::default();
+            
+            if let Some(addr) = config_value["serverAddress"].as_str() {
+                config.server_address = addr.to_string();
+            }
+            if let Some(auto_reconnect) = config_value["autoReconnect"].as_bool() {
+                config.auto_reconnect = auto_reconnect;
+            }
+            if let Some(delay_ms) = config_value["reconnectDelay"].as_u64() {
+                config.reconnect_delay = std::time::Duration::from_millis(delay_ms);
+            }
+
+            config
+        };
+
+        // Get user_id from protocol config
+        let user_id = handle_ref.protocol.config().user_id.as_str();
+        
+        // Create Internet transport
+        let transport = offline_protocol_transport::InternetTransport::with_config(
+            user_id,
+            config
+        );
+
+        // Add to protocol's transport manager
+        use offline_protocol_transport::TransportType;
+        handle_ref.protocol.transport_manager_mut().add_transport(
+            TransportType::Internet,
+            Box::new(transport)
+        );
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Adds a WiFi Direct transport to the protocol.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `config_json` must be a valid null-terminated C string containing JSON configuration.
+///
+/// Configuration JSON format:
+/// ```json
+/// {
+///   "deviceName": "MyDevice",
+///   "autoAccept": false,
+///   "groupOwnerIntent": 7
+/// }
+/// ```
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_add_wifi_direct_transport(
+    handle: *mut ProtocolHandle,
+    config_json: *const c_char,
+) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated handle is non-null above.
+        let handle_ref = &mut *(handle as *mut ProtocolHandle);
+
+        // Parse config if provided
+        let config = if config_json.is_null() {
+            offline_protocol_transport::WifiDirectConfig::default()
+        } else {
+            let config_str = match CStr::from_ptr(config_json).to_str() {
+                Ok(s) => s,
+                Err(_) => return ERROR_INVALID_UTF8,
+            };
+
+            let config_value: serde_json::Value = match serde_json::from_str(config_str) {
+                Ok(v) => v,
+                Err(_) => return ERROR_INVALID_CONFIG,
+            };
+
+            let mut config = offline_protocol_transport::WifiDirectConfig::default();
+            
+            if let Some(name) = config_value["deviceName"].as_str() {
+                config.device_name = name.to_string();
+            }
+            if let Some(auto_accept) = config_value["autoAccept"].as_bool() {
+                config.auto_accept = auto_accept;
+            }
+            if let Some(intent) = config_value["groupOwnerIntent"].as_u64() {
+                config.group_owner_intent = intent as u8;
+            }
+
+            config
+        };
+
+        // Get user_id from protocol config
+        let user_id = handle_ref.protocol.config().user_id.as_str();
+        
+        // Create WiFi Direct transport
+        let transport = offline_protocol_transport::WifiDirectTransport::with_config(
+            user_id,
+            config
+        );
+
+        // Add to protocol's transport manager
+        use offline_protocol_transport::TransportType;
+        handle_ref.protocol.transport_manager_mut().add_transport(
+            TransportType::WiFiDirect,
+            Box::new(transport)
+        );
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Removes a transport from the protocol by type.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `transport_type` must be one of: 0 (Internet), 1 (BLE), 2 (WiFiDirect).
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_remove_transport(
+    handle: *mut ProtocolHandle,
+    transport_type: i32,
+) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated handle is non-null above.
+        let handle_ref = &mut *(handle as *mut ProtocolHandle);
+
+        use offline_protocol_transport::TransportType;
+        
+        let transport = match transport_type {
+            0 => TransportType::Internet,
+            1 => TransportType::BLE,
+            2 => TransportType::WiFiDirect,
+            _ => return ERROR_INVALID_CONFIG,
+        };
+
+        handle_ref.protocol.transport_manager_mut().remove_transport(transport);
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets the list of active transports.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `out_buffer` must be a valid pointer to a buffer of at least `buffer_len` bytes.
+///
+/// The output format is a JSON array of transport names, e.g.:
+/// `["ble", "internet"]`
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_active_transports(
+    handle: *mut ProtocolHandle,
+    out_buffer: *mut c_char,
+    buffer_len: usize,
+) -> i32 {
+    if handle.is_null() || out_buffer.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated all pointers are non-null above.
+        let handle_ref = &*handle;
+
+        let transports = handle_ref.protocol.transport_manager().get_active_transports();
+        
+        let transport_names: Vec<&str> = transports.iter().map(|t| {
+            use offline_protocol_transport::TransportType;
+            match t {
+                TransportType::Internet => "internet",
+                TransportType::BLE => "ble",
+                TransportType::WiFiDirect => "wifiDirect",
+            }
+        }).collect();
+
+        let json = match serde_json::to_string(&transport_names) {
+            Ok(j) => j,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_cstr = match CString::new(json) {
+            Ok(s) => s,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_bytes = json_cstr.as_bytes_with_nul();
+        if json_bytes.len() > buffer_len {
+            return ERROR_OTHER;
+        }
+
+        ptr::copy_nonoverlapping(
+            json_bytes.as_ptr(),
+            out_buffer as *mut u8,
+            json_bytes.len(),
+        );
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,7 +1155,7 @@ mod tests {
 
         // Add a mock transport for testing
         unsafe {
-            use offline_protocol_transport::{MockTransport, Transport, TransportType};
+            use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
             let protocol_ref = &mut *(handle as *mut ProtocolHandle);
             let mut mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
@@ -913,7 +1236,7 @@ mod tests {
         
         // Add a mock transport for testing
         unsafe {
-            use offline_protocol_transport::{MockTransport, Transport, TransportType};
+            use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
             let protocol_ref = &mut *(handle as *mut ProtocolHandle);
             let mut mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
