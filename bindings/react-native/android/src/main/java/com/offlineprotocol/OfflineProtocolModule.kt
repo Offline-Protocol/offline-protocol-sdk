@@ -15,6 +15,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var bleSendScheduler: ScheduledExecutorService? = null
     private val bleRecipientBuffer = ByteArray(256)
     private val bleFragmentBuffer = ByteArray(512)
+    private var listenerCount: Int = 0
 
     companion object {
         const val NAME = "OfflineProtocolModule"
@@ -62,6 +63,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             nativeDestroy(protocolHandle)
             protocolHandle = 0
         }
+    }
+
+    @ReactMethod
+    fun addListener(eventName: String) {
+        listenerCount += 1
+    }
+
+    @ReactMethod
+    fun removeListeners(count: Double) {
+        listenerCount = (listenerCount - count.toInt()).coerceAtLeast(0)
     }
 
     @ReactMethod
@@ -414,6 +425,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @Suppress("unused")
     fun handleEvent(eventJson: String) {
         try {
+            if (listenerCount == 0) {
+                return
+            }
             reactApplicationContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(EVENT_NAME, Arguments.createMap().apply {

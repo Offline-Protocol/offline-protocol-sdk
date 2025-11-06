@@ -15,6 +15,7 @@ Pod::Spec.new do |s|
 
   s.source_files = "*.{h,m,swift}"
   s.public_header_files = "*.h"
+  s.static_framework = true
 
   # Pre-built Rust library
   s.vendored_libraries = "libs/liboffline_protocol_ffi.a"
@@ -29,7 +30,8 @@ Pod::Spec.new do |s|
 
   # Allow non-modular includes (required for React Native headers)
   s.pod_target_xcconfig = {
-    'CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES' => 'YES'
+    'CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES' => 'YES',
+    'DEFINES_MODULE' => 'YES'
   }
 
   s.user_target_xcconfig = {

@@ -164,20 +164,55 @@ class BleManager: NSObject {
     }
     
     @objc func sendMessage(recipientId: String, messageData: Data) -> Bool {
-        guard let peripheral = connectedPeripherals[recipientId] else {
-            NSLog("[BleManager] No connection to peer: \(recipientId)")
-            return false
+        var sendSucceeded = false
+
+        let sendBlock = {
+            guard let peripheral = self.connectedPeripherals[recipientId] else {
+                let msg = "[BleManager] No connection to peer: \(recipientId)"
+                NSLog(msg)
+                self.onDiagnostic?("[BLE] ❌ No active BLE connection to peer \(recipientId)")
+                return
+            }
+
+            guard peripheral.state == .connected else {
+                let msg = "[BleManager] Peripheral for \(recipientId) is not connected (state: \(peripheral.state.rawValue))"
+                NSLog(msg)
+                self.onDiagnostic?("[BLE] ⚠️ Peripheral for \(recipientId) not connected (state: \(peripheral.state.rawValue))")
+                return
+            }
+
+            guard let service = peripheral.services?.first(where: { $0.uuid == BleManager.serviceUUID }) else {
+                let msg = "[BleManager] Service not discovered yet for peer \(recipientId)"
+                NSLog(msg)
+                self.onDiagnostic?("[BLE] ℹ️ Service not ready for \(recipientId) – requesting discovery")
+                peripheral.discoverServices([BleManager.serviceUUID])
+                return
+            }
+
+            guard let characteristic = service.characteristics?.first(where: { $0.uuid == BleManager.messageCharUUID }) else {
+                let msg = "[BleManager] Message characteristic not available for peer \(recipientId)"
+                NSLog(msg)
+                self.onDiagnostic?("[BLE] ℹ️ Message characteristic not ready for \(recipientId) – rediscovering")
+                peripheral.discoverCharacteristics(nil, for: service)
+                return
+            }
+
+            peripheral.writeValue(messageData, for: characteristic, type: .withResponse)
+            let msg = "[BleManager] Sending message to \(recipientId) (\(messageData.count) bytes)"
+            NSLog(msg)
+            self.onDiagnostic?("[BLE] 🚀 Sent BLE fragment to \(recipientId) (\(messageData.count) bytes)")
+            sendSucceeded = true
         }
-        
-        guard let service = peripheral.services?.first(where: { $0.uuid == BleManager.serviceUUID }),
-              let characteristic = service.characteristics?.first(where: { $0.uuid == BleManager.messageCharUUID }) else {
-            NSLog("[BleManager] Message characteristic not found")
-            return false
+
+        if Thread.isMainThread {
+            sendBlock()
+        } else {
+            DispatchQueue.main.sync {
+                sendBlock()
+            }
         }
-        
-        peripheral.writeValue(messageData, for: characteristic, type: .withResponse)
-        NSLog("[BleManager] Sending message to \(recipientId)")
-        return true
+
+        return sendSucceeded
     }
     
     @objc func getDiscoveredPeers() -> [[String: Any]] {
@@ -280,39 +315,63 @@ class BleManager: NSObject {
     }
     
     private func handleDiscoveredPeripheral(_ peripheral: CBPeripheral, rssi: NSNumber) {
-        // Update RSSI value
-        rssiValues[peripheral.identifier] = rssi.intValue
-        
-        // Skip if already connecting or connected
-        if connectingPeripherals[peripheral.identifier] != nil {
-            return // Already trying to connect
+        let work = {
+            // Update RSSI value
+            self.rssiValues[peripheral.identifier] = rssi.intValue
+
+            // Skip if already connecting or connected
+            if self.connectingPeripherals[peripheral.identifier] != nil {
+                return // Already trying to connect
+            }
+
+            if self.connectedPeripherals.values.contains(where: { $0.identifier == peripheral.identifier }) {
+                return // Already connected
+            }
+
+            // Skip if we already know this device
+            if self.discoveredPeers.values.contains(where: { $0.peripheral.identifier == peripheral.identifier }) {
+                return // Already discovered
+            }
+
+            let msg = "[BLE] 🔗 Connecting to peripheral \(peripheral.identifier.uuidString) to read device ID..."
+            NSLog("[BleManager] \(msg)")
+            self.onDiagnostic?(msg)
+
+            // IMPORTANT: Store peripheral to prevent deallocation during connection
+            self.connectingPeripherals[peripheral.identifier] = peripheral
+
+            // Ensure delegate is set before connecting so callbacks route correctly
+            peripheral.delegate = self
+
+            // Set up connection timeout on main run loop
+            let timeout = Timer(timeInterval: self.connectionTimeoutInterval, repeats: false) { [weak self, weak peripheral] _ in
+                guard let peripheral = peripheral else { return }
+                self?.handleConnectionTimeout(for: peripheral)
+            }
+            RunLoop.main.add(timeout, forMode: .common)
+            self.connectionTimeouts[peripheral.identifier] = timeout
+
+            // Connect to read device ID with connection options
+            let options: [String: Any] = [
+                CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+                CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
+                CBConnectPeripheralOptionNotifyOnNotificationKey: true
+            ]
+
+            if Thread.isMainThread {
+                self.centralManager?.connect(peripheral, options: options)
+            } else {
+                DispatchQueue.main.async {
+                    self.centralManager?.connect(peripheral, options: options)
+                }
+            }
         }
-        
-        // Skip if we already know this device
-        if discoveredPeers.values.contains(where: { $0.peripheral.identifier == peripheral.identifier }) {
-            return // Already discovered
+
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
         }
-        
-        let msg = "[BLE] 🔗 Connecting to peripheral \(peripheral.identifier.uuidString) to read device ID..."
-        NSLog("[BleManager] \(msg)")
-        onDiagnostic?(msg)
-        
-        // IMPORTANT: Store peripheral to prevent deallocation during connection
-        connectingPeripherals[peripheral.identifier] = peripheral
-        
-        // Set up connection timeout
-        let timeout = Timer.scheduledTimer(withTimeInterval: connectionTimeoutInterval, repeats: false) { [weak self] _ in
-            self?.handleConnectionTimeout(for: peripheral)
-        }
-        connectionTimeouts[peripheral.identifier] = timeout
-        
-        // Connect to read device ID with connection options
-        let options: [String: Any] = [
-            CBConnectPeripheralOptionNotifyOnConnectionKey: true,
-            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
-            CBConnectPeripheralOptionNotifyOnNotificationKey: true
-        ]
-        centralManager?.connect(peripheral, options: options)
     }
     
     private func handleConnectionTimeout(for peripheral: CBPeripheral) {
@@ -321,7 +380,13 @@ class BleManager: NSObject {
         onDiagnostic?(msg)
         
         // Cancel the connection attempt
-        centralManager?.cancelPeripheralConnection(peripheral)
+        if Thread.isMainThread {
+            centralManager?.cancelPeripheralConnection(peripheral)
+        } else {
+            DispatchQueue.main.async {
+                self.centralManager?.cancelPeripheralConnection(peripheral)
+            }
+        }
         
         // Clean up
         connectionTimeouts.removeValue(forKey: peripheral.identifier)

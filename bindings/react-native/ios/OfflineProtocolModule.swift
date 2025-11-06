@@ -18,6 +18,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var bleFragmentTimer: DispatchSourceTimer?
     private var bleRecipientBuffer = [CChar](repeating: 0, count: 256)
     private var bleFragmentBuffer = [UInt8](repeating: 0, count: 512)
+    private var hasListeners = false
     
     // Event names
     private enum Events {
@@ -50,6 +51,22 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     override func supportedEvents() -> [String]! {
         return [Events.onEvent]
+    }
+
+    override func startObserving() {
+        hasListeners = true
+    }
+
+    override func stopObserving() {
+        hasListeners = false
+    }
+
+    @objc override func addListener(_ eventName: String) {
+        super.addListener(eventName)
+    }
+
+    @objc override func removeListeners(_ count: Double) {
+        super.removeListeners(count)
     }
     
     // MARK: - Exported Methods
@@ -204,7 +221,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     contentPtr,
                     priority.int32Value,
                     buffer,
-                    256
+                    UInt(256)
                 )
             }
         }
@@ -232,7 +249,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 65536)
         defer { buffer.deallocate() }
         
-        let result = offline_protocol_get_topology(handle, buffer, 65536)
+        let result = offline_protocol_get_topology(handle, buffer, UInt(65536))
         
         if result == SUCCESS {
             let topologyJson = String(cString: buffer)
@@ -252,7 +269,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 65536)
         defer { buffer.deallocate() }
         
-        let result = offline_protocol_get_message_stats(handle, buffer, 65536)
+        let result = offline_protocol_get_message_stats(handle, buffer, UInt(65536))
         
         if result == SUCCESS {
             let statsJson = String(cString: buffer)
@@ -355,9 +372,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                     return offline_protocol_ble_get_next_fragment(
                         handle,
                         recipientBase,
-                        recipientPtr.count,
+                        UInt(recipientPtr.count),
                         fragmentBase,
-                        fragmentPtr.count,
+                        UInt(fragmentPtr.count),
                         &fragmentLength
                     )
                 }
@@ -405,6 +422,9 @@ class OfflineProtocolModule: RCTEventEmitter {
     // MARK: - Event Callback
     
     fileprivate func handleEvent(_ eventJson: String) {
+        guard hasListeners else {
+            return
+        }
         sendEvent(withName: Events.onEvent, body: ["eventJson": eventJson])
     }
     
@@ -484,9 +504,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 guard let baseAddress = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                     return ERROR_OTHER
                 }
-                return offline_protocol_ble_fragment_received(handle, baseAddress, messageData.count)
+                return offline_protocol_ble_fragment_received(handle, baseAddress, UInt(messageData.count))
             }
-
             if result != SUCCESS {
                 NSLog("[OfflineProtocol] Failed to forward BLE fragment to Rust: \(result)")
 
