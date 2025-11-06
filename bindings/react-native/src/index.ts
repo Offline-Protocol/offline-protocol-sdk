@@ -8,6 +8,7 @@ import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription } from
 import type {
   ProtocolConfig,
   SendMessageParams,
+  SendFileParams,
   ProtocolEvent,
   EventListener,
   EventType,
@@ -16,6 +17,8 @@ import type {
   TransportType,
   InternetTransportConfig,
   WifiDirectTransportConfig,
+  FileProgress,
+  ProtocolState,
 } from './types';
 import { MessagePriority } from './types';
 
@@ -339,6 +342,83 @@ export class OfflineProtocol {
    */
   async getMedianHops(): Promise<number | null> {
     return await OfflineProtocolNativeModule.getMedianHops();
+  }
+
+  /**
+   * Sends a file to a recipient
+   *
+   * @param params - File sending parameters
+   * @returns File ID for tracking progress
+   * @throws Error if file fails to send
+   */
+  async sendFile(params: SendFileParams): Promise<string> {
+    const fileName = params.fileName || params.filePath.split('/').pop() || 'file';
+    const fileId = await OfflineProtocolNativeModule.sendFile(
+      params.filePath,
+      params.recipient,
+      fileName
+    );
+    return fileId;
+  }
+
+  /**
+   * Gets the progress of a file transfer
+   *
+   * @param fileId - File identifier
+   * @returns File progress information, or null if not found
+   * @throws Error if retrieval fails
+   */
+  async getFileProgress(fileId: string): Promise<FileProgress | null> {
+    return await OfflineProtocolNativeModule.getFileProgress(fileId);
+  }
+
+  /**
+   * Cancels an active file transfer
+   *
+   * @param fileId - File identifier
+   * @returns True if cancelled, false if not found
+   * @throws Error if cancellation fails
+   */
+  async cancelFileTransfer(fileId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.cancelFileTransfer(fileId);
+  }
+
+  /**
+   * Polls for the next received message
+   *
+   * @returns Message object if available, null otherwise
+   * @throws Error if polling fails
+   */
+  async receiveMessage(): Promise<any | null> {
+    return await OfflineProtocolNativeModule.receiveMessage();
+  }
+
+  /**
+   * Pauses the protocol (for background mode)
+   *
+   * @throws Error if protocol is not running or fails to pause
+   */
+  async pause(): Promise<void> {
+    await OfflineProtocolNativeModule.pause();
+  }
+
+  /**
+   * Resumes the protocol from pause
+   *
+   * @throws Error if protocol is not paused or fails to resume
+   */
+  async resume(): Promise<void> {
+    await OfflineProtocolNativeModule.resume();
+  }
+
+  /**
+   * Gets the current protocol state
+   *
+   * @returns Protocol state (Stopped, Running, or Paused)
+   * @throws Error if retrieval fails
+   */
+  async getState(): Promise<ProtocolState> {
+    return await OfflineProtocolNativeModule.getState();
   }
 
   /**

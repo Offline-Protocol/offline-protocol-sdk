@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -13,6 +14,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var bleManager: BleManager? = null
     private var deviceId: String = ""
     private var bleSendScheduler: ScheduledExecutorService? = null
+    private var processScheduler: ScheduledExecutorService? = null
     private val bleRecipientBuffer = ByteArray(256)
     private val bleFragmentBuffer = ByteArray(512)
     private var listenerCount: Int = 0
@@ -59,6 +61,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     override fun invalidate() {
         super.invalidate()
         stopBleFragmentPump()
+        stopProcessScheduler()
         if (protocolHandle != 0L) {
             nativeDestroy(protocolHandle)
             protocolHandle = 0
@@ -111,6 +114,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             protocolHandle = handle
+            
+            // Start process scheduler for retries and cleanup
+            startProcessScheduler()
             
             // Optionally enable Internet and WiFi Direct transports based on config
             try {
@@ -165,6 +171,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             // Stop and cleanup BLE
             stopBleFragmentPump()
+            stopProcessScheduler()
             bleManager?.stop()
             bleManager = null
 
@@ -285,6 +292,34 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun stopBleFragmentPump() {
         bleSendScheduler?.shutdownNow()
         bleSendScheduler = null
+    }
+
+    private fun startProcessScheduler() {
+        if (processScheduler != null) {
+            return
+        }
+
+        val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "offlineprotocol-processor").apply { isDaemon = true }
+        }
+
+        scheduler.scheduleAtFixedRate({
+            try {
+                val handle = protocolHandle
+                if (handle != 0L) {
+                    nativeProcess(handle)
+                }
+            } catch (t: Throwable) {
+                android.util.Log.e(NAME, "Error while processing protocol", t)
+            }
+        }, 500, 500, TimeUnit.MILLISECONDS)
+
+        processScheduler = scheduler
+    }
+
+    private fun stopProcessScheduler() {
+        processScheduler?.shutdownNow()
+        processScheduler = null
     }
 
     private fun flushBleFragments() {
@@ -454,6 +489,268 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Exception during getMedianHops: ${e.message}", e)
             promise.reject("ERROR_GET_HOPS_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun sendFile(
+        filePath: String,
+        recipient: String,
+        fileName: String,
+        promise: Promise
+    ) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            // Read file data
+            val file = java.io.File(filePath)
+            if (!file.exists()) {
+                promise.reject("ERROR_FILE_NOT_FOUND", "File not found: $filePath")
+                return
+            }
+
+            val fileData = file.readBytes()
+
+            val fileId = nativeSendFile(protocolHandle, fileData, fileName, recipient)
+            if (fileId == null) {
+                promise.reject("ERROR_SEND_FILE_FAILED", "Failed to send file")
+                return
+            }
+
+            promise.resolve(fileId)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during sendFile: ${e.message}", e)
+            promise.reject("ERROR_SEND_FILE_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getFileProgress(fileId: String, promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val progressJson = nativeGetFileProgress(protocolHandle, fileId)
+            if (progressJson == null) {
+                promise.resolve(null)
+            } else {
+                val jsonObject = JSONObject(progressJson)
+                val map = Arguments.createMap().apply {
+                    putString("file_id", jsonObject.optString("file_id"))
+                    putString("file_name", jsonObject.optString("file_name"))
+                    putDouble("file_size", jsonObject.optDouble("file_size"))
+                    putInt("chunks_completed", jsonObject.optInt("chunks_completed"))
+                    putInt("total_chunks", jsonObject.optInt("total_chunks"))
+                    putInt("percentage", jsonObject.optInt("percentage"))
+                }
+                promise.resolve(map)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getFileProgress: ${e.message}", e)
+            promise.reject("ERROR_GET_PROGRESS_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun cancelFileTransfer(fileId: String, promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val result = nativeCancelFileTransfer(protocolHandle, fileId)
+            promise.resolve(result > 0)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during cancelFileTransfer: ${e.message}", e)
+            promise.reject("ERROR_CANCEL_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun receiveMessage(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val messageJson = nativeReceiveMessage(protocolHandle)
+            if (messageJson == null) {
+                promise.resolve(null)
+            } else {
+                val jsonObject = JSONObject(messageJson)
+                val map = Arguments.createMap().apply {
+                    putString("id", jsonObject.optString("id"))
+                    putString("sender", jsonObject.optString("sender"))
+                    putString("recipient", jsonObject.optString("recipient"))
+                    putString("content", jsonObject.optString("content"))
+                    putDouble("timestamp", jsonObject.optDouble("timestamp"))
+                    putInt("hop_count", jsonObject.optInt("hop_count"))
+                }
+                promise.resolve(map)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during receiveMessage: ${e.message}", e)
+            promise.reject("ERROR_RECEIVE_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun pause(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val result = nativePause(protocolHandle)
+            when (result) {
+                SUCCESS -> promise.resolve(null)
+                ERROR_NOT_STARTED -> promise.reject("ERROR_NOT_STARTED", "Protocol not started")
+                else -> promise.reject("ERROR_PAUSE_FAILED", "Failed to pause protocol")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during pause: ${e.message}", e)
+            promise.reject("ERROR_PAUSE_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun resume(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val result = nativeResume(protocolHandle)
+            when (result) {
+                SUCCESS -> promise.resolve(null)
+                else -> promise.reject("ERROR_RESUME_FAILED", "Failed to resume protocol")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during resume: ${e.message}", e)
+            promise.reject("ERROR_RESUME_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getState(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val state = nativeGetState(protocolHandle)
+            if (state < 0) {
+                promise.reject("ERROR_GET_STATE_FAILED", "Failed to get protocol state")
+            } else {
+                promise.resolve(state)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getState: ${e.message}", e)
+            promise.reject("ERROR_GET_STATE_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun enableTransport(type: String, config: ReadableMap?, promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val configJson = config?.let { 
+                org.json.JSONObject(it.toHashMap()).toString() 
+            }
+
+            val transportType = when (type) {
+                "internet" -> 0
+                "ble" -> 1
+                "wifiDirect" -> 2
+                else -> {
+                    promise.reject("ERROR_INVALID_TRANSPORT", "Invalid transport type: $type")
+                    return
+                }
+            }
+
+            val result = when (type) {
+                "internet" -> nativeAddInternetTransport(protocolHandle, configJson)
+                "wifiDirect" -> nativeAddWifiDirectTransport(protocolHandle, configJson)
+                else -> SUCCESS // BLE is always enabled
+            }
+
+            when (result) {
+                SUCCESS -> promise.resolve(null)
+                else -> promise.reject("ERROR_ENABLE_TRANSPORT_FAILED", "Failed to enable transport")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during enableTransport: ${e.message}", e)
+            promise.reject("ERROR_ENABLE_TRANSPORT_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun disableTransport(type: String, promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val transportType = when (type) {
+                "internet" -> 0
+                "ble" -> 1
+                "wifiDirect" -> 2
+                else -> {
+                    promise.reject("ERROR_INVALID_TRANSPORT", "Invalid transport type: $type")
+                    return
+                }
+            }
+
+            val result = nativeRemoveTransport(protocolHandle, transportType)
+            when (result) {
+                SUCCESS -> promise.resolve(null)
+                else -> promise.reject("ERROR_DISABLE_TRANSPORT_FAILED", "Failed to disable transport")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during disableTransport: ${e.message}", e)
+            promise.reject("ERROR_DISABLE_TRANSPORT_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getActiveTransports(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val transportsJson = nativeGetActiveTransports(protocolHandle)
+            if (transportsJson == null) {
+                promise.reject("ERROR_GET_TRANSPORTS_FAILED", "Failed to get active transports")
+                return
+            }
+
+            // Parse JSON array and return as array
+            val jsonArray = org.json.JSONArray(transportsJson)
+            val transports = Arguments.createArray()
+            for (i in 0 until jsonArray.length()) {
+                transports.pushString(jsonArray.getString(i))
+            }
+            promise.resolve(transports)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getActiveTransports: ${e.message}", e)
+            promise.reject("ERROR_GET_TRANSPORTS_FAILED", e.message, e)
         }
     }
 
@@ -659,6 +956,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private external fun nativeGetMedianLatency(handle: Long): Long
     private external fun nativeGetMedianHops(handle: Long): Int
     
+    // File transfer methods
+    private external fun nativeSendFile(handle: Long, fileData: ByteArray, fileName: String, recipient: String): String?
+    private external fun nativeGetFileProgress(handle: Long, fileId: String): String?
+    private external fun nativeCancelFileTransfer(handle: Long, fileId: String): Int
+    
+    // Process and state methods
+    private external fun nativeProcess(handle: Long): Int
+    private external fun nativePause(handle: Long): Int
+    private external fun nativeResume(handle: Long): Int
+    private external fun nativeGetState(handle: Long): Int
+    private external fun nativeReceiveMessage(handle: Long): String?
+    
     // BLE bridge native methods
     private external fun nativeInitBleBridge(bleManager: BleManager)
     private external fun nativeStartBle(): Boolean
@@ -690,4 +999,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private external fun nativeShouldEscalateToWifi(handle: Long): Int
     private external fun nativeAddInternetTransport(handle: Long, configJson: String?): Int
     private external fun nativeAddWifiDirectTransport(handle: Long, configJson: String?): Int
+    private external fun nativeRemoveTransport(handle: Long, transportType: Int): Int
+    private external fun nativeGetActiveTransports(handle: Long): String?
 }

@@ -16,6 +16,8 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var deviceId: String = ""
     private let bleFragmentQueue = DispatchQueue(label: "offlineprotocol.ble.fragment-pump")
     private var bleFragmentTimer: DispatchSourceTimer?
+    private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
+    private var processTimer: DispatchSourceTimer?
     private var bleRecipientBuffer = [CChar](repeating: 0, count: 256)
     private var bleFragmentBuffer = [UInt8](repeating: 0, count: 512)
     private var hasListeners = false
@@ -46,6 +48,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
 
         stopBleFragmentPump()
+        stopProcessTimer()
     }
     
     override class func requiresMainQueueSetup() -> Bool {
@@ -106,13 +109,17 @@ class OfflineProtocolModule: RCTEventEmitter {
         
         protocolHandle = handle
         
+        // Start process timer for retries and cleanup
+        startProcessTimer()
+        
         // Set up event callback
         let unmanagedSelf = Unmanaged.passRetained(self)
         eventCallbackContext = unmanagedSelf.toOpaque()
         
+        var callbackOption = Option_EventCallback(is_some: true, value: eventCallbackHandler)
         let result = offline_protocol_set_event_callback(
             handle,
-            eventCallbackHandler,
+            callbackOption,
             eventCallbackContext
         )
         
@@ -183,6 +190,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         
         // Stop and cleanup BLE
         stopBleFragmentPump()
+        stopProcessTimer()
         bleManager?.stop()
         bleManager = nil
         
@@ -383,6 +391,276 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    @objc func sendFile(_ filePath: String,
+                       recipient: String,
+                       fileName: String,
+                       resolver: @escaping RCTPromiseResolveBlock,
+                       rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        // Read file data
+        guard let fileData = try? Data(contentsOf: URL(fileURLWithPath: filePath)) else {
+            rejecter("ERROR_FILE_NOT_FOUND", "File not found: \(filePath)", nil)
+            return
+        }
+
+        let fileIdBuffer = UnsafeMutablePointer<CChar>.allocate(capacity: 256)
+        defer { fileIdBuffer.deallocate() }
+
+        let result = fileData.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> Int32 in
+            guard let baseAddress = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return ERROR_OTHER
+            }
+            return fileName.withCString { fileNamePtr in
+                recipient.withCString { recipientPtr in
+                    offline_protocol_send_file(
+                        handle,
+                        baseAddress,
+                        UInt(fileData.count),
+                        fileNamePtr,
+                        recipientPtr,
+                        fileIdBuffer,
+                        UInt(256)
+                    )
+                }
+            }
+        }
+
+        if result == SUCCESS {
+            let fileId = String(cString: fileIdBuffer)
+            resolver(fileId)
+        } else {
+            rejecter("ERROR_SEND_FILE_FAILED", "Failed to send file", nil)
+        }
+    }
+
+    @objc func getFileProgress(_ fileId: String,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 4096)
+        defer { buffer.deallocate() }
+
+        let result = fileId.withCString { fileIdPtr in
+            offline_protocol_get_file_progress(handle, fileIdPtr, buffer, UInt(4096))
+        }
+
+        if result == SUCCESS {
+            let progressJson = String(cString: buffer)
+            if let data = progressJson.data(using: .utf8),
+               let jsonObject = try? JSONSerialization.jsonObject(with: data) {
+                resolver(jsonObject)
+            } else {
+                resolver(progressJson)
+            }
+        } else if result == 0 {
+            resolver(NSNull())
+        } else {
+            rejecter("ERROR_GET_PROGRESS_FAILED", "Failed to get file progress", nil)
+        }
+    }
+
+    @objc func cancelFileTransfer(_ fileId: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let result = fileId.withCString { fileIdPtr in
+            offline_protocol_cancel_file_transfer(handle, fileIdPtr)
+        }
+
+        resolver(result > 0)
+    }
+
+    @objc func receiveMessage(_ resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 65536)
+        defer { buffer.deallocate() }
+
+        let result = offline_protocol_receive_message(handle, buffer, UInt(65536))
+
+        if result == SUCCESS {
+            let messageJson = String(cString: buffer)
+            if let data = messageJson.data(using: .utf8),
+               let jsonObject = try? JSONSerialization.jsonObject(with: data) {
+                resolver(jsonObject)
+            } else {
+                resolver(messageJson)
+            }
+        } else if result == NO_MESSAGE_AVAILABLE {
+            resolver(NSNull())
+        } else {
+            rejecter("ERROR_RECEIVE_FAILED", "Failed to receive message", nil)
+        }
+    }
+
+    @objc func pause(_ resolver: @escaping RCTPromiseResolveBlock,
+                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let result = offline_protocol_pause(handle)
+
+        switch result {
+        case SUCCESS:
+            resolver(nil)
+        case ERROR_NOT_STARTED:
+            rejecter("ERROR_NOT_STARTED", "Protocol not started", nil)
+        default:
+            rejecter("ERROR_PAUSE_FAILED", "Failed to pause protocol", nil)
+        }
+    }
+
+    @objc func resume(_ resolver: @escaping RCTPromiseResolveBlock,
+                     rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let result = offline_protocol_resume(handle)
+
+        switch result {
+        case SUCCESS:
+            resolver(nil)
+        default:
+            rejecter("ERROR_RESUME_FAILED", "Failed to resume protocol", nil)
+        }
+    }
+
+    @objc func getState(_ resolver: @escaping RCTPromiseResolveBlock,
+                       rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let state = offline_protocol_get_state(handle)
+
+        if state < 0 {
+            rejecter("ERROR_GET_STATE_FAILED", "Failed to get protocol state", nil)
+        } else {
+            resolver(NSNumber(value: state))
+        }
+    }
+
+    @objc func enableTransport(_ type: String,
+                              config: NSDictionary?,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let configJson: String? = config.flatMap { dict in
+            guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                  let json = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            return json
+        }
+
+        let result: Int32
+        switch type {
+        case "internet":
+            result = configJson.flatMap { json in
+                json.withCString { ptr in
+                    offline_protocol_add_internet_transport(handle, ptr)
+                }
+            } ?? offline_protocol_add_internet_transport(handle, nil)
+        case "wifiDirect":
+            result = configJson.flatMap { json in
+                json.withCString { ptr in
+                    offline_protocol_add_wifi_direct_transport(handle, ptr)
+                }
+            } ?? offline_protocol_add_wifi_direct_transport(handle, nil)
+        case "ble":
+            result = SUCCESS // BLE is always enabled
+        default:
+            rejecter("ERROR_INVALID_TRANSPORT", "Invalid transport type: \(type)", nil)
+            return
+        }
+
+        if result == SUCCESS {
+            resolver(nil)
+        } else {
+            rejecter("ERROR_ENABLE_TRANSPORT_FAILED", "Failed to enable transport", nil)
+        }
+    }
+
+    @objc func disableTransport(_ type: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let transportType: Int32
+        switch type {
+        case "internet":
+            transportType = 0
+        case "ble":
+            transportType = 1
+        case "wifiDirect":
+            transportType = 2
+        default:
+            rejecter("ERROR_INVALID_TRANSPORT", "Invalid transport type: \(type)", nil)
+            return
+        }
+
+        let result = offline_protocol_remove_transport(handle, transportType)
+
+        if result == SUCCESS {
+            resolver(nil)
+        } else {
+            rejecter("ERROR_DISABLE_TRANSPORT_FAILED", "Failed to disable transport", nil)
+        }
+    }
+
+    @objc func getActiveTransports(_ resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 4096)
+        defer { buffer.deallocate() }
+
+        let result = offline_protocol_get_active_transports(handle, buffer, UInt(4096))
+
+        if result == SUCCESS {
+            let transportsJson = String(cString: buffer)
+            if let data = transportsJson.data(using: .utf8),
+               let jsonArray = try? JSONSerialization.jsonObject(with: data) {
+                resolver(jsonArray)
+            } else {
+                resolver(transportsJson)
+            }
+        } else {
+            rejecter("ERROR_GET_TRANSPORTS_FAILED", "Failed to get active transports", nil)
+        }
+    }
+
     // MARK: - BLE Fragment Handling
 
     private func startBleFragmentPump() {
@@ -400,6 +678,27 @@ class OfflineProtocolModule: RCTEventEmitter {
     private func stopBleFragmentPump() {
         bleFragmentTimer?.cancel()
         bleFragmentTimer = nil
+    }
+
+    private func startProcessTimer() {
+        guard processTimer == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: processQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(500))
+        timer.setEventHandler { [weak self] in
+            guard let self = self,
+                  let handle = self.protocolHandle else {
+                return
+            }
+            _ = offline_protocol_process(handle)
+        }
+        timer.resume()
+        processTimer = timer
+    }
+
+    private func stopProcessTimer() {
+        processTimer?.cancel()
+        processTimer = nil
     }
 
     private func flushBleFragments() {
@@ -452,11 +751,11 @@ class OfflineProtocolModule: RCTEventEmitter {
                 recipient.withCString { recipientPtr in
                     messageData.withUnsafeBytes { buffer in
                         if let baseAddress = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
-                            let requeueResult = offline_protocol_ble_return_fragment(
+                let requeueResult = offline_protocol_ble_return_fragment(
                                 handle,
                                 recipientPtr,
                                 baseAddress,
-                                fragmentLength
+                    fragmentLength
                             )
                             if requeueResult != SUCCESS {
                                 NSLog("[OfflineProtocol] Failed to requeue BLE fragment: \(requeueResult)")
@@ -498,7 +797,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             0, // latencyMs - not tracking yet
             150_000, // bandwidthBps - typical BLE ~150 KB/s
             0.0, // congestion
-            0, // queueDepth - BLE queue is managed in Rust
+            UInt(0), // queueDepth - BLE queue is managed in Rust
             bleSendSuccessCount,
             bleSendFailureCount
         )

@@ -13,6 +13,15 @@ export enum MessagePriority {
 }
 
 /**
+ * Protocol state
+ */
+export enum ProtocolState {
+  Stopped = 0,
+  Running = 1,
+  Paused = 2,
+}
+
+/**
  * BLE transport configuration
  */
 export interface BleTransportConfig {
@@ -49,6 +58,34 @@ export interface WifiDirectTransportConfig {
 }
 
 /**
+ * File transfer configuration
+ */
+export interface FileTransferConfig {
+  /** Size of each chunk in bytes (default: 32KB) */
+  chunkSize?: number;
+  /** Maximum file size allowed in bytes (default: 100MB) */
+  maxFileSize?: number;
+}
+
+/**
+ * File transfer progress information
+ */
+export interface FileProgress {
+  /** File identifier */
+  file_id: string;
+  /** File name */
+  file_name: string;
+  /** Total file size in bytes */
+  file_size: number;
+  /** Number of chunks completed */
+  chunks_completed: number;
+  /** Total number of chunks */
+  total_chunks: number;
+  /** Progress percentage (0-100) */
+  percentage: number;
+}
+
+/**
  * Transport configuration
  */
 export interface TransportsConfig {
@@ -70,6 +107,8 @@ export interface ProtocolConfig {
   userId: string;
   /** Transport configuration (optional) */
   transports?: TransportsConfig;
+  /** File transfer configuration (optional) */
+  fileTransfer?: FileTransferConfig;
   /** DORS configuration (optional) */
   dors?: {
     /** Prefer online mode (default: false) */
@@ -118,6 +157,18 @@ export interface SendMessageParams {
   content: string;
   /** Message priority (optional, defaults to Medium) */
   priority?: MessagePriority;
+}
+
+/**
+ * Parameters for sending a file
+ */
+export interface SendFileParams {
+  /** File path or URI */
+  filePath: string;
+  /** Recipient's user ID */
+  recipient: string;
+  /** Optional custom file name */
+  fileName?: string;
 }
 
 /**

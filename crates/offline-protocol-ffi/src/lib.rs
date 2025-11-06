@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 use offline_protocol::{OfflineProtocol, ProtocolConfig, NetworkVisualizer};
+use offline_protocol::file_transfer::{FileTransferManager, FileChunk};
 use offline_protocol_router::DorsConfig;
 use offline_protocol_transport::{BleTransport, PeerDevice, TransportStatus};
 use std::ffi::{CStr, CString};
@@ -28,6 +29,9 @@ pub const SUCCESS: i32 = 0;
 
 /// No BLE fragment available.
 pub const NO_FRAGMENT_AVAILABLE: i32 = 1;
+
+/// No message available.
+pub const NO_MESSAGE_AVAILABLE: i32 = 2;
 
 /// Error: Null pointer passed as argument.
 pub const ERROR_NULL_POINTER: i32 = -1;
@@ -46,6 +50,9 @@ pub const ERROR_SEND_FAILED: i32 = -5;
 
 /// Error: Invalid configuration.
 pub const ERROR_INVALID_CONFIG: i32 = -6;
+
+/// Error: Invalid state for operation.
+pub const ERROR_INVALID_STATE: i32 = -7;
 
 /// Error: Rust panic occurred (bug).
 pub const ERROR_PANIC: i32 = -99;
@@ -93,6 +100,7 @@ pub struct ProtocolHandle {
     callback: Arc<Mutex<Option<CallbackData>>>,
     ble_transport: Arc<Mutex<Option<Arc<BleTransport>>>>,
     visualizer: Arc<Mutex<NetworkVisualizer>>,
+    file_transfer: Arc<Mutex<FileTransferManager>>,
 }
 
 /// Creates a new OfflineProtocol instance from JSON configuration.
@@ -267,11 +275,13 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
                 }
                 
                 let visualizer = NetworkVisualizer::new(user_id);
+                let file_transfer = FileTransferManager::new();
                 let handle = ProtocolHandle {
                     protocol,
                     callback: Arc::new(Mutex::new(None)),
                     ble_transport: Arc::new(Mutex::new(Some(ble_transport))),
                     visualizer: Arc::new(Mutex::new(visualizer)),
+                    file_transfer: Arc::new(Mutex::new(file_transfer)),
                 };
                 Box::into_raw(Box::new(handle))
             }
@@ -1518,6 +1528,471 @@ pub extern "C" fn offline_protocol_should_escalate_to_wifi(
         // Check DORS escalation signal
         let should_escalate = handle_ref.protocol.transport_manager().should_escalate_to_wifi();
         *out_should_escalate = if should_escalate { 1 } else { 0 };
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Sends a file by chunking it and sending each chunk as a message.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `file_data` must be a valid pointer to a byte array of length `file_data_len`.
+/// - `file_name` and `recipient` must be valid null-terminated C strings.
+/// - `out_file_id` must be a valid pointer to a buffer of at least `out_file_id_len` bytes.
+///
+/// # Arguments
+///
+/// - `file_data`: Pointer to the file data
+/// - `file_data_len`: Length of the file data
+/// - `file_name`: Name of the file
+/// - `recipient`: Recipient's user ID
+/// - `out_file_id`: Buffer to write the file ID (null-terminated)
+/// - `out_file_id_len`: Size of the file ID buffer
+///
+/// # Returns
+///
+/// Returns SUCCESS and writes file ID to `out_file_id`, or an error code.
+#[no_mangle]
+pub extern "C" fn offline_protocol_send_file(
+    handle: *mut ProtocolHandle,
+    file_data: *const u8,
+    file_data_len: usize,
+    file_name: *const c_char,
+    recipient: *const c_char,
+    out_file_id: *mut c_char,
+    out_file_id_len: usize,
+) -> i32 {
+    if handle.is_null() || file_data.is_null() || file_name.is_null() || recipient.is_null() || out_file_id.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        // Convert C strings
+        let file_name_str = match CStr::from_ptr(file_name).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        let recipient_str = match CStr::from_ptr(recipient).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        // Copy file data
+        let data_slice = std::slice::from_raw_parts(file_data, file_data_len);
+        let data_vec = data_slice.to_vec();
+
+        // Generate file ID
+        let file_id = format!("file_{}_{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis(), file_name_str);
+
+        // Chunk file
+        let file_transfer = handle_ref.file_transfer.lock().unwrap();
+        let chunks = match file_transfer.chunk_file(file_id.clone(), file_name_str.to_string(), data_vec) {
+            Ok(chunks) => chunks,
+            Err(_) => return ERROR_OTHER,
+        };
+        drop(file_transfer);
+
+        // Send each chunk as a message
+        for chunk in chunks {
+            let chunk_json = match chunk.to_json() {
+                Ok(json) => json,
+                Err(_) => return ERROR_OTHER,
+            };
+
+            match handle_ref.protocol.send_message(recipient_str, chunk_json, Some(offline_protocol_core::MessagePriority::High)) {
+                Ok(_) => {},
+                Err(_) => return ERROR_SEND_FAILED,
+            }
+        }
+
+        // Write file ID to output buffer
+        let id_bytes = file_id.as_bytes();
+        if id_bytes.len() >= out_file_id_len {
+            return ERROR_OTHER; // Buffer too small
+        }
+
+        ptr::copy_nonoverlapping(id_bytes.as_ptr(), out_file_id as *mut u8, id_bytes.len());
+        *out_file_id.add(id_bytes.len()) = 0; // Null terminate
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Processes a received file chunk.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `chunk_json` must be a valid null-terminated C string containing FileChunk JSON.
+/// - `out_progress_json` must be a valid pointer to a buffer of at least `out_len` bytes.
+///
+/// # Returns
+///
+/// Returns SUCCESS and writes progress JSON to `out_progress_json`, or an error code.
+#[no_mangle]
+pub extern "C" fn offline_protocol_process_file_chunk(
+    handle: *mut ProtocolHandle,
+    chunk_json: *const c_char,
+    out_progress_json: *mut c_char,
+    out_len: usize,
+) -> i32 {
+    if handle.is_null() || chunk_json.is_null() || out_progress_json.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        // Parse chunk JSON
+        let chunk_str = match CStr::from_ptr(chunk_json).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        let chunk: FileChunk = match serde_json::from_str(chunk_str) {
+            Ok(c) => c,
+            Err(_) => return ERROR_INVALID_CONFIG,
+        };
+
+        // Process chunk
+        let mut file_transfer = handle_ref.file_transfer.lock().unwrap();
+        let progress = match file_transfer.process_chunk(chunk) {
+            Some(p) => p,
+            None => return ERROR_OTHER,
+        };
+
+        // Serialize progress to JSON
+        let progress_json = match serde_json::to_string(&progress) {
+            Ok(json) => json,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_bytes = progress_json.as_bytes();
+        if json_bytes.len() >= out_len {
+            return ERROR_OTHER; // Buffer too small
+        }
+
+        ptr::copy_nonoverlapping(json_bytes.as_ptr(), out_progress_json as *mut u8, json_bytes.len());
+        *out_progress_json.add(json_bytes.len()) = 0; // Null terminate
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets the progress of a file transfer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `file_id` must be a valid null-terminated C string.
+/// - `out_progress_json` must be a valid pointer to a buffer of at least `out_len` bytes.
+///
+/// # Returns
+///
+/// Returns SUCCESS if transfer exists, 0 if not found, or an error code.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_file_progress(
+    handle: *mut ProtocolHandle,
+    file_id: *const c_char,
+    out_progress_json: *mut c_char,
+    out_len: usize,
+) -> i32 {
+    if handle.is_null() || file_id.is_null() || out_progress_json.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &*handle;
+
+        let file_id_str = match CStr::from_ptr(file_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        let file_transfer = handle_ref.file_transfer.lock().unwrap();
+        let progress = match file_transfer.get_progress(file_id_str) {
+            Some(p) => p,
+            None => return 0, // Not found
+        };
+
+        let progress_json = match serde_json::to_string(&progress) {
+            Ok(json) => json,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_bytes = progress_json.as_bytes();
+        if json_bytes.len() >= out_len {
+            return ERROR_OTHER;
+        }
+
+        ptr::copy_nonoverlapping(json_bytes.as_ptr(), out_progress_json as *mut u8, json_bytes.len());
+        *out_progress_json.add(json_bytes.len()) = 0;
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Finalizes a file transfer and retrieves the complete file data.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `file_id` must be a valid null-terminated C string.
+/// - `out_file_data` must be a valid pointer to a buffer of at least `out_len` bytes.
+/// - `out_actual_len` must be a valid pointer to store the actual file size.
+///
+/// # Returns
+///
+/// Returns SUCCESS if file is complete and copied, 0 if not complete, or an error code.
+#[no_mangle]
+pub extern "C" fn offline_protocol_finalize_file(
+    handle: *mut ProtocolHandle,
+    file_id: *const c_char,
+    out_file_data: *mut u8,
+    out_len: usize,
+    out_actual_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || file_id.is_null() || out_file_data.is_null() || out_actual_len.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        let file_id_str = match CStr::from_ptr(file_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        let mut file_transfer = handle_ref.file_transfer.lock().unwrap();
+        let file_data = match file_transfer.finalize_file(file_id_str) {
+            Some(data) => data,
+            None => return 0, // Not complete or not found
+        };
+
+        if file_data.len() > out_len {
+            return ERROR_OTHER; // Buffer too small
+        }
+
+        ptr::copy_nonoverlapping(file_data.as_ptr(), out_file_data, file_data.len());
+        *out_actual_len = file_data.len();
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Cancels an active file transfer.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `file_id` must be a valid null-terminated C string.
+///
+/// # Returns
+///
+/// Returns SUCCESS if cancelled, 0 if not found, or an error code.
+#[no_mangle]
+pub extern "C" fn offline_protocol_cancel_file_transfer(
+    handle: *mut ProtocolHandle,
+    file_id: *const c_char,
+) -> i32 {
+    if handle.is_null() || file_id.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        let file_id_str = match CStr::from_ptr(file_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        let mut file_transfer = handle_ref.file_transfer.lock().unwrap();
+        if file_transfer.cancel_transfer(file_id_str) {
+            SUCCESS
+        } else {
+            0 // Not found
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Processes pending operations (retries, timeouts, cleanup).
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_process(handle: *mut ProtocolHandle) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        match handle_ref.protocol.process() {
+            Ok(_) => SUCCESS,
+            Err(_) => ERROR_OTHER,
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Pauses the protocol (for background mode).
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_pause(handle: *mut ProtocolHandle) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        match handle_ref.protocol.pause() {
+            Ok(_) => SUCCESS,
+            Err(offline_protocol::Error::NotStarted) => ERROR_NOT_STARTED,
+            Err(_) => ERROR_INVALID_STATE,
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Resumes the protocol from pause.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_resume(handle: *mut ProtocolHandle) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        match handle_ref.protocol.resume() {
+            Ok(_) => SUCCESS,
+            Err(_) => ERROR_INVALID_STATE,
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets the current protocol state.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+///
+/// # Returns
+///
+/// Returns state code: 0 = Stopped, 1 = Running, 2 = Paused, or negative error code.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_state(handle: *mut ProtocolHandle) -> i32 {
+    if handle.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &*handle;
+
+        match handle_ref.protocol.state() {
+            offline_protocol::protocol::ProtocolState::Stopped => 0,
+            offline_protocol::protocol::ProtocolState::Running => 1,
+            offline_protocol::protocol::ProtocolState::Paused => 2,
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Polls for the next received message.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `out_message_json` must be a valid pointer to a buffer of at least `out_len` bytes.
+///
+/// # Returns
+///
+/// Returns SUCCESS if a message was retrieved, NO_MESSAGE_AVAILABLE if none, or an error code.
+#[no_mangle]
+pub extern "C" fn offline_protocol_receive_message(
+    handle: *mut ProtocolHandle,
+    out_message_json: *mut c_char,
+    out_len: usize,
+) -> i32 {
+    if handle.is_null() || out_message_json.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &mut *handle;
+
+        // Try to receive a message
+        let message = match handle_ref.protocol.receive_message() {
+            Some(msg) => msg,
+            None => return NO_MESSAGE_AVAILABLE,
+        };
+
+        // Serialize message to JSON
+        let message_json = match serde_json::to_string(&serde_json::json!({
+            "id": message.id.as_str(),
+            "sender": message.sender.as_str(),
+            "recipient": message.recipient.as_str(),
+            "content": message.content,
+            "timestamp": message.timestamp.as_millis(),
+            "hop_count": message.hop_count.value(),
+        })) {
+            Ok(json) => json,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_bytes = message_json.as_bytes();
+        if json_bytes.len() >= out_len {
+            return ERROR_OTHER; // Buffer too small
+        }
+
+        ptr::copy_nonoverlapping(json_bytes.as_ptr(), out_message_json as *mut u8, json_bytes.len());
+        *out_message_json.add(json_bytes.len()) = 0; // Null terminate
 
         SUCCESS
     });

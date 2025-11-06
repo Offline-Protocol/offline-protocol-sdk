@@ -63,7 +63,7 @@ impl FileChunk {
 }
 
 /// File transfer progress information.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileProgress {
     /// File identifier.
     pub file_id: String,

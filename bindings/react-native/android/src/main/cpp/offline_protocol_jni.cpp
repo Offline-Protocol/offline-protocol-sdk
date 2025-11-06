@@ -16,6 +16,10 @@
 extern "C" {
     typedef struct ProtocolHandle ProtocolHandle;
     typedef void (*EventCallback)(const char *event_json, void *user_data);
+    typedef struct Option_EventCallback {
+        bool is_some;
+        EventCallback value;
+    } Option_EventCallback;
     
     ProtocolHandle* offline_protocol_create(const char* config_json);
     void offline_protocol_destroy(ProtocolHandle* handle);
@@ -28,7 +32,7 @@ extern "C" {
                                           char* out_message_id,
                                           uintptr_t out_len);
     int32_t offline_protocol_set_event_callback(ProtocolHandle* handle,
-                                                EventCallback callback,
+                                                Option_EventCallback callback,
                                                 void* user_data);
     void offline_protocol_free_string(char* s);
     
@@ -84,6 +88,37 @@ extern "C" {
                                                      const char* config_json);
     int32_t offline_protocol_add_wifi_direct_transport(ProtocolHandle* handle,
                                                         const char* config_json);
+    int32_t offline_protocol_remove_transport(ProtocolHandle* handle,
+                                              int32_t transport_type);
+    int32_t offline_protocol_get_active_transports(ProtocolHandle* handle,
+                                                   char* out_buffer,
+                                                   uintptr_t buffer_len);
+    
+    // File transfer functions
+    int32_t offline_protocol_send_file(ProtocolHandle* handle,
+                                       const uint8_t* file_data,
+                                       uintptr_t file_data_len,
+                                       const char* file_name,
+                                       const char* recipient,
+                                       char* out_file_id,
+                                       uintptr_t out_file_id_len);
+    int32_t offline_protocol_get_file_progress(ProtocolHandle* handle,
+                                               const char* file_id,
+                                               char* out_progress_json,
+                                               uintptr_t out_len);
+    int32_t offline_protocol_cancel_file_transfer(ProtocolHandle* handle,
+                                                  const char* file_id);
+    
+    // Process and state management
+    int32_t offline_protocol_process(ProtocolHandle* handle);
+    int32_t offline_protocol_pause(ProtocolHandle* handle);
+    int32_t offline_protocol_resume(ProtocolHandle* handle);
+    int32_t offline_protocol_get_state(ProtocolHandle* handle);
+    
+    // Message polling
+    int32_t offline_protocol_receive_message(ProtocolHandle* handle,
+                                            char* out_message_json,
+                                            uintptr_t out_len);
 }
 
 // Error codes
@@ -94,6 +129,7 @@ const int32_t ERROR_ALREADY_STARTED = -4;
 const int32_t ERROR_SEND_FAILED = -5;
 const int32_t ERROR_OTHER = -100;
 const int32_t NO_FRAGMENT_AVAILABLE = 1;
+const int32_t NO_MESSAGE_AVAILABLE = 2;
 
 // Global callback context
 struct CallbackContext {
@@ -160,8 +196,11 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeCreate(
     context->moduleRef = env->NewGlobalRef(thiz);
     
     // Set event callback
+    Option_EventCallback callbackOption;
+    callbackOption.is_some = true;
+    callbackOption.value = eventCallbackHandler;
     int32_t result = offline_protocol_set_event_callback(
-        handle, eventCallbackHandler, context);
+        handle, callbackOption, context);
     
     if (result != SUCCESS) {
         env->DeleteGlobalRef(context->moduleRef);
@@ -587,6 +626,190 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeAddWifiDirectTransport(
     }
     
     return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeRemoveTransport(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jint transportType) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    return offline_protocol_remove_transport(handle, static_cast<int32_t>(transportType));
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeGetActiveTransports(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return nullptr;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    char buffer[4096];
+    int32_t result = offline_protocol_get_active_transports(handle, buffer, sizeof(buffer));
+    
+    if (result != SUCCESS) {
+        return nullptr;
+    }
+    
+    return env->NewStringUTF(buffer);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeSendFile(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jbyteArray fileData,
+    jstring fileName, jstring recipient) {
+    
+    if (handlePtr == 0 || fileData == nullptr || fileName == nullptr || recipient == nullptr) {
+        return nullptr;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    jsize fileDataLen = env->GetArrayLength(fileData);
+    jbyte* fileBytes = env->GetByteArrayElements(fileData, nullptr);
+    
+    const char* fileNameStr = env->GetStringUTFChars(fileName, nullptr);
+    const char* recipientStr = env->GetStringUTFChars(recipient, nullptr);
+    
+    char fileId[256];
+    int32_t result = offline_protocol_send_file(
+        handle,
+        reinterpret_cast<uint8_t*>(fileBytes),
+        static_cast<uintptr_t>(fileDataLen),
+        fileNameStr,
+        recipientStr,
+        fileId,
+        256
+    );
+    
+    env->ReleaseByteArrayElements(fileData, fileBytes, JNI_ABORT);
+    env->ReleaseStringUTFChars(fileName, fileNameStr);
+    env->ReleaseStringUTFChars(recipient, recipientStr);
+    
+    if (result != SUCCESS) {
+        return nullptr;
+    }
+    
+    return env->NewStringUTF(fileId);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeGetFileProgress(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jstring fileId) {
+    
+    if (handlePtr == 0 || fileId == nullptr) {
+        return nullptr;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    const char* fileIdStr = env->GetStringUTFChars(fileId, nullptr);
+    
+    char buffer[4096];
+    int32_t result = offline_protocol_get_file_progress(handle, fileIdStr, buffer, sizeof(buffer));
+    
+    env->ReleaseStringUTFChars(fileId, fileIdStr);
+    
+    if (result == 0) {
+        return nullptr; // Not found
+    } else if (result != SUCCESS) {
+        return nullptr; // Error
+    }
+    
+    return env->NewStringUTF(buffer);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeCancelFileTransfer(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jstring fileId) {
+    
+    if (handlePtr == 0 || fileId == nullptr) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    const char* fileIdStr = env->GetStringUTFChars(fileId, nullptr);
+    int32_t result = offline_protocol_cancel_file_transfer(handle, fileIdStr);
+    env->ReleaseStringUTFChars(fileId, fileIdStr);
+    
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeProcess(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    return offline_protocol_process(handle);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativePause(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    return offline_protocol_pause(handle);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeResume(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    return offline_protocol_resume(handle);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeGetState(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    return offline_protocol_get_state(handle);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeReceiveMessage(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return nullptr;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    char buffer[65536];
+    int32_t result = offline_protocol_receive_message(handle, buffer, sizeof(buffer));
+    
+    if (result == NO_MESSAGE_AVAILABLE) {
+        return nullptr; // No message available
+    } else if (result != SUCCESS) {
+        return nullptr; // Error
+    }
+    
+    return env->NewStringUTF(buffer);
 }
 
 } // extern "C"
