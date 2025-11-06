@@ -47,7 +47,12 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
 
       // Set up event listener
       instance.on('all', (event) => {
-        console.log('Protocol event:', event.type, event);
+        // Special formatting for diagnostic messages
+        if (event.type === 'diagnostic') {
+          console.log('🔍', (event as any).message);
+        } else {
+          console.log('Protocol event:', event.type, event);
+        }
         setEvents((prev) => [event, ...prev].slice(0, 100)); // Keep last 100 events
       });
     } catch (err) {

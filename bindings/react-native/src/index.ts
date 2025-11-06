@@ -11,6 +11,11 @@ import type {
   ProtocolEvent,
   EventListener,
   EventType,
+  NetworkTopology,
+  MessageDeliveryStats,
+  TransportType,
+  InternetTransportConfig,
+  WifiDirectTransportConfig,
 } from './types';
 import { MessagePriority } from './types';
 
@@ -282,6 +287,58 @@ export class OfflineProtocol {
    */
   async disableTransport(type: TransportType): Promise<void> {
     return await OfflineProtocolNativeModule.disableTransport(type);
+  }
+
+  /**
+   * Gets the current network topology
+   *
+   * @returns Network topology snapshot including nodes, links, and stats
+   * @throws Error if topology retrieval fails
+   */
+  async getTopology(): Promise<NetworkTopology> {
+    const topologyJson = await OfflineProtocolNativeModule.getTopology();
+    return JSON.parse(topologyJson) as NetworkTopology;
+  }
+
+  /**
+   * Gets message delivery statistics
+   *
+   * @returns Array of message delivery statistics
+   * @throws Error if stats retrieval fails
+   */
+  async getMessageStats(): Promise<MessageDeliveryStats[]> {
+    const statsJson = await OfflineProtocolNativeModule.getMessageStats();
+    return JSON.parse(statsJson) as MessageDeliveryStats[];
+  }
+
+  /**
+   * Gets the delivery success rate
+   *
+   * @returns Success rate as a number between 0 and 1
+   * @throws Error if retrieval fails
+   */
+  async getDeliverySuccessRate(): Promise<number> {
+    return await OfflineProtocolNativeModule.getDeliverySuccessRate();
+  }
+
+  /**
+   * Gets the median message delivery latency
+   *
+   * @returns Median latency in milliseconds, or null if no data available
+   * @throws Error if retrieval fails
+   */
+  async getMedianLatency(): Promise<number | null> {
+    return await OfflineProtocolNativeModule.getMedianLatency();
+  }
+
+  /**
+   * Gets the median hop count for delivered messages
+   *
+   * @returns Median hop count, or null if no data available
+   * @throws Error if retrieval fails
+   */
+  async getMedianHops(): Promise<number | null> {
+    return await OfflineProtocolNativeModule.getMedianHops();
   }
 
   /**

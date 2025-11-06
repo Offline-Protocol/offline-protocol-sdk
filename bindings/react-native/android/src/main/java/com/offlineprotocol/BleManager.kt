@@ -27,7 +27,8 @@ class BleManager(
     private val onPeerDiscovered: (String, String, Int) -> Unit, // deviceId, address, rssi
     private val onPeerLost: (String) -> Unit,
     private val onMessageReceived: (ByteArray) -> Unit,
-    private val onStatusChanged: (Status) -> Unit
+    private val onStatusChanged: (Status) -> Unit,
+    private val onDiagnostic: (String) -> Unit = {}
 ) {
     enum class Status {
         UNAVAILABLE,
@@ -58,6 +59,9 @@ class BleManager(
     
     // Track discovered peers
     private val discoveredPeers = mutableMapOf<String, DiscoveredPeer>()
+    
+    // Track device IDs that have already been discovered (for deduplication)
+    private val discoveredDeviceIds = mutableSetOf<String>()
     
     // Track connected GATT clients
     private val connectedClients = mutableMapOf<String, BluetoothGatt>()
@@ -149,6 +153,13 @@ class BleManager(
             stopAdvertising()
             stopScanning()
             stopGattServer()
+            
+            // Clear tracking data
+            discoveredPeers.clear()
+            discoveredDeviceIds.clear()
+            connectedClients.values.forEach { it.close() }
+            connectedClients.clear()
+            
             onStatusChanged(Status.DISCONNECTED)
             android.util.Log.d(TAG, "BLE stopped")
         } catch (e: Exception) {
@@ -161,6 +172,7 @@ class BleManager(
      */
     @SuppressLint("MissingPermission")
     private fun startGattServer() {
+        onDiagnostic("[BLE] 🔧 Starting GATT server...")
         gattServer = bluetoothManager?.openGattServer(context, gattServerCallback)
         
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
@@ -173,18 +185,22 @@ class BleManager(
         )
         
         // Device ID characteristic (read)
+        val deviceIdBytes = deviceId.toByteArray()
         val deviceIdChar = BluetoothGattCharacteristic(
             DEVICE_ID_CHAR_UUID,
             BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ
         )
-        deviceIdChar.value = deviceId.toByteArray()
+        deviceIdChar.value = deviceIdBytes
+        
+        onDiagnostic("[BLE] 📝 Device ID characteristic value: '$deviceId' (${deviceIdBytes.size} bytes)")
         
         service.addCharacteristic(messageChar)
         service.addCharacteristic(deviceIdChar)
         
         gattServer?.addService(service)
         android.util.Log.d(TAG, "GATT server started")
+        onDiagnostic("[BLE] ✅ GATT server started with 2 characteristics")
     }
 
     /**
@@ -205,6 +221,7 @@ class BleManager(
         
         if (bleAdvertiser == null) {
             android.util.Log.e(TAG, "BLE advertiser not available")
+            onDiagnostic("[BLE] ❌ BLE advertiser not available")
             return
         }
 
@@ -221,6 +238,7 @@ class BleManager(
             .addServiceUuid(ParcelUuid(SERVICE_UUID))
             .build()
 
+        onDiagnostic("[BLE] 📡 Starting BLE advertising with service UUID: $SERVICE_UUID")
         bleAdvertiser?.startAdvertising(settings, data, advertiseCallback)
         android.util.Log.d(TAG, "BLE advertising started")
     }
@@ -273,12 +291,16 @@ class BleManager(
     // Advertise callback
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-            android.util.Log.d(TAG, "Advertising started successfully")
+            val msg = "[BLE] ✅ Advertising started successfully - device is now discoverable and connectable"
+            android.util.Log.d(TAG, msg)
+            onDiagnostic(msg)
             onStatusChanged(Status.ADVERTISING)
         }
 
         override fun onStartFailure(errorCode: Int) {
-            android.util.Log.e(TAG, "Advertising failed with error: $errorCode")
+            val msg = "[BLE] ❌ Advertising failed with error: $errorCode"
+            android.util.Log.e(TAG, msg)
+            onDiagnostic(msg)
             onStatusChanged(Status.UNAVAILABLE)
         }
     }
@@ -326,22 +348,45 @@ class BleManager(
                         characteristic.uuid == DEVICE_ID_CHAR_UUID) {
                         
                         val remoteDeviceId = String(characteristic.value)
-                        android.util.Log.d(TAG, "Discovered peer: $remoteDeviceId at ${device.address} (RSSI: $rssi)")
                         
-                        // Store peer
-                        discoveredPeers[remoteDeviceId] = DiscoveredPeer(
-                            remoteDeviceId,
-                            device.address,
-                            rssi,
-                            System.currentTimeMillis()
-                        )
-                        
-                        // Notify discovery
-                        onPeerDiscovered(remoteDeviceId, device.address, rssi)
-                        
-                        // Keep connection for messaging
-                        connectedClients[remoteDeviceId] = gatt
+                        // Check if we've already discovered this peer
+                        if (discoveredDeviceIds.contains(remoteDeviceId)) {
+                            // Peer already discovered - update RSSI and timestamp silently
+                            discoveredPeers[remoteDeviceId]?.let { peer ->
+                                discoveredPeers[remoteDeviceId] = peer.copy(
+                                    rssi = rssi,
+                                    lastSeen = System.currentTimeMillis()
+                                )
+                            }
+                            android.util.Log.d(TAG, "Updated existing peer: $remoteDeviceId (RSSI: $rssi)")
+                            
+                            // Keep connection if not already stored
+                            if (!connectedClients.containsKey(remoteDeviceId)) {
+                                connectedClients[remoteDeviceId] = gatt
+                            }
+                        } else {
+                            // New peer - emit discovery event
+                            android.util.Log.d(TAG, "Discovered NEW peer: $remoteDeviceId at ${device.address} (RSSI: $rssi)")
+                            
+                            // Add to discovered set
+                            discoveredDeviceIds.add(remoteDeviceId)
+                            
+                            // Store peer
+                            discoveredPeers[remoteDeviceId] = DiscoveredPeer(
+                                remoteDeviceId,
+                                device.address,
+                                rssi,
+                                System.currentTimeMillis()
+                            )
+                            
+                            // Notify discovery (only once)
+                            onPeerDiscovered(remoteDeviceId, device.address, rssi)
+                            
+                            // Keep connection for messaging
+                            connectedClients[remoteDeviceId] = gatt
+                        }
                     } else {
+                        android.util.Log.w(TAG, "Failed to read device ID characteristic: status=$status")
                         gatt.close()
                     }
                 }
@@ -355,6 +400,62 @@ class BleManager(
 
     // GATT server callback
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            super.onConnectionStateChange(device, status, newState)
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    val msg = "[BLE] ✅ GATT client connected: ${device.address}"
+                    android.util.Log.d(TAG, msg)
+                    onDiagnostic(msg)
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    val msg = "[BLE] ⚠️ GATT client disconnected: ${device.address}"
+                    android.util.Log.d(TAG, msg)
+                    onDiagnostic(msg)
+                }
+            }
+        }
+        
+        @SuppressLint("MissingPermission")
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            offset: Int,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val msg = "[BLE] 📖 Read request from ${device.address} for ${characteristic.uuid}"
+            android.util.Log.d(TAG, msg)
+            onDiagnostic(msg)
+            
+            if (characteristic.uuid == DEVICE_ID_CHAR_UUID) {
+                val deviceIdBytes = deviceId.toByteArray()
+                val msg2 = "[BLE] 📤 Sending device ID '$deviceId' (${deviceIdBytes.size} bytes) to ${device.address}"
+                android.util.Log.d(TAG, msg2)
+                onDiagnostic(msg2)
+                
+                gattServer?.sendResponse(
+                    device,
+                    requestId,
+                    BluetoothGatt.GATT_SUCCESS,
+                    offset,
+                    deviceIdBytes
+                )
+            } else {
+                val msg2 = "[BLE] ❌ Read request for unknown characteristic: ${characteristic.uuid}"
+                android.util.Log.w(TAG, msg2)
+                onDiagnostic(msg2)
+                gattServer?.sendResponse(
+                    device,
+                    requestId,
+                    BluetoothGatt.GATT_FAILURE,
+                    offset,
+                    null
+                )
+            }
+        }
+        
+        @SuppressLint("MissingPermission")
         override fun onCharacteristicWriteRequest(
             device: BluetoothDevice,
             requestId: Int,
@@ -377,6 +478,17 @@ class BleManager(
                         BluetoothGatt.GATT_SUCCESS,
                         offset,
                         value
+                    )
+                }
+            } else {
+                android.util.Log.w(TAG, "Write request for unknown characteristic: ${characteristic.uuid}")
+                if (responseNeeded) {
+                    gattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_FAILURE,
+                        offset,
+                        null
                     )
                 }
             }

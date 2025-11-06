@@ -14,6 +14,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var eventCallbackContext: UnsafeMutableRawPointer?
     private var bleManager: BleManager?
     private var deviceId: String = ""
+    private let bleFragmentQueue = DispatchQueue(label: "offlineprotocol.ble.fragment-pump")
+    private var bleFragmentTimer: DispatchSourceTimer?
+    private var bleRecipientBuffer = [CChar](repeating: 0, count: 256)
+    private var bleFragmentBuffer = [UInt8](repeating: 0, count: 512)
     
     // Event names
     private enum Events {
@@ -36,6 +40,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             Unmanaged<OfflineProtocolModule>.fromOpaque(context).release()
             eventCallbackContext = nil
         }
+
+        stopBleFragmentPump()
     }
     
     override class func requiresMainQueueSetup() -> Bool {
@@ -53,6 +59,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                      rejecter: @escaping RCTPromiseRejectBlock) {
         // Clean up existing handle if any
         if let handle = protocolHandle {
+            stopBleFragmentPump()
             offline_protocol_destroy(handle)
             protocolHandle = nil
         }
@@ -109,6 +116,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         
         // Stop and cleanup BLE
+        stopBleFragmentPump()
         bleManager?.stop()
         bleManager = nil
         
@@ -143,6 +151,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         
         switch result {
         case SUCCESS:
+            startBleFragmentPump()
             resolver(nil)
         case ERROR_ALREADY_STARTED:
             rejecter("ERROR_ALREADY_STARTED", "Protocol already started", nil)
@@ -159,6 +168,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         
         // Stop BLE first
+        stopBleFragmentPump()
         bleManager?.stop()
         
         let result = offline_protocol_stop(handle)
@@ -209,6 +219,186 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_SEND_FAILED", "Failed to send message", nil)
         default:
             rejecter("ERROR_UNKNOWN", "Unknown error occurred", nil)
+        }
+    }
+    
+    @objc func getTopology(_ resolver: @escaping RCTPromiseResolveBlock,
+                          rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 65536)
+        defer { buffer.deallocate() }
+        
+        let result = offline_protocol_get_topology(handle, buffer, 65536)
+        
+        if result == SUCCESS {
+            let topologyJson = String(cString: buffer)
+            resolver(topologyJson)
+        } else {
+            rejecter("ERROR_GET_TOPOLOGY_FAILED", "Failed to get topology", nil)
+        }
+    }
+    
+    @objc func getMessageStats(_ resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 65536)
+        defer { buffer.deallocate() }
+        
+        let result = offline_protocol_get_message_stats(handle, buffer, 65536)
+        
+        if result == SUCCESS {
+            let statsJson = String(cString: buffer)
+            resolver(statsJson)
+        } else {
+            rejecter("ERROR_GET_STATS_FAILED", "Failed to get message stats", nil)
+        }
+    }
+    
+    @objc func getDeliverySuccessRate(_ resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        var rate: Float = 0.0
+        let result = offline_protocol_get_delivery_success_rate(handle, &rate)
+        
+        if result == SUCCESS {
+            resolver(NSNumber(value: rate))
+        } else {
+            rejecter("ERROR_GET_RATE_FAILED", "Failed to get delivery success rate", nil)
+        }
+    }
+    
+    @objc func getMedianLatency(_ resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        var latency: UInt64 = 0
+        let result = offline_protocol_get_median_latency(handle, &latency)
+        
+        if result == SUCCESS {
+            resolver(NSNumber(value: latency))
+        } else if result == 0 {
+            resolver(NSNull())
+        } else {
+            rejecter("ERROR_GET_LATENCY_FAILED", "Failed to get median latency", nil)
+        }
+    }
+    
+    @objc func getMedianHops(_ resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let handle = protocolHandle else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        
+        var hops: UInt8 = 0
+        let result = offline_protocol_get_median_hops(handle, &hops)
+        
+        if result == SUCCESS {
+            resolver(NSNumber(value: hops))
+        } else if result == 0 {
+            resolver(NSNull())
+        } else {
+            rejecter("ERROR_GET_HOPS_FAILED", "Failed to get median hops", nil)
+        }
+    }
+
+    // MARK: - BLE Fragment Handling
+
+    private func startBleFragmentPump() {
+        guard bleFragmentTimer == nil else { return }
+
+        let timer = DispatchSource.makeTimerSource(queue: bleFragmentQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(150))
+        timer.setEventHandler { [weak self] in
+            self?.flushBleFragments()
+        }
+        timer.resume()
+        bleFragmentTimer = timer
+    }
+
+    private func stopBleFragmentPump() {
+        bleFragmentTimer?.cancel()
+        bleFragmentTimer = nil
+    }
+
+    private func flushBleFragments() {
+        guard let handle = protocolHandle,
+              let manager = bleManager else {
+            return
+        }
+
+        while true {
+            var fragmentLength: UInt = 0
+
+            let result: Int32 = bleRecipientBuffer.withUnsafeMutableBufferPointer { recipientPtr in
+                bleFragmentBuffer.withUnsafeMutableBufferPointer { fragmentPtr in
+                    guard let recipientBase = recipientPtr.baseAddress,
+                          let fragmentBase = fragmentPtr.baseAddress else {
+                        return ERROR_OTHER
+                    }
+
+                    return offline_protocol_ble_get_next_fragment(
+                        handle,
+                        recipientBase,
+                        recipientPtr.count,
+                        fragmentBase,
+                        fragmentPtr.count,
+                        &fragmentLength
+                    )
+                }
+            }
+
+            if result == NO_FRAGMENT_AVAILABLE || fragmentLength == 0 {
+                break
+            }
+
+            if result != SUCCESS {
+                NSLog("[OfflineProtocol] Failed to fetch BLE fragment: \(result)")
+                break
+            }
+
+            guard let recipient = String(validatingUTF8: bleRecipientBuffer) else {
+                NSLog("[OfflineProtocol] Invalid recipient string for BLE fragment")
+                continue
+            }
+
+            let length = Int(fragmentLength)
+            let messageData = Data(bytes: bleFragmentBuffer, count: length)
+
+            let sendSucceeded = manager.sendMessage(recipientId: recipient, messageData: messageData)
+            if !sendSucceeded {
+                recipient.withCString { recipientPtr in
+                    messageData.withUnsafeBytes { buffer in
+                        if let baseAddress = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                            let requeueResult = offline_protocol_ble_return_fragment(
+                                handle,
+                                recipientPtr,
+                                baseAddress,
+                                fragmentLength
+                            )
+                            if requeueResult != SUCCESS {
+                                NSLog("[OfflineProtocol] Failed to requeue BLE fragment: \(requeueResult)")
+                            }
+                        }
+                    }
+                }
+                break
+            }
         }
     }
     
@@ -285,9 +475,24 @@ class OfflineProtocolModule: RCTEventEmitter {
         
         manager.onMessageReceived = { [weak self] messageData in
             NSLog("[OfflineProtocol] Message received: \(messageData.count) bytes")
-            
-            if let messageJson = String(data: messageData, encoding: .utf8) {
-                self?.handleEvent(messageJson)
+
+            guard let handle = self?.protocolHandle else {
+                return
+            }
+
+            let result = messageData.withUnsafeBytes { buffer -> Int32 in
+                guard let baseAddress = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                    return ERROR_OTHER
+                }
+                return offline_protocol_ble_fragment_received(handle, baseAddress, messageData.count)
+            }
+
+            if result != SUCCESS {
+                NSLog("[OfflineProtocol] Failed to forward BLE fragment to Rust: \(result)")
+
+                if let messageJson = String(data: messageData, encoding: .utf8) {
+                    self?.handleEvent(messageJson)
+                }
             }
         }
         
@@ -336,6 +541,20 @@ class OfflineProtocolModule: RCTEventEmitter {
                 """
                 self?.handleEvent(eventJson)
             }
+        }
+        
+        manager.onDiagnostic = { [weak self] message in
+            NSLog("[OfflineProtocol] \(message)")
+            
+            // Emit diagnostic event to React Native
+            let eventJson = """
+            {
+                "type": "diagnostic",
+                "message": "\(message)",
+                "timestamp": \(Date().timeIntervalSince1970 * 1000)
+            }
+            """
+            self?.handleEvent(eventJson)
         }
         
         bleManager = manager

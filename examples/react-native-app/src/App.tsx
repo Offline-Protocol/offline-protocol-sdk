@@ -15,14 +15,16 @@ import { StatusBar } from './components/StatusBar';
 import { EventLog } from './components/EventLog';
 import { MessagingScreen } from './screens/MessagingScreen';
 import { NetworkScreen } from './screens/NetworkScreen';
+import { VisualizationScreen } from './screens/VisualizationScreen';
 
-type Tab = 'messaging' | 'network' | 'events';
+type Tab = 'messaging' | 'network' | 'visualization' | 'events';
 
 export default function App() {
   const [userId, setUserId] = useState('user_' + Math.random().toString(36).substr(2, 9));
   const [activeTab, setActiveTab] = useState<Tab>('messaging');
 
   const {
+    protocol,
     isStarted,
     error,
     events,
@@ -91,6 +93,8 @@ export default function App() {
         );
       case 'network':
         return <NetworkScreen events={events} />;
+      case 'visualization':
+        return <VisualizationScreen protocol={protocol} isStarted={isStarted} />;
       case 'events':
         return <EventLog events={events} onClear={clearEvents} />;
     }
@@ -148,7 +152,7 @@ export default function App() {
             onPress={() => setActiveTab('messaging')}
           >
             <Text style={[styles.tabText, activeTab === 'messaging' && styles.activeTabText]}>
-              Messaging
+              💬 Messages
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -156,7 +160,15 @@ export default function App() {
             onPress={() => setActiveTab('network')}
           >
             <Text style={[styles.tabText, activeTab === 'network' && styles.activeTabText]}>
-              Network
+              🌐 Network
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'visualization' && styles.activeTab]}
+            onPress={() => setActiveTab('visualization')}
+          >
+            <Text style={[styles.tabText, activeTab === 'visualization' && styles.activeTabText]}>
+              📊 Analytics
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -164,7 +176,7 @@ export default function App() {
             onPress={() => setActiveTab('events')}
           >
             <Text style={[styles.tabText, activeTab === 'events' && styles.activeTabText]}>
-              Events ({events.length})
+              📝 Events ({events.length})
             </Text>
           </TouchableOpacity>
         </View>
@@ -178,11 +190,16 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: '#f5f5f5',
   },
   header: {
     padding: 16,
     backgroundColor: '#2196f3',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 5,
   },
   title: {
     fontSize: 24,
@@ -208,6 +225,11 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     fontSize: 14,
     color: '#333',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
   },
   content: {
     flex: 1,
@@ -241,9 +263,14 @@ const styles = StyleSheet.create({
   },
   controlButton: {
     paddingVertical: 14,
-    borderRadius: 8,
+    borderRadius: 12,
     alignItems: 'center',
     marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
   },
   startButton: {
     backgroundColor: '#4caf50',
@@ -258,27 +285,35 @@ const styles = StyleSheet.create({
   },
   tabs: {
     flexDirection: 'row',
-    borderBottomWidth: 2,
-    borderBottomColor: '#e0e0e0',
+    backgroundColor: '#fff',
+    borderRadius: 12,
     marginBottom: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 2,
+    overflow: 'hidden',
   },
   tab: {
     flex: 1,
     paddingVertical: 12,
+    paddingHorizontal: 8,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   activeTab: {
-    borderBottomWidth: 2,
-    borderBottomColor: '#2196f3',
+    backgroundColor: '#e3f2fd',
   },
   tabText: {
-    fontSize: 14,
+    fontSize: 11,
     fontWeight: '500',
     color: '#666',
+    textAlign: 'center',
   },
   activeTabText: {
     color: '#2196f3',
-    fontWeight: '600',
+    fontWeight: '700',
   },
   tabContent: {
     flex: 1,

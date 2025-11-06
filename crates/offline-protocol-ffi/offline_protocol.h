@@ -14,6 +14,11 @@
 #define SUCCESS 0
 
 /**
+ * No BLE fragment available.
+ */
+#define NO_FRAGMENT_AVAILABLE 1
+
+/**
  * Error: Null pointer passed as argument.
  */
 #define ERROR_NULL_POINTER -1
@@ -260,7 +265,7 @@ int32_t offline_protocol_ble_fragment_received(struct ProtocolHandle *handle,
  *
  * # Returns
  *
- * Returns SUCCESS if a fragment is available, 0 if no fragments, or an error code on failure.
+ * Returns SUCCESS if a fragment is available, NO_FRAGMENT_AVAILABLE if none are queued, or an error code on failure.
  */
 int32_t offline_protocol_ble_get_next_fragment(struct ProtocolHandle *handle,
                                                char *recipient_out,
@@ -268,6 +273,14 @@ int32_t offline_protocol_ble_get_next_fragment(struct ProtocolHandle *handle,
                                                uint8_t *fragment_out,
                                                uintptr_t fragment_out_len,
                                                uintptr_t *fragment_len_out);
+
+/**
+ * Re-queues a BLE fragment if sending fails on the platform side.
+ */
+int32_t offline_protocol_ble_return_fragment(struct ProtocolHandle *handle,
+                                             const char *recipient,
+                                             const uint8_t *fragment_data,
+                                             uintptr_t fragment_len);
 
 /**
  * Gets the number of discovered peers.
@@ -362,5 +375,83 @@ int32_t offline_protocol_remove_transport(struct ProtocolHandle *handle, int32_t
 int32_t offline_protocol_get_active_transports(struct ProtocolHandle *handle,
                                                char *out_buffer,
                                                uintptr_t buffer_len);
+
+/**
+ * Gets the current network topology as JSON.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `out_buffer` must be a valid pointer to a buffer of at least `buffer_len` bytes.
+ *
+ * The output is a JSON string containing the complete network topology including nodes, links, and stats.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_get_topology(struct ProtocolHandle *handle,
+                                      char *out_buffer,
+                                      uintptr_t buffer_len);
+
+/**
+ * Gets message delivery statistics as JSON.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `out_buffer` must be a valid pointer to a buffer of at least `buffer_len` bytes.
+ *
+ * The output is a JSON array containing message statistics.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_get_message_stats(struct ProtocolHandle *handle,
+                                           char *out_buffer,
+                                           uintptr_t buffer_len);
+
+/**
+ * Gets delivery success rate (0.0 - 1.0).
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `out_rate` must be a valid pointer to store the success rate.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_get_delivery_success_rate(struct ProtocolHandle *handle, float *out_rate);
+
+/**
+ * Gets median delivery latency in milliseconds.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `out_latency` must be a valid pointer to store the latency.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS if latency is available, 0 if no data, or an error code on failure.
+ */
+int32_t offline_protocol_get_median_latency(struct ProtocolHandle *handle, uint64_t *out_latency);
+
+/**
+ * Gets median hop count.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `out_hops` must be a valid pointer to store the hop count.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS if hop count is available, 0 if no data, or an error code on failure.
+ */
+int32_t offline_protocol_get_median_hops(struct ProtocolHandle *handle, uint8_t *out_hops);
 
 #endif /* OFFLINE_PROTOCOL_H */

@@ -2,6 +2,9 @@ package com.offlineprotocol
 
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -9,6 +12,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var protocolHandle: Long = 0
     private var bleManager: BleManager? = null
     private var deviceId: String = ""
+    private var bleSendScheduler: ScheduledExecutorService? = null
+    private val bleRecipientBuffer = ByteArray(256)
+    private val bleFragmentBuffer = ByteArray(512)
 
     companion object {
         const val NAME = "OfflineProtocolModule"
@@ -16,6 +22,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         
         // Error codes
         const val SUCCESS = 0
+        const val NO_FRAGMENT_AVAILABLE = 1
         const val ERROR_NULL_POINTER = -1
         const val ERROR_NOT_STARTED = -3
         const val ERROR_ALREADY_STARTED = -4
@@ -50,6 +57,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     override fun invalidate() {
         super.invalidate()
+        stopBleFragmentPump()
         if (protocolHandle != 0L) {
             nativeDestroy(protocolHandle)
             protocolHandle = 0
@@ -67,6 +75,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             // Clean up existing handle
             if (protocolHandle != 0L) {
+                stopBleFragmentPump()
                 nativeDestroy(protocolHandle)
             }
 
@@ -111,6 +120,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             // Stop and cleanup BLE
+            stopBleFragmentPump()
             bleManager?.stop()
             bleManager = null
 
@@ -145,6 +155,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             when (result) {
                 SUCCESS -> {
                     android.util.Log.d(NAME, "Protocol started successfully")
+                    startBleFragmentPump()
                     promise.resolve(null)
                 }
                 ERROR_ALREADY_STARTED -> {
@@ -190,6 +201,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             // Stop BLE first
+            stopBleFragmentPump()
             bleManager?.stop()
             
             val result = nativeStop(protocolHandle)
@@ -203,6 +215,71 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
         } catch (e: Exception) {
             promise.reject("ERROR_STOP_FAILED", e.message, e)
+        }
+    }
+
+    private fun startBleFragmentPump() {
+        if (bleSendScheduler != null) {
+            return
+        }
+
+        val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "offlineprotocol-ble-sender").apply { isDaemon = true }
+        }
+
+        scheduler.scheduleAtFixedRate({
+            try {
+                flushBleFragments()
+            } catch (t: Throwable) {
+                android.util.Log.e(NAME, "Error while flushing BLE fragments", t)
+            }
+        }, 0, 150, TimeUnit.MILLISECONDS)
+
+        bleSendScheduler = scheduler
+    }
+
+    private fun stopBleFragmentPump() {
+        bleSendScheduler?.shutdownNow()
+        bleSendScheduler = null
+    }
+
+    private fun flushBleFragments() {
+        val handle = protocolHandle
+        val manager = bleManager ?: return
+
+        if (handle == 0L) {
+            return
+        }
+
+        while (true) {
+            val fragmentLength = nativeBleGetNextFragment(handle, bleRecipientBuffer, bleFragmentBuffer)
+
+            if (fragmentLength == NO_FRAGMENT_AVAILABLE || fragmentLength == 0) {
+                break
+            }
+
+            if (fragmentLength < 0) {
+                android.util.Log.e(NAME, "Failed to fetch BLE fragment: $fragmentLength")
+                break
+            }
+
+            val terminatorIndex = bleRecipientBuffer.indexOf(0)
+            val recipient = if (terminatorIndex >= 0) {
+                String(bleRecipientBuffer, 0, terminatorIndex, Charsets.UTF_8)
+            } else {
+                String(bleRecipientBuffer, Charsets.UTF_8).trimEnd('\u0000')
+            }
+
+            val payload = bleFragmentBuffer.copyOfRange(0, fragmentLength)
+
+            val sendSucceeded = nativeSendBleMessage(recipient, payload)
+            if (!sendSucceeded) {
+                val requeueResult = nativeBleReturnFragment(handle, recipient, payload, fragmentLength)
+                if (requeueResult != SUCCESS) {
+                    android.util.Log.e(NAME, "Failed to requeue BLE fragment: $requeueResult")
+                }
+                break
+            }
         }
     }
 
@@ -232,6 +309,104 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Exception during sendMessage: ${e.message}", e)
             promise.reject("ERROR_SEND_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getTopology(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val topologyJson = nativeGetTopology(protocolHandle)
+            if (topologyJson == null) {
+                promise.reject("ERROR_GET_TOPOLOGY_FAILED", "Failed to get topology")
+                return
+            }
+
+            promise.resolve(topologyJson)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getTopology: ${e.message}", e)
+            promise.reject("ERROR_GET_TOPOLOGY_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getMessageStats(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val statsJson = nativeGetMessageStats(protocolHandle)
+            if (statsJson == null) {
+                promise.reject("ERROR_GET_STATS_FAILED", "Failed to get message stats")
+                return
+            }
+
+            promise.resolve(statsJson)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getMessageStats: ${e.message}", e)
+            promise.reject("ERROR_GET_STATS_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getDeliverySuccessRate(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val rate = nativeGetDeliverySuccessRate(protocolHandle)
+            promise.resolve(rate)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getDeliverySuccessRate: ${e.message}", e)
+            promise.reject("ERROR_GET_RATE_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getMedianLatency(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val latency = nativeGetMedianLatency(protocolHandle)
+            if (latency < 0) {
+                promise.resolve(null)
+            } else {
+                promise.resolve(latency)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getMedianLatency: ${e.message}", e)
+            promise.reject("ERROR_GET_LATENCY_FAILED", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun getMedianHops(promise: Promise) {
+        try {
+            if (protocolHandle == 0L) {
+                promise.reject("ERROR_NOT_INITIALIZED", "Protocol not initialized")
+                return
+            }
+
+            val hops = nativeGetMedianHops(protocolHandle)
+            if (hops < 0) {
+                promise.resolve(null)
+            } else {
+                promise.resolve(hops)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Exception during getMedianHops: ${e.message}", e)
+            promise.reject("ERROR_GET_HOPS_FAILED", e.message, e)
         }
     }
 
@@ -312,12 +487,24 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             onMessageReceived = { messageData ->
                 android.util.Log.d(NAME, "Message received: ${messageData.size} bytes")
                 
-                // Parse message and emit event
-                try {
-                    val messageJson = String(messageData)
-                    handleEvent(messageJson)
-                } catch (e: Exception) {
-                    android.util.Log.e(NAME, "Failed to parse received message", e)
+                if (protocolHandle != 0L) {
+                    val result = nativeBleFragmentReceived(protocolHandle, messageData)
+                    if (result != SUCCESS) {
+                        android.util.Log.e(NAME, "Failed to forward BLE fragment to Rust: $result")
+                        try {
+                            val messageJson = String(messageData)
+                            handleEvent(messageJson)
+                        } catch (e: Exception) {
+                            android.util.Log.e(NAME, "Failed to parse received message", e)
+                        }
+                    }
+                } else {
+                    try {
+                        val messageJson = String(messageData)
+                        handleEvent(messageJson)
+                    } catch (e: Exception) {
+                        android.util.Log.e(NAME, "Failed to parse received message", e)
+                    }
                 }
             },
             onStatusChanged = { status ->
@@ -369,6 +556,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         // Do nothing for other statuses
                     }
                 }
+            },
+            onDiagnostic = { message ->
+                android.util.Log.d(NAME, message)
+                
+                // Emit diagnostic event to React Native
+                val eventJson = """
+                    {
+                        "type": "diagnostic",
+                        "message": "$message",
+                        "timestamp": ${System.currentTimeMillis()}
+                    }
+                """.trimIndent()
+                
+                handleEvent(eventJson)
             }
         )
 
@@ -387,6 +588,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         priority: Int
     ): String?
     
+    // Visualization methods
+    private external fun nativeGetTopology(handle: Long): String?
+    private external fun nativeGetMessageStats(handle: Long): String?
+    private external fun nativeGetDeliverySuccessRate(handle: Long): Float
+    private external fun nativeGetMedianLatency(handle: Long): Long
+    private external fun nativeGetMedianHops(handle: Long): Int
+    
     // BLE bridge native methods
     private external fun nativeInitBleBridge(bleManager: BleManager)
     private external fun nativeStartBle(): Boolean
@@ -399,4 +607,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private external fun nativeBlePeerLost(handle: Long, deviceId: String): Int
     private external fun nativeBleStatusChanged(handle: Long, status: Int): Int
     private external fun nativeBleGetPeerCount(handle: Long): Int
+    private external fun nativeBleFragmentReceived(handle: Long, fragmentData: ByteArray): Int
+    private external fun nativeBleGetNextFragment(handle: Long, recipientBuffer: ByteArray, fragmentBuffer: ByteArray): Int
+    private external fun nativeBleReturnFragment(handle: Long, recipient: String, fragmentData: ByteArray, fragmentLength: Int): Int
 }

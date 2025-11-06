@@ -83,6 +83,8 @@ pub struct BleTransport {
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
     /// Send queue
     send_queue: Arc<Mutex<VecDeque<(String, Message)>>>,
+    /// Pending serialized fragments waiting to be delivered
+    pending_fragments: Arc<Mutex<VecDeque<(String, Vec<u8>)>>>,
     /// Transport metrics
     metrics: Arc<Mutex<TransportMetrics>>,
     /// Platform-specific handle (opaque pointer)
@@ -102,6 +104,7 @@ impl BleTransport {
             peers: Arc::new(Mutex::new(HashMap::new())),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
+            pending_fragments: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             platform_handle: Arc::new(Mutex::new(None)),
             fragment_buffers: Arc::new(Mutex::new(HashMap::new())),
@@ -176,10 +179,25 @@ impl BleTransport {
         *self.metrics.lock().unwrap() = metrics;
     }
 
+    fn update_queue_metric(&self) {
+        let send_len = self.send_queue.lock().unwrap().len();
+        let fragment_len = self.pending_fragments.lock().unwrap().len();
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.queue_depth = send_len + fragment_len;
+    }
+
     /// Processes the send queue (to be called by platform implementation).
     pub fn dequeue_send(&self) -> Option<(String, Message)> {
-        let mut queue = self.send_queue.lock().unwrap();
-        queue.pop_front()
+        let result = {
+            let mut queue = self.send_queue.lock().unwrap();
+            queue.pop_front()
+        };
+
+        if result.is_some() {
+            self.update_queue_metric();
+        }
+
+        result
     }
 
     /// Checks if there are messages to send.
@@ -338,25 +356,59 @@ impl BleTransport {
     ///
     /// Returns (recipient, fragment_data) or None if no messages to send.
     pub fn get_next_fragment(&self) -> Result<Option<(String, Vec<u8>)>> {
-        let (recipient, message) = {
-            let queue = self.send_queue.lock().unwrap();
-            match queue.front() {
-                Some((r, m)) => (r.clone(), m.clone()),
-                None => return Ok(None),
-            }
-        };
-
-        // Fragment the message
-        let fragments = self.fragment_message(&message)?;
-        
-        // For now, return first fragment and keep message in queue
-        // Platform should call this repeatedly until all fragments sent
-        // More sophisticated queuing can be added later
-        if let Some(fragment) = fragments.first() {
-            return Ok(Some((recipient, fragment.clone())));
+        if let Some(fragment) = {
+            let mut pending = self.pending_fragments.lock().unwrap();
+            pending.pop_front()
+        } {
+            self.update_queue_metric();
+            return Ok(Some(fragment));
         }
 
-        Ok(None)
+        // No serialized fragments waiting – pull a fresh message from the queue
+        let maybe_message = {
+            let mut queue = self.send_queue.lock().unwrap();
+            queue.pop_front()
+        };
+
+        let Some((recipient, message)) = maybe_message else {
+            self.update_queue_metric();
+            return Ok(None);
+        };
+
+        let fragments = self.fragment_message(&message)?;
+
+        if fragments.is_empty() {
+            self.update_queue_metric();
+            return Ok(None);
+        }
+
+        {
+            let mut pending = self.pending_fragments.lock().unwrap();
+            for fragment in fragments {
+                pending.push_back((recipient.clone(), fragment));
+            }
+        }
+
+        self.update_queue_metric();
+
+        let result = {
+            let mut pending = self.pending_fragments.lock().unwrap();
+            pending.pop_front()
+        };
+
+        self.update_queue_metric();
+
+        Ok(result)
+    }
+
+    /// Re-queues a fragment at the front of the pending queue (used when platform send fails).
+    pub fn requeue_fragment(&self, recipient: &str, fragment_data: Vec<u8>) {
+        {
+            let mut pending = self.pending_fragments.lock().unwrap();
+            pending.push_front((recipient.to_string(), fragment_data));
+        }
+
+        self.update_queue_metric();
     }
 }
 
@@ -383,12 +435,12 @@ impl Transport for BleTransport {
 
         // Determine recipient and add to send queue
         let recipient = message.recipient.as_str().to_string();
-        let mut queue = self.send_queue.lock().unwrap();
-        queue.push_back((recipient, message.clone()));
+        {
+            let mut queue = self.send_queue.lock().unwrap();
+            queue.push_back((recipient, message.clone()));
+        }
 
-        // Update metrics
-        let mut metrics = self.metrics.lock().unwrap();
-        metrics.queue_depth = queue.len();
+        self.update_queue_metric();
         
         Ok(())
     }

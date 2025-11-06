@@ -263,3 +263,101 @@ export type EventListener<T extends ProtocolEvent = ProtocolEvent> = (event: T) 
  * Event type names
  */
 export type EventType = ProtocolEvent['type'];
+
+/**
+ * Node role in the network
+ */
+export enum NodeRole {
+  Normal = 'normal',
+  Relay = 'relay',
+}
+
+/**
+ * Network node information
+ */
+export interface NetworkNode {
+  /** Node user ID */
+  user_id: string;
+  /** Node role (Normal or Relay) */
+  role: NodeRole;
+  /** Connection count */
+  connection_count: number;
+  /** Battery level (0-100), if known */
+  battery_level?: number;
+  /** Last seen timestamp */
+  last_seen: number;
+  /** Transport types available */
+  transports: TransportType[];
+}
+
+/**
+ * Link between two nodes
+ */
+export interface NetworkLink {
+  /** Source node */
+  from: string;
+  /** Destination node */
+  to: string;
+  /** Link quality (0.0 - 1.0) */
+  quality: number;
+  /** Transport type used for this link */
+  transport: TransportType;
+  /** RSSI (signal strength) if available */
+  rssi?: number;
+}
+
+/**
+ * Network-wide statistics
+ */
+export interface NetworkStats {
+  /** Total nodes in network */
+  total_nodes: number;
+  /** Total relay nodes */
+  relay_nodes: number;
+  /** Total active connections */
+  total_connections: number;
+  /** Average link quality */
+  avg_link_quality: number;
+  /** Network diameter (max hops between any two nodes) */
+  network_diameter?: number;
+}
+
+/**
+ * Complete network topology snapshot
+ */
+export interface NetworkTopology {
+  /** Timestamp of this snapshot */
+  timestamp: number;
+  /** Local device user ID */
+  local_user_id: string;
+  /** All nodes in the network */
+  nodes: NetworkNode[];
+  /** All links between nodes */
+  links: NetworkLink[];
+  /** Network-wide statistics */
+  stats: NetworkStats;
+}
+
+/**
+ * Message delivery statistics
+ */
+export interface MessageDeliveryStats {
+  /** Message ID */
+  message_id: string;
+  /** Sender */
+  sender: string;
+  /** Recipient */
+  recipient: string;
+  /** Timestamp sent */
+  sent_at: number;
+  /** Timestamp delivered (if delivered) */
+  delivered_at?: number;
+  /** Number of hops */
+  hop_count: number;
+  /** Transport used for final delivery */
+  transport?: TransportType;
+  /** Retry count */
+  retry_count: number;
+  /** Delivery latency in milliseconds (if delivered) */
+  latency_ms?: number;
+}

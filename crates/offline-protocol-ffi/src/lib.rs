@@ -13,7 +13,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![warn(missing_docs)]
 
-use offline_protocol::{OfflineProtocol, ProtocolConfig};
+use offline_protocol::{OfflineProtocol, ProtocolConfig, NetworkVisualizer};
 use offline_protocol_transport::{BleTransport, PeerDevice, TransportStatus};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
@@ -24,6 +24,9 @@ use std::time::SystemTime;
 
 /// Success code.
 pub const SUCCESS: i32 = 0;
+
+/// No BLE fragment available.
+pub const NO_FRAGMENT_AVAILABLE: i32 = 1;
 
 /// Error: Null pointer passed as argument.
 pub const ERROR_NULL_POINTER: i32 = -1;
@@ -88,6 +91,7 @@ pub struct ProtocolHandle {
     protocol: OfflineProtocol,
     callback: Arc<Mutex<Option<CallbackData>>>,
     ble_transport: Arc<Mutex<Option<Arc<BleTransport>>>>,
+    visualizer: Arc<Mutex<NetworkVisualizer>>,
 }
 
 /// Creates a new OfflineProtocol instance from JSON configuration.
@@ -232,10 +236,12 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
                     );
                 }
                 
+                let visualizer = NetworkVisualizer::new(user_id);
                 let handle = ProtocolHandle {
                     protocol,
                     callback: Arc::new(Mutex::new(None)),
                     ble_transport: Arc::new(Mutex::new(Some(ble_transport))),
+                    visualizer: Arc::new(Mutex::new(visualizer)),
                 };
                 Box::into_raw(Box::new(handle))
             }
@@ -729,7 +735,7 @@ pub extern "C" fn offline_protocol_ble_fragment_received(
 ///
 /// # Returns
 ///
-/// Returns SUCCESS if a fragment is available, 0 if no fragments, or an error code on failure.
+/// Returns SUCCESS if a fragment is available, NO_FRAGMENT_AVAILABLE if none are queued, or an error code on failure.
 #[no_mangle]
 pub extern "C" fn offline_protocol_ble_get_next_fragment(
     handle: *mut ProtocolHandle,
@@ -746,6 +752,11 @@ pub extern "C" fn offline_protocol_ble_get_next_fragment(
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated pointers are non-null above.
         let handle_ref = &*handle;
+
+        *fragment_len_out = 0;
+        if recipient_out_len > 0 {
+            *recipient_out = 0;
+        }
 
         // Get BLE transport
         let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
@@ -780,9 +791,45 @@ pub extern "C" fn offline_protocol_ble_get_next_fragment(
 
                     SUCCESS
                 }
-                Ok(None) => 0, // No fragments available
+                Ok(None) => NO_FRAGMENT_AVAILABLE,
                 Err(_) => ERROR_OTHER,
             }
+        } else {
+            ERROR_OTHER
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Re-queues a BLE fragment if sending fails on the platform side.
+#[no_mangle]
+pub extern "C" fn offline_protocol_ble_return_fragment(
+    handle: *mut ProtocolHandle,
+    recipient: *const c_char,
+    fragment_data: *const u8,
+    fragment_len: usize,
+) -> i32 {
+    if handle.is_null() || recipient.is_null() || fragment_data.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        let handle_ref = &*handle;
+
+        let recipient_str = match CStr::from_ptr(recipient).to_str() {
+            Ok(s) => s,
+            Err(_) => return ERROR_INVALID_UTF8,
+        };
+
+        let data_slice = std::slice::from_raw_parts(fragment_data, fragment_len);
+        let mut fragment_vec = Vec::with_capacity(fragment_len);
+        fragment_vec.extend_from_slice(data_slice);
+
+        let ble_transport_opt = handle_ref.ble_transport.lock().unwrap();
+        if let Some(ref ble_transport) = *ble_transport_opt {
+            ble_transport.requeue_fragment(recipient_str, fragment_vec);
+            SUCCESS
         } else {
             ERROR_OTHER
         }
@@ -1091,6 +1138,225 @@ pub extern "C" fn offline_protocol_get_active_transports(
         );
 
         SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets the current network topology as JSON.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `out_buffer` must be a valid pointer to a buffer of at least `buffer_len` bytes.
+///
+/// The output is a JSON string containing the complete network topology including nodes, links, and stats.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_topology(
+    handle: *mut ProtocolHandle,
+    out_buffer: *mut c_char,
+    buffer_len: usize,
+) -> i32 {
+    if handle.is_null() || out_buffer.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated all pointers are non-null above.
+        let handle_ref = &*handle;
+
+        let visualizer = handle_ref.visualizer.lock().unwrap();
+        
+        let topology_json = match visualizer.export_json() {
+            Ok(json) => json,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_cstr = match CString::new(topology_json) {
+            Ok(s) => s,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_bytes = json_cstr.as_bytes_with_nul();
+        if json_bytes.len() > buffer_len {
+            return ERROR_OTHER;
+        }
+
+        ptr::copy_nonoverlapping(
+            json_bytes.as_ptr(),
+            out_buffer as *mut u8,
+            json_bytes.len(),
+        );
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets message delivery statistics as JSON.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `out_buffer` must be a valid pointer to a buffer of at least `buffer_len` bytes.
+///
+/// The output is a JSON array containing message statistics.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_message_stats(
+    handle: *mut ProtocolHandle,
+    out_buffer: *mut c_char,
+    buffer_len: usize,
+) -> i32 {
+    if handle.is_null() || out_buffer.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated all pointers are non-null above.
+        let handle_ref = &*handle;
+
+        let visualizer = handle_ref.visualizer.lock().unwrap();
+        let stats = visualizer.get_message_stats();
+        
+        let stats_json = match serde_json::to_string(&stats) {
+            Ok(json) => json,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_cstr = match CString::new(stats_json) {
+            Ok(s) => s,
+            Err(_) => return ERROR_OTHER,
+        };
+
+        let json_bytes = json_cstr.as_bytes_with_nul();
+        if json_bytes.len() > buffer_len {
+            return ERROR_OTHER;
+        }
+
+        ptr::copy_nonoverlapping(
+            json_bytes.as_ptr(),
+            out_buffer as *mut u8,
+            json_bytes.len(),
+        );
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets delivery success rate (0.0 - 1.0).
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `out_rate` must be a valid pointer to store the success rate.
+///
+/// # Returns
+///
+/// Returns SUCCESS on success, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_delivery_success_rate(
+    handle: *mut ProtocolHandle,
+    out_rate: *mut f32,
+) -> i32 {
+    if handle.is_null() || out_rate.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated pointers are non-null above.
+        let handle_ref = &*handle;
+
+        let visualizer = handle_ref.visualizer.lock().unwrap();
+        let rate = visualizer.delivery_success_rate();
+        
+        *out_rate = rate;
+
+        SUCCESS
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets median delivery latency in milliseconds.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `out_latency` must be a valid pointer to store the latency.
+///
+/// # Returns
+///
+/// Returns SUCCESS if latency is available, 0 if no data, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_median_latency(
+    handle: *mut ProtocolHandle,
+    out_latency: *mut u64,
+) -> i32 {
+    if handle.is_null() || out_latency.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated pointers are non-null above.
+        let handle_ref = &*handle;
+
+        let visualizer = handle_ref.visualizer.lock().unwrap();
+        
+        match visualizer.median_latency() {
+            Some(latency) => {
+                *out_latency = latency;
+                SUCCESS
+            }
+            None => 0, // No data available
+        }
+    });
+
+    result.unwrap_or(ERROR_PANIC)
+}
+
+/// Gets median hop count.
+///
+/// # Safety
+///
+/// - `handle` must be a valid pointer returned by `offline_protocol_create`.
+/// - `out_hops` must be a valid pointer to store the hop count.
+///
+/// # Returns
+///
+/// Returns SUCCESS if hop count is available, 0 if no data, or an error code on failure.
+#[no_mangle]
+pub extern "C" fn offline_protocol_get_median_hops(
+    handle: *mut ProtocolHandle,
+    out_hops: *mut u8,
+) -> i32 {
+    if handle.is_null() || out_hops.is_null() {
+        return ERROR_NULL_POINTER;
+    }
+
+    let result = panic::catch_unwind(|| unsafe {
+        // SAFETY: We validated pointers are non-null above.
+        let handle_ref = &*handle;
+
+        let visualizer = handle_ref.visualizer.lock().unwrap();
+        
+        match visualizer.median_hops() {
+            Some(hops) => {
+                *out_hops = hops;
+                SUCCESS
+            }
+            None => 0, // No data available
+        }
     });
 
     result.unwrap_or(ERROR_PANIC)

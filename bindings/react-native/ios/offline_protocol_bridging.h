@@ -13,6 +13,7 @@
 
 // Success code
 #define SUCCESS 0
+#define NO_FRAGMENT_AVAILABLE 1
 
 // Error codes
 #define ERROR_NULL_POINTER -1
@@ -56,6 +57,33 @@ int32_t offline_protocol_ble_peer_lost(ProtocolHandle *handle,
 int32_t offline_protocol_ble_status_changed(ProtocolHandle *handle,
                                              int32_t status);
 int32_t offline_protocol_ble_get_peer_count(ProtocolHandle *handle);
+int32_t offline_protocol_ble_fragment_received(ProtocolHandle *handle,
+                                               const uint8_t *fragment_data,
+                                               uintptr_t data_len);
+int32_t offline_protocol_ble_get_next_fragment(ProtocolHandle *handle,
+                                               char *recipient_out,
+                                               uintptr_t recipient_out_len,
+                                               uint8_t *fragment_out,
+                                               uintptr_t fragment_out_len,
+                                               uintptr_t *fragment_len_out);
+int32_t offline_protocol_ble_return_fragment(ProtocolHandle *handle,
+                                             const char *recipient,
+                                             const uint8_t *fragment_data,
+                                             uintptr_t fragment_len);
+
+// Visualization functions
+int32_t offline_protocol_get_topology(ProtocolHandle *handle,
+                                      char *out_buffer,
+                                      uintptr_t buffer_len);
+int32_t offline_protocol_get_message_stats(ProtocolHandle *handle,
+                                           char *out_buffer,
+                                           uintptr_t buffer_len);
+int32_t offline_protocol_get_delivery_success_rate(ProtocolHandle *handle,
+                                                   float *out_rate);
+int32_t offline_protocol_get_median_latency(ProtocolHandle *handle,
+                                            uint64_t *out_latency);
+int32_t offline_protocol_get_median_hops(ProtocolHandle *handle,
+                                         uint8_t *out_hops);
 
 #endif /* offline_protocol_bridging_h */
 
