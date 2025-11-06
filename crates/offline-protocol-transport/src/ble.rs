@@ -186,6 +186,25 @@ impl BleTransport {
         metrics.queue_depth = send_len + fragment_len;
     }
 
+    /// Records a successful send for metrics tracking.
+    pub fn record_send_success(&self) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.success_count = metrics.success_count.saturating_add(1);
+    }
+
+    /// Records a failed send for metrics tracking.
+    pub fn record_send_failure(&self) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.failure_count = metrics.failure_count.saturating_add(1);
+    }
+
+    /// Gets current queue depth for metrics.
+    pub fn get_queue_depth(&self) -> usize {
+        let send_len = self.send_queue.lock().unwrap().len();
+        let fragment_len = self.pending_fragments.lock().unwrap().len();
+        send_len + fragment_len
+    }
+
     /// Processes the send queue (to be called by platform implementation).
     pub fn dequeue_send(&self) -> Option<(String, Message)> {
         let result = {

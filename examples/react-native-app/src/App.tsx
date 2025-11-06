@@ -37,13 +37,29 @@ export default function App() {
   } = useOfflineProtocol({
     appId: 'offline-protocol-example',
     userId,
-    transport: {
-      bleEnabled: true,
-      wifiDirectEnabled: true,
-      internetEnabled: true,
+    transports: {
+      ble: {
+        enabled: true,
+      },
+      internet: {
+        enabled: false, // Enable if you have a relay server
+        serverAddress: 'wss://relay.example.com',
+        autoReconnect: true,
+      },
+      wifiDirect: {
+        enabled: false, // Android only
+        deviceName: 'OfflineProtocolDevice',
+        autoAccept: false,
+      },
     },
     dors: {
-      preferOnline: true,
+      preferOnline: false, // Set to true to prefer Internet when available
+      switchHysteresis: 15.0, // Minimum score improvement to switch
+      switchCooldownSecs: 20, // Cooldown after switching
+      bleToWifiRetryThreshold: 2, // Retries before escalating to WiFi Direct
+      rssiSwitchThreshold: -85, // RSSI threshold for switching (dBm)
+      congestionQueueThreshold: 50, // Queue depth for congestion
+      stabilityWindowSecs: 8, // Stability check window
     },
     relay: {
       allowRelay: true,

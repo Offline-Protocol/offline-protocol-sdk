@@ -454,4 +454,52 @@ int32_t offline_protocol_get_median_latency(struct ProtocolHandle *handle, uint6
  */
 int32_t offline_protocol_get_median_hops(struct ProtocolHandle *handle, uint8_t *out_hops);
 
+/**
+ * Updates transport metrics for DORS scoring.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `transport_type` must be one of: 0 (Internet), 1 (BLE), 2 (WiFiDirect).
+ *
+ * # Arguments
+ *
+ * - `rssi`: Signal strength in dBm (or -1 if not applicable)
+ * - `latency_ms`: Latency in milliseconds (or 0 if not applicable)
+ * - `bandwidth_bps`: Bandwidth in bytes per second (or 0 if not applicable)
+ * - `congestion`: Congestion level from 0.0 to 1.0
+ * - `queue_depth`: Number of messages in send queue
+ * - `success_count`: Number of successful sends in last window
+ * - `failure_count`: Number of failed sends in last window
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ */
+int32_t offline_protocol_update_transport_metrics(struct ProtocolHandle *handle,
+                                                  int32_t transport_type,
+                                                  int16_t rssi,
+                                                  uint32_t latency_ms,
+                                                  uint64_t bandwidth_bps,
+                                                  float congestion,
+                                                  uintptr_t queue_depth,
+                                                  uint32_t success_count,
+                                                  uint32_t failure_count);
+
+/**
+ * Checks if DORS should escalate from BLE to Wi-Fi Direct.
+ *
+ * # Safety
+ *
+ * - `handle` must be a valid pointer returned by `offline_protocol_create`.
+ * - `out_should_escalate` must be a valid pointer to store the result.
+ *
+ * # Returns
+ *
+ * Returns SUCCESS on success, or an error code on failure.
+ * Sets `out_should_escalate` to 1 if escalation is needed, 0 otherwise.
+ */
+int32_t offline_protocol_should_escalate_to_wifi(struct ProtocolHandle *handle,
+                                                 int32_t *out_should_escalate);
+
 #endif /* OFFLINE_PROTOCOL_H */

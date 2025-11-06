@@ -311,21 +311,33 @@ wasm-pack build --target web --out-dir pkg
 {
   appId: 'emergency-app',
   userId: userId,
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: true,
-    internetEnabled: false,  // Offline only
+  transports: {
+    ble: {
+      enabled: true,
+    },
+    wifiDirect: {
+      enabled: true, // Android only
+      deviceName: 'EmergencyDevice',
+      autoAccept: false,
+      groupOwnerIntent: 15, // High priority to be group owner
+    },
+    internet: {
+      enabled: false, // Offline only
+    },
   },
   dors: {
     preferOnline: false,
+    switchHysteresis: 10.0, // More aggressive switching
+    bleToWifiRetryThreshold: 1, // Escalate faster in emergencies
+    rssiSwitchThreshold: -80, // Switch earlier on weak signal
   },
   relay: {
     allowRelay: true,
-    minBatteryForRelay: 15,  // Lower for emergencies
+    minBatteryForRelay: 15, // Lower for emergencies
     relayThreshold: 2,
   },
   network: {
-    initialTtl: 10,  // Higher TTL for wider coverage
+    initialTtl: 10, // Higher TTL for wider coverage
   }
 }
 ```
@@ -335,18 +347,118 @@ wasm-pack build --target web --out-dir pkg
 {
   appId: 'chat-app',
   userId: userId,
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: true,
-    internetEnabled: true,
+  transports: {
+    ble: {
+      enabled: true,
+    },
+    internet: {
+      enabled: true,
+      serverAddress: 'wss://relay.example.com',
+      autoReconnect: true,
+      reconnectDelay: 5000,
+    },
+    wifiDirect: {
+      enabled: true, // Android only - fallback when offline
+      deviceName: 'ChatDevice',
+      autoAccept: false,
+    },
   },
   dors: {
-    preferOnline: true,  // Online-first
+    preferOnline: true, // Online-first
+    switchHysteresis: 15.0,
+    switchCooldownSecs: 20,
+    bleToWifiRetryThreshold: 2,
   },
   relay: {
     allowRelay: true,
     minBatteryForRelay: 30,
   },
+}
+```
+
+**BLE-Only App** (e.g., Local Mesh):
+```typescript
+{
+  appId: 'mesh-app',
+  userId: userId,
+  transports: {
+    ble: {
+      enabled: true,
+    },
+    internet: {
+      enabled: false,
+    },
+    wifiDirect: {
+      enabled: false,
+    },
+  },
+  dors: {
+    preferOnline: false,
+  },
+}
+```
+
+### DORS Tuning Guide
+
+DORS uses a multi-factor scoring system to select the optimal transport. Understanding these parameters helps you tune behavior for your use case:
+
+**Core Configuration Options:**
+
+| Parameter | Default | Description | When to Adjust |
+|-----------|---------|-------------|----------------|
+| `preferOnline` | `false` | Prefer Internet when available | Set `true` for hybrid apps that prioritize server connectivity |
+| `switchHysteresis` | `15.0` | Minimum score improvement to switch | Lower (5-10) for responsive switching, higher (20-30) for stability |
+| `switchCooldownSecs` | `20` | Wait time after switching | Lower (5-10) in fast-changing environments, higher (30-60) for stability |
+| `bleToWifiRetryThreshold` | `2` | BLE failures before escalating | Lower (1) for faster escalation, higher (3-5) to avoid premature switching |
+| `rssiSwitchThreshold` | `-85` | RSSI trigger for BLE→WiFi switch | Higher (-75 to -80) for aggressive switching, lower (-90) to stay on BLE longer |
+| `congestionQueueThreshold` | `50` | Queue depth indicating congestion | Lower (20-30) for low-latency apps, higher (100+) for batch processing |
+| `stabilityWindowSecs` | `8` | Period to verify new transport is better | Lower (3-5) for fast adaptation, higher (15-30) for conservative switching |
+
+**Transport Scoring Weights:**
+
+DORS scores each transport on multiple factors:
+
+**BLE Transport Score:**
+- Signal strength (30%): Based on RSSI
+- Energy efficiency (30%): BLE is low power
+- Congestion (20%): Queue depth and failure rate
+- Proximity (20%): Hop count
+
+**WiFi Direct Score:**
+- Bandwidth (40%): High throughput capability
+- Proximity (30%): Direct peer-to-peer
+- Congestion (30%): Queue and success rate
+
+**Internet Score:**
+- Always 100 when `preferOnline: true` and connected
+- Always 0 when `preferOnline: false`
+
+**Tuning Examples:**
+
+*Aggressive switching for real-time apps:*
+```typescript
+dors: {
+  switchHysteresis: 5.0,
+  switchCooldownSecs: 5,
+  stabilityWindowSecs: 3,
+}
+```
+
+*Conservative switching for batch/background sync:*
+```typescript
+dors: {
+  switchHysteresis: 25.0,
+  switchCooldownSecs: 60,
+  stabilityWindowSecs: 20,
+}
+```
+
+*Fast WiFi Direct escalation for high-bandwidth needs:*
+```typescript
+dors: {
+  bleToWifiRetryThreshold: 1,
+  rssiSwitchThreshold: -75,
+  congestionQueueThreshold: 20,
 }
 ```
 

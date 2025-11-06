@@ -152,3 +152,4 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeCleanupBleBridge(
 } // extern "C"
 
 
+

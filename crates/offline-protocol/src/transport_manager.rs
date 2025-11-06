@@ -186,6 +186,21 @@ impl TransportManager {
     pub fn get_active_transports(&self) -> Vec<TransportType> {
         self.transports.keys().copied().collect()
     }
+
+    /// Checks if DORS suggests escalating from BLE to WiFi Direct.
+    pub fn should_escalate_to_wifi(&self) -> bool {
+        self.selector.should_escalate_to_wifi()
+    }
+
+    /// Records a retry failure for the given transport.
+    pub fn record_retry_failure(&mut self, transport_type: TransportType) {
+        self.selector.record_retry_failure(transport_type);
+    }
+
+    /// Resets retry count for the given transport after successful delivery.
+    pub fn reset_retry_count(&mut self, transport_type: TransportType) {
+        self.selector.reset_retry_count(transport_type);
+    }
 }
 
 #[cfg(test)]

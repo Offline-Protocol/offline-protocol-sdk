@@ -19,6 +19,9 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var bleRecipientBuffer = [CChar](repeating: 0, count: 256)
     private var bleFragmentBuffer = [UInt8](repeating: 0, count: 512)
     private var hasListeners = false
+    private var bleSendSuccessCount: UInt32 = 0
+    private var bleSendFailureCount: UInt32 = 0
+    private var bleLastRssi: Int16 = -1
     
     // Event names
     private enum Events {
@@ -120,6 +123,52 @@ class OfflineProtocolModule: RCTEventEmitter {
             protocolHandle = nil
             rejecter("ERROR_CALLBACK_FAILED", "Failed to set event callback", nil)
             return
+        }
+        
+        // Optionally enable Internet and WiFi Direct transports based on config
+        if let jsonData = configJson.data(using: .utf8),
+           let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+           let transports = config["transports"] as? [String: Any] {
+            
+            // Enable Internet transport if configured
+            if let internetConfig = transports["internet"] as? [String: Any],
+               let enabled = internetConfig["enabled"] as? Bool, enabled {
+                do {
+                    let internetConfigData = try JSONSerialization.data(withJSONObject: internetConfig)
+                    if let internetConfigJson = String(data: internetConfigData, encoding: .utf8) {
+                        let result = internetConfigJson.withCString { configPtr in
+                            offline_protocol_add_internet_transport(handle, configPtr)
+                        }
+                        if result == SUCCESS {
+                            NSLog("[OfflineProtocol] Internet transport enabled")
+                        } else {
+                            NSLog("[OfflineProtocol] Failed to enable Internet transport: \(result)")
+                        }
+                    }
+                } catch {
+                    NSLog("[OfflineProtocol] Error serializing Internet config: \(error)")
+                }
+            }
+            
+            // Enable WiFi Direct transport if configured
+            if let wifiDirectConfig = transports["wifiDirect"] as? [String: Any],
+               let enabled = wifiDirectConfig["enabled"] as? Bool, enabled {
+                do {
+                    let wifiDirectConfigData = try JSONSerialization.data(withJSONObject: wifiDirectConfig)
+                    if let wifiDirectConfigJson = String(data: wifiDirectConfigData, encoding: .utf8) {
+                        let result = wifiDirectConfigJson.withCString { configPtr in
+                            offline_protocol_add_wifi_direct_transport(handle, configPtr)
+                        }
+                        if result == SUCCESS {
+                            NSLog("[OfflineProtocol] WiFi Direct transport enabled")
+                        } else {
+                            NSLog("[OfflineProtocol] Failed to enable WiFi Direct transport: \(result)")
+                        }
+                    }
+                } catch {
+                    NSLog("[OfflineProtocol] Error serializing WiFi Direct config: \(error)")
+                }
+            }
         }
         
         resolver(nil)
@@ -399,6 +448,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             let sendSucceeded = manager.sendMessage(recipientId: recipient, messageData: messageData)
             if !sendSucceeded {
+                recordBleSendFailure()
                 recipient.withCString { recipientPtr in
                     messageData.withUnsafeBytes { buffer in
                         if let baseAddress = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) {
@@ -415,6 +465,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                     }
                 }
                 break
+            } else {
+                recordBleSendSuccess()
             }
         }
     }
@@ -429,6 +481,42 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     // MARK: - BLE Manager
+    
+    private func updateBleMetrics(rssi: Int16 = -1) {
+        guard let handle = protocolHandle else { return }
+        
+        // Update RSSI if provided
+        if rssi != -1 {
+            bleLastRssi = rssi
+        }
+        
+        // Transport type 1 = BLE
+        let result = offline_protocol_update_transport_metrics(
+            handle,
+            1, // BLE
+            bleLastRssi,
+            0, // latencyMs - not tracking yet
+            150_000, // bandwidthBps - typical BLE ~150 KB/s
+            0.0, // congestion
+            0, // queueDepth - BLE queue is managed in Rust
+            bleSendSuccessCount,
+            bleSendFailureCount
+        )
+        
+        if result != SUCCESS {
+            NSLog("[OfflineProtocol] Failed to update BLE metrics: \(result)")
+        }
+    }
+    
+    private func recordBleSendSuccess() {
+        bleSendSuccessCount += 1
+        updateBleMetrics()
+    }
+    
+    private func recordBleSendFailure() {
+        bleSendFailureCount += 1
+        updateBleMetrics()
+    }
     
     private func initializeBleManager() {
         if bleManager != nil {
@@ -452,6 +540,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                         }
                     }
                 }
+                
+                // Update BLE metrics with RSSI value
+                self?.updateBleMetrics(rssi: Int16(rssi))
             }
             
             // Emit neighbor_discovered event (matches NetworkScreen expectations)
@@ -536,30 +627,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
             }
             
-            // Emit transport_switched event when BLE becomes available
-            if status == .available || status == .scanning || status == .advertising {
-                let eventJson = """
-                {
-                    "type": "transport_switched",
-                    "from": null,
-                    "to": "ble",
-                    "reason": "BLE transport became available",
-                    "timestamp": \(Date().timeIntervalSince1970 * 1000)
-                }
-                """
-                self?.handleEvent(eventJson)
-            } else if status == .disconnected {
-                let eventJson = """
-                {
-                    "type": "transport_switched",
-                    "from": "ble",
-                    "to": "none",
-                    "reason": "BLE transport disconnected",
-                    "timestamp": \(Date().timeIntervalSince1970 * 1000)
-                }
-                """
-                self?.handleEvent(eventJson)
-            }
+            // Note: transport_switched events are now emitted by Rust DORS core
+            // No need to synthesize them here
         }
         
         manager.onDiagnostic = { [weak self] message in

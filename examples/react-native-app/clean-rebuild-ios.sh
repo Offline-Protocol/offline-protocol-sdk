@@ -41,3 +41,4 @@ echo "  1. Product → Clean Build Folder (Cmd+Shift+K)"
 echo "  2. Product → Build (Cmd+B)"
 echo "  3. Check the Issue Navigator (Cmd+5) for detailed error"
 
+

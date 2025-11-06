@@ -11,6 +11,7 @@ description = "C FFI bindings for the Offline Protocol SDK"
 [dependencies]
 offline-protocol = { workspace = true }
 offline-protocol-core = { workspace = true }
+offline-protocol-router = { workspace = true }
 offline-protocol-transport = { workspace = true }
 serde_json = { workspace = true }
 

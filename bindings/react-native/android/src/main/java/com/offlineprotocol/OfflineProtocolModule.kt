@@ -111,6 +111,39 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             protocolHandle = handle
+            
+            // Optionally enable Internet and WiFi Direct transports based on config
+            try {
+                val transports = config.optJSONObject("transports")
+                
+                // Enable Internet transport if configured
+                val internetConfig = transports?.optJSONObject("internet")
+                if (internetConfig?.optBoolean("enabled", false) == true) {
+                    val internetConfigJson = internetConfig.toString()
+                    val result = nativeAddInternetTransport(handle, internetConfigJson)
+                    if (result == SUCCESS) {
+                        android.util.Log.d(NAME, "Internet transport enabled")
+                    } else {
+                        android.util.Log.w(NAME, "Failed to enable Internet transport: $result")
+                    }
+                }
+                
+                // Enable WiFi Direct transport if configured
+                val wifiDirectConfig = transports?.optJSONObject("wifiDirect")
+                if (wifiDirectConfig?.optBoolean("enabled", false) == true) {
+                    val wifiDirectConfigJson = wifiDirectConfig.toString()
+                    val result = nativeAddWifiDirectTransport(handle, wifiDirectConfigJson)
+                    if (result == SUCCESS) {
+                        android.util.Log.d(NAME, "WiFi Direct transport enabled")
+                    } else {
+                        android.util.Log.w(NAME, "Failed to enable WiFi Direct transport: $result")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(NAME, "Error enabling additional transports: ${e.message}")
+                // Don't fail the entire create, just log the warning
+            }
+            
             promise.resolve(null)
         } catch (e: SecurityException) {
             // Permission error - can happen if permissions are revoked after app start
@@ -285,11 +318,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             val sendSucceeded = nativeSendBleMessage(recipient, payload)
             if (!sendSucceeded) {
+                recordBleSendFailure()
                 val requeueResult = nativeBleReturnFragment(handle, recipient, payload, fragmentLength)
                 if (requeueResult != SUCCESS) {
                     android.util.Log.e(NAME, "Failed to requeue BLE fragment: $requeueResult")
                 }
                 break
+            } else {
+                recordBleSendSuccess()
             }
         }
     }
@@ -442,6 +478,46 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     // Initialize BLE manager
+    private var bleSendSuccessCount = 0
+    private var bleSendFailureCount = 0
+    private var bleLastRssi: Short = -1
+
+    private fun updateBleMetrics(rssi: Short = -1) {
+        if (protocolHandle == 0L) return
+        
+        // Update RSSI if provided
+        if (rssi != (-1).toShort()) {
+            bleLastRssi = rssi
+        }
+        
+        // Transport type 1 = BLE
+        val result = nativeUpdateTransportMetrics(
+            protocolHandle,
+            transportType = 1, // BLE
+            rssi = bleLastRssi,
+            latencyMs = 0, // Not tracking yet
+            bandwidthBps = 150_000, // Typical BLE bandwidth ~150 KB/s
+            congestion = 0.0f, // Could calculate based on queue depth
+            queueDepth = 0, // BLE queue is managed in Rust
+            successCount = bleSendSuccessCount,
+            failureCount = bleSendFailureCount
+        )
+        
+        if (result != SUCCESS) {
+            android.util.Log.d(NAME, "Failed to update BLE metrics: $result")
+        }
+    }
+
+    private fun recordBleSendSuccess() {
+        bleSendSuccessCount++
+        updateBleMetrics()
+    }
+
+    private fun recordBleSendFailure() {
+        bleSendFailureCount++
+        updateBleMetrics()
+    }
+
     private fun initializeBleManager() {
         if (bleManager != null) {
             return // Already initialized
@@ -461,6 +537,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     } else {
                         android.util.Log.d(NAME, "Successfully notified Rust transport of peer: $peerId")
                     }
+                    
+                    // Update BLE metrics with RSSI value
+                    updateBleMetrics(rssi.toShort())
                 }
                 
                 // Emit neighbor_discovered event (matches NetworkScreen expectations)
@@ -539,37 +618,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     }
                 }
                 
-                // Emit transport_switched event when BLE becomes available
-                when (status) {
-                    BleManager.Status.AVAILABLE, BleManager.Status.SCANNING, 
-                    BleManager.Status.ADVERTISING -> {
-                        val eventJson = """
-                            {
-                                "type": "transport_switched",
-                                "from": null,
-                                "to": "ble",
-                                "reason": "BLE transport became available",
-                                "timestamp": ${System.currentTimeMillis()}
-                            }
-                        """.trimIndent()
-                        handleEvent(eventJson)
-                    }
-                    BleManager.Status.DISCONNECTED -> {
-                        val eventJson = """
-                            {
-                                "type": "transport_switched",
-                                "from": "ble",
-                                "to": "none",
-                                "reason": "BLE transport disconnected",
-                                "timestamp": ${System.currentTimeMillis()}
-                            }
-                        """.trimIndent()
-                        handleEvent(eventJson)
-                    }
-                    else -> {
-                        // Do nothing for other statuses
-                    }
-                }
+                // Note: transport_switched events are now emitted by Rust DORS core
+                // No need to synthesize them here
             },
             onDiagnostic = { message ->
                 android.util.Log.d(NAME, message)
@@ -624,4 +674,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private external fun nativeBleFragmentReceived(handle: Long, fragmentData: ByteArray): Int
     private external fun nativeBleGetNextFragment(handle: Long, recipientBuffer: ByteArray, fragmentBuffer: ByteArray): Int
     private external fun nativeBleReturnFragment(handle: Long, recipient: String, fragmentData: ByteArray, fragmentLength: Int): Int
+    
+    // Transport management methods
+    private external fun nativeUpdateTransportMetrics(
+        handle: Long,
+        transportType: Int,
+        rssi: Short,
+        latencyMs: Int,
+        bandwidthBps: Long,
+        congestion: Float,
+        queueDepth: Int,
+        successCount: Int,
+        failureCount: Int
+    ): Int
+    private external fun nativeShouldEscalateToWifi(handle: Long): Int
+    private external fun nativeAddInternetTransport(handle: Long, configJson: String?): Int
+    private external fun nativeAddWifiDirectTransport(handle: Long, configJson: String?): Int
 }

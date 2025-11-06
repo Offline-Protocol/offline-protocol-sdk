@@ -72,8 +72,20 @@ export interface ProtocolConfig {
   transports?: TransportsConfig;
   /** DORS configuration (optional) */
   dors?: {
-    /** Prefer online mode */
+    /** Prefer online mode (default: false) */
     preferOnline?: boolean;
+    /** Minimum score improvement required to switch transports (default: 15.0) */
+    switchHysteresis?: number;
+    /** Cooldown period after switching in seconds (default: 20) */
+    switchCooldownSecs?: number;
+    /** Number of retry failures before escalating from BLE to Wi-Fi Direct (default: 2) */
+    bleToWifiRetryThreshold?: number;
+    /** RSSI threshold for switching from BLE to Wi-Fi Direct in dBm (default: -85) */
+    rssiSwitchThreshold?: number;
+    /** Queue depth threshold for detecting congestion (default: 50) */
+    congestionQueueThreshold?: number;
+    /** Duration for checking stability before switching in seconds (default: 8) */
+    stabilityWindowSecs?: number;
   };
   /** Relay configuration (optional) */
   relay?: {

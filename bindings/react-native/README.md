@@ -96,7 +96,13 @@ interface ProtocolConfig {
     internetEnabled?: boolean;  // Enable Internet transport (default: true)
   };
   dors?: {                      // DORS configuration
-    preferOnline?: boolean;     // Prefer online mode (default: true)
+    preferOnline?: boolean;     // Prefer online mode (default: false)
+    switchHysteresis?: number;  // Min score improvement to switch (default: 15.0)
+    switchCooldownSecs?: number; // Cooldown after switching (default: 20)
+    bleToWifiRetryThreshold?: number; // BLE failures before WiFi escalation (default: 2)
+    rssiSwitchThreshold?: number; // RSSI trigger for BLE→WiFi (default: -85 dBm)
+    congestionQueueThreshold?: number; // Queue depth for congestion (default: 50)
+    stabilityWindowSecs?: number; // Stability verification window (default: 8)
   };
   relay?: {                     // Relay configuration
     allowRelay?: boolean;       // Allow device to act as relay (default: true)
@@ -373,20 +379,31 @@ function ChatScreen({ userId, recipientId }) {
 const protocol = new OfflineProtocol({
   appId: 'emergency-app',
   userId: 'responder-123',
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: true,
-    internetEnabled: false,  // Offline only!
+  transports: {
+    ble: {
+      enabled: true,
+    },
+    wifiDirect: {
+      enabled: true, // Android only
+      deviceName: 'EmergencyDevice',
+      autoAccept: false,
+      groupOwnerIntent: 15, // High priority to be group owner
+    },
+    internet: {
+      enabled: false, // Offline only!
+    },
   },
   dors: {
     preferOnline: false,
+    switchHysteresis: 10.0, // Aggressive switching for emergencies
+    bleToWifiRetryThreshold: 1, // Fast escalation
   },
   relay: {
     allowRelay: true,
-    minBatteryForRelay: 15,  // Lower threshold for emergencies
+    minBatteryForRelay: 15, // Lower threshold for emergencies
   },
   network: {
-    initialTtl: 10,  // Higher TTL for wider coverage
+    initialTtl: 10, // Higher TTL for wider coverage
   },
 });
 ```

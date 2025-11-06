@@ -69,6 +69,21 @@ extern "C" {
                                                 uint64_t* out_latency);
     int32_t offline_protocol_get_median_hops(ProtocolHandle* handle,
                                              uint8_t* out_hops);
+    int32_t offline_protocol_update_transport_metrics(ProtocolHandle* handle,
+                                                       int32_t transport_type,
+                                                       int16_t rssi,
+                                                       uint32_t latency_ms,
+                                                       uint64_t bandwidth_bps,
+                                                       float congestion,
+                                                       uintptr_t queue_depth,
+                                                       uint32_t success_count,
+                                                       uint32_t failure_count);
+    int32_t offline_protocol_should_escalate_to_wifi(ProtocolHandle* handle,
+                                                      int32_t* out_should_escalate);
+    int32_t offline_protocol_add_internet_transport(ProtocolHandle* handle,
+                                                     const char* config_json);
+    int32_t offline_protocol_add_wifi_direct_transport(ProtocolHandle* handle,
+                                                        const char* config_json);
 }
 
 // Error codes
@@ -478,6 +493,100 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeGetMedianHops(
     }
     
     return static_cast<jint>(hops);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeUpdateTransportMetrics(
+    JNIEnv* env, jobject thiz, jlong handlePtr,
+    jint transportType, jshort rssi, jint latencyMs,
+    jlong bandwidthBps, jfloat congestion, jint queueDepth,
+    jint successCount, jint failureCount) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    return offline_protocol_update_transport_metrics(
+        handle,
+        static_cast<int32_t>(transportType),
+        static_cast<int16_t>(rssi),
+        static_cast<uint32_t>(latencyMs),
+        static_cast<uint64_t>(bandwidthBps),
+        static_cast<float>(congestion),
+        static_cast<uintptr_t>(queueDepth),
+        static_cast<uint32_t>(successCount),
+        static_cast<uint32_t>(failureCount)
+    );
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeShouldEscalateToWifi(
+    JNIEnv* env, jobject thiz, jlong handlePtr) {
+    
+    if (handlePtr == 0) {
+        return -1;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    int32_t shouldEscalate = 0;
+    int32_t result = offline_protocol_should_escalate_to_wifi(handle, &shouldEscalate);
+    
+    if (result != SUCCESS) {
+        return -1;
+    }
+    
+    return static_cast<jint>(shouldEscalate);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeAddInternetTransport(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jstring configJson) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    const char* config = nullptr;
+    if (configJson != nullptr) {
+        config = env->GetStringUTFChars(configJson, nullptr);
+    }
+    
+    int32_t result = offline_protocol_add_internet_transport(handle, config);
+    
+    if (config != nullptr) {
+        env->ReleaseStringUTFChars(configJson, config);
+    }
+    
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_offlineprotocol_OfflineProtocolModule_nativeAddWifiDirectTransport(
+    JNIEnv* env, jobject thiz, jlong handlePtr, jstring configJson) {
+    
+    if (handlePtr == 0) {
+        return ERROR_NULL_POINTER;
+    }
+    
+    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
+    
+    const char* config = nullptr;
+    if (configJson != nullptr) {
+        config = env->GetStringUTFChars(configJson, nullptr);
+    }
+    
+    int32_t result = offline_protocol_add_wifi_direct_transport(handle, config);
+    
+    if (config != nullptr) {
+        env->ReleaseStringUTFChars(configJson, config);
+    }
+    
+    return result;
 }
 
 } // extern "C"

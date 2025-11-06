@@ -229,8 +229,24 @@ impl OfflineProtocol {
         // Mark as seen
         self.deduplicator.mark_seen(message_id.clone());
 
+        // Track previous transport
+        let previous_transport = self.transport_manager.current_transport();
+
         // Send via transport manager (DORS will select best transport)
         self.transport_manager.send(&message)?;
+
+        // Check if transport switched
+        let current_transport = self.transport_manager.current_transport();
+        if current_transport != previous_transport {
+            if let Some(new_transport) = current_transport {
+                let state = self.shared_state.lock().unwrap();
+                state.emit_event(Event::transport_switched(
+                    previous_transport,
+                    new_transport,
+                    "DORS selected better transport".to_string(),
+                ));
+            }
+        }
 
         // Register for ACK if required
         if message.requires_ack {
@@ -318,15 +334,28 @@ impl OfflineProtocol {
 
         // Check for retry-ready messages
         while let Some(entry) = self.retry_queue.dequeue_ready() {
+            // Track which transport was used for retry
+            let previous_transport = self.transport_manager.current_transport();
+            
             // Try to resend
             if self.transport_manager.send(&entry.message).is_err() {
                 // Re-enqueue with incremented retry count
                 let _ = self
                     .retry_queue
                     .enqueue(entry.message.clone(), entry.retry_count + 1);
+                
+                // Record retry failure for DORS
+                if let Some(transport) = previous_transport {
+                    self.transport_manager.record_retry_failure(transport);
+                }
             } else {
                 // Reset ACK timer
                 self.ack_manager.increment_retry_count(&entry.message.id);
+                
+                // Record retry success for DORS
+                if let Some(transport) = self.transport_manager.current_transport() {
+                    self.transport_manager.reset_retry_count(transport);
+                }
             }
         }
 
@@ -354,6 +383,26 @@ impl OfflineProtocol {
         // Cleanup expired entries
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
+
+        // Check for DORS escalation signal
+        if self.transport_manager.should_escalate_to_wifi() {
+            // Check if WiFi Direct is already enabled
+            use offline_protocol_transport::TransportType;
+            let active_transports = self.transport_manager.get_active_transports();
+            
+            if !active_transports.contains(&TransportType::WiFiDirect) {
+                // Emit event suggesting WiFi Direct enablement
+                let state = self.shared_state.lock().unwrap();
+                state.emit_event(Event::transport_switched(
+                    Some(TransportType::BLE),
+                    TransportType::WiFiDirect,
+                    "DORS suggests escalating to WiFi Direct due to BLE failures".to_string(),
+                ));
+                
+                // Note: Actual WiFi Direct transport must be added by platform code
+                // This event serves as a signal to the application layer
+            }
+        }
 
         Ok(())
     }

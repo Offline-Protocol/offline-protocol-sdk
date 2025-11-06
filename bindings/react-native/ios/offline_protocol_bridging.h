@@ -71,6 +71,25 @@ int32_t offline_protocol_ble_return_fragment(ProtocolHandle *handle,
                                              const uint8_t *fragment_data,
                                              uintptr_t fragment_len);
 
+int32_t offline_protocol_update_transport_metrics(ProtocolHandle *handle,
+                                                   int32_t transport_type,
+                                                   int16_t rssi,
+                                                   uint32_t latency_ms,
+                                                   uint64_t bandwidth_bps,
+                                                   float congestion,
+                                                   uintptr_t queue_depth,
+                                                   uint32_t success_count,
+                                                   uint32_t failure_count);
+
+int32_t offline_protocol_should_escalate_to_wifi(ProtocolHandle *handle,
+                                                  int32_t *out_should_escalate);
+
+int32_t offline_protocol_add_internet_transport(ProtocolHandle *handle,
+                                                 const char *config_json);
+
+int32_t offline_protocol_add_wifi_direct_transport(ProtocolHandle *handle,
+                                                    const char *config_json);
+
 // Visualization functions
 int32_t offline_protocol_get_topology(ProtocolHandle *handle,
                                       char *out_buffer,
