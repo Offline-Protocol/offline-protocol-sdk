@@ -18,6 +18,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private val bleRecipientBuffer = ByteArray(256)
     private val bleFragmentBuffer = ByteArray(512)
     private var listenerCount: Int = 0
+    private var bleBridgeInitialized: Boolean = false
 
     companion object {
         const val NAME = "OfflineProtocolModule"
@@ -62,6 +63,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         super.invalidate()
         stopBleFragmentPump()
         stopProcessScheduler()
+        if (bleBridgeInitialized) {
+            nativeCleanupBleBridge()
+            bleBridgeInitialized = false
+        }
         if (protocolHandle != 0L) {
             nativeDestroy(protocolHandle)
             protocolHandle = 0
@@ -174,6 +179,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             stopProcessScheduler()
             bleManager?.stop()
             bleManager = null
+            if (bleBridgeInitialized) {
+                nativeCleanupBleBridge()
+                bleBridgeInitialized = false
+            }
 
             nativeDestroy(protocolHandle)
             protocolHandle = 0
@@ -935,6 +944,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         )
 
         android.util.Log.d(NAME, "BLE manager initialized for device: $deviceId")
+
+        try {
+            bleManager?.let {
+                nativeInitBleBridge(it)
+                bleBridgeInitialized = true
+                android.util.Log.d(NAME, "BLE bridge bound to BleManager instance")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to initialize BLE bridge: ${e.message}", e)
+        }
     }
 
     // Native methods

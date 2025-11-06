@@ -21,6 +21,67 @@ export enum ProtocolState {
   Paused = 2,
 }
 
+export interface AckConfig {
+  /** Default ACK timeout in milliseconds */
+  defaultTimeoutMs?: number;
+  /** Maximum number of pending ACKs */
+  maxPendingAcks?: number;
+}
+
+export interface RetryConfig {
+  /** Maximum number of retries per message */
+  maxRetries?: number;
+  /** Initial retry delay in milliseconds */
+  initialDelayMs?: number;
+  /** Maximum retry delay in milliseconds */
+  maxDelayMs?: number;
+  /** Exponential backoff multiplier */
+  backoffMultiplier?: number;
+  /** Maximum lifetime for outbox messages in milliseconds */
+  outboxMaxLifetimeMs?: number;
+}
+
+export interface DedupConfig {
+  /** Maximum number of message IDs to track */
+  maxTrackedMessages?: number;
+  /** Time to retain IDs in seconds */
+  retentionTimeSecs?: number;
+}
+
+export interface ReliabilityConfig {
+  /** ACK handling configuration */
+  ack?: AckConfig;
+  /** Retry queue configuration */
+  retry?: RetryConfig;
+  /** Deduplication configuration */
+  dedup?: DedupConfig;
+}
+
+export type RelayPriority = 'never' | 'auto' | 'always';
+
+export interface RelayConfig {
+  /** Allow device to act as relay */
+  allowRelay?: boolean;
+  /** Minimum battery level for relaying */
+  minBatteryForRelay?: number;
+  /** Connection threshold for relay promotion */
+  relayThreshold?: number;
+  /** Preferred relay behavior */
+  relayPriority?: RelayPriority;
+}
+
+export interface NetworkConfig {
+  /** Initial TTL (time-to-live) */
+  initialTtl?: number;
+}
+
+export interface PathConfig {
+  /** Number of neighbors to forward to for redundancy */
+  forwardToTopK?: number;
+  /** Maximum acceptable congestion level (0.0-1.0) */
+  maxCongestionLevel?: number;
+}
+
 /**
  * BLE transport configuration
  */
@@ -127,19 +188,13 @@ export interface ProtocolConfig {
     stabilityWindowSecs?: number;
   };
   /** Relay configuration (optional) */
-  relay?: {
-    /** Allow device to act as relay */
-    allowRelay?: boolean;
-    /** Minimum battery level for relaying */
-    minBatteryForRelay?: number;
-    /** Connection threshold for relay promotion */
-    relayThreshold?: number;
-  };
+  relay?: RelayConfig;
   /** Network configuration (optional) */
-  network?: {
-    /** Initial TTL (time-to-live) */
-    initialTtl?: number;
-  };
+  network?: NetworkConfig;
+  /** Reliability configuration (optional) */
+  reliability?: ReliabilityConfig;
+  /** Path selection configuration (optional) */
+  path?: PathConfig;
 }
 
 /**

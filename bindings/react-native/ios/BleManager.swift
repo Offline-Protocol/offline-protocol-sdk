@@ -96,71 +96,89 @@ class BleManager: NSObject {
     // MARK: - Public Methods
     
     @objc func start() -> Bool {
-        NSLog("[BleManager] Starting BLE operations for device: \(deviceId)")
-        onDiagnostic?("[BLE] Starting BLE operations for device: \(deviceId)")
-        
-        shouldStartOperations = true
-        
-        // Initialize central manager (for scanning)
-        if centralManager == nil {
-            onDiagnostic?("[BLE] Initializing Central Manager (scanner)")
-            centralManager = CBCentralManager(delegate: self, queue: nil)
+        var didScheduleStart = false
+        let startBlock = {
+            NSLog("[BleManager] Starting BLE operations for device: \(self.deviceId)")
+            self.onDiagnostic?("[BLE] Starting BLE operations for device: \(self.deviceId)")
+
+            self.shouldStartOperations = true
+
+            // Initialize central manager (for scanning)
+            if self.centralManager == nil {
+                self.onDiagnostic?("[BLE] Initializing Central Manager (scanner)")
+                self.centralManager = CBCentralManager(delegate: self, queue: nil)
+            }
+
+            // Initialize peripheral manager (for advertising)
+            if self.peripheralManager == nil {
+                self.onDiagnostic?("[BLE] Initializing Peripheral Manager (advertiser)")
+                self.peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
+            }
+
+            // Try to start operations if managers are already ready
+            self.startOperationsIfReady()
+            didScheduleStart = true
         }
-        
-        // Initialize peripheral manager (for advertising)
-        if peripheralManager == nil {
-            onDiagnostic?("[BLE] Initializing Peripheral Manager (advertiser)")
-            peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
+
+        if Thread.isMainThread {
+            startBlock()
+        } else {
+            DispatchQueue.main.sync(execute: startBlock)
         }
-        
-        // Try to start operations if managers are already ready
-        startOperationsIfReady()
-        
-        return true
+
+        return didScheduleStart
     }
-    
+
     @objc func stop() {
-        NSLog("[BleManager] Stopping BLE operations")
-        
-        shouldStartOperations = false
-        gattServiceAdded = false
-        
-        // Stop scanning
-        centralManager?.stopScan()
-        
-        // Stop advertising
-        peripheralManager?.stopAdvertising()
-        
-        // Cancel all timeout timers
-        for (_, timer) in connectionTimeouts {
-            timer.invalidate()
+        let stopBlock = {
+            NSLog("[BleManager] Stopping BLE operations")
+
+            self.shouldStartOperations = false
+            self.gattServiceAdded = false
+
+            // Stop scanning
+            self.centralManager?.stopScan()
+
+            // Stop advertising
+            self.peripheralManager?.stopAdvertising()
+
+            // Cancel all timeout timers
+            for (_, timer) in self.connectionTimeouts {
+                timer.invalidate()
+            }
+            self.connectionTimeouts.removeAll()
+
+            for (_, timer) in self.serviceDiscoveryTimeouts {
+                timer.invalidate()
+            }
+            self.serviceDiscoveryTimeouts.removeAll()
+
+            for (_, timer) in self.characteristicDiscoveryTimeouts {
+                timer.invalidate()
+            }
+            self.characteristicDiscoveryTimeouts.removeAll()
+
+            // Disconnect all peripherals
+            for (_, peripheral) in self.connectedPeripherals {
+                self.centralManager?.cancelPeripheralConnection(peripheral)
+            }
+            for (_, peripheral) in self.connectingPeripherals {
+                self.centralManager?.cancelPeripheralConnection(peripheral)
+            }
+            self.connectedPeripherals.removeAll()
+            self.connectingPeripherals.removeAll()
+            self.discoveredPeers.removeAll()
+            self.rssiValues.removeAll()
+            self.discoveredDeviceIds.removeAll()
+
+            self.onStatusChanged?(.disconnected)
         }
-        connectionTimeouts.removeAll()
-        
-        for (_, timer) in serviceDiscoveryTimeouts {
-            timer.invalidate()
+
+        if Thread.isMainThread {
+            stopBlock()
+        } else {
+            DispatchQueue.main.sync(execute: stopBlock)
         }
-        serviceDiscoveryTimeouts.removeAll()
-        
-        for (_, timer) in characteristicDiscoveryTimeouts {
-            timer.invalidate()
-        }
-        characteristicDiscoveryTimeouts.removeAll()
-        
-        // Disconnect all peripherals
-        for (_, peripheral) in connectedPeripherals {
-            centralManager?.cancelPeripheralConnection(peripheral)
-        }
-        for (_, peripheral) in connectingPeripherals {
-            centralManager?.cancelPeripheralConnection(peripheral)
-        }
-        connectedPeripherals.removeAll()
-        connectingPeripherals.removeAll()
-        discoveredPeers.removeAll()
-        rssiValues.removeAll()
-        discoveredDeviceIds.removeAll()
-        
-        onStatusChanged?(.disconnected)
     }
     
     @objc func sendMessage(recipientId: String, messageData: Data) -> Bool {

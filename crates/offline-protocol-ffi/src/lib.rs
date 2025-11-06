@@ -16,6 +16,7 @@
 use offline_protocol::{OfflineProtocol, ProtocolConfig, NetworkVisualizer};
 use offline_protocol::file_transfer::{FileTransferManager, FileChunk};
 use offline_protocol_router::DorsConfig;
+use offline_protocol_router::relay::RelayPriority;
 use offline_protocol_transport::{BleTransport, PeerDevice, TransportStatus};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
@@ -178,21 +179,116 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
             protocol_config.dors = dors;
         }
 
+        // Parse transport configuration flags early so validation matches runtime transports
+        let transports_config = config_value.get("transports");
+
+        let ble_enabled = transports_config
+            .and_then(|t| t.get("ble"))
+            .and_then(|b| b.get("enabled"))
+            .and_then(|e| e.as_bool())
+            .unwrap_or(true);
+
+        let internet_enabled = transports_config
+            .and_then(|t| t.get("internet"))
+            .and_then(|i| i.get("enabled"))
+            .and_then(|e| e.as_bool())
+            .unwrap_or(false);
+
+        let wifi_direct_enabled = transports_config
+            .and_then(|t| t.get("wifiDirect"))
+            .and_then(|w| w.get("enabled"))
+            .and_then(|e| e.as_bool())
+            .unwrap_or(false);
+
+        protocol_config.transport.ble_enabled = ble_enabled;
+        protocol_config.transport.internet_enabled = internet_enabled;
+        protocol_config.transport.wifi_direct_enabled = wifi_direct_enabled;
+
+        // Network configuration (initial TTL, etc.)
+        if let Some(network_config) = config_value.get("network") {
+            if let Some(initial_ttl) = network_config.get("initialTtl").and_then(|v| v.as_u64()) {
+                let ttl = initial_ttl.max(1).min(u8::MAX as u64) as u8;
+                protocol_config.initial_ttl = ttl;
+            }
+        }
+
+        // Reliability layer configuration (ACK, retry, dedup)
+        if let Some(reliability_config) = config_value.get("reliability") {
+            if let Some(ack_config) = reliability_config.get("ack") {
+                if let Some(timeout) = ack_config.get("defaultTimeoutMs").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.ack.default_timeout_ms = timeout;
+                }
+                if let Some(max_pending) = ack_config.get("maxPendingAcks").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.ack.max_pending_acks = max_pending as usize;
+                }
+            }
+
+            if let Some(retry_config) = reliability_config.get("retry") {
+                if let Some(max_retries) = retry_config.get("maxRetries").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.retry.max_retries = max_retries as u32;
+                }
+                if let Some(initial_delay) = retry_config.get("initialDelayMs").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.retry.initial_delay_ms = initial_delay;
+                }
+                if let Some(max_delay) = retry_config.get("maxDelayMs").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.retry.max_delay_ms = max_delay;
+                }
+                if let Some(backoff) = retry_config.get("backoffMultiplier").and_then(|v| v.as_f64()) {
+                    protocol_config.reliability.retry.backoff_multiplier = backoff as f32;
+                }
+                if let Some(outbox_lifetime) = retry_config.get("outboxMaxLifetimeMs").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.retry.outbox_max_lifetime_ms = outbox_lifetime;
+                }
+            }
+
+            if let Some(dedup_config) = reliability_config.get("dedup") {
+                if let Some(max_tracked) = dedup_config.get("maxTrackedMessages").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.dedup.max_tracked_messages = max_tracked as usize;
+                }
+                if let Some(retention) = dedup_config.get("retentionTimeSecs").and_then(|v| v.as_u64()) {
+                    protocol_config.reliability.dedup.retention_time_secs = retention;
+                }
+            }
+        }
+
+        // Relay configuration
+        if let Some(relay_config) = config_value.get("relay") {
+            if let Some(allow_relay) = relay_config.get("allowRelay").and_then(|v| v.as_bool()) {
+                protocol_config.relay.allow_relay = allow_relay;
+            }
+            if let Some(min_battery) = relay_config.get("minBatteryForRelay").and_then(|v| v.as_u64()) {
+                protocol_config.relay.min_battery_for_relay = min_battery.min(100) as u8;
+            }
+            if let Some(threshold) = relay_config.get("relayThreshold").and_then(|v| v.as_u64()) {
+                protocol_config.relay.relay_threshold = threshold as usize;
+            }
+            if let Some(priority_str) = relay_config.get("relayPriority").and_then(|v| v.as_str()) {
+                let priority = match priority_str.to_lowercase().as_str() {
+                    "never" => RelayPriority::Never,
+                    "always" => RelayPriority::Always,
+                    _ => RelayPriority::Auto,
+                };
+                protocol_config.relay.relay_priority = priority;
+            }
+        }
+
+        // Path selection configuration
+        if let Some(path_config) = config_value.get("path") {
+            if let Some(top_k) = path_config.get("forwardToTopK").and_then(|v| v.as_u64()) {
+                protocol_config.path.forward_to_top_k = top_k as usize;
+            }
+            if let Some(max_congestion) = path_config.get("maxCongestionLevel").and_then(|v| v.as_f64()) {
+                protocol_config.path.max_congestion_level = max_congestion as f32;
+            }
+        }
+
         // Create protocol instance
         match OfflineProtocol::new(protocol_config) {
             Ok(mut protocol) => {
                 use offline_protocol_transport::{Transport, TransportType, InternetTransport, InternetConfig, WifiDirectTransport, WifiDirectConfig};
                 
-                // Parse transports configuration
-                let transports_config = config_value.get("transports");
-                
                 // BLE transport (always created for FFI, but may not be enabled)
                 let ble_transport = Arc::new(BleTransport::new(user_id));
-                let ble_enabled = transports_config
-                    .and_then(|t| t.get("ble"))
-                    .and_then(|b| b.get("enabled"))
-                    .and_then(|e| e.as_bool())
-                    .unwrap_or(true); // Default: enabled
                 
                 if ble_enabled {
                     // We need to convert Arc<BleTransport> to Box<dyn Transport>
@@ -232,18 +328,20 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
                 }
                 
                 // Internet transport (optional)
-                if let Some(internet_cfg) = transports_config
-                    .and_then(|t| t.get("internet"))
-                    .filter(|i| i.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
-                {
+                if internet_enabled {
                     let mut config = InternetConfig::default();
-                    if let Some(addr) = internet_cfg.get("serverAddress").and_then(|v| v.as_str()) {
-                        config.server_address = addr.to_string();
+                    if let Some(internet_cfg) = transports_config.and_then(|t| t.get("internet")) {
+                        if let Some(addr) = internet_cfg.get("serverAddress").and_then(|v| v.as_str()) {
+                            config.server_address = addr.to_string();
+                        }
+                        if let Some(auto_reconnect) = internet_cfg.get("autoReconnect").and_then(|v| v.as_bool()) {
+                            config.auto_reconnect = auto_reconnect;
+                        }
+                        if let Some(reconnect_delay) = internet_cfg.get("reconnectDelay").and_then(|v| v.as_u64()) {
+                            config.reconnect_delay = std::time::Duration::from_millis(reconnect_delay);
+                        }
                     }
-                    if let Some(auto_reconnect) = internet_cfg.get("autoReconnect").and_then(|v| v.as_bool()) {
-                        config.auto_reconnect = auto_reconnect;
-                    }
-                    
+
                     let transport = InternetTransport::with_config(user_id, config);
                     protocol.transport_manager_mut().add_transport(
                         TransportType::Internet,
@@ -252,21 +350,20 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
                 }
                 
                 // WiFi Direct transport (optional)
-                if let Some(wifi_cfg) = transports_config
-                    .and_then(|t| t.get("wifiDirect"))
-                    .filter(|w| w.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
-                {
+                if wifi_direct_enabled {
                     let mut config = WifiDirectConfig::default();
-                    if let Some(name) = wifi_cfg.get("deviceName").and_then(|v| v.as_str()) {
-                        config.device_name = name.to_string();
+                    if let Some(wifi_cfg) = transports_config.and_then(|t| t.get("wifiDirect")) {
+                        if let Some(name) = wifi_cfg.get("deviceName").and_then(|v| v.as_str()) {
+                            config.device_name = name.to_string();
+                        }
+                        if let Some(auto_accept) = wifi_cfg.get("autoAccept").and_then(|v| v.as_bool()) {
+                            config.auto_accept = auto_accept;
+                        }
+                        if let Some(intent) = wifi_cfg.get("groupOwnerIntent").and_then(|v| v.as_u64()) {
+                            config.group_owner_intent = intent as u8;
+                        }
                     }
-                    if let Some(auto_accept) = wifi_cfg.get("autoAccept").and_then(|v| v.as_bool()) {
-                        config.auto_accept = auto_accept;
-                    }
-                    if let Some(intent) = wifi_cfg.get("groupOwnerIntent").and_then(|v| v.as_u64()) {
-                        config.group_owner_intent = intent as u8;
-                    }
-                    
+
                     let transport = WifiDirectTransport::with_config(user_id, config);
                     protocol.transport_manager_mut().add_transport(
                         TransportType::WiFiDirect,

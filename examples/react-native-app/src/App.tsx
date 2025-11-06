@@ -65,9 +65,31 @@ export default function App() {
       allowRelay: true,
       minBatteryForRelay: 20,
       relayThreshold: 3,
+      relayPriority: 'auto',
     },
     network: {
       initialTtl: 10,
+    },
+    reliability: {
+      ack: {
+        defaultTimeoutMs: 6000,
+        maxPendingAcks: 2000,
+      },
+      retry: {
+        maxRetries: 5,
+        initialDelayMs: 1500,
+        maxDelayMs: 45000,
+        backoffMultiplier: 2.5,
+        outboxMaxLifetimeMs: 2 * 60 * 60 * 1000, // 2 hours
+      },
+      dedup: {
+        maxTrackedMessages: 20000,
+        retentionTimeSecs: 3 * 60 * 60, // 3 hours
+      },
+    },
+    path: {
+      forwardToTopK: 3,
+      maxCongestionLevel: 0.7,
     },
   });
 
