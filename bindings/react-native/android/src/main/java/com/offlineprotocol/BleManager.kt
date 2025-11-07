@@ -7,6 +7,8 @@ import android.bluetooth.le.*
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
@@ -25,6 +27,7 @@ class BleManager(
     private val context: Context,
     private val deviceId: String,
     private val onPeerDiscovered: (String, String, Int) -> Unit, // deviceId, address, rssi
+    private val onPeerUpdated: (String, String, Int) -> Unit,
     private val onPeerLost: (String) -> Unit,
     private val onMessageReceived: (ByteArray) -> Unit,
     private val onStatusChanged: (Status) -> Unit,
@@ -65,13 +68,61 @@ class BleManager(
     
     // Track connected GATT clients
     private val connectedClients = mutableMapOf<String, BluetoothGatt>()
+    private val connectingClients = mutableMapOf<String, BluetoothGatt>()
+
+    private val peerLossTimeoutMs = 60_000L
+    private val peerCheckIntervalMs = 5_000L
+    private val peerCheckHandler = Handler(Looper.getMainLooper())
+    private val peerCheckRunnable = object : Runnable {
+        override fun run() {
+            checkForExpiredPeers()
+            peerCheckHandler.postDelayed(this, peerCheckIntervalMs)
+        }
+    }
 
     data class DiscoveredPeer(
         val deviceId: String,
-        val address: String,
+        var address: String,
+        var device: BluetoothDevice,
         var rssi: Int,
         var lastSeen: Long
     )
+
+    private fun startPeerExpiryMonitoring() {
+        peerCheckHandler.removeCallbacks(peerCheckRunnable)
+        peerCheckHandler.postDelayed(peerCheckRunnable, peerCheckIntervalMs)
+    }
+
+    private fun stopPeerExpiryMonitoring() {
+        peerCheckHandler.removeCallbacks(peerCheckRunnable)
+    }
+
+    private fun checkForExpiredPeers() {
+        val now = System.currentTimeMillis()
+        val expired = mutableListOf<String>()
+
+        discoveredPeers.forEach { (deviceId, peer) ->
+            val isActive = connectedClients.containsKey(deviceId) || connectingClients.containsKey(deviceId)
+            if (!isActive && now - peer.lastSeen > peerLossTimeoutMs) {
+                expired.add(deviceId)
+            }
+        }
+
+        if (expired.isEmpty()) {
+            return
+        }
+
+        expired.forEach { deviceId ->
+            val removed = discoveredPeers.remove(deviceId)
+            if (removed != null) {
+                discoveredDeviceIds.remove(deviceId)
+                connectedClients.remove(deviceId)?.close()
+                connectingClients.remove(deviceId)?.close()
+                onDiagnostic("[BLE] ⏳ Peer $deviceId expired after ${peerLossTimeoutMs}ms without advertisements")
+                onPeerLost(deviceId)
+            }
+        }
+    }
 
     /**
      * Check if BLE is available and enabled
@@ -132,6 +183,7 @@ class BleManager(
             
             onStatusChanged(Status.AVAILABLE)
             android.util.Log.d(TAG, "BLE started successfully")
+            startPeerExpiryMonitoring()
             return true
         } catch (e: SecurityException) {
             android.util.Log.e(TAG, "Security exception starting BLE", e)
@@ -150,6 +202,7 @@ class BleManager(
     @SuppressLint("MissingPermission")
     fun stop() {
         try {
+            stopPeerExpiryMonitoring()
             stopAdvertising()
             stopScanning()
             stopGattServer()
@@ -159,6 +212,8 @@ class BleManager(
             discoveredDeviceIds.clear()
             connectedClients.values.forEach { it.close() }
             connectedClients.clear()
+            connectingClients.values.forEach { it.close() }
+            connectingClients.clear()
             
             onStatusChanged(Status.DISCONNECTED)
             android.util.Log.d(TAG, "BLE stopped")
@@ -312,7 +367,21 @@ class BleManager(
             val device = result.device
             val rssi = result.rssi
             
-            // Connect to device to read its device ID
+            // Check if we already discovered this device by address
+            // Update existing peer's RSSI without reconnecting
+            val existingPeer = discoveredPeers.values.find { it.address == device.address }
+            if (existingPeer != null) {
+                // Update RSSI, lastSeen, and device reference
+                existingPeer.address = device.address
+                existingPeer.device = device
+                existingPeer.rssi = rssi
+                existingPeer.lastSeen = System.currentTimeMillis()
+                onPeerUpdated(existingPeer.deviceId, device.address, rssi)
+                // Don't reconnect - peer is already known
+                return
+            }
+            
+            // Connect to device to read its device ID (only for new devices)
             device.connectGatt(context, false, object : BluetoothGattCallback() {
                 override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
@@ -320,6 +389,13 @@ class BleManager(
                         gatt.discoverServices()
                     } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                         android.util.Log.d(TAG, "Disconnected from ${device.address}")
+                        val entry = connectedClients.entries.find { it.value == gatt }
+                        if (entry != null) {
+                            connectedClients.remove(entry.key)
+                            discoveredPeers[entry.key]?.let { peer ->
+                                discoveredPeers[entry.key] = peer.copy(lastSeen = System.currentTimeMillis())
+                            }
+                        }
                         gatt.close()
                     }
                 }
@@ -351,19 +427,21 @@ class BleManager(
                         
                         // Check if we've already discovered this peer
                         if (discoveredDeviceIds.contains(remoteDeviceId)) {
-                            // Peer already discovered - update RSSI and timestamp silently
+                            // Peer already discovered - update metadata silently
                             discoveredPeers[remoteDeviceId]?.let { peer ->
-                                discoveredPeers[remoteDeviceId] = peer.copy(
-                                    rssi = rssi,
-                                    lastSeen = System.currentTimeMillis()
-                                )
+                                peer.address = device.address
+                                peer.device = device
+                                peer.rssi = rssi
+                                peer.lastSeen = System.currentTimeMillis()
+                                onPeerUpdated(remoteDeviceId, device.address, rssi)
                             }
                             android.util.Log.d(TAG, "Updated existing peer: $remoteDeviceId (RSSI: $rssi)")
                             
-                            // Keep connection if not already stored
-                            if (!connectedClients.containsKey(remoteDeviceId)) {
-                                connectedClients[remoteDeviceId] = gatt
-                            }
+                            // CRITICAL FIX: Disconnect after reading device ID
+                            // Don't maintain persistent connections - reconnect on-demand for messaging
+                            gatt.disconnect()
+                            gatt.close()
+                            
                         } else {
                             // New peer - emit discovery event
                             android.util.Log.d(TAG, "Discovered NEW peer: $remoteDeviceId at ${device.address} (RSSI: $rssi)")
@@ -373,17 +451,20 @@ class BleManager(
                             
                             // Store peer
                             discoveredPeers[remoteDeviceId] = DiscoveredPeer(
-                                remoteDeviceId,
-                                device.address,
-                                rssi,
-                                System.currentTimeMillis()
+                                deviceId = remoteDeviceId,
+                                address = device.address,
+                                device = device,
+                                rssi = rssi,
+                                lastSeen = System.currentTimeMillis()
                             )
                             
                             // Notify discovery (only once)
                             onPeerDiscovered(remoteDeviceId, device.address, rssi)
                             
-                            // Keep connection for messaging
-                            connectedClients[remoteDeviceId] = gatt
+                            // CRITICAL FIX: Disconnect after reading device ID
+                            // We'll reconnect on-demand when sending messages
+                            gatt.disconnect()
+                            gatt.close()
                         }
                     } else {
                         android.util.Log.w(TAG, "Failed to read device ID characteristic: status=$status")
@@ -500,26 +581,139 @@ class BleManager(
      */
     @SuppressLint("MissingPermission")
     fun sendMessage(recipientId: String, messageData: ByteArray): Boolean {
-        val gatt = connectedClients[recipientId]
+        // CRITICAL FIX: Since we disconnect after reading device ID,
+        // we need to reconnect on-demand for messaging
         
-        if (gatt == null) {
-            android.util.Log.e(TAG, "No connection to peer: $recipientId")
+        val peer = discoveredPeers[recipientId]
+        if (peer == null) {
+            android.util.Log.e(TAG, "Peer not discovered: $recipientId")
             return false
         }
+        
+        // Check if we have an active or in-flight connection
+        connectedClients[recipientId]?.let { gatt ->
+            return writeMessage(gatt, recipientId, messageData)
+        }
 
+        if (!connectingClients.containsKey(recipientId)) {
+            android.util.Log.d(TAG, "Peer $recipientId not connected, starting messaging connection")
+            connectForMessaging(peer)
+        } else {
+            android.util.Log.d(TAG, "Peer $recipientId connection already in progress")
+        }
+
+        return false
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun writeMessage(
+        gatt: BluetoothGatt,
+        recipientId: String,
+        messageData: ByteArray
+    ): Boolean {
         val service = gatt.getService(SERVICE_UUID)
         val messageChar = service?.getCharacteristic(MESSAGE_CHAR_UUID)
-        
-        if (messageChar == null) {
-            android.util.Log.e(TAG, "Message characteristic not found")
+
+        if (service == null || messageChar == null) {
+            android.util.Log.w(TAG, "Message characteristic not ready for $recipientId; rediscovering services")
+            onDiagnostic("[BLE] ℹ️ Message characteristic not ready for $recipientId – rediscovering")
+            gatt.discoverServices()
             return false
         }
 
         messageChar.value = messageData
         val success = gatt.writeCharacteristic(messageChar)
-        
+
         android.util.Log.d(TAG, "Send message to $recipientId: $success")
+        if (!success) {
+            onDiagnostic("[BLE] ❌ Failed to write BLE fragment to $recipientId")
+        }
         return success
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connectForMessaging(peer: DiscoveredPeer) {
+        onDiagnostic("[BLE] 🔄 Connecting to ${peer.deviceId} (${peer.address}) for messaging")
+
+        val callback = object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                if (status != BluetoothGatt.GATT_SUCCESS || newState != BluetoothProfile.STATE_CONNECTED) {
+                    android.util.Log.w(TAG, "Messaging connection failed for ${peer.deviceId}: status=$status state=$newState")
+                    onDiagnostic("[BLE] ❌ Messaging connection failed for ${peer.deviceId} (status=$status, state=$newState)")
+                    connectingClients.remove(peer.deviceId)
+                    connectedClients.remove(peer.deviceId)?.close()
+                    gatt.disconnect()
+                    gatt.close()
+                    return
+                }
+
+                android.util.Log.d(TAG, "Messaging connection established for ${peer.deviceId}")
+                onDiagnostic("[BLE] ✅ Messaging connection established for ${peer.deviceId}")
+                gatt.discoverServices()
+            }
+
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    android.util.Log.w(TAG, "Service discovery failed for ${peer.deviceId}: status=$status")
+                    onDiagnostic("[BLE] ❌ Messaging service discovery failed for ${peer.deviceId} (status=$status)")
+                    connectingClients.remove(peer.deviceId)
+                    gatt.disconnect()
+                    gatt.close()
+                    return
+                }
+
+                val service = gatt.getService(SERVICE_UUID)
+                val messageChar = service?.getCharacteristic(MESSAGE_CHAR_UUID)
+
+                if (service == null || messageChar == null) {
+                    android.util.Log.w(TAG, "Messaging characteristics missing for ${peer.deviceId}")
+                    onDiagnostic("[BLE] ❌ Messaging characteristics missing for ${peer.deviceId}")
+                    connectingClients.remove(peer.deviceId)
+                    gatt.disconnect()
+                    gatt.close()
+                    return
+                }
+
+                connectingClients.remove(peer.deviceId)
+                connectedClients[peer.deviceId] = gatt
+                android.util.Log.d(TAG, "Messaging connection ready for ${peer.deviceId}")
+                onDiagnostic("[BLE] 🔗 Ready to send BLE fragments to ${peer.deviceId}")
+            }
+
+            override fun onCharacteristicWrite(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                if (characteristic.uuid == MESSAGE_CHAR_UUID && status != BluetoothGatt.GATT_SUCCESS) {
+                    android.util.Log.w(TAG, "Message write failed for ${peer.deviceId}: status=$status")
+                    onDiagnostic("[BLE] ❌ Message write failed for ${peer.deviceId} (status=$status)")
+                }
+            }
+
+            override fun onCharacteristicChanged(
+                gatt: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic
+            ) {
+                // Forward incoming messages if necessary
+                if (characteristic.uuid == MESSAGE_CHAR_UUID) {
+                    onMessageReceived(characteristic.value)
+                }
+            }
+
+            override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    discoveredPeers[peer.deviceId]?.let {
+                        it.rssi = rssi
+                        it.lastSeen = System.currentTimeMillis()
+                    }
+                    onPeerUpdated(peer.deviceId, peer.address, rssi)
+                }
+            }
+        }
+
+        val gatt = peer.device.connectGatt(context, false, callback)
+        connectingClients[peer.deviceId] = gatt
     }
 
     /**

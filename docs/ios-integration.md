@@ -106,7 +106,9 @@ Add to `Info.plist`:
 <key>NSBluetoothPeripheralUsageDescription</key>
 <string>This app uses Bluetooth to communicate with nearby devices</string>
 
-<!-- Background modes (optional) -->
+<!-- Background modes (REQUIRED for reliable BLE operation) -->
+<!-- Without these, iOS will throttle/stop BLE scanning and advertising -->
+<!-- causing missed discoveries and false "peer lost" events -->
 <key>UIBackgroundModes</key>
 <array>
     <string>bluetooth-central</string>

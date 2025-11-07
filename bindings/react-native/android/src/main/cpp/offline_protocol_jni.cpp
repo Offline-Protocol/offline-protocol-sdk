@@ -257,15 +257,33 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeSendMessage(
     jstring recipient, jstring content, jint priority) {
     
     if (handlePtr == 0) {
+        LOGE("Invalid handle pointer");
+        return nullptr;
+    }
+    
+    if (recipient == nullptr || content == nullptr) {
+        LOGE("Null recipient or content");
         return nullptr;
     }
     
     ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
     
     const char* recipientStr = env->GetStringUTFChars(recipient, nullptr);
+    if (recipientStr == nullptr) {
+        LOGE("Failed to get recipient string");
+        return nullptr;
+    }
+    
     const char* contentStr = env->GetStringUTFChars(content, nullptr);
+    if (contentStr == nullptr) {
+        LOGE("Failed to get content string");
+        env->ReleaseStringUTFChars(recipient, recipientStr);
+        return nullptr;
+    }
     
     char messageId[256];
+    memset(messageId, 0, sizeof(messageId)); // Initialize buffer
+    
     int32_t result = offline_protocol_send_message(
         handle, recipientStr, contentStr, priority, messageId, 256);
     
@@ -273,10 +291,16 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeSendMessage(
     env->ReleaseStringUTFChars(content, contentStr);
     
     if (result != SUCCESS) {
+        LOGE("send_message failed with code: %d", result);
         return nullptr;
     }
     
-    return env->NewStringUTF(messageId);
+    jstring resultStr = env->NewStringUTF(messageId);
+    if (resultStr == nullptr) {
+        LOGE("Failed to create result string");
+    }
+    
+    return resultStr;
 }
 
 JNIEXPORT jint JNICALL

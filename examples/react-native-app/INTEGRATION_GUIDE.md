@@ -85,6 +85,14 @@ Add required permissions to `ios/YourApp/Info.plist`:
 <array>
     <string>_offlineprotocol._tcp</string>
 </array>
+
+<!-- Background modes (REQUIRED for reliable BLE operation) -->
+<!-- Without these, iOS will throttle/stop BLE causing false "peer lost" events -->
+<key>UIBackgroundModes</key>
+<array>
+    <string>bluetooth-central</string>
+    <string>bluetooth-peripheral</string>
+</array>
 ```
 
 ### 3. Verify Podfile

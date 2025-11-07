@@ -18,17 +18,22 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var bleFragmentTimer: DispatchSourceTimer?
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
-    private var bleRecipientBuffer = [CChar](repeating: 0, count: 256)
-    private var bleFragmentBuffer = [UInt8](repeating: 0, count: 512)
+    private var bleRecipientBuffer = [CChar](repeating: 0, count: OfflineProtocolModule.bleRecipientBufferSize)
+    private var bleFragmentBuffer = [UInt8](repeating: 0, count: OfflineProtocolModule.bleFragmentBufferSize)
     private var hasListeners = false
     private var bleSendSuccessCount: UInt32 = 0
     private var bleSendFailureCount: UInt32 = 0
     private var bleLastRssi: Int16 = -1
+    private var blePeerRefreshTimestamps: [String: Date] = [:]
+    private let blePeerUpdateThrottle: TimeInterval = 2.0
     
     // Event names
     private enum Events {
         static let onEvent = "OfflineProtocol_Event"
     }
+
+    private static let bleRecipientBufferSize = 512
+    private static let bleFragmentBufferSize = 65536
     
     override init() {
         super.init()
@@ -52,7 +57,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     override class func requiresMainQueueSetup() -> Bool {
-        return false
+        return true
     }
     
     override func supportedEvents() -> [String]! {
@@ -98,8 +103,13 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         
-        // Initialize BLE manager
-        initializeBleManager()
+        blePeerRefreshTimestamps.removeAll()
+        
+        // Initialize BLE manager on main thread
+        // CoreBluetooth managers must be created on the same queue they'll be used on
+        DispatchQueue.main.async {
+            self.initializeBleManager()
+        }
         
         // Create new protocol instance
         guard let handle = configJson.withCString({ offline_protocol_create($0) }) else {
@@ -193,6 +203,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         stopProcessTimer()
         bleManager?.stop()
         bleManager = nil
+        blePeerRefreshTimestamps.removeAll()
         
         offline_protocol_destroy(handle)
         protocolHandle = nil
@@ -244,6 +255,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         // Stop BLE first
         stopBleFragmentPump()
         bleManager?.stop()
+        blePeerRefreshTimestamps.removeAll()
         
         let result = offline_protocol_stop(handle)
         
@@ -267,8 +279,12 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         
+        NSLog("[OfflineProtocol] Calling sendMessage(recipient:\(recipient), priority:\(priority))")
         let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: 256)
         defer { buffer.deallocate() }
+        
+        // Initialize buffer to prevent crashes on error paths
+        buffer.initialize(repeating: 0, count: 256)
         
         let result = recipient.withCString { recipientPtr in
             content.withCString { contentPtr in
@@ -286,12 +302,16 @@ class OfflineProtocolModule: RCTEventEmitter {
         switch result {
         case SUCCESS:
             let messageId = String(cString: buffer)
+            NSLog("[OfflineProtocol] sendMessage succeeded with id \(messageId)")
             resolver(messageId)
         case ERROR_NOT_STARTED:
+            NSLog("[OfflineProtocol] sendMessage failed: protocol not started")
             rejecter("ERROR_NOT_STARTED", "Protocol not started", nil)
         case ERROR_SEND_FAILED:
+            NSLog("[OfflineProtocol] sendMessage failed: transport send error")
             rejecter("ERROR_SEND_FAILED", "Failed to send message", nil)
         default:
+            NSLog("[OfflineProtocol] sendMessage failed with unknown error code \(result)")
             rejecter("ERROR_UNKNOWN", "Unknown error occurred", nil)
         }
     }
@@ -858,6 +878,29 @@ class OfflineProtocolModule: RCTEventEmitter {
             self?.handleEvent(eventJson)
         }
         
+        manager.onPeerUpdated = { [weak self] peerId, address, rssi in
+            guard let self = self else { return }
+
+            let now = Date()
+            if let last = self.blePeerRefreshTimestamps[peerId], now.timeIntervalSince(last) < self.blePeerUpdateThrottle {
+                return
+            }
+            self.blePeerRefreshTimestamps[peerId] = now
+
+            guard let handle = self.protocolHandle else { return }
+
+            peerId.withCString { peerIdPtr in
+                address.withCString { addressPtr in
+                    let result = offline_protocol_ble_peer_discovered(handle, peerIdPtr, addressPtr, Int16(rssi))
+                    if result != SUCCESS {
+                        NSLog("[OfflineProtocol] Failed to refresh BLE peer discovery for \(peerId): \(result)")
+                    }
+                }
+            }
+
+            self.updateBleMetrics(rssi: Int16(rssi))
+        }
+
         manager.onPeerLost = { [weak self] peerId in
             NSLog("[OfflineProtocol] Peer lost: \(peerId)")
             

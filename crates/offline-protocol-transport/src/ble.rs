@@ -9,8 +9,9 @@
 
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
-use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, VecDeque};
+use std::convert::TryInto;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// UUID for the Offline Protocol GATT service
@@ -44,16 +45,15 @@ pub struct PeerDevice {
     pub connected: bool,
 }
 
-/// Message fragment for BLE transmission
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct MessageFragment {
-    /// Message ID being fragmented
+const FRAGMENT_MAGIC: [u8; 2] = *b"OP"; // Offline Protocol
+const FRAGMENT_VERSION: u8 = 1;
+const FRAGMENT_HEADER_FIXED: usize = 2 /*magic*/ + 1 /*version*/ + 1 /*id_len*/ + 2 /*index*/ + 2 /*total*/ + 2 /*data_len*/;
+
+#[derive(Debug, Clone)]
+struct DecodedFragment {
     message_id: String,
-    /// Fragment index (0-based)
     fragment_index: u16,
-    /// Total number of fragments
     total_fragments: u16,
-    /// Fragment payload data
     data: Vec<u8>,
 }
 
@@ -241,41 +241,39 @@ impl BleTransport {
     ///
     /// Returns a vector of serialized fragments ready to send over BLE.
     pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
-        // Serialize the message
         let message_bytes = self.serialize_message(message)?;
-        
-        // Check if fragmentation is needed
+
         let mtu = self.mtu();
-        if message_bytes.len() <= mtu {
-            // No fragmentation needed, send as single fragment
-            let fragment = MessageFragment {
-                message_id: message.id.as_str(),
-                fragment_index: 0,
-                total_fragments: 1,
-                data: message_bytes,
-            };
-            let fragment_bytes = serde_json::to_vec(&fragment)
-                .map_err(|e| crate::Error::SerializationError(format!("Failed to serialize fragment: {}", e)))?;
-            return Ok(vec![fragment_bytes]);
+        let message_id = message.id.as_str();
+        let message_id_bytes = message_id.as_bytes();
+        if message_id_bytes.len() > u8::MAX as usize {
+            return Err(crate::Error::Other("Message ID too long".to_string()));
         }
 
-        // Fragment the message
-        let total_fragments = (message_bytes.len() + mtu - 1) / mtu;
+        // Ensure fragment payload fits within MTU once headers are applied
+        let header_overhead = FRAGMENT_HEADER_FIXED + message_id_bytes.len();
+        if header_overhead >= mtu {
+            return Err(crate::Error::Other("MTU too small for fragment header".to_string()));
+        }
+
+        let max_fragment_payload = mtu - header_overhead;
+        let total_fragments = (message_bytes.len() + max_fragment_payload - 1) / max_fragment_payload;
+        if total_fragments == 0 {
+            return Err(crate::Error::Other("Empty message".to_string()));
+        }
         if total_fragments > u16::MAX as usize {
             return Err(crate::Error::Other("Message too large to fragment".to_string()));
         }
 
-        let mut fragments = Vec::new();
-        for (i, chunk) in message_bytes.chunks(mtu).enumerate() {
-            let fragment = MessageFragment {
-                message_id: message.id.as_str(),
-                fragment_index: i as u16,
-                total_fragments: total_fragments as u16,
-                data: chunk.to_vec(),
-            };
-            let fragment_bytes = serde_json::to_vec(&fragment)
-                .map_err(|e| crate::Error::SerializationError(format!("Failed to serialize fragment {}: {}", i, e)))?;
-            fragments.push(fragment_bytes);
+        let mut fragments = Vec::with_capacity(total_fragments);
+        for (i, chunk) in message_bytes.chunks(max_fragment_payload).enumerate() {
+            let encoded = encode_fragment(
+                message_id_bytes,
+                i as u16,
+                total_fragments as u16,
+                chunk,
+            )?;
+            fragments.push(encoded);
         }
 
         Ok(fragments)
@@ -285,11 +283,9 @@ impl BleTransport {
     ///
     /// Returns Ok(Some(Message)) if message is complete, Ok(None) if more fragments needed.
     pub fn process_fragment(&self, fragment_data: &[u8]) -> Result<Option<Message>> {
-        // Deserialize fragment
-        let fragment: MessageFragment = serde_json::from_slice(fragment_data)
-            .map_err(|e| crate::Error::SerializationError(format!("Failed to deserialize fragment: {}", e)))?;
+        // Decode fragment from binary format
+        let fragment = decode_fragment(fragment_data)?;
 
-        // If it's a single fragment message, deserialize directly
         if fragment.total_fragments == 1 {
             return Ok(Some(self.deserialize_message(&fragment.data)?));
         }
@@ -322,7 +318,6 @@ impl BleTransport {
             )));
         }
 
-        // Add fragment
         assembly.fragments.insert(fragment.fragment_index, fragment.data);
 
         // Check if complete
@@ -429,6 +424,87 @@ impl BleTransport {
 
         self.update_queue_metric();
     }
+}
+
+fn encode_fragment(message_id: &[u8], fragment_index: u16, total_fragments: u16, data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() > u16::MAX as usize {
+        return Err(crate::Error::Other("Fragment payload too large".to_string()));
+    }
+
+    let mut encoded = Vec::with_capacity(FRAGMENT_HEADER_FIXED + message_id.len() + data.len());
+    encoded.extend_from_slice(&FRAGMENT_MAGIC);
+    encoded.push(FRAGMENT_VERSION);
+    encoded.push(message_id.len() as u8);
+    encoded.extend_from_slice(message_id);
+    encoded.extend_from_slice(&fragment_index.to_le_bytes());
+    encoded.extend_from_slice(&total_fragments.to_le_bytes());
+    encoded.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    encoded.extend_from_slice(data);
+    Ok(encoded)
+}
+
+fn decode_fragment(fragment_data: &[u8]) -> Result<DecodedFragment> {
+    if fragment_data.len() < FRAGMENT_HEADER_FIXED {
+        return Err(crate::Error::Other("Fragment too short".to_string()));
+    }
+
+    if &fragment_data[0..2] != FRAGMENT_MAGIC {
+        return Err(crate::Error::Other("Invalid fragment magic".to_string()));
+    }
+
+    let version = fragment_data[2];
+    if version != FRAGMENT_VERSION {
+        return Err(crate::Error::Other(format!("Unsupported fragment version {}", version)));
+    }
+
+    let id_len = fragment_data[3] as usize;
+    let header_len = FRAGMENT_HEADER_FIXED + id_len;
+    if fragment_data.len() < header_len {
+        return Err(crate::Error::Other("Fragment truncated (id)".to_string()));
+    }
+
+    let mut offset = 4;
+    let message_id_bytes = &fragment_data[offset..offset + id_len];
+    offset += id_len;
+
+    let message_id = String::from_utf8(message_id_bytes.to_vec())
+        .map_err(|_| crate::Error::Other("Invalid UTF-8 in message ID".to_string()))?;
+
+    if fragment_data.len() < offset + 6 {
+        return Err(crate::Error::Other("Fragment truncated (header)".to_string()));
+    }
+
+    let fragment_index = u16::from_le_bytes(
+        fragment_data[offset..offset + 2]
+            .try_into()
+            .map_err(|_| crate::Error::Other("Fragment truncated (index)".to_string()))?,
+    );
+    offset += 2;
+    let total_fragments = u16::from_le_bytes(
+        fragment_data[offset..offset + 2]
+            .try_into()
+            .map_err(|_| crate::Error::Other("Fragment truncated (total)".to_string()))?,
+    );
+    offset += 2;
+    let data_len = u16::from_le_bytes(
+        fragment_data[offset..offset + 2]
+            .try_into()
+            .map_err(|_| crate::Error::Other("Fragment truncated (length)".to_string()))?,
+    ) as usize;
+    offset += 2;
+
+    if fragment_data.len() < offset + data_len {
+        return Err(crate::Error::Other("Fragment truncated (data)".to_string()));
+    }
+
+    let data = fragment_data[offset..offset + data_len].to_vec();
+
+    Ok(DecodedFragment {
+        message_id,
+        fragment_index,
+        total_fragments,
+        data,
+    })
 }
 
 impl Transport for BleTransport {
@@ -547,6 +623,40 @@ mod tests {
         
         let peers = transport.get_peers();
         assert_eq!(peers.len(), 0);
+    }
+
+    #[test]
+    fn test_fragment_roundtrip() {
+        use offline_protocol_core::{AppId, Message, MessagePriority, TTL, UserId};
+
+        let transport = BleTransport::new("test-device");
+
+        let sender = UserId::new("alice").unwrap();
+        let recipient = UserId::new("bob").unwrap();
+        let app_id = AppId::new("app").unwrap();
+        let content = "x".repeat(512);
+
+        let message = Message::builder(sender, recipient, app_id)
+            .content(content.clone())
+            .priority(MessagePriority::High)
+            .ttl(TTL::new(8).unwrap())
+            .build();
+
+        let fragments = transport.fragment_message(&message).unwrap();
+        assert!(fragments.len() > 1); // should fragment
+        for fragment in &fragments {
+            assert!(fragment.len() <= MAX_FRAGMENT_SIZE);
+        }
+
+        let mut reconstructed = None;
+        for fragment in fragments {
+            if let Some(msg) = transport.process_fragment(&fragment).unwrap() {
+                reconstructed = Some(msg);
+            }
+        }
+
+        let reconstructed = reconstructed.expect("Expected complete message");
+        assert_eq!(reconstructed.content, content);
     }
 }
 

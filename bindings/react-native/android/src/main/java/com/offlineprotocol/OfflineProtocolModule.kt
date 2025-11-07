@@ -15,8 +15,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var deviceId: String = ""
     private var bleSendScheduler: ScheduledExecutorService? = null
     private var processScheduler: ScheduledExecutorService? = null
-    private val bleRecipientBuffer = ByteArray(256)
-    private val bleFragmentBuffer = ByteArray(512)
+    private val bleRecipientBuffer = ByteArray(BLE_RECIPIENT_BUFFER_SIZE)
+    private val bleFragmentBuffer = ByteArray(BLE_FRAGMENT_BUFFER_SIZE)
     private var listenerCount: Int = 0
     private var bleBridgeInitialized: Boolean = false
 
@@ -31,6 +31,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         const val ERROR_NOT_STARTED = -3
         const val ERROR_ALREADY_STARTED = -4
         const val ERROR_SEND_FAILED = -5
+        private const val BLE_RECIPIENT_BUFFER_SIZE = 512
+        private const val BLE_FRAGMENT_BUFFER_SIZE = 65536
 
         private var nativeLibraryLoaded = false
         private var nativeLibraryError: String? = null
@@ -71,6 +73,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             nativeDestroy(protocolHandle)
             protocolHandle = 0
         }
+        blePeerRefreshTimestamps.clear()
     }
 
     @ReactMethod
@@ -108,6 +111,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             // Initialize BLE manager
+            blePeerRefreshTimestamps.clear()
             initializeBleManager()
 
             // Create new protocol instance
@@ -178,6 +182,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             stopBleFragmentPump()
             stopProcessScheduler()
             bleManager?.stop()
+            blePeerRefreshTimestamps.clear()
             bleManager = null
             if (bleBridgeInitialized) {
                 nativeCleanupBleBridge()
@@ -263,6 +268,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Stop BLE first
             stopBleFragmentPump()
             bleManager?.stop()
+            blePeerRefreshTimestamps.clear()
             
             val result = nativeStop(protocolHandle)
             when (result) {
@@ -387,7 +393,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 return
             }
 
+            android.util.Log.d(NAME, "Calling nativeSendMessage(recipient=$recipient, priority=$priority)")
             val messageId = nativeSendMessage(protocolHandle, recipient, content, priority)
+            android.util.Log.d(NAME, "nativeSendMessage returned: ${messageId ?: "null"}")
             if (messageId == null) {
                 promise.reject("ERROR_SEND_FAILED", "Failed to send message")
                 return
@@ -787,6 +795,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var bleSendSuccessCount = 0
     private var bleSendFailureCount = 0
     private var bleLastRssi: Short = -1
+    private val blePeerRefreshTimestamps = mutableMapOf<String, Long>()
+    private val blePeerUpdateThrottleMs = 2000L
 
     private fun updateBleMetrics(rssi: Short = -1) {
         if (protocolHandle == 0L) return
@@ -860,6 +870,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 """.trimIndent()
                 
                 handleEvent(eventJson)
+            },
+            onPeerUpdated = { peerId, address, rssi ->
+                val now = System.currentTimeMillis()
+                val last = blePeerRefreshTimestamps[peerId]
+                if (last == null || now - last >= blePeerUpdateThrottleMs) {
+                    blePeerRefreshTimestamps[peerId] = now
+
+                    if (protocolHandle != 0L) {
+                        val result = nativeBlePeerDiscovered(protocolHandle, peerId, address, rssi.toShort())
+                        if (result != SUCCESS) {
+                            android.util.Log.e(NAME, "Failed to refresh BLE peer discovery: $result")
+                        }
+                        updateBleMetrics(rssi.toShort())
+                    }
+                }
             },
             onPeerLost = { peerId ->
                 android.util.Log.d(NAME, "Peer lost: $peerId")

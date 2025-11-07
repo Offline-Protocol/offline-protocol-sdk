@@ -97,11 +97,17 @@ unsafe impl Sync for CallbackData {}
 ///
 /// This is an opaque type used only via pointers in the FFI interface.
 pub struct ProtocolHandle {
-    protocol: OfflineProtocol,
+    protocol: Mutex<OfflineProtocol>,
     callback: Arc<Mutex<Option<CallbackData>>>,
     ble_transport: Arc<Mutex<Option<Arc<BleTransport>>>>,
     visualizer: Arc<Mutex<NetworkVisualizer>>,
     file_transfer: Arc<Mutex<FileTransferManager>>,
+}
+
+impl ProtocolHandle {
+    fn lock_protocol(&self) -> std::result::Result<std::sync::MutexGuard<'_, OfflineProtocol>, i32> {
+        self.protocol.lock().map_err(|_| ERROR_OTHER)
+    }
 }
 
 /// Creates a new OfflineProtocol instance from JSON configuration.
@@ -374,7 +380,7 @@ pub extern "C" fn offline_protocol_create(config_json: *const c_char) -> *mut Pr
                 let visualizer = NetworkVisualizer::new(user_id);
                 let file_transfer = FileTransferManager::new();
                 let handle = ProtocolHandle {
-                    protocol,
+                    protocol: Mutex::new(protocol),
                     callback: Arc::new(Mutex::new(None)),
                     ble_transport: Arc::new(Mutex::new(Some(ble_transport))),
                     visualizer: Arc::new(Mutex::new(visualizer)),
@@ -427,9 +433,14 @@ pub extern "C" fn offline_protocol_start(handle: *mut ProtocolHandle) -> i32 {
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated handle is non-null and it was created by
         // offline_protocol_create, so we know it's a valid ProtocolHandle.
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
-        match handle_ref.protocol.start() {
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        match protocol.start() {
             Ok(_) => SUCCESS,
             Err(offline_protocol::Error::AlreadyStarted) => ERROR_ALREADY_STARTED,
             Err(_) => ERROR_OTHER,
@@ -457,9 +468,14 @@ pub extern "C" fn offline_protocol_stop(handle: *mut ProtocolHandle) -> i32 {
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated handle is non-null and it was created by
         // offline_protocol_create, so we know it's a valid ProtocolHandle.
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
-        match handle_ref.protocol.stop() {
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        match protocol.stop() {
             Ok(_) => SUCCESS,
             Err(offline_protocol::Error::NotStarted) => ERROR_NOT_STARTED,
             Err(_) => ERROR_OTHER,
@@ -493,11 +509,19 @@ pub extern "C" fn offline_protocol_send_message(
     if handle.is_null() || recipient.is_null() || content.is_null() || out_message_id.is_null() {
         return ERROR_NULL_POINTER;
     }
+    
+    // Initialize output buffer to empty string to prevent crashes on error paths
+    unsafe {
+        if out_len > 0 {
+            *out_message_id = 0;
+        }
+    }
 
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated all pointers are non-null above.
         // The caller must ensure they point to valid data.
-        let handle_ref = &mut *handle;
+        // Use immutable reference since ProtocolHandle uses interior mutability
+        let handle_ref = &*handle;
 
         // Convert C strings to Rust strings
         let recipient_str = match CStr::from_ptr(recipient).to_str() {
@@ -520,13 +544,17 @@ pub extern "C" fn offline_protocol_send_message(
         };
 
         // Send message
-        let message_id = match handle_ref
-            .protocol
-            .send_message(recipient_str, content_str, Some(priority))
-        {
-            Ok(id) => id,
-            Err(offline_protocol::Error::NotStarted) => return ERROR_NOT_STARTED,
-            Err(_) => return ERROR_SEND_FAILED,
+        let message_id = {
+            let mut protocol = match handle_ref.lock_protocol() {
+                Ok(guard) => guard,
+                Err(code) => return code,
+            };
+
+            match protocol.send_message(recipient_str, content_str, Some(priority)) {
+                Ok(id) => id,
+                Err(offline_protocol::Error::NotStarted) => return ERROR_NOT_STARTED,
+                Err(_) => return ERROR_SEND_FAILED,
+            }
         };
 
         // Copy message ID to output buffer
@@ -597,7 +625,7 @@ pub extern "C" fn offline_protocol_set_event_callback(
     let result = panic::catch_unwind(|| unsafe {
         // SAFETY: We validated handle is non-null and it was created by
         // offline_protocol_create, so we know it's a valid ProtocolHandle.
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
         // Store the callback
         let mut cb = handle_ref.callback.lock().unwrap();
@@ -609,27 +637,34 @@ pub extern "C" fn offline_protocol_set_event_callback(
 
         // Register the event handler with the protocol
         let callback_arc = handle_ref.callback.clone();
-        handle_ref.protocol.on_event(move |event| {
-            // Serialize event to JSON
-            let event_json = match event.to_json() {
-                Ok(json) => json,
-                Err(_) => return, // Skip if serialization fails
+        {
+            let mut protocol = match handle_ref.lock_protocol() {
+                Ok(guard) => guard,
+                Err(code) => return code,
             };
 
-            // Convert to C string
-            let c_str = match CString::new(event_json) {
-                Ok(s) => s,
-                Err(_) => return, // Skip if contains null bytes
-            };
+            protocol.on_event(move |event| {
+                // Serialize event to JSON
+                let event_json = match event.to_json() {
+                    Ok(json) => json,
+                    Err(_) => return, // Skip if serialization fails
+                };
 
-            // Call the callback if set
-            let cb_guard = callback_arc.lock().unwrap();
-            if let Some(ref cb_data) = *cb_guard {
-                // SAFETY: The callback function pointer must be valid and the user_data
-                // pointer must remain valid for the lifetime of the protocol.
-                (cb_data.callback)(c_str.as_ptr(), cb_data.user_data);
-            }
-        });
+                // Convert to C string
+                let c_str = match CString::new(event_json) {
+                    Ok(s) => s,
+                    Err(_) => return, // Skip if contains null bytes
+                };
+
+                // Call the callback if set
+                let cb_guard = callback_arc.lock().unwrap();
+                if let Some(ref cb_data) = *cb_guard {
+                    // SAFETY: The callback function pointer must be valid and the user_data
+                    // pointer must remain valid for the lifetime of the protocol.
+                    (cb_data.callback)(c_str.as_ptr(), cb_data.user_data);
+                }
+            });
+        }
 
         SUCCESS
     });
@@ -1070,18 +1105,22 @@ pub extern "C" fn offline_protocol_add_internet_transport(
             config
         };
 
-        // Get user_id from protocol config
-        let user_id = handle_ref.protocol.config().user_id.as_str();
-        
+        // Access protocol safely
+        use offline_protocol_transport::TransportType;
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
         // Create Internet transport
+        let user_id = protocol.config().user_id.as_str();
         let transport = offline_protocol_transport::InternetTransport::with_config(
             user_id,
             config
         );
 
         // Add to protocol's transport manager
-        use offline_protocol_transport::TransportType;
-        handle_ref.protocol.transport_manager_mut().add_transport(
+        protocol.transport_manager_mut().add_transport(
             TransportType::Internet,
             Box::new(transport)
         );
@@ -1153,18 +1192,21 @@ pub extern "C" fn offline_protocol_add_wifi_direct_transport(
             config
         };
 
-        // Get user_id from protocol config
-        let user_id = handle_ref.protocol.config().user_id.as_str();
-        
+        use offline_protocol_transport::TransportType;
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
         // Create WiFi Direct transport
+        let user_id = protocol.config().user_id.as_str();
         let transport = offline_protocol_transport::WifiDirectTransport::with_config(
             user_id,
             config
         );
 
         // Add to protocol's transport manager
-        use offline_protocol_transport::TransportType;
-        handle_ref.protocol.transport_manager_mut().add_transport(
+        protocol.transport_manager_mut().add_transport(
             TransportType::WiFiDirect,
             Box::new(transport)
         );
@@ -1207,7 +1249,12 @@ pub extern "C" fn offline_protocol_remove_transport(
             _ => return ERROR_INVALID_CONFIG,
         };
 
-        handle_ref.protocol.transport_manager_mut().remove_transport(transport);
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        protocol.transport_manager_mut().remove_transport(transport);
 
         SUCCESS
     });
@@ -1242,7 +1289,13 @@ pub extern "C" fn offline_protocol_get_active_transports(
         // SAFETY: We validated all pointers are non-null above.
         let handle_ref = &*handle;
 
-        let transports = handle_ref.protocol.transport_manager().get_active_transports();
+        let transports = {
+            let protocol = match handle_ref.lock_protocol() {
+                Ok(guard) => guard,
+                Err(code) => return code,
+            };
+            protocol.transport_manager().get_active_transports()
+        };
         
         let transport_names: Vec<&str> = transports.iter().map(|t| {
             use offline_protocol_transport::TransportType;
@@ -1571,12 +1624,16 @@ pub extern "C" fn offline_protocol_update_transport_metrics(
             }
             TransportType::Internet => {
                 // Get Internet transport from protocol manager
-                if let Some(_transport_arc) = handle_ref.protocol.transport_manager()
+                let protocol = match handle_ref.lock_protocol() {
+                    Ok(guard) => guard,
+                    Err(code) => return code,
+                };
+
+                if protocol
+                    .transport_manager()
                     .get_transport(TransportType::Internet)
+                    .is_some()
                 {
-                    // We need to downcast to access update_metrics
-                    // For now, we'll just return success as the base Transport trait doesn't expose this
-                    // In a real implementation, we'd need a way to update metrics on the transport
                     SUCCESS
                 } else {
                     ERROR_OTHER
@@ -1584,8 +1641,15 @@ pub extern "C" fn offline_protocol_update_transport_metrics(
             }
             TransportType::WiFiDirect => {
                 // Similar to Internet transport
-                if let Some(_transport_arc) = handle_ref.protocol.transport_manager()
+                let protocol = match handle_ref.lock_protocol() {
+                    Ok(guard) => guard,
+                    Err(code) => return code,
+                };
+
+                if protocol
+                    .transport_manager()
                     .get_transport(TransportType::WiFiDirect)
+                    .is_some()
                 {
                     SUCCESS
                 } else {
@@ -1623,7 +1687,12 @@ pub extern "C" fn offline_protocol_should_escalate_to_wifi(
         let handle_ref = &*handle;
 
         // Check DORS escalation signal
-        let should_escalate = handle_ref.protocol.transport_manager().should_escalate_to_wifi();
+        let protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        let should_escalate = protocol.transport_manager().should_escalate_to_wifi();
         *out_should_escalate = if should_escalate { 1 } else { 0 };
 
         SUCCESS
@@ -1668,7 +1737,7 @@ pub extern "C" fn offline_protocol_send_file(
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
         // Convert C strings
         let file_name_str = match CStr::from_ptr(file_name).to_str() {
@@ -1697,13 +1766,18 @@ pub extern "C" fn offline_protocol_send_file(
         drop(file_transfer);
 
         // Send each chunk as a message
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
         for chunk in chunks {
             let chunk_json = match chunk.to_json() {
                 Ok(json) => json,
                 Err(_) => return ERROR_OTHER,
             };
 
-            match handle_ref.protocol.send_message(recipient_str, chunk_json, Some(offline_protocol_core::MessagePriority::High)) {
+            match protocol.send_message(recipient_str, chunk_json, Some(offline_protocol_core::MessagePriority::High)) {
                 Ok(_) => {},
                 Err(_) => return ERROR_SEND_FAILED,
             }
@@ -1747,7 +1821,7 @@ pub extern "C" fn offline_protocol_process_file_chunk(
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
         // Parse chunk JSON
         let chunk_str = match CStr::from_ptr(chunk_json).to_str() {
@@ -1867,7 +1941,7 @@ pub extern "C" fn offline_protocol_finalize_file(
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
         let file_id_str = match CStr::from_ptr(file_id).to_str() {
             Ok(s) => s,
@@ -1913,7 +1987,7 @@ pub extern "C" fn offline_protocol_cancel_file_transfer(
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
         let file_id_str = match CStr::from_ptr(file_id).to_str() {
             Ok(s) => s,
@@ -1947,9 +2021,14 @@ pub extern "C" fn offline_protocol_process(handle: *mut ProtocolHandle) -> i32 {
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
-        match handle_ref.protocol.process() {
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        match protocol.process() {
             Ok(_) => SUCCESS,
             Err(_) => ERROR_OTHER,
         }
@@ -1974,9 +2053,14 @@ pub extern "C" fn offline_protocol_pause(handle: *mut ProtocolHandle) -> i32 {
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
-        match handle_ref.protocol.pause() {
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        match protocol.pause() {
             Ok(_) => SUCCESS,
             Err(offline_protocol::Error::NotStarted) => ERROR_NOT_STARTED,
             Err(_) => ERROR_INVALID_STATE,
@@ -2002,9 +2086,14 @@ pub extern "C" fn offline_protocol_resume(handle: *mut ProtocolHandle) -> i32 {
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
-        match handle_ref.protocol.resume() {
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        match protocol.resume() {
             Ok(_) => SUCCESS,
             Err(_) => ERROR_INVALID_STATE,
         }
@@ -2031,7 +2120,12 @@ pub extern "C" fn offline_protocol_get_state(handle: *mut ProtocolHandle) -> i32
     let result = panic::catch_unwind(|| unsafe {
         let handle_ref = &*handle;
 
-        match handle_ref.protocol.state() {
+        let protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        match protocol.state() {
             offline_protocol::protocol::ProtocolState::Stopped => 0,
             offline_protocol::protocol::ProtocolState::Running => 1,
             offline_protocol::protocol::ProtocolState::Paused => 2,
@@ -2062,10 +2156,15 @@ pub extern "C" fn offline_protocol_receive_message(
     }
 
     let result = panic::catch_unwind(|| unsafe {
-        let handle_ref = &mut *handle;
+        let handle_ref = &*handle;
 
         // Try to receive a message
-        let message = match handle_ref.protocol.receive_message() {
+        let mut protocol = match handle_ref.lock_protocol() {
+            Ok(guard) => guard,
+            Err(code) => return code,
+        };
+
+        let message = match protocol.receive_message() {
             Some(msg) => msg,
             None => return NO_MESSAGE_AVAILABLE,
         };
@@ -2160,7 +2259,8 @@ mod tests {
             let protocol_ref = &mut *(handle as *mut ProtocolHandle);
             let mut mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
-            protocol_ref.protocol.transport_manager_mut().add_transport(
+            let mut protocol = protocol_ref.lock_protocol().unwrap();
+            protocol.transport_manager_mut().add_transport(
                 TransportType::BLE, 
                 Box::new(mock_transport)
             );
@@ -2241,7 +2341,8 @@ mod tests {
             let protocol_ref = &mut *(handle as *mut ProtocolHandle);
             let mut mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
-            protocol_ref.protocol.transport_manager_mut().add_transport(
+            let mut protocol = protocol_ref.lock_protocol().unwrap();
+            protocol.transport_manager_mut().add_transport(
                 TransportType::BLE, 
                 Box::new(mock_transport)
             );

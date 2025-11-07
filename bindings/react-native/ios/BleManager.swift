@@ -24,7 +24,7 @@ class BleManager: NSObject {
     
     struct DiscoveredPeer {
         let deviceId: String
-        let peripheral: CBPeripheral
+        var peripheral: CBPeripheral
         var rssi: Int
         var lastSeen: Date
         var connected: Bool = false
@@ -62,6 +62,11 @@ class BleManager: NSObject {
     
     // Connected peripherals for messaging
     private var connectedPeripherals: [String: CBPeripheral] = [:]
+
+    // Peer expiry tracking
+    private var peerExpiryTimer: Timer?
+    private let peerExpiryCheckInterval: TimeInterval = 5.0
+    private let peerLossTimeout: TimeInterval = 60.0
     
     // Connection timeout timers (keyed by peripheral UUID)
     private var connectionTimeouts: [UUID: Timer] = [:]
@@ -85,6 +90,7 @@ class BleManager: NSObject {
     var onMessageReceived: ((Data) -> Void)?
     var onStatusChanged: ((Status) -> Void)?
     var onDiagnostic: ((String) -> Void)?
+    var onPeerUpdated: ((String, String, Int) -> Void)?
     
     // MARK: - Initialization
     
@@ -104,12 +110,15 @@ class BleManager: NSObject {
             self.shouldStartOperations = true
 
             // Initialize central manager (for scanning)
+            // IMPORTANT: queue: nil means use main queue. All CB operations must happen
+            // on the same queue where the manager was created to avoid missed callbacks.
             if self.centralManager == nil {
                 self.onDiagnostic?("[BLE] Initializing Central Manager (scanner)")
                 self.centralManager = CBCentralManager(delegate: self, queue: nil)
             }
 
             // Initialize peripheral manager (for advertising)
+            // IMPORTANT: queue: nil means use main queue. Must match central manager queue.
             if self.peripheralManager == nil {
                 self.onDiagnostic?("[BLE] Initializing Peripheral Manager (advertiser)")
                 self.peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
@@ -118,6 +127,8 @@ class BleManager: NSObject {
             // Try to start operations if managers are already ready
             self.startOperationsIfReady()
             didScheduleStart = true
+
+            self.startPeerExpiryTimer()
         }
 
         if Thread.isMainThread {
@@ -135,6 +146,8 @@ class BleManager: NSObject {
 
             self.shouldStartOperations = false
             self.gattServiceAdded = false
+
+            self.stopPeerExpiryTimer()
 
             // Stop scanning
             self.centralManager?.stopScan()
@@ -225,9 +238,7 @@ class BleManager: NSObject {
         if Thread.isMainThread {
             sendBlock()
         } else {
-            DispatchQueue.main.sync {
-                sendBlock()
-            }
+            DispatchQueue.main.sync(execute: sendBlock)
         }
 
         return sendSucceeded
@@ -240,6 +251,54 @@ class BleManager: NSObject {
                 "rssi": peer.rssi,
                 "connected": peer.connected
             ]
+        }
+    }
+
+    // MARK: - Peer Expiry Management
+
+    private func startPeerExpiryTimer() {
+        guard peerExpiryTimer == nil else { return }
+
+        let timer = Timer(timeInterval: peerExpiryCheckInterval, repeats: true) { [weak self] _ in
+            self?.checkForExpiredPeers()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        peerExpiryTimer = timer
+    }
+
+    private func stopPeerExpiryTimer() {
+        peerExpiryTimer?.invalidate()
+        peerExpiryTimer = nil
+    }
+
+    private func checkForExpiredPeers() {
+        let now = Date()
+        var expired: [String] = []
+
+        for (deviceId, peer) in discoveredPeers {
+            if peer.connected {
+                continue
+            }
+            if now.timeIntervalSince(peer.lastSeen) > peerLossTimeout {
+                expired.append(deviceId)
+            }
+        }
+
+        guard !expired.isEmpty else { return }
+
+        for deviceId in expired {
+            guard let peer = discoveredPeers.removeValue(forKey: deviceId) else { continue }
+
+            let msg = "[BLE] ⏳ Peer \(deviceId) expired after \(peerLossTimeout)s without advertisements"
+            NSLog("[BleManager] \(msg)")
+            onDiagnostic?(msg)
+
+            connectedPeripherals.removeValue(forKey: deviceId)
+            discoveredDeviceIds.remove(deviceId)
+            rssiValues.removeValue(forKey: peer.peripheral.identifier)
+            connectingPeripherals.removeValue(forKey: peer.peripheral.identifier)
+
+            onPeerLost?(deviceId)
         }
     }
     
@@ -259,7 +318,8 @@ class BleManager: NSObject {
         onDiagnostic?(msg)
         centralManager.scanForPeripherals(
             withServices: [BleManager.serviceUUID],
-            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]  // Allow duplicates for better Android compatibility
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]  // CRITICAL: Without this, iOS throttles/suppresses duplicate advertisements
+                                                                            // causing false "peer lost" events when iOS doesn't deliver scans for 3-5s
         )
         onStatusChanged?(.scanning)
     }
@@ -337,18 +397,29 @@ class BleManager: NSObject {
             // Update RSSI value
             self.rssiValues[peripheral.identifier] = rssi.intValue
 
-            // Skip if already connecting or connected
+            // Check if we already discovered this peripheral
+            if let existingPeer = self.discoveredPeers.values.first(where: { $0.peripheral.identifier == peripheral.identifier }) {
+                // Update existing peer's RSSI, lastSeen, and peripheral reference
+                var updatedPeer = existingPeer
+                updatedPeer.peripheral = peripheral
+                updatedPeer.rssi = rssi.intValue
+                updatedPeer.lastSeen = Date()
+                updatedPeer.connected = false
+                self.discoveredPeers[existingPeer.deviceId] = updatedPeer
+
+                if updatedPeer.connected {
+                    self.connectedPeripherals[existingPeer.deviceId] = peripheral
+                } else {
+                    self.connectedPeripherals.removeValue(forKey: existingPeer.deviceId)
+                }
+
+                self.onPeerUpdated?(existingPeer.deviceId, peripheral.identifier.uuidString, rssi.intValue)
+                return // Don't reconnect - peer is already known
+            }
+
+            // Skip if already connecting
             if self.connectingPeripherals[peripheral.identifier] != nil {
                 return // Already trying to connect
-            }
-
-            if self.connectedPeripherals.values.contains(where: { $0.identifier == peripheral.identifier }) {
-                return // Already connected
-            }
-
-            // Skip if we already know this device
-            if self.discoveredPeers.values.contains(where: { $0.peripheral.identifier == peripheral.identifier }) {
-                return // Already discovered
             }
 
             let msg = "[BLE] 🔗 Connecting to peripheral \(peripheral.identifier.uuidString) to read device ID..."
@@ -525,14 +596,19 @@ extension BleManager: CBCentralManagerDelegate {
         NSLog("[BleManager] \(msg)")
         onDiagnostic?(msg)
         
-        // Find and remove peer
+        //  Don't mark peer as lost on disconnect!
+        // We intentionally disconnect after reading device ID and reconnect on-demand.
+        // Peers are only truly "lost" when they stop advertising (handled by scan timeout logic if implemented).
+        
+        // Just update connection status and clean up connection tracking
         if let peer = discoveredPeers.first(where: { $0.value.peripheral.identifier == peripheral.identifier }) {
             let deviceId = peer.key
-            discoveredPeers.removeValue(forKey: deviceId)
+            var updatedPeer = peer.value
+            updatedPeer.connected = false
+            discoveredPeers[deviceId] = updatedPeer
             connectedPeripherals.removeValue(forKey: deviceId)
-            discoveredDeviceIds.remove(deviceId)
-            rssiValues.removeValue(forKey: peripheral.identifier)
-            onPeerLost?(deviceId)
+            
+            NSLog("[BleManager] Peer \(deviceId) disconnected but still in discovered list")
         }
         
         connectingPeripherals.removeValue(forKey: peripheral.identifier)
@@ -665,15 +741,32 @@ extension BleManager: CBPeripheralDelegate {
         NSLog("[BleManager] \(msg1)")
         onDiagnostic?(msg1)
         
+        // Check if we already know this peripheral's device ID (reconnecting for messaging)
+        let existingPeer = discoveredPeers.values.first(where: { $0.peripheral.identifier == peripheral.identifier })
+        
         var foundDeviceId = false
         for characteristic in characteristics {
             if characteristic.uuid == BleManager.deviceIdCharUUID {
                 foundDeviceId = true
-                // Read device ID
-                let msg2 = "[BLE] 📖 Reading device ID characteristic from \(peripheral.identifier.uuidString)..."
-                NSLog("[BleManager] \(msg2)")
-                onDiagnostic?(msg2)
-                peripheral.readValue(for: characteristic)
+                
+                if let knownPeer = existingPeer {
+                    // We already know this peer - skip reading device ID, just mark as connected
+                    NSLog("[BleManager] 📡 Reconnected to known peer \(knownPeer.deviceId) for messaging")
+                    onDiagnostic?("[BLE] Reconnected to \(knownPeer.deviceId)")
+                    
+                    var updatedPeer = knownPeer
+                    updatedPeer.connected = true
+                    updatedPeer.lastSeen = Date()
+                    discoveredPeers[knownPeer.deviceId] = updatedPeer
+                    connectedPeripherals[knownPeer.deviceId] = peripheral
+                    connectingPeripherals.removeValue(forKey: peripheral.identifier)
+                } else {
+                    // New peer - read device ID
+                    let msg2 = "[BLE] 📖 Reading device ID characteristic from \(peripheral.identifier.uuidString)..."
+                    NSLog("[BleManager] \(msg2)")
+                    onDiagnostic?(msg2)
+                    peripheral.readValue(for: characteristic)
+                }
             } else if characteristic.uuid == BleManager.messageCharUUID {
                 // Subscribe to notifications
                 NSLog("[BleManager] Subscribing to message notifications...")
@@ -708,52 +801,58 @@ extension BleManager: CBPeripheralDelegate {
             NSLog("[BleManager] \(msg)")
             onDiagnostic?(msg)
             
-            // Got device ID
             if let remoteDeviceId = String(data: value, encoding: .utf8) {
                 // Get stored RSSI value or use default
                 let rssi = rssiValues[peripheral.identifier] ?? -60
-                
-                // Check if we've already discovered this peer
+
                 if discoveredDeviceIds.contains(remoteDeviceId) {
-                    // Peer already discovered - update RSSI and timestamp silently
                     if var peer = discoveredPeers[remoteDeviceId] {
+                        peer.peripheral = peripheral
                         peer.rssi = rssi
                         peer.lastSeen = Date()
+                        peer.connected = true
                         discoveredPeers[remoteDeviceId] = peer
                     }
                     NSLog("[BleManager] Updated existing peer: \(remoteDeviceId) (RSSI: \(rssi))")
-                    
-                    // Keep connection if not already stored
-                    if connectedPeripherals[remoteDeviceId] == nil {
-                        connectedPeripherals[remoteDeviceId] = peripheral
-                    }
+                    connectedPeripherals[remoteDeviceId] = peripheral
                 } else {
-                    // New peer - emit discovery event
                     let msg = "[BLE] 🎉 Discovered NEW peer device: \(remoteDeviceId) (RSSI: \(rssi))"
                     NSLog("[BleManager] \(msg)")
                     onDiagnostic?(msg)
-                    
-                    // Add to discovered set
+
                     discoveredDeviceIds.insert(remoteDeviceId)
-                    
-                    // Store peer
-                    let peer = DiscoveredPeer(
+                    discoveredPeers[remoteDeviceId] = DiscoveredPeer(
                         deviceId: remoteDeviceId,
                         peripheral: peripheral,
                         rssi: rssi,
                         lastSeen: Date(),
-                        connected: true
+                        connected: false
                     )
-                    discoveredPeers[remoteDeviceId] = peer
-                    connectedPeripherals[remoteDeviceId] = peripheral
-                    
-                    // Notify discovery (only once)
+
                     onPeerDiscovered?(remoteDeviceId, peripheral.identifier.uuidString, rssi)
                 }
+
+                if var peer = discoveredPeers[remoteDeviceId] {
+                    peer.connected = false
+                    discoveredPeers[remoteDeviceId] = peer
+                }
+                connectedPeripherals.removeValue(forKey: remoteDeviceId)
+                centralManager?.cancelPeripheralConnection(peripheral)
             } else {
                 let msg = "[BLE] ❌ Failed to decode device ID from characteristic value"
                 NSLog("[BleManager] \(msg)")
                 onDiagnostic?(msg)
+
+                if let entry = self.discoveredPeers.first(where: { $0.value.peripheral.identifier == peripheral.identifier }) {
+                    let deviceId = entry.key
+                    var peer = entry.value
+                    peer.connected = false
+                    self.discoveredPeers[deviceId] = peer
+                }
+                for (deviceId, storedPeripheral) in self.connectedPeripherals where storedPeripheral.identifier == peripheral.identifier {
+                    self.connectedPeripherals.removeValue(forKey: deviceId)
+                }
+                centralManager?.cancelPeripheralConnection(peripheral)
             }
             
             connectingPeripherals.removeValue(forKey: peripheral.identifier)
