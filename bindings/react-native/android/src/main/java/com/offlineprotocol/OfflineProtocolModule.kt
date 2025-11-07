@@ -69,7 +69,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Set up event callback
             proto.setEventCallback(object : EventCallback {
                 override fun onEvent(eventJson: String) {
-                    sendEvent(EVENT_NAME, eventJson)
+                    val params = Arguments.createMap().apply {
+                        putString("eventJson", eventJson)
+                    }
+                    sendEvent(EVENT_NAME, params)
                 }
             })
             

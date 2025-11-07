@@ -97,7 +97,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     // MARK: - Event Handling
     
-    private func sendEventToJS(_ eventName: String, body: Any?) {
+    fileprivate func sendEventToJS(_ eventName: String, body: Any?) {
         if hasListeners {
             sendEvent(withName: eventName, body: body)
         }
@@ -295,7 +295,7 @@ class EventCallbackImpl: EventCallback {
     }
     
     func onEvent(eventJson: String) {
-        emitter?.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: eventJson)
+        emitter?.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: ["eventJson": eventJson])
     }
 }
 
