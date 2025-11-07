@@ -146,6 +146,8 @@ interface OfflineProtocol {
     
     string? poll_event();
     
+    void emit_test_event();
+    
     // Messaging
     [Throws=ProtocolError]
     string send_message(string recipient, string content, MessagePriority priority);

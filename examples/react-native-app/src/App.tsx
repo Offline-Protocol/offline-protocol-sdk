@@ -184,6 +184,24 @@ export default function App() {
           </Text>
         </TouchableOpacity>
 
+        {isStarted && (
+          <TouchableOpacity
+            style={[styles.controlButton, styles.testButton]}
+            onPress={async () => {
+              try {
+                await protocol?.emitTestEvent();
+                Alert.alert('Test Event', 'Event emitted! Check the Events tab to verify event system is working.');
+              } catch (err) {
+                Alert.alert('Error', err instanceof Error ? err.message : 'Failed to emit test event');
+              }
+            }}
+          >
+            <Text style={styles.controlButtonText}>
+              🧪 Test Event System
+            </Text>
+          </TouchableOpacity>
+        )}
+
         <View style={styles.tabs}>
           <TouchableOpacity
             style={[styles.tab, activeTab === 'messaging' && styles.activeTab]}
@@ -315,6 +333,9 @@ const styles = StyleSheet.create({
   },
   stopButton: {
     backgroundColor: '#f44336',
+  },
+  testButton: {
+    backgroundColor: '#9c27b0',
   },
   controlButtonText: {
     color: '#fff',

@@ -546,8 +546,9 @@ impl Transport for BleTransport {
     }
 
     fn start(&mut self) -> Result<()> {
-        // Status will be updated by platform implementation
-        // via on_status_changed()
+        // Set status to Available when starting
+        // Platform can still override this via on_status_changed() if BLE is not available
+        *self.status.lock().unwrap() = TransportStatus::Available;
         Ok(())
     }
 

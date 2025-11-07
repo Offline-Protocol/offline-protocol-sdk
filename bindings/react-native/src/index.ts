@@ -243,6 +243,21 @@ export class OfflineProtocol {
   }
 
   /**
+   * Emits a test event to verify the event system is working
+   * 
+   * This is a debugging method that emits a network_metrics event with all zeros.
+   * Use this to verify that events are being delivered from Rust through the
+   * native bridge to JavaScript.
+   */
+  async emitTestEvent(): Promise<void> {
+    if (!this.isCreated) {
+      await OfflineProtocolNativeModule.create(JSON.stringify(this.config));
+      this.isCreated = true;
+    }
+    await OfflineProtocolNativeModule.emitTestEvent();
+  }
+
+  /**
    * Sends a message
    *
    * @param params - Message parameters

@@ -104,13 +104,19 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     @objc func start(_ resolver: @escaping RCTPromiseResolveBlock,
-                    rejecter: @escaping RCTPromiseRejectBlock) {
+                   rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             try protocolInstance?.start()
             resolver(nil)
         } catch {
             rejecter("ERROR_START", "Failed to start protocol: \(error.localizedDescription)", error)
         }
+    }
+    
+    @objc func emitTestEvent(_ resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.emitTestEvent()
+        resolver(nil)
     }
     
     @objc func stop(_ resolver: @escaping RCTPromiseResolveBlock,

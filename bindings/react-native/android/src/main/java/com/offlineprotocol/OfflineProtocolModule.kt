@@ -107,6 +107,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_START", "Failed to start protocol: ${e.message}", e)
         }
     }
+    
+    @ReactMethod
+    fun emitTestEvent(promise: Promise) {
+        try {
+            protocol?.emitTestEvent()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_TEST_EVENT", "Failed to emit test event: ${e.message}", e)
+        }
+    }
 
     @ReactMethod
     fun stop(promise: Promise) {

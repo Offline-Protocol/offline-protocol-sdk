@@ -676,6 +676,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
     ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
+    ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports(
@@ -770,6 +772,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_status_changed(`ptr`: Long,`isAvailable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -966,6 +970,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328.toShort()) {
@@ -1568,6 +1575,8 @@ public interface OfflineProtocolInterface {
     
     fun `cancelFileTransfer`(`fileId`: kotlin.String)
     
+    fun `emitTestEvent`()
+    
     fun `finalizeFile`(`fileId`: kotlin.String)
     
     fun `getActiveTransports`(): List<kotlin.String>
@@ -1845,6 +1854,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
         it,
         FfiConverterString.lower(`fileId`),_status)
+}
+    }
+    
+    
+
+    override fun `emitTestEvent`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(
+        it,
+        _status)
 }
     }
     

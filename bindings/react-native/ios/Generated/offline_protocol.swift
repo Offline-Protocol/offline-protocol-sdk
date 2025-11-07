@@ -608,6 +608,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func cancelFileTransfer(fileId: String) throws 
     
+    func emitTestEvent() 
+    
     func finalizeFile(fileId: String) throws 
     
     func getActiveTransports()  -> [String]
@@ -788,6 +790,13 @@ open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiC
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(fileId),$0
+    )
+}
+}
+    
+open func emitTestEvent()  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(
+            self.uniffiCloneHandle(),$0
     )
 }
 }
@@ -2409,6 +2418,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328) {
