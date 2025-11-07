@@ -4,6 +4,7 @@ import {
   ProtocolConfig,
   ProtocolEvent,
   MessagePriority,
+  DiagnosticEvent,
 } from '@offlineprotocol/react-native';
 import { requestBluetoothPermissions, showPermissionRationale, getPermissionDeniedMessage } from '../utils/permissions';
 import { ensureBluetoothEnabled } from '../utils/bluetooth';
@@ -49,7 +50,8 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       instance.on('all', (event) => {
         // Special formatting for diagnostic messages
         if (event.type === 'diagnostic') {
-          console.log('🔍', (event as any).message);
+          const diagnostic = event as DiagnosticEvent;
+          console.log('🔍', diagnostic.message, diagnostic.context ?? '');
         } else {
           console.log('Protocol event:', event.type, event);
         }

@@ -8,6 +8,7 @@ import type {
   NeighborDiscoveredEvent,
   NeighborLostEvent,
   NetworkMetricsEvent,
+  DiagnosticEvent,
 } from '@offlineprotocol/react-native';
 
 interface NetworkScreenProps {
@@ -65,6 +66,46 @@ export function NetworkScreen({ events }: NetworkScreenProps) {
             avgLatencyMs: (event as NetworkMetricsEvent).avg_latency_ms,
           };
           break;
+        case 'diagnostic': {
+          const diag = event as DiagnosticEvent;
+          const context = (diag.context ?? {}) as Record<string, unknown>;
+          const stateValue = typeof context.state === 'string' ? context.state.toLowerCase() : undefined;
+
+          if (diag.message === 'Starting BLE transport') {
+            state.currentTransport = 'BLE (starting)';
+          }
+
+          if (diag.message === 'BLE transport state changed' && stateValue) {
+            if (stateValue === 'running') {
+              state.currentTransport = 'BLE';
+            } else if (stateValue === 'unavailable' || stateValue === 'stopped') {
+              state.currentTransport = null;
+            }
+          }
+
+          if (diag.message === 'BLE transport stopped') {
+            state.currentTransport = null;
+          }
+
+          if (diag.message === 'Peer discovered') {
+            const peerId = typeof context.peerId === 'string' ? context.peerId : undefined;
+            if (peerId) {
+              state.neighbors.add(peerId);
+              if (!state.currentTransport) {
+                state.currentTransport = 'BLE';
+              }
+            }
+          }
+
+          if (diag.message === 'Disconnected from BLE peripheral') {
+            const peerId = typeof context.peerId === 'string' ? context.peerId : undefined;
+            if (peerId) {
+              state.neighbors.delete(peerId);
+            }
+          }
+
+          break;
+        }
       }
     });
 

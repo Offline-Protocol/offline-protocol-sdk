@@ -22,7 +22,8 @@ import java.util.concurrent.ConcurrentHashMap
 class BleManager(
     private val context: Context,
     private val protocol: OfflineProtocol,
-    private val deviceId: String
+    private val deviceId: String,
+    private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
 ) : TransportManager {
     
     // MARK: - TransportManager Implementation
@@ -73,6 +74,7 @@ class BleManager(
     private val gattClients = ConcurrentHashMap<String, BluetoothGatt>()
     private val deviceAddressToId = ConcurrentHashMap<String, String>()
     private val deviceIdToAddress = ConcurrentHashMap<String, String>()
+    private val lastSeenRssi = ConcurrentHashMap<String, Short>()
     
     // Fragment polling
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -93,14 +95,20 @@ class BleManager(
     
     // MARK: - TransportManager Implementation
     
+    private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
+        diagnosticEmitter?.invoke(level, message, context)
+    }
+
     override fun isAvailable(): Boolean {
         if (bluetoothAdapter == null) {
             Log.w(TAG, "Bluetooth adapter not available")
+            emitDiagnostic("error", "Bluetooth adapter not available")
             return false
         }
         
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
             Log.w(TAG, "BLE not supported on this device")
+            emitDiagnostic("error", "BLE not supported on this device")
             return false
         }
         
@@ -127,6 +135,7 @@ class BleManager(
         }
         
         Log.i(TAG, "Starting BLE transport for device: $deviceId")
+        emitDiagnostic("info", "Starting BLE transport", mapOf("deviceId" to deviceId))
         updateState(TransportState.STARTING)
         
         try {
@@ -152,8 +161,25 @@ class BleManager(
             protocol.bleStatusChanged(true)
             
             Log.i(TAG, "BLE Manager started successfully - scanning and advertising active")
+            emitDiagnostic(
+                "info",
+                "BLE manager running",
+                mapOf(
+                    "scanning" to true,
+                    "advertising" to true,
+                    "mtu" to MAX_FRAGMENT_SIZE
+                )
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start BLE manager", e)
+            emitDiagnostic(
+                "error",
+                "Failed to start BLE manager",
+                mapOf(
+                    "message" to (e.message ?: "unknown"),
+                    "exception" to e.javaClass.simpleName
+                )
+            )
             updateState(TransportState.STOPPED)
             throw TransportException.StartFailed("Failed to start BLE manager", e)
         }
@@ -187,6 +213,7 @@ class BleManager(
         gattClients.clear()
         deviceAddressToId.clear()
         deviceIdToAddress.clear()
+        lastSeenRssi.clear()
         
         // Close GATT server
         gattServer?.close()
@@ -196,6 +223,7 @@ class BleManager(
         protocol.bleStatusChanged(false)
         
         Log.i(TAG, "BLE Manager stopped")
+        emitDiagnostic("info", "BLE transport stopped")
     }
     
     override fun pause() {
@@ -303,6 +331,7 @@ class BleManager(
                 override fun onScanFailed(errorCode: Int) {
                     Log.e(TAG, "Scan failed with error code: $errorCode")
                     isScanning = false
+                    emitDiagnostic("error", "BLE scan failed", mapOf("errorCode" to errorCode))
                 }
             }
             
@@ -310,8 +339,10 @@ class BleManager(
             isScanning = true
             
             Log.i(TAG, "Started scanning for service: $SERVICE_UUID")
+            emitDiagnostic("info", "Started BLE scanning", mapOf("serviceUuid" to SERVICE_UUID.toString()))
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while starting scan", e)
+            emitDiagnostic("error", "Permission denied while starting scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
             throw e
         }
     }
@@ -324,8 +355,10 @@ class BleManager(
             scanCallback = null
             isScanning = false
             Log.i(TAG, "Stopped scanning")
+            emitDiagnostic("info", "Stopped BLE scanning")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while stopping scan", e)
+            emitDiagnostic("error", "Permission denied while stopping scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
     
@@ -349,19 +382,23 @@ class BleManager(
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
                     Log.i(TAG, "Advertising started successfully")
                     isAdvertising = true
+                    emitDiagnostic("info", "BLE advertising started")
                 }
                 
                 override fun onStartFailure(errorCode: Int) {
                     Log.e(TAG, "Advertising failed with error code: $errorCode")
                     isAdvertising = false
+                    emitDiagnostic("error", "BLE advertising failed", mapOf("errorCode" to errorCode))
                 }
             }
             
             bluetoothLeAdvertiser?.startAdvertising(settings, data, advertiseCallback)
             
             Log.i(TAG, "Starting advertising with service: $SERVICE_UUID")
+            emitDiagnostic("info", "Starting BLE advertising", mapOf("serviceUuid" to SERVICE_UUID.toString()))
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while starting advertising", e)
+            emitDiagnostic("error", "Permission denied while starting advertising", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
             throw e
         }
     }
@@ -374,8 +411,10 @@ class BleManager(
             advertiseCallback = null
             isAdvertising = false
             Log.i(TAG, "Stopped advertising")
+            emitDiagnostic("info", "Stopped BLE advertising")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while stopping advertising", e)
+            emitDiagnostic("error", "Permission denied while stopping advertising", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
     
@@ -385,7 +424,10 @@ class BleManager(
         val address = device.address
         
         Log.d(TAG, "Discovered device: $address RSSI: $rssi")
+        emitDiagnostic("info", "Discovered BLE device", mapOf("address" to address, "rssi" to rssi))
         
+        lastSeenRssi[address] = rssi
+
         // Connect to device if not already connected
         if (!gattClients.containsKey(address)) {
             connectToDevice(device)
@@ -398,8 +440,10 @@ class BleManager(
             gattClients[device.address] = gatt
             
             Log.i(TAG, "Connecting to device: ${device.address}")
+            emitDiagnostic("info", "Connecting to BLE device", mapOf("address" to device.address))
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while connecting to device", e)
+            emitDiagnostic("error", "Permission denied while connecting to device", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
     
@@ -417,6 +461,7 @@ class BleManager(
             
             if (gatt == null) {
                 Log.w(TAG, "No connected device for recipient: $recipientId")
+                emitDiagnostic("warning", "No connected device for BLE fragment", mapOf("recipientId" to recipientId))
                 return
             }
             
@@ -438,8 +483,10 @@ class BleManager(
             fragmentsSent++
             
             Log.d(TAG, "Sent fragment to $recipientId: ${data.size} bytes")
+            emitDiagnostic("info", "Sent BLE fragment", mapOf("recipientId" to recipientId, "bytes" to data.size))
         } catch (e: Exception) {
             Log.e(TAG, "Error polling/sending fragments", e)
+            emitDiagnostic("error", "Error sending BLE fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
     
@@ -449,6 +496,7 @@ class BleManager(
             val senderId = deviceAddressToId[address]
             if (senderId == null) {
                 Log.w(TAG, "Unknown sender address: $address")
+                emitDiagnostic("warning", "Unknown sender address", mapOf("address" to address))
                 return
             }
             
@@ -462,8 +510,10 @@ class BleManager(
             fragmentsReceived++
             
             Log.d(TAG, "Received fragment from $senderId: ${data.size} bytes")
+            emitDiagnostic("info", "Received BLE fragment", mapOf("senderId" to senderId, "bytes" to data.size))
         } catch (e: Exception) {
             Log.e(TAG, "Error processing received fragment", e)
+            emitDiagnostic("error", "Error processing received fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
     
@@ -474,9 +524,22 @@ class BleManager(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.i(TAG, "GATT server: Device connected: ${device.address}")
+                    emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.i(TAG, "GATT server: Device disconnected: ${device.address}")
+                    emitDiagnostic("info", "Device disconnected from GATT server", mapOf("address" to device.address))
+                    lastSeenRssi.remove(device.address)
+                    deviceAddressToId[device.address]?.let { peerId ->
+                        try {
+                            protocol.blePeerLost(peerId)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error notifying peer lost", e)
+                            emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                        }
+                        deviceAddressToId.remove(device.address)
+                        deviceIdToAddress.remove(peerId)
+                    }
                 }
             }
         }
@@ -496,6 +559,7 @@ class BleManager(
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "Permission denied in read request", e)
+                emitDiagnostic("error", "Permission denied in characteristic read", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
             }
         }
         
@@ -523,6 +587,7 @@ class BleManager(
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "Permission denied in write request", e)
+                emitDiagnostic("error", "Permission denied in characteristic write", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
             }
         }
     }
@@ -534,19 +599,28 @@ class BleManager(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.i(TAG, "GATT client: Connected to ${gatt.device.address}")
+                    emitDiagnostic("info", "Connected to BLE device", mapOf("address" to gatt.device.address))
                     try {
                         gatt.discoverServices()
                     } catch (e: SecurityException) {
                         Log.e(TAG, "Permission denied discovering services", e)
+                        emitDiagnostic("error", "Permission denied discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.i(TAG, "GATT client: Disconnected from ${gatt.device.address}")
+                    emitDiagnostic("info", "Disconnected from BLE device", mapOf("address" to gatt.device.address))
                     gattClients.remove(gatt.device.address)
+                    lastSeenRssi.remove(gatt.device.address)
                     
                     // Notify protocol of peer loss
                     deviceAddressToId[gatt.device.address]?.let { deviceId ->
-                        protocol.blePeerLost(deviceId)
+                        try {
+                            protocol.blePeerLost(deviceId)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error notifying peer lost", e)
+                            emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                        }
                         deviceAddressToId.remove(gatt.device.address)
                         deviceIdToAddress.remove(deviceId)
                     }
@@ -558,6 +632,7 @@ class BleManager(
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val service = gatt.getService(SERVICE_UUID)
                 if (service != null) {
+                    emitDiagnostic("info", "GATT services discovered", mapOf("address" to gatt.device.address))
                     // Read device ID characteristic
                     val deviceIdChar = service.getCharacteristic(DEVICE_ID_CHAR_UUID)
                     if (deviceIdChar != null) {
@@ -565,6 +640,7 @@ class BleManager(
                             gatt.readCharacteristic(deviceIdChar)
                         } catch (e: SecurityException) {
                             Log.e(TAG, "Permission denied reading characteristic", e)
+                            emitDiagnostic("error", "Permission denied reading device ID characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                         }
                     }
                     
@@ -574,11 +650,15 @@ class BleManager(
                         try {
                             gatt.setCharacteristicNotification(messageChar, true)
                             Log.d(TAG, "Enabled notifications for message characteristic")
+                            emitDiagnostic("info", "Enabled notifications for message characteristic", mapOf("address" to gatt.device.address))
                         } catch (e: SecurityException) {
                             Log.e(TAG, "Permission denied setting notification", e)
+                            emitDiagnostic("error", "Permission denied enabling notifications", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                         }
                     }
                 }
+            } else {
+                emitDiagnostic("error", "Service discovery failed", mapOf("address" to gatt.device.address, "status" to status))
             }
         }
         
@@ -590,10 +670,16 @@ class BleManager(
                     deviceIdToAddress[deviceIdValue] = gatt.device.address
                     
                     // Notify protocol of peer discovery
-                    // RSSI will be updated from scan results
-                    protocol.blePeerDiscovered(deviceIdValue, -50)
+                    val rssi = lastSeenRssi[gatt.device.address] ?: (-60).toShort()
+                    try {
+                        protocol.blePeerDiscovered(deviceIdValue, rssi)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error notifying peer discovered", e)
+                        emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                    }
                     
                     Log.i(TAG, "Peer discovered: $deviceIdValue at ${gatt.device.address}")
+                    emitDiagnostic("info", "Peer discovered", mapOf("peerId" to deviceIdValue, "address" to gatt.device.address, "rssi" to rssi))
                 }
             }
         }

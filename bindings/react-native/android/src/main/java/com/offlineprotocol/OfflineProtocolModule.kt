@@ -1,7 +1,9 @@
 package com.offlineprotocol
 
+import android.net.Uri
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -20,6 +22,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var bleManager: BleManager? = null
     private var processScheduler: ScheduledExecutorService? = null
     private var listenerCount: Int = 0
+    private var currentConfig: ProtocolConfig? = null
 
     companion object {
         const val NAME = "OfflineProtocolModule"
@@ -68,6 +71,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val config = parseConfig(configJson)
             val proto = OfflineProtocol(config)
+            currentConfig = config
+            emitDiagnostic("info", "Protocol core created", mapOf(
+                "appId" to config.appId,
+                "userId" to config.userId,
+                "bleEnabled" to config.bleEnabled,
+                "wifiDirectEnabled" to config.wifiDirectEnabled,
+                "internetEnabled" to config.internetEnabled
+            ))
             
             // Set up event callback
             proto.setEventCallback(object : EventCallback {
@@ -83,15 +94,57 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             
             // Initialize BLE manager if BLE is enabled
             if (config.bleEnabled) {
-                bleManager = BleManager(reactApplicationContext, proto, config.userId)
+                bleManager = BleManager(reactApplicationContext, proto, config.userId) { level, message, context ->
+                    emitDiagnostic(level, message, context)
+                }.also { manager ->
+                    manager.listener = object : TransportManagerListener {
+                        override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
+                            emitDiagnostic("info", "BLE transport state changed", mapOf(
+                                "state" to state.name.lowercase()
+                            ))
+                        }
+
+                        override fun onTransportError(manager: TransportManager, error: Throwable) {
+                            emitDiagnostic("error", "BLE transport error", mapOf(
+                                "message" to (error.message ?: "unknown"),
+                                "exception" to error.javaClass.simpleName
+                            ))
+                        }
+
+                        override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
+                            emitDiagnostic("info", "BLE transport metrics", metrics.mapValues { it.value })
+                        }
+
+                        override fun onTransportDiagnostic(
+                            manager: TransportManager,
+                            level: String,
+                            message: String,
+                            context: Map<String, Any?>
+                        ) {
+                            emitDiagnostic(level, message, context)
+                        }
+                    }
+                }
                 android.util.Log.i(NAME, "BLE Manager initialized for user: ${config.userId}")
+                emitDiagnostic("info", "BLE manager initialized", mapOf(
+                    "userId" to config.userId
+                ))
+            } else {
+                emitDiagnostic("warning", "BLE disabled in configuration", mapOf(
+                    "userId" to config.userId
+                ))
             }
             
             // Start process scheduler
             startProcessScheduler()
+            emitDiagnostic("info", "Protocol process scheduler started")
             
             promise.resolve(null)
         } catch (e: Exception) {
+            emitDiagnostic("error", "Failed to create protocol", mapOf(
+                "message" to (e.message ?: "unknown"),
+                "exception" to e.javaClass.simpleName
+            ))
             promise.reject("ERROR_CREATE", "Failed to create protocol: ${e.message}", e)
         }
     }
@@ -107,24 +160,62 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
+        try {
+            val json = JSONObject()
+            json.put("type", "diagnostic")
+            json.put("level", level)
+            json.put("message", message)
+
+            if (context.isNotEmpty()) {
+                val contextJson = JSONObject()
+                context.forEach { (key, value) ->
+                    when (value) {
+                        null -> contextJson.put(key, JSONObject.NULL)
+                        else -> contextJson.put(key, value)
+                    }
+                }
+                json.put("context", contextJson)
+            }
+
+            val params = Arguments.createMap().apply {
+                putString("eventJson", json.toString())
+            }
+            sendEvent(EVENT_NAME, params)
+        } catch (e: Exception) {
+            android.util.Log.e(NAME, "Failed to emit diagnostic event", e)
+        }
+    }
+
     @ReactMethod
     fun start(promise: Promise) {
         try {
+            emitDiagnostic("info", "Starting protocol")
             protocol?.start()
+            emitDiagnostic("info", "Protocol core started")
             
             // Start BLE manager if available
             bleManager?.let { manager ->
                 try {
                     manager.start()
                     android.util.Log.i(NAME, "BLE Manager started")
+                    emitDiagnostic("info", "BLE manager started")
                 } catch (e: Exception) {
                     android.util.Log.w(NAME, "Warning: Failed to start BLE Manager: ${e.message}")
+                    emitDiagnostic("error", "Failed to start BLE manager", mapOf(
+                        "message" to (e.message ?: "unknown"),
+                        "exception" to e.javaClass.simpleName
+                    ))
                     // Don't fail the entire start if BLE fails
                 }
             }
             
             promise.resolve(null)
         } catch (e: Exception) {
+            emitDiagnostic("error", "Failed to start protocol", mapOf(
+                "message" to (e.message ?: "unknown"),
+                "exception" to e.javaClass.simpleName
+            ))
             promise.reject("ERROR_START", "Failed to start protocol: ${e.message}", e)
         }
     }
@@ -146,11 +237,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // Stop BLE manager first
         bleManager?.stop()
         android.util.Log.i(NAME, "BLE Manager stopped")
+        emitDiagnostic("info", "BLE manager stopped")
         
         try {
             protocol?.stop()
+            emitDiagnostic("info", "Protocol stopped")
             promise.resolve(null)
         } catch (e: Exception) {
+            emitDiagnostic("error", "Failed to stop protocol", mapOf(
+                "message" to (e.message ?: "unknown"),
+                "exception" to e.javaClass.simpleName
+            ))
             promise.reject("ERROR_STOP", "Failed to stop protocol: ${e.message}", e)
         }
     }
@@ -205,6 +302,185 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun receiveMessage(promise: Promise) {
         val messageJson = protocol?.receiveMessage()
         promise.resolve(messageJson)
+    }
+
+    @ReactMethod
+    fun destroy(promise: Promise) {
+        try {
+            stopProcessScheduler()
+            bleManager?.stop()
+            bleManager = null
+
+            try {
+                protocol?.stop()
+            } catch (_: Exception) {
+                // Ignore stop errors during destroy
+            }
+
+            protocol = null
+            listenerCount = 0
+            currentConfig = null
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_DESTROY", "Failed to destroy protocol: ${e.message}", e)
+        }
+    }
+
+    // ========================================================================
+    // TRANSPORT MANAGEMENT
+    // ========================================================================
+
+    @ReactMethod
+    fun enableTransport(type: String, config: ReadableMap?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            when (type.lowercase()) {
+                "internet" -> {
+                    val (host, port) = parseInternetConfig(config)
+                    proto.addInternetTransport(host, port.toUShort())
+                }
+                "wifidirect", "wifi_direct" -> {
+                    proto.addWifiDirectTransport()
+                }
+                "ble" -> {
+                    // BLE transport is managed automatically
+                }
+                else -> throw IllegalArgumentException("Unsupported transport type: $type")
+            }
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_TRANSPORT_ENABLE", "Failed to enable transport: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_TRANSPORT_ENABLE", "Failed to enable transport: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun disableTransport(type: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val transportType = mapTransportType(type)
+            proto.removeTransport(transportType)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getTopology(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val topology = proto.getTopology()
+            val topologyJson = buildTopologyJson(topology)
+            promise.resolve(topologyJson)
+        } catch (e: Exception) {
+            promise.reject("ERROR_TOPOLOGY", "Failed to get topology: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getMessageStats(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val stats = proto.getMessageStats()
+            val statsJson = buildMessageStatsJson(stats)
+            promise.resolve(statsJson)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESSAGE_STATS", "Failed to get message stats: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getDeliverySuccessRate(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val rate = proto.getDeliverySuccessRate().toDouble()
+            promise.resolve(rate)
+        } catch (e: Exception) {
+            promise.reject("ERROR_DELIVERY_RATE", "Failed to get delivery success rate: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getMedianLatency(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val latency = proto.getMedianLatency().toLong()
+            if (latency == 0L) {
+                promise.resolve(null)
+            } else {
+                promise.resolve(latency)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_MEDIAN_LATENCY", "Failed to get median latency: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getMedianHops(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val hops = proto.getMedianHops().toInt()
+            if (hops == 0) {
+                promise.resolve(null)
+            } else {
+                promise.resolve(hops)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_MEDIAN_HOPS", "Failed to get median hops: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun sendFile(filePath: String, recipient: String, fileName: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val id = proto.sendFile(recipient, filePath, fileName)
+            promise.resolve(id)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_SEND_FILE", "Failed to send file: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_SEND_FILE", "Failed to send file: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getFileProgress(fileId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val progress = proto.getFileProgress(fileId)
+            if (progress != null) {
+                val map = Arguments.createMap().apply {
+                    putString("file_id", progress.fileId)
+                    putString("file_name", progress.fileId)
+                    putDouble("file_size", 0.0)
+                    putInt("chunks_completed", progress.chunksSent.toInt())
+                    putInt("total_chunks", progress.totalChunks.toInt())
+                    putInt("percentage", progress.percentage.toInt())
+                }
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_FILE_PROGRESS", "Failed to get file progress: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun cancelFileTransfer(fileId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.cancelFileTransfer(fileId)
+            promise.resolve(true)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
+        }
     }
     
     // ========================================================================
@@ -373,7 +649,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val type = when (transportType.lowercase()) {
                 "ble" -> TransportType.BLE
-                "wifidirect" -> TransportType.WIFI_DIRECT
+                "wifidirect" -> TransportType.WI_FI_DIRECT
                 "internet" -> TransportType.INTERNET
                 else -> TransportType.BLE
             }
@@ -403,7 +679,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val type = when (transportType.lowercase()) {
                 "ble" -> TransportType.BLE
-                "wifidirect" -> TransportType.WIFI_DIRECT
+                "wifidirect" -> TransportType.WI_FI_DIRECT
                 "internet" -> TransportType.INTERNET
                 else -> TransportType.BLE
             }
@@ -495,6 +771,162 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             protocol?.process()
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Process error: ${e.message}", e)
+        }
+    }
+
+    private fun parseInternetConfig(config: ReadableMap?): Pair<String, Int> {
+        var serverAddress: String? = null
+        if (config != null) {
+            if (config.hasKey("serverAddress") && !config.isNull("serverAddress")) {
+                serverAddress = config.getString("serverAddress")
+            } else if (config.hasKey("server_url") && !config.isNull("server_url")) {
+                serverAddress = config.getString("server_url")
+            }
+        }
+
+        if (serverAddress.isNullOrBlank()) {
+            throw IllegalArgumentException("Internet transport requires serverAddress")
+        }
+
+        var port: Int? = null
+        if (config != null) {
+            if (config.hasKey("port") && !config.isNull("port")) {
+                port = config.getInt("port")
+            } else if (config.hasKey("serverPort") && !config.isNull("serverPort")) {
+                port = config.getInt("serverPort")
+            }
+        }
+
+        val uri = try {
+            Uri.parse(serverAddress)
+        } catch (_: Exception) {
+            null
+        }
+
+        var host = serverAddress
+        if (uri != null && !uri.scheme.isNullOrBlank()) {
+            host = uri.host ?: serverAddress
+            if (uri.port != -1) {
+                port = uri.port
+            }
+        }
+
+        if (port == null) {
+            port = when (uri?.scheme?.lowercase()) {
+                "wss", "https" -> 443
+                "ws", "http" -> 80
+                else -> 443
+            }
+        }
+
+        val safePort = port!!.coerceIn(0, 65535)
+        return host!! to safePort
+    }
+
+    private fun mapTransportType(type: String): TransportType {
+        return when (type.lowercase()) {
+            "internet" -> TransportType.INTERNET
+            "ble" -> TransportType.BLE
+            "wifidirect", "wifi_direct" -> TransportType.WI_FI_DIRECT
+            else -> throw IllegalArgumentException("Unsupported transport type: $type")
+        }
+    }
+
+    private fun buildTopologyJson(topology: NetworkTopology): String {
+        val linksArray = JSONArray()
+        val nodesArray = JSONArray()
+        val connectionCounts = mutableMapOf<String, Int>()
+        val transportsByNode = mutableMapOf<String, MutableSet<String>>()
+
+        topology.links.forEach { link ->
+            val transportName = normalizeTransportName(link.transport)
+            val linkObj = JSONObject().apply {
+                put("from", link.sourceId)
+                put("to", link.targetId)
+                put("quality", link.quality.toDouble())
+                put("transport", transportName)
+                put("rssi", JSONObject.NULL)
+            }
+            linksArray.put(linkObj)
+
+            transportsByNode.getOrPut(link.sourceId) { mutableSetOf() }.add(transportName)
+            transportsByNode.getOrPut(link.targetId) { mutableSetOf() }.add(transportName)
+
+            connectionCounts[link.sourceId] = (connectionCounts[link.sourceId] ?: 0) + 1
+            connectionCounts[link.targetId] = (connectionCounts[link.targetId] ?: 0) + 1
+        }
+
+        topology.nodes.forEach { node ->
+            val transportsArray = JSONArray()
+            transportsByNode[node.nodeId]?.forEach { transportsArray.put(it) }
+
+            val nodeObj = JSONObject().apply {
+                put("user_id", node.nodeId)
+                put("role", node.role.lowercase())
+                put("connection_count", connectionCounts[node.nodeId] ?: 0)
+                put("battery_level", JSONObject.NULL)
+                put("last_seen", node.lastSeenMs.toLong() / 1000)
+                put("transports", transportsArray)
+            }
+            nodesArray.put(nodeObj)
+        }
+
+        val avgQuality = if (topology.links.isNotEmpty()) {
+            topology.links.map { it.quality }.average()
+        } else {
+            0.0
+        }
+
+        val statsObj = JSONObject().apply {
+            put("total_nodes", topology.nodes.size)
+            put("relay_nodes", topology.nodes.count { it.role.equals("relay", true) })
+            put("total_connections", topology.links.size)
+            put("avg_link_quality", avgQuality)
+            put("network_diameter", JSONObject.NULL)
+        }
+
+        val root = JSONObject().apply {
+            put("timestamp", System.currentTimeMillis() / 1000)
+            put("local_user_id", currentConfig?.userId ?: "")
+            put("nodes", nodesArray)
+            put("links", linksArray)
+            put("stats", statsObj)
+        }
+
+        return root.toString()
+    }
+
+    private fun buildMessageStatsJson(stats: List<MessageStats>): String {
+        val array = JSONArray()
+        stats.forEach { stat ->
+            val obj = JSONObject().apply {
+                put("message_id", stat.messageId)
+                put("sender", JSONObject.NULL)
+                put("recipient", JSONObject.NULL)
+                put("sent_at", stat.sentAtMs.toLong())
+                if (stat.deliveredAtMs != null) {
+                    put("delivered_at", stat.deliveredAtMs!!.toLong())
+                    put("latency_ms", (stat.deliveredAtMs!!.toLong() - stat.sentAtMs.toLong()).coerceAtLeast(0))
+                } else {
+                    put("delivered_at", JSONObject.NULL)
+                    put("latency_ms", JSONObject.NULL)
+                }
+                put("hop_count", stat.hopCount.toInt())
+                put("transport", JSONObject.NULL)
+                put("retry_count", 0)
+                put("status", stat.status)
+            }
+            array.put(obj)
+        }
+        return array.toString()
+    }
+
+    private fun normalizeTransportName(name: String): String {
+        return when (name.lowercase()) {
+            "ble" -> "ble"
+            "internet" -> "internet"
+            "wifi_direct", "wifidirect", "wi_fi_direct" -> "wifiDirect"
+            else -> name.lowercase()
         }
     }
 }

@@ -30,6 +30,11 @@ interface TransportManagerListener {
      * Called when transport metrics are updated
      */
     fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>)
+
+    /**
+     * Called when the transport emits a diagnostic message
+     */
+    fun onTransportDiagnostic(manager: TransportManager, level: String, message: String, context: Map<String, Any?>)
 }
 
 /**

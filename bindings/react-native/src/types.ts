@@ -356,6 +356,16 @@ export interface FileReceivedEvent extends BaseEvent {
 }
 
 /**
+ * Diagnostic event emitted by native modules for debugging purposes
+ */
+export interface DiagnosticEvent extends BaseEvent {
+  type: 'diagnostic';
+  level: 'info' | 'warning' | 'error';
+  message: string;
+  context?: Record<string, unknown>;
+}
+
+/**
  * Union type of all events
  */
 export type ProtocolEvent =
@@ -370,7 +380,8 @@ export type ProtocolEvent =
   | NeighborLostEvent
   | NetworkMetricsEvent
   | FileProgressEvent
-  | FileReceivedEvent;
+  | FileReceivedEvent
+  | DiagnosticEvent;
 
 /**
  * Event listener type

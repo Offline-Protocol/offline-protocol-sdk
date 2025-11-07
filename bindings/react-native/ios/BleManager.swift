@@ -39,6 +39,8 @@ public class BleManager: NSObject, TransportManager {
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var connectedPeripherals: [UUID: CBPeripheral] = [:]
     private var peripheralDeviceIds: [UUID: String] = [:]
+    private var peripheralRSSI: [UUID: Int16] = [:]
+    private var centralDeviceIds: [UUID: String] = [:]
     
     // Peripheral (advertiser/server) components
     private var peripheralManager: CBPeripheralManager?
@@ -60,6 +62,11 @@ public class BleManager: NSObject, TransportManager {
     private var bytesReceived: UInt64 = 0
     private var fragmentsSent: UInt64 = 0
     private var fragmentsReceived: UInt64 = 0
+
+    // MARK: - Diagnostics
+    private func emitDiagnostic(_ level: String, _ message: String, context: [String: Any] = [:]) {
+        delegate?.transportManager(self, didEmitDiagnostic: level, message: message, context: context)
+    }
     
     // MARK: - Initialization
     
@@ -90,6 +97,7 @@ public class BleManager: NSObject, TransportManager {
         }
         
         print("[BleManager] Starting BLE transport for device: \(deviceId)")
+        emitDiagnostic("info", "Starting BLE transport", context: ["deviceId": deviceId])
         updateState(.starting)
         
         // Initialize Central Manager (for scanning)
@@ -107,6 +115,7 @@ public class BleManager: NSObject, TransportManager {
         )
         
         print("[BleManager] Waiting for Bluetooth to power on...")
+        emitDiagnostic("info", "Waiting for Bluetooth to power on")
         // Note: Actual start happens in delegate callbacks when ready
     }
     
@@ -133,6 +142,8 @@ public class BleManager: NSObject, TransportManager {
         connectedPeripherals.removeAll()
         discoveredPeripherals.removeAll()
         peripheralDeviceIds.removeAll()
+        peripheralRSSI.removeAll()
+        centralDeviceIds.removeAll()
         
         // Clean up managers
         centralManager = nil
@@ -142,6 +153,7 @@ public class BleManager: NSObject, TransportManager {
         peripheralReady = false
         
         updateState(.stopped)
+        emitDiagnostic("info", "BLE transport stopped")
     }
     
     public func pause() {
@@ -182,6 +194,7 @@ public class BleManager: NSObject, TransportManager {
         }
         
         print("[BleManager] Starting scan for service: \(SERVICE_UUID)")
+        emitDiagnostic("info", "Started BLE scanning", context: ["serviceUuid": SERVICE_UUID.uuidString])
         central.scanForPeripherals(
             withServices: [SERVICE_UUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
@@ -194,6 +207,7 @@ public class BleManager: NSObject, TransportManager {
         centralManager?.stopScan()
         isScanning = false
         print("[BleManager] Stopped scanning")
+        emitDiagnostic("info", "Stopped BLE scanning")
     }
     
     private func startAdvertising() {
@@ -211,6 +225,7 @@ public class BleManager: NSObject, TransportManager {
         ]
         
         print("[BleManager] Starting advertising with service: \(SERVICE_UUID)")
+        emitDiagnostic("info", "Starting BLE advertising", context: ["serviceUuid": SERVICE_UUID.uuidString])
         peripheral.startAdvertising(advertisementData)
         isAdvertising = true
     }
@@ -220,6 +235,7 @@ public class BleManager: NSObject, TransportManager {
         peripheralManager?.stopAdvertising()
         isAdvertising = false
         print("[BleManager] Stopped advertising")
+        emitDiagnostic("info", "Stopped BLE advertising")
     }
     
     private func setupGattServer() {
@@ -249,6 +265,7 @@ public class BleManager: NSObject, TransportManager {
         // Add service to peripheral manager
         peripheral.add(service)
         print("[BleManager] GATT server configured")
+        emitDiagnostic("info", "GATT server configured")
     }
     
     private func startFragmentPolling() {
@@ -263,11 +280,13 @@ public class BleManager: NSObject, TransportManager {
         
         RunLoop.current.add(fragmentTimer!, forMode: .common)
         print("[BleManager] Fragment polling started")
+        emitDiagnostic("info", "Fragment polling started")
     }
     
     private func stopFragmentPolling() {
         fragmentTimer?.invalidate()
         fragmentTimer = nil
+        emitDiagnostic("info", "Fragment polling stopped")
     }
     
     private func pollAndSendFragments() {
@@ -296,6 +315,7 @@ public class BleManager: NSObject, TransportManager {
         
         guard let peripheral = targetPeripheral else {
             print("[BleManager] No connected peripheral for recipient: \(recipientId)")
+            emitDiagnostic("warning", "No connected peripheral for BLE fragment", context: ["recipientId": recipientId])
             return
         }
         
@@ -303,6 +323,7 @@ public class BleManager: NSObject, TransportManager {
         guard let service = peripheral.services?.first(where: { $0.uuid == SERVICE_UUID }),
               let characteristic = service.characteristics?.first(where: { $0.uuid == MESSAGE_CHAR_UUID }) else {
             print("[BleManager] Message characteristic not found")
+            emitDiagnostic("warning", "Message characteristic not found", context: ["recipientId": recipientId])
             return
         }
         
@@ -313,31 +334,29 @@ public class BleManager: NSObject, TransportManager {
         fragmentsSent += 1
         
         print("[BleManager] Sent fragment to \(recipientId): \(data.count) bytes")
+        emitDiagnostic("info", "Sent BLE fragment", context: ["recipientId": recipientId, "bytes": data.count])
     }
     
-    private func handleReceivedData(_ data: Data, from peripheral: CBPeripheral) {
+    private func handleReceivedData(_ data: Data, senderId: String?) {
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
-            
-            // Get sender device ID
-            guard let senderId = self.peripheralDeviceIds[peripheral.identifier] else {
-                print("[BleManager] Unknown sender peripheral")
+            guard let senderId = senderId else {
+                print("[BleManager] Missing sender ID for received fragment")
+                emitDiagnostic("warning", "Missing sender ID for received fragment")
                 return
             }
-            
-            // Convert to byte array
+
             let bytes = [UInt8](data)
-            
-            // Pass to protocol
+
             do {
                 try self.protocolInstance.bleFragmentReceived(senderId: senderId, fragment: bytes)
-                
                 self.bytesReceived += UInt64(data.count)
                 self.fragmentsReceived += 1
-                
                 print("[BleManager] Received fragment from \(senderId): \(data.count) bytes")
+                self.emitDiagnostic("info", "Received BLE fragment", context: ["senderId": senderId, "bytes": data.count])
             } catch {
                 print("[BleManager] Error processing received fragment: \(error)")
+                self.emitDiagnostic("error", "Error processing received fragment", context: ["error": error.localizedDescription])
             }
         }
     }
@@ -358,12 +377,14 @@ extension BleManager: CBCentralManagerDelegate {
     
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         print("[BleManager] Central state: \(central.state.rawValue)")
+        emitDiagnostic("info", "Central manager state changed", context: ["state": central.state.rawValue])
         
         switch central.state {
         case .poweredOn:
             centralReady = true
             startScanning()
             startFragmentPolling()
+            emitDiagnostic("info", "Central manager powered on")
             
             // If both central and peripheral are ready, mark as running
             if peripheralReady && state == .starting {
@@ -376,6 +397,7 @@ extension BleManager: CBCentralManagerDelegate {
             stopScanning()
             updateState(.unavailable)
             try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            emitDiagnostic("warning", "Central manager unavailable", context: ["state": central.state.rawValue])
             
         default:
             break
@@ -387,8 +409,13 @@ extension BleManager: CBCentralManagerDelegate {
         
         // Store discovered peripheral
         discoveredPeripherals[peripheral.identifier] = peripheral
+        peripheralRSSI[peripheral.identifier] = rssiValue
         
         print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI: \(rssiValue)")
+        emitDiagnostic("info", "Discovered BLE peripheral", context: [
+            "identifier": peripheral.identifier.uuidString,
+            "rssi": rssiValue
+        ])
         
         // Connect to peripheral if not already connected
         if connectedPeripherals[peripheral.identifier] == nil {
@@ -399,6 +426,7 @@ extension BleManager: CBCentralManagerDelegate {
     
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         print("[BleManager] Connected to peripheral: \(peripheral.identifier)")
+        emitDiagnostic("info", "Connected to BLE peripheral", context: ["identifier": peripheral.identifier.uuidString])
         
         connectedPeripherals[peripheral.identifier] = peripheral
         
@@ -408,18 +436,29 @@ extension BleManager: CBCentralManagerDelegate {
     
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         print("[BleManager] Failed to connect to peripheral: \(error?.localizedDescription ?? "unknown")")
+        emitDiagnostic("error", "Failed to connect to BLE peripheral", context: [
+            "identifier": peripheral.identifier.uuidString,
+            "error": error?.localizedDescription ?? "unknown"
+        ])
         discoveredPeripherals.removeValue(forKey: peripheral.identifier)
+        peripheralRSSI.removeValue(forKey: peripheral.identifier)
     }
     
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         print("[BleManager] Disconnected from peripheral: \(peripheral.identifier)")
+        emitDiagnostic("info", "Disconnected from BLE peripheral", context: [
+            "identifier": peripheral.identifier.uuidString,
+            "error": error?.localizedDescription ?? "none"
+        ])
         
         connectedPeripherals.removeValue(forKey: peripheral.identifier)
+        peripheralRSSI.removeValue(forKey: peripheral.identifier)
         
         // Notify protocol of peer loss
         if let deviceId = peripheralDeviceIds[peripheral.identifier] {
             try? self.protocolInstance.blePeerLost(peerId: deviceId)
             peripheralDeviceIds.removeValue(forKey: peripheral.identifier)
+            centralDeviceIds.removeValue(forKey: peripheral.identifier)
         }
     }
 }
@@ -431,6 +470,7 @@ extension BleManager: CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error = error {
             print("[BleManager] Error discovering services: \(error)")
+            emitDiagnostic("error", "Error discovering services", context: ["error": error.localizedDescription])
             return
         }
         
@@ -439,11 +479,13 @@ extension BleManager: CBPeripheralDelegate {
         for service in services where service.uuid == SERVICE_UUID {
             peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID], for: service)
         }
+        emitDiagnostic("info", "Discovered BLE services", context: ["peripheral": peripheral.identifier.uuidString])
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         if let error = error {
             print("[BleManager] Error discovering characteristics: \(error)")
+            emitDiagnostic("error", "Error discovering characteristics", context: ["error": error.localizedDescription])
             return
         }
         
@@ -454,6 +496,7 @@ extension BleManager: CBPeripheralDelegate {
                 // Enable notifications for message characteristic
                 peripheral.setNotifyValue(true, for: characteristic)
                 print("[BleManager] Enabled notifications for message characteristic")
+                emitDiagnostic("info", "Enabled notifications for message characteristic", context: ["peripheral": peripheral.identifier.uuidString])
             } else if characteristic.uuid == DEVICE_ID_CHAR_UUID {
                 // Read device ID
                 peripheral.readValue(for: characteristic)
@@ -464,6 +507,7 @@ extension BleManager: CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             print("[BleManager] Error reading characteristic: \(error)")
+            emitDiagnostic("error", "Error reading characteristic", context: ["error": error.localizedDescription])
             return
         }
         
@@ -473,22 +517,28 @@ extension BleManager: CBPeripheralDelegate {
             // Store device ID
             if let deviceId = String(data: data, encoding: .utf8) {
                 peripheralDeviceIds[peripheral.identifier] = deviceId
-                    
-                    // Notify protocol of peer discovery
-                    let rssi: Int16 = -50 // Default RSSI (will be updated from scan)
-                    try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
-                    
-                    print("[BleManager] Peer discovered: \(deviceId)")
+                centralDeviceIds[peripheral.identifier] = deviceId
+
+                let rssi = peripheralRSSI[peripheral.identifier] ?? -60
+                try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
+
+                print("[BleManager] Peer discovered: \(deviceId)")
+                emitDiagnostic("info", "Peer discovered", context: [
+                    "peerId": deviceId,
+                    "peripheral": peripheral.identifier.uuidString,
+                    "rssi": rssi
+                ])
             }
         } else if characteristic.uuid == MESSAGE_CHAR_UUID {
             // Handle received message fragment
-            handleReceivedData(data, from: peripheral)
+            handleReceivedData(data, senderId: peripheralDeviceIds[peripheral.identifier])
         }
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
             print("[BleManager] Error writing characteristic: \(error)")
+            emitDiagnostic("error", "Error writing characteristic", context: ["error": error.localizedDescription])
         }
     }
 }
@@ -499,11 +549,13 @@ extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         print("[BleManager] Peripheral state: \(peripheral.state.rawValue)")
+        emitDiagnostic("info", "Peripheral manager state changed", context: ["state": peripheral.state.rawValue])
         
         switch peripheral.state {
         case .poweredOn:
             peripheralReady = true
             startAdvertising()
+            emitDiagnostic("info", "Peripheral manager powered on")
             
             // If both central and peripheral are ready, mark as running
             if centralReady && state == .starting {
@@ -516,6 +568,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             stopAdvertising()
             updateState(.unavailable)
             try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            emitDiagnostic("warning", "Peripheral manager unavailable", context: ["state": peripheral.state.rawValue])
             
         default:
             break
@@ -525,18 +578,22 @@ extension BleManager: CBPeripheralManagerDelegate {
     public func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
         if let error = error {
             print("[BleManager] Error starting advertising: \(error)")
+            emitDiagnostic("error", "Error starting BLE advertising", context: ["error": error.localizedDescription])
         } else {
             print("[BleManager] Advertising started successfully")
+            emitDiagnostic("info", "BLE advertising started successfully")
         }
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
         for request in requests {
             if request.characteristic.uuid == MESSAGE_CHAR_UUID, let value = request.value {
-                // Handle incoming fragment
-                // Note: We don't have the central's device ID here directly
-                // In a real implementation, we'd need to track central connections
-                handleReceivedData(value, from: request.central as! CBPeripheral)
+                let senderId = centralDeviceIds[request.central.identifier] ?? peripheralDeviceIds[request.central.identifier]
+                handleReceivedData(value, senderId: senderId)
+                emitDiagnostic("info", "Received BLE write request", context: [
+                    "central": request.central.identifier.uuidString,
+                    "bytes": value.count
+                ])
             }
             
             // Respond to write request
@@ -546,10 +603,23 @@ extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         print("[BleManager] Central subscribed to characteristic: \(characteristic.uuid)")
+        emitDiagnostic("info", "Central subscribed", context: [
+            "central": central.identifier.uuidString,
+            "characteristic": characteristic.uuid.uuidString
+        ])
+        if centralDeviceIds[central.identifier] == nil,
+           let deviceId = peripheralDeviceIds[central.identifier] {
+            centralDeviceIds[central.identifier] = deviceId
+        }
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
         print("[BleManager] Central unsubscribed from characteristic: \(characteristic.uuid)")
+        emitDiagnostic("info", "Central unsubscribed", context: [
+            "central": central.identifier.uuidString,
+            "characteristic": characteristic.uuid.uuidString
+        ])
+        centralDeviceIds.removeValue(forKey: central.identifier)
     }
 }
 

@@ -27,6 +27,9 @@ public protocol TransportManagerDelegate: AnyObject {
     
     /// Called when transport metrics are updated
     func transportManager(_ manager: TransportManager, didUpdateMetrics metrics: [String: Any])
+
+    /// Called when the transport emits a diagnostic message
+    func transportManager(_ manager: TransportManager, didEmitDiagnostic level: String, message: String, context: [String: Any])
 }
 
 /// Base protocol for all transport implementations

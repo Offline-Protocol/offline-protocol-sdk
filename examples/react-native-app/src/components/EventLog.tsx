@@ -34,6 +34,8 @@ export function EventLog({ events, onClear }: EventLogProps) {
         return '#ffc107';
       case 'file_received':
         return '#cddc39';
+      case 'diagnostic':
+        return '#607d8b';
       default:
         return '#9e9e9e';
     }
