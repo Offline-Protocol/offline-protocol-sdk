@@ -43,11 +43,12 @@ android {
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/CMakeLists.txt"
-        }
-    }
+    // UniFFI libraries are pre-built Rust .so files, no CMake needed
+    // externalNativeBuild {
+    //     cmake {
+    //         path "src/main/cpp/CMakeLists.txt"
+    //     }
+    // }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -72,6 +73,9 @@ repositories {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    
+    // JNA required for UniFFI-generated Kotlin bindings
+    implementation 'net.java.dev.jna:jna:5.13.0@aar'
     
     if (reactNativeExists) {
         implementation 'com.facebook.react:react-native:+'

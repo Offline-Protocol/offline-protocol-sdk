@@ -21,7 +21,7 @@ rustup target add aarch64-apple-ios-sim  # For M1 simulator
 ### 2. Build Rust Library
 
 ```bash
-cd crates/offline-protocol-ffi
+cd crates/offline-protocol-uniffi
 
 # Build for iOS devices
 cargo build --release --target aarch64-apple-ios

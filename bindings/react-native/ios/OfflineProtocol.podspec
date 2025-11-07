@@ -1,41 +1,49 @@
-require 'json'
+require "json"
 
-package = JSON.parse(File.read(File.join(__dir__, '../package.json')))
+package = JSON.parse(File.read(File.join(__dir__, "../package.json")))
 
 Pod::Spec.new do |s|
   s.name         = "OfflineProtocol"
-  s.version      = package['version']
-  s.summary      = package['description']
-  s.homepage     = package['homepage']
-  s.license      = package['license']
-  s.authors      = package['author']
+  s.version      = package["version"]
+  s.summary      = package["description"]
+  s.homepage     = package["homepage"]
+  s.license      = package["license"]
+  s.authors      = package["author"]
 
-  s.platforms    = { :ios => "12.0" }
-  s.source       = { :git => package['repository']['url'], :tag => "v#{s.version}" }
+  s.platforms    = { :ios => "13.0" }
+  s.source       = { :git => "https://github.com/offline-protocol/sdk.git", :tag => "#{s.version}" }
 
-  s.source_files = "*.{h,m,swift}"
-  s.public_header_files = "*.h"
-  s.static_framework = true
+  # Source files
+  s.source_files = [
+    "OfflineProtocolModule.{h,m,swift}",
+    "Generated/offline_protocol.swift"  # UniFFI generated Swift file
+  ]
 
-  # Pre-built Rust library
-  s.vendored_libraries = "libs/liboffline_protocol_ffi.a"
+  # Preserve the C header files
+  s.preserve_paths = [
+    "Generated/*.h",
+    "Generated/*.modulemap"
+  ]
 
-  # System frameworks
-  s.frameworks = "Foundation"
+  # Native library - use vendored_libraries with specific per-platform linking
+  s.vendored_libraries = "libs/*.a"
 
+  # Configure library search paths and linking
+  s.pod_target_xcconfig = {
+    'LIBRARY_SEARCH_PATHS' => '$(PODS_TARGET_SRCROOT)/libs',
+    'OTHER_LDFLAGS[sdk=iphonesimulator*]' => '-loffline_protocol_uniffi_sim',
+    'OTHER_LDFLAGS[sdk=iphoneos*]' => '-loffline_protocol_uniffi_device',
+    'SWIFT_INCLUDE_PATHS' => '$(PODS_TARGET_SRCROOT)/Generated',
+    'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/Generated'
+  }
+
+  # System libraries and frameworks
+  s.frameworks = "Foundation", "CoreBluetooth"
+
+  # React Native dependency
   s.dependency "React-Core"
 
-  # Swift support
-  s.swift_version = "5.0"
-
-  # Allow non-modular includes (required for React Native headers)
-  s.pod_target_xcconfig = {
-    'CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES' => 'YES',
-    'DEFINES_MODULE' => 'YES'
-  }
-
-  s.user_target_xcconfig = {
-    'CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES' => 'YES'
-  }
+  # Swift version
+  s.swift_version = "5.5"
 end
 

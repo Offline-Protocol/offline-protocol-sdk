@@ -1,0 +1,225 @@
+namespace offline_protocol {
+};
+
+// Error types
+[Error]
+enum ProtocolError {
+    "NotStarted",
+    "AlreadyStarted",
+    "InvalidConfiguration",
+    "SendFailed",
+    "InvalidState",
+    "Other",
+};
+
+// Message priority levels
+enum MessagePriority {
+    "Low",
+    "Medium",
+    "High",
+    "Critical",
+};
+
+// Transport types
+enum TransportType {
+    "Internet",
+    "Ble",
+    "WiFiDirect",
+};
+
+// Protocol state
+enum ProtocolState {
+    "Stopped",
+    "Starting",
+    "Running",
+    "Paused",
+    "Stopping",
+};
+
+// Relay priority
+enum RelayPriority {
+    "Low",
+    "Medium",
+    "High",
+};
+
+// BLE peer device information
+dictionary PeerDevice {
+    string peer_id;
+    i16 rssi;
+    u64 last_seen_ms;
+};
+
+// BLE transport metrics
+dictionary TransportMetrics {
+    u32 packets_sent;
+    u32 packets_received;
+    u32 bytes_sent;
+    u32 bytes_received;
+    f32 error_rate;
+    u32 avg_latency_ms;
+};
+
+// File transfer progress information
+dictionary FileProgress {
+    string file_id;
+    u32 chunks_sent;
+    u32 total_chunks;
+    u8 percentage;
+};
+
+// Message delivery statistics
+dictionary MessageStats {
+    string message_id;
+    u64 sent_at_ms;
+    u64? delivered_at_ms;
+    u8 hop_count;
+    string status;
+};
+
+// Network topology node
+dictionary NetworkNode {
+    string node_id;
+    string role;
+    i16? rssi;
+    u64 last_seen_ms;
+};
+
+// Network topology link
+dictionary NetworkLink {
+    string source_id;
+    string target_id;
+    string transport;
+    f32 quality;
+};
+
+// Network topology
+dictionary NetworkTopology {
+    sequence<NetworkNode> nodes;
+    sequence<NetworkLink> links;
+    sequence<MessageStats> message_stats;
+};
+
+// Configuration for protocol creation
+dictionary ProtocolConfig {
+    string app_id;
+    string user_id;
+    boolean ble_enabled;
+    boolean wifi_direct_enabled;
+    boolean internet_enabled;
+    boolean prefer_online;
+    u8 initial_ttl;
+};
+
+// Event callback interface
+callback interface EventCallback {
+    void on_event(string event_json);
+};
+
+// Main protocol interface
+interface OfflineProtocol {
+    // Create a new protocol instance
+    [Throws=ProtocolError]
+    constructor(ProtocolConfig config);
+    
+    // Lifecycle management
+    [Throws=ProtocolError]
+    void start();
+    
+    [Throws=ProtocolError]
+    void stop();
+    
+    [Throws=ProtocolError]
+    void pause();
+    
+    [Throws=ProtocolError]
+    void resume();
+    
+    ProtocolState get_state();
+    
+    // Process the protocol (internal message processing)
+    [Throws=ProtocolError]
+    void process();
+    
+    // Event handling
+    void set_event_callback(EventCallback callback);
+    
+    string? poll_event();
+    
+    // Messaging
+    [Throws=ProtocolError]
+    string send_message(string recipient, string content, MessagePriority priority);
+    
+    string? receive_message();
+    
+    // BLE transport operations
+    [Throws=ProtocolError]
+    void ble_peer_discovered(string peer_id, i16 rssi);
+    
+    [Throws=ProtocolError]
+    void ble_peer_lost(string peer_id);
+    
+    [Throws=ProtocolError]
+    void ble_status_changed(boolean is_available);
+    
+    [Throws=ProtocolError]
+    void ble_fragment_received(string sender_id, sequence<u8> fragment);
+    
+    BleFragment? ble_get_next_fragment();
+    
+    void ble_return_fragment();
+    
+    u32 ble_get_peer_count();
+    
+    // Transport management
+    [Throws=ProtocolError]
+    void add_internet_transport(string server_url, u16 port);
+    
+    [Throws=ProtocolError]
+    void add_wifi_direct_transport();
+    
+    [Throws=ProtocolError]
+    void remove_transport(TransportType transport_type);
+    
+    sequence<string> get_active_transports();
+    
+    [Throws=ProtocolError]
+    void update_transport_metrics(TransportType transport_type, TransportMetrics metrics);
+    
+    // DORS decision support
+    boolean should_escalate_to_wifi();
+    
+    // File transfer
+    [Throws=ProtocolError]
+    string send_file(string recipient, string file_path, string file_name);
+    
+    [Throws=ProtocolError]
+    void process_file_chunk(string file_id, u32 chunk_index, sequence<u8> data);
+    
+    FileProgress? get_file_progress(string file_id);
+    
+    [Throws=ProtocolError]
+    void finalize_file(string file_id);
+    
+    [Throws=ProtocolError]
+    void cancel_file_transfer(string file_id);
+    
+    // Network visualization and metrics
+    [Throws=ProtocolError]
+    NetworkTopology get_topology();
+    
+    sequence<MessageStats> get_message_stats();
+    
+    f32 get_delivery_success_rate();
+    
+    u64 get_median_latency();
+    
+    u8 get_median_hops();
+};
+
+// BLE fragment for outgoing data
+dictionary BleFragment {
+    string recipient_id;
+    sequence<u8> data;
+};
+

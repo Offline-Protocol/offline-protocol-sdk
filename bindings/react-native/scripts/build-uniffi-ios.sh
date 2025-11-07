@@ -1,16 +1,18 @@
 #!/bin/bash
 
-# Build iOS universal library
-# This script builds the Rust library for all iOS architectures and combines them into a universal library
+# Build UniFFI iOS library and generate Swift bindings
+# This script builds the Rust UniFFI library for iOS and generates Swift bindings
 
 set -e
 
-echo "Building iOS universal library..."
+echo "Building UniFFI iOS library and generating Swift bindings..."
 
 # Navigate to the Rust project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 OUTPUT_DIR="$SCRIPT_DIR/../ios/libs"
+GENERATED_DIR="$SCRIPT_DIR/../ios/Generated"
 
 cd "$PROJECT_ROOT"
 
@@ -18,7 +20,7 @@ cd "$PROJECT_ROOT"
 IOS_ARCHS=(
   "aarch64-apple-ios"           # iOS devices (ARM64)
   "aarch64-apple-ios-sim"       # iOS simulator on Apple Silicon
-  "x86_64-apple-ios"           # iOS simulator on Intel
+  "x86_64-apple-ios"            # iOS simulator on Intel
 )
 
 # Ensure targets are installed
@@ -28,30 +30,24 @@ for arch in "${IOS_ARCHS[@]}"; do
 done
 
 # Build for each architecture
-echo "Building for iOS architectures..."
+echo "Building UniFFI library for iOS architectures..."
 for arch in "${IOS_ARCHS[@]}"; do
   echo "Building for $arch..."
   cargo build --release --target "$arch" --package offline-protocol-uniffi
 done
 
-# Create output directory
+# Create output directories
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$GENERATED_DIR"
 
-echo "Copying iOS libraries..."
-
-# Note: We can't create a fat binary with both device and simulator arm64 architectures
-# Modern Xcode handles this automatically with XCFrameworks or separate binaries
-# For now, we'll just copy the device library which works for both
-
-# Create universal libraries
 echo "Creating universal libraries..."
 
-# Device library
-echo "Copying device library (aarch64-apple-ios)..."
+# Create universal library for devices
+echo "Creating device library..."
 cp "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a" \
    "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
 
-# Simulator library (universal for Intel and Apple Silicon)
+# Create universal library for simulators (both Intel and Apple Silicon)
 echo "Creating simulator library..."
 lipo -create \
   "$PROJECT_ROOT/target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a" \
@@ -62,14 +58,39 @@ echo "iOS libraries created:"
 echo "  Device: $OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
 echo "  Simulator: $OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
 
+# Generate Swift bindings
+echo ""
+echo "Generating Swift bindings..."
+
+if command -v uniffi-bindgen &> /dev/null; then
+  cd "$UNIFFI_DIR"
+  
+  uniffi-bindgen generate \
+    src/offline_protocol.udl \
+    --language swift \
+    --out-dir "$GENERATED_DIR"
+  
+  echo "✅ Swift bindings generated in $GENERATED_DIR"
+else
+  echo "⚠️  uniffi-bindgen not found!"
+  echo "Install it with: cargo install uniffi --version 0.30.0 --features cli"
+  echo ""
+  echo "For now, the native libraries are built, but you'll need to"
+  echo "generate Swift bindings manually when uniffi-bindgen is available."
+  echo ""
+  echo "To generate bindings later, run:"
+  echo "  cd $UNIFFI_DIR"
+  echo "  uniffi-bindgen generate src/offline_protocol.udl --language swift --out-dir $GENERATED_DIR"
+fi
+
 # Print library info
 echo ""
 echo "Library info:"
-echo "Device:"
+echo "Device library:"
 lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
-echo "Simulator:"
+echo "Simulator library:"
 lipo -info "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
 
 echo ""
-echo "✅ iOS build complete!"
+echo "✅ iOS UniFFI build complete!"
 

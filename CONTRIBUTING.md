@@ -80,7 +80,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 - `router`: offline-protocol-router (DORS)
 - `reliability`: offline-protocol-reliability
 - `protocol`: offline-protocol (main API)
-- `ffi`: offline-protocol-ffi
+- `uniffi`: offline-protocol-uniffi (UniFFI bindings for Swift/Kotlin)
 - `bindings`: Platform bindings
 
 **Examples**:

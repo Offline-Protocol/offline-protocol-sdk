@@ -21,7 +21,7 @@ rustup target add x86_64-linux-android
 ### 2. Build Rust Library
 
 ```bash
-cd crates/offline-protocol-ffi
+cd crates/offline-protocol-uniffi
 
 # Build for all Android architectures
 cargo build --release --target aarch64-linux-android

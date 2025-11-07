@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 
-# Build Android libraries for all ABIs
-# This script builds the Rust library for all Android architectures
+# Build UniFFI Android libraries and generate Kotlin bindings
+# This script builds the Rust UniFFI library for Android and generates Kotlin bindings
 # Compatible with bash 3.2+ (macOS default)
 
 set -e
 
-echo "Building Android libraries..."
+echo "Building UniFFI Android libraries and generating Kotlin bindings..."
 
 # Navigate to the Rust project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 OUTPUT_DIR="$SCRIPT_DIR/../android/src/main/jniLibs"
+GENERATED_DIR="$SCRIPT_DIR/../android/src/main/java"
 
 cd "$PROJECT_ROOT"
 
@@ -73,7 +75,7 @@ for target in "${TARGETS[@]}"; do
 done
 
 # Build for each ABI
-echo "Building for Android ABIs..."
+echo "Building UniFFI library for Android ABIs..."
 for i in "${!ABIS[@]}"; do
   abi="${ABIS[$i]}"
   target="${TARGETS[$i]}"
@@ -85,17 +87,18 @@ for i in "${!ABIS[@]}"; do
   mkdir -p "$OUTPUT_DIR/$abi"
   
   # Copy library to jniLibs
+  # UniFFI generates code that looks for "uniffi_offline_protocol" which JNA converts to "libuniffi_offline_protocol.so"
   cp "$PROJECT_ROOT/target/$target/release/liboffline_protocol_uniffi.so" \
-     "$OUTPUT_DIR/$abi/"
+     "$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
   
   echo "✅ Built and copied library for $abi"
 done
 
 echo ""
 echo "Android libraries built and copied to $OUTPUT_DIR"
-echo ""
 
 # Print library info
+echo ""
 echo "Library sizes:"
 for abi in "${ABIS[@]}"; do
   lib_path="$OUTPUT_DIR/$abi/liboffline_protocol_uniffi.so"
@@ -105,6 +108,32 @@ for abi in "${ABIS[@]}"; do
   fi
 done
 
+# Generate Kotlin bindings
 echo ""
-echo "✅ Android build complete!"
+echo "Generating Kotlin bindings..."
+
+if command -v uniffi-bindgen &> /dev/null; then
+  mkdir -p "$GENERATED_DIR"
+  cd "$UNIFFI_DIR"
+  
+  uniffi-bindgen generate \
+    src/offline_protocol.udl \
+    --language kotlin \
+    --out-dir "$GENERATED_DIR"
+  
+  echo "✅ Kotlin bindings generated in $GENERATED_DIR"
+else
+  echo "⚠️  uniffi-bindgen not found!"
+  echo "Install it with: cargo install uniffi --version 0.30.0 --features cli"
+  echo ""
+  echo "For now, the native libraries are built, but you'll need to"
+  echo "generate Kotlin bindings manually when uniffi-bindgen is available."
+  echo ""
+  echo "To generate bindings later, run:"
+  echo "  cd $UNIFFI_DIR"
+  echo "  uniffi-bindgen generate src/offline_protocol.udl --language kotlin --out-dir $GENERATED_DIR"
+fi
+
+echo ""
+echo "✅ Android UniFFI build complete!"
 

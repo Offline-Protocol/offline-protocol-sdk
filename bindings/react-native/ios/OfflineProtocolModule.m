@@ -8,6 +8,7 @@
 #import <React/RCTBridgeModule.h>
 #import <React/RCTEventEmitter.h>
 
+// UniFFI-based module
 @interface RCT_EXTERN_MODULE(OfflineProtocolModule, RCTEventEmitter)
 
 RCT_EXTERN_METHOD(create:(NSString *)configJson
@@ -80,6 +81,34 @@ RCT_EXTERN_METHOD(disableTransport:(NSString *)type
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(getActiveTransports:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// BLE transport methods
+RCT_EXTERN_METHOD(blePeerDiscovered:(NSString *)peerId
+                  rssi:(nonnull NSNumber *)rssi
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(blePeerLost:(NSString *)peerId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(bleStatusChanged:(BOOL)isAvailable
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(bleFragmentReceived:(NSString *)senderId
+                  fragmentData:(NSArray *)fragmentData
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(bleGetNextFragment:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(bleReturnFragment:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(bleGetPeerCount:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 @end

@@ -12,7 +12,8 @@ echo "Validating pre-built binaries for npm package..."
 echo ""
 
 # Check iOS library
-IOS_LIB="$RN_DIR/ios/libs/liboffline_protocol_ffi.a"
+IOS_LIB="$RN_DIR/ios/libs/liboffline_protocol_uniffi_device.a"
+IOS_SIM_LIB="$RN_DIR/ios/libs/liboffline_protocol_uniffi_sim.a"
 if [ -f "$IOS_LIB" ]; then
   echo "✅ iOS library found: $IOS_LIB"
   echo "   Size: $(du -h "$IOS_LIB" | cut -f1)"
@@ -31,7 +32,7 @@ ANDROID_ABIS=("arm64-v8a" "armeabi-v7a" "x86_64" "x86")
 MISSING_ABIS=()
 
 for abi in "${ANDROID_ABIS[@]}"; do
-  lib_path="$ANDROID_DIR/$abi/liboffline_protocol_ffi.so"
+  lib_path="$ANDROID_DIR/$abi/liboffline_protocol_uniffi.so"
   if [ -f "$lib_path" ]; then
     echo "✅ Android $abi library found"
     echo "   Size: $(du -h "$lib_path" | cut -f1)"

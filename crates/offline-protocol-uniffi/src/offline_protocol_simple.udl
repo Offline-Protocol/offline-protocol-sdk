@@ -1,0 +1,55 @@
+namespace offline_protocol {};
+
+// Minimal UDL for working prototype
+
+[Error]
+enum ProtocolError {
+    "NotStarted",
+    "AlreadyStarted",
+    "InvalidConfiguration",
+    "SendFailed",
+    "Other",
+};
+
+enum MessagePriority {
+    "Low",
+    "Medium",
+    "High",
+    "Critical",
+};
+
+dictionary ProtocolConfig {
+    string app_id;
+    string user_id;
+    boolean ble_enabled;
+    boolean wifi_direct_enabled;
+    boolean internet_enabled;
+    boolean prefer_online;
+    u8 initial_ttl;
+};
+
+interface OfflineProtocol {
+    [Throws=ProtocolError]
+    constructor(ProtocolConfig config);
+    
+    [Throws=ProtocolError]
+    void start();
+    
+    [Throws=ProtocolError]
+    void stop();
+    
+    [Throws=ProtocolError]
+    void pause();
+    
+    [Throws=ProtocolError]
+    void resume();
+    
+    [Throws=ProtocolError]
+    void process();
+    
+    [Throws=ProtocolError]
+    string send_message(string recipient, string content, MessagePriority priority);
+    
+    string? receive_message();
+};
+

@@ -6,7 +6,7 @@ members = [
     "crates/offline-protocol-router",
     "crates/offline-protocol-reliability",
     "crates/offline-protocol",
-    "crates/offline-protocol-ffi",
+    "crates/offline-protocol-uniffi",
     "crates/offline-protocol-bench",
 ]
 

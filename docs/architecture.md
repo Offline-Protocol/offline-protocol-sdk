@@ -94,12 +94,20 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: All other crates
 
-### 6. offline-protocol-ffi
+### 6. offline-protocol-uniffi
 
-**Purpose**: C FFI bindings for cross-platform use.
+**Purpose:** UniFFI bindings for cross-platform interoperability (replaces old C FFI)
 
-**Key Functions**:
-- `offline_protocol_create/destroy` - Memory management
+**Features:**
+- Type-safe Swift and Kotlin bindings (auto-generated from UDL)
+- Zero unsafe application code  
+- Automatic memory management
+- Native exception handling
+- Complete API surface (36 methods)
+
+**Key Functions:**
+- `new(config)` - Create protocol instance
+- `send_message()` - Type-safe messaging
 - `offline_protocol_start/stop` - Lifecycle
 - `offline_protocol_send_message` - Messaging
 

@@ -1,23 +1,30 @@
 [package]
-name = "offline-protocol-ffi"
+name = "offline-protocol-uniffi"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "C FFI bindings for the Offline Protocol SDK"
+description = "UniFFI bindings for the Offline Protocol SDK"
 
 [dependencies]
 offline-protocol = { workspace = true }
 offline-protocol-core = { workspace = true }
 offline-protocol-router = { workspace = true }
 offline-protocol-transport = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+uniffi = "0.30"
 
 [build-dependencies]
-cbindgen = { workspace = true }
+uniffi = { version = "0.30", features = ["build"] }
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "lib"]
+name = "offline_protocol_uniffi"
+
+[features]
+default = []
 
