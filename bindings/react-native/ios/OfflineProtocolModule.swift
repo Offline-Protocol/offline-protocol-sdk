@@ -15,6 +15,7 @@ import React
 @objc(OfflineProtocolModule)
 class OfflineProtocolModule: RCTEventEmitter {
     private var protocolInstance: OfflineProtocol?
+    private var bleManager: BleManager?
     private var hasListeners = false
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
@@ -25,6 +26,8 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     deinit {
         stopProcessTimer()
+        bleManager?.stop()
+        bleManager = nil
         protocolInstance = nil
     }
     
@@ -86,6 +89,12 @@ class OfflineProtocolModule: RCTEventEmitter {
             
             protocolInstance = proto
             
+            // Initialize BLE manager if BLE is enabled
+            if config.bleEnabled {
+                bleManager = BleManager(protocol: proto, deviceId: config.userId)
+                print("[OfflineProtocolModule] BLE Manager initialized for user: \(config.userId)")
+            }
+            
             // Start process timer
             startProcessTimer()
             
@@ -107,6 +116,18 @@ class OfflineProtocolModule: RCTEventEmitter {
                    rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             try protocolInstance?.start()
+            
+            // Start BLE manager if available
+            if let manager = bleManager {
+                do {
+                    try manager.start()
+                    print("[OfflineProtocolModule] BLE Manager started")
+                } catch {
+                    print("[OfflineProtocolModule] Warning: Failed to start BLE Manager: \(error.localizedDescription)")
+                    // Don't fail the entire start if BLE fails
+                }
+            }
+            
             resolver(nil)
         } catch {
             rejecter("ERROR_START", "Failed to start protocol: \(error.localizedDescription)", error)
@@ -123,6 +144,10 @@ class OfflineProtocolModule: RCTEventEmitter {
                    rejecter: @escaping RCTPromiseRejectBlock) {
         stopProcessTimer()
         
+        // Stop BLE manager first
+        bleManager?.stop()
+        print("[OfflineProtocolModule] BLE Manager stopped")
+        
         do {
             try protocolInstance?.stop()
             resolver(nil)
@@ -134,6 +159,9 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func pause(_ resolver: @escaping RCTPromiseResolveBlock,
                     rejecter: @escaping RCTPromiseRejectBlock) {
         do {
+            // Pause BLE manager for background mode
+            bleManager?.pause()
+            
             try protocolInstance?.pause()
             resolver(nil)
         } catch {
@@ -145,6 +173,10 @@ class OfflineProtocolModule: RCTEventEmitter {
                      rejecter: @escaping RCTPromiseRejectBlock) {
         do {
             try protocolInstance?.resume()
+            
+            // Resume BLE manager
+            bleManager?.resume()
+            
             resolver(nil)
         } catch {
             rejecter("ERROR_RESUME", "Failed to resume protocol: \(error.localizedDescription)", error)
@@ -260,6 +292,213 @@ class OfflineProtocolModule: RCTEventEmitter {
                                rejecter: @escaping RCTPromiseRejectBlock) {
         let count = protocolInstance?.bleGetPeerCount() ?? 0
         resolver(NSNumber(value: count))
+    }
+    
+    @objc func getActiveTransports(_ resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        let transports = protocolInstance?.getActiveTransports() ?? []
+        resolver(transports)
+    }
+    
+    @objc func getState(_ resolver: @escaping RCTPromiseResolveBlock,
+                       rejecter: @escaping RCTPromiseRejectBlock) {
+        if let state = protocolInstance?.getState() {
+            let stateString: String
+            switch state {
+            case .stopped:
+                stateString = "Stopped"
+            case .starting:
+                stateString = "Starting"
+            case .running:
+                stateString = "Running"
+            case .paused:
+                stateString = "Paused"
+            case .stopping:
+                stateString = "Stopping"
+            @unknown default:
+                stateString = "Unknown"
+            }
+            resolver(stateString)
+        } else {
+            resolver("Stopped")
+        }
+    }
+    
+    // MARK: - Battery Management
+    
+    @objc func setBatteryLevel(_ level: Int,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.setBatteryLevel(level: UInt8(min(100, max(0, level))))
+        resolver(nil)
+    }
+    
+    @objc func getBatteryLevel(_ resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        if let level = protocolInstance?.getBatteryLevel() {
+            resolver(NSNumber(value: level))
+        } else {
+            resolver(NSNull())
+        }
+    }
+    
+    // MARK: - Relay Management
+    
+    @objc func setRelayPriority(_ priorityString: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let priority: RelayPriority
+            switch priorityString.lowercased() {
+            case "low":
+                priority = .low
+            case "high":
+                priority = .high
+            default:
+                priority = .medium
+            }
+            
+            try protocolInstance?.setRelayPriority(priority: priority)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_RELAY", "Failed to set relay priority: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func getRelayPriority(_ resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        if let priority = protocolInstance?.getRelayPriority() {
+            let priorityString: String
+            switch priority {
+            case .low:
+                priorityString = "low"
+            case .medium:
+                priorityString = "medium"
+            case .high:
+                priorityString = "high"
+            @unknown default:
+                priorityString = "medium"
+            }
+            resolver(priorityString)
+        } else {
+            resolver("medium")
+        }
+    }
+    
+    @objc func isRelay(_ resolver: @escaping RCTPromiseResolveBlock,
+                      rejecter: @escaping RCTPromiseRejectBlock) {
+        let isRelay = protocolInstance?.isRelay() ?? false
+        resolver(NSNumber(value: isRelay))
+    }
+    
+    // MARK: - Transport Metrics
+    
+    @objc func getTransportMetrics(_ transportType: String,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        let type: TransportType
+        switch transportType.lowercased() {
+        case "ble":
+            type = .ble
+        case "wifidirect":
+            type = .wiFiDirect
+        case "internet":
+            type = .internet
+        default:
+            type = .ble
+        }
+        
+        if let metrics = protocolInstance?.getTransportMetrics(transportType: type) {
+            let metricsDict: [String: Any] = [
+                "packetsSent": NSNumber(value: metrics.packetsSent),
+                "packetsReceived": NSNumber(value: metrics.packetsReceived),
+                "bytesSent": NSNumber(value: metrics.bytesSent),
+                "bytesReceived": NSNumber(value: metrics.bytesReceived),
+                "errorRate": NSNumber(value: metrics.errorRate),
+                "avgLatencyMs": NSNumber(value: metrics.avgLatencyMs)
+            ]
+            resolver(metricsDict)
+        } else {
+            resolver(NSNull())
+        }
+    }
+    
+    // MARK: - Manual Transport Control
+    
+    @objc func forceTransport(_ transportType: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let type: TransportType
+            switch transportType.lowercased() {
+            case "ble":
+                type = .ble
+            case "wifidirect":
+                type = .wiFiDirect
+            case "internet":
+                type = .internet
+            default:
+                type = .ble
+            }
+            
+            try protocolInstance?.forceTransport(transportType: type)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_TRANSPORT", "Failed to force transport: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func releaseTransportLock(_ resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.releaseTransportLock()
+        resolver(nil)
+    }
+    
+    // MARK: - DORS Configuration
+    
+    @objc func updateDorsConfig(_ configJson: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let jsonData = configJson.data(using: .utf8),
+                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
+            }
+            
+            let dorsConfig = DorsConfig(
+                preferOnline: config["preferOnline"] as? Bool ?? false,
+                switchHysteresis: config["switchHysteresis"] as? Float ?? 15.0,
+                switchCooldownSecs: config["switchCooldownSecs"] as? UInt64 ?? 20,
+                bleToWifiRetryThreshold: config["bleToWifiRetryThreshold"] as? UInt32 ?? 2,
+                rssiSwitchThreshold: config["rssiSwitchThreshold"] as? Int16 ?? -85,
+                congestionQueueThreshold: config["congestionQueueThreshold"] as? UInt64 ?? 50,
+                stabilityWindowSecs: config["stabilityWindowSecs"] as? UInt64 ?? 8
+            )
+            
+            try protocolInstance?.updateDorsConfig(config: dorsConfig)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_CONFIG", "Failed to update DORS config: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func getDorsConfig(_ resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        if let config = protocolInstance?.getDorsConfig() {
+            let configDict: [String: Any] = [
+                "preferOnline": config.preferOnline,
+                "switchHysteresis": config.switchHysteresis,
+                "switchCooldownSecs": config.switchCooldownSecs,
+                "bleToWifiRetryThreshold": config.bleToWifiRetryThreshold,
+                "rssiSwitchThreshold": config.rssiSwitchThreshold,
+                "congestionQueueThreshold": config.congestionQueueThreshold,
+                "stabilityWindowSecs": config.stabilityWindowSecs
+            ]
+            resolver(configDict)
+        } else {
+            resolver(NSNull())
+        }
     }
     
     // MARK: - Process Timer

@@ -174,7 +174,75 @@ pub struct NetworkTopology {
     pub message_stats: Vec<MessageStats>,
 }
 
-/// Protocol configuration
+/// DORS configuration
+#[derive(Debug, Clone)]
+pub struct DorsConfig {
+    pub prefer_online: bool,
+    pub switch_hysteresis: f32,
+    pub switch_cooldown_secs: u64,
+    pub ble_to_wifi_retry_threshold: u32,
+    pub rssi_switch_threshold: i16,
+    pub congestion_queue_threshold: u64,
+    pub stability_window_secs: u64,
+}
+
+/// ACK configuration
+#[derive(Debug, Clone)]
+pub struct AckConfig {
+    pub default_timeout_ms: u64,
+    pub max_pending_acks: u64,
+}
+
+/// Retry configuration
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub backoff_multiplier: f32,
+    pub outbox_max_lifetime_ms: u64,
+}
+
+/// Deduplication configuration
+#[derive(Debug, Clone)]
+pub struct DedupConfig {
+    pub max_tracked_messages: u64,
+    pub retention_time_secs: u64,
+}
+
+/// Reliability configuration
+#[derive(Debug, Clone)]
+pub struct ReliabilityConfig {
+    pub ack: AckConfig,
+    pub retry: RetryConfig,
+    pub dedup: DedupConfig,
+}
+
+/// Path selection configuration
+#[derive(Debug, Clone)]
+pub struct PathConfig {
+    pub forward_to_top_k: u32,
+    pub max_congestion_level: u32,
+}
+
+/// Relay configuration
+#[derive(Debug, Clone)]
+pub struct RelayConfig {
+    pub relay_threshold: u64,
+    pub min_battery_for_relay: u8,
+    pub allow_relay: bool,
+    pub relay_priority: RelayPriority,
+}
+
+/// Transport configuration
+#[derive(Debug, Clone)]
+pub struct TransportConfig {
+    pub ble_enabled: bool,
+    pub wifi_direct_enabled: bool,
+    pub internet_enabled: bool,
+}
+
+/// Protocol configuration (simplified)
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
     pub app_id: String,
@@ -183,6 +251,19 @@ pub struct ProtocolConfig {
     pub wifi_direct_enabled: bool,
     pub internet_enabled: bool,
     pub prefer_online: bool,
+    pub initial_ttl: u8,
+}
+
+/// Extended protocol configuration with all options
+#[derive(Debug, Clone)]
+pub struct ProtocolConfigExtended {
+    pub app_id: String,
+    pub user_id: String,
+    pub transport: TransportConfig,
+    pub dors: DorsConfig,
+    pub relay: RelayConfig,
+    pub path: PathConfig,
+    pub reliability: ReliabilityConfig,
     pub initial_ttl: u8,
 }
 
@@ -226,6 +307,10 @@ pub struct OfflineProtocol {
     ble_state: Mutex<BleState>,
     file_manager: Mutex<FileTransferManager>,
     visualizer: Mutex<NetworkVisualizer>,
+    battery_level: RwLock<Option<u8>>,
+    relay_priority: RwLock<RelayPriority>,
+    forced_transport: RwLock<Option<TransportType>>,
+    dors_config: RwLock<Option<DorsConfig>>,
     #[allow(dead_code)]
     user_id: String,
 }
@@ -288,6 +373,10 @@ impl OfflineProtocol {
             }),
             file_manager: Mutex::new(FileTransferManager::new()),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
+            battery_level: RwLock::new(None),
+            relay_priority: RwLock::new(RelayPriority::Medium),
+            forced_transport: RwLock::new(None),
+            dors_config: RwLock::new(None),
             user_id,
         })
     }
@@ -764,6 +853,119 @@ impl OfflineProtocol {
     pub fn get_median_hops(&self) -> u8 {
         let visualizer = self.visualizer.lock().unwrap();
         visualizer.median_hops().unwrap_or(0)
+    }
+    
+    // ========================================================================
+    // BATTERY AND DEVICE MANAGEMENT
+    // ========================================================================
+    
+    /// Sets the battery level for relay decisions
+    pub fn set_battery_level(&self, level: u8) {
+        *self.battery_level.write().unwrap() = Some(level.min(100));
+    }
+    
+    /// Gets the current battery level
+    pub fn get_battery_level(&self) -> Option<u8> {
+        *self.battery_level.read().unwrap()
+    }
+    
+    // ========================================================================
+    // RELAY MANAGEMENT
+    // ========================================================================
+    
+    /// Sets the relay priority
+    pub fn set_relay_priority(&self, priority: RelayPriority) -> Result<(), ProtocolError> {
+        *self.relay_priority.write().unwrap() = priority;
+        Ok(())
+    }
+    
+    /// Gets the current relay priority
+    pub fn get_relay_priority(&self) -> RelayPriority {
+        *self.relay_priority.read().unwrap()
+    }
+    
+    /// Checks if this device is currently acting as a relay
+    pub fn is_relay(&self) -> bool {
+        // Check if we have enough connections and battery to be a relay
+        let battery = self.get_battery_level();
+        let ble_state = self.ble_state.lock().unwrap();
+        let peer_count = ble_state.peer_count;
+        drop(ble_state);
+        
+        match self.get_relay_priority() {
+            RelayPriority::Low => false,
+            RelayPriority::High => {
+                // High priority: be a relay if we have at least one connection
+                peer_count > 0 && battery.unwrap_or(100) > 20
+            },
+            RelayPriority::Medium => {
+                // Medium priority: default threshold
+                peer_count >= 3 && battery.unwrap_or(100) > 30
+            },
+        }
+    }
+    
+    // ========================================================================
+    // TRANSPORT METRICS
+    // ========================================================================
+    
+    /// Gets detailed metrics for a specific transport
+    pub fn get_transport_metrics(&self, _transport_type: TransportType) -> Option<TransportMetrics> {
+        // Transport metrics are tracked internally by the transport implementations
+        // For now, return mock data based on transport type
+        // In production, this would query the actual transport
+        Some(TransportMetrics {
+            packets_sent: 0,
+            packets_received: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+            error_rate: 0.0,
+            avg_latency_ms: 0,
+        })
+    }
+    
+    // ========================================================================
+    // MANUAL TRANSPORT CONTROL
+    // ========================================================================
+    
+    /// Forces the protocol to use a specific transport (overrides DORS)
+    pub fn force_transport(&self, transport_type: TransportType) -> Result<(), ProtocolError> {
+        *self.forced_transport.write().unwrap() = Some(transport_type);
+        Ok(())
+    }
+    
+    /// Releases the transport lock and lets DORS make decisions again
+    pub fn release_transport_lock(&self) {
+        *self.forced_transport.write().unwrap() = None;
+    }
+    
+    // ========================================================================
+    // CONFIGURATION UPDATES
+    // ========================================================================
+    
+    /// Updates DORS configuration at runtime
+    pub fn update_dors_config(&self, config: DorsConfig) -> Result<(), ProtocolError> {
+        *self.dors_config.write().unwrap() = Some(config);
+        // In a production implementation, this would update the internal DORS selector
+        Ok(())
+    }
+    
+    /// Gets the current DORS configuration
+    pub fn get_dors_config(&self) -> DorsConfig {
+        if let Some(config) = self.dors_config.read().unwrap().clone() {
+            return config;
+        }
+        
+        // Return default config
+        DorsConfig {
+            prefer_online: false,
+            switch_hysteresis: 15.0,
+            switch_cooldown_secs: 20,
+            ble_to_wifi_retry_threshold: 2,
+            rssi_switch_threshold: -85,
+            congestion_queue_threshold: 50,
+            stability_window_secs: 8,
+        }
     }
 }
 

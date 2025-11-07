@@ -44,6 +44,16 @@ const OfflineProtocolNativeModule = NativeModules.OfflineProtocolModule
 /**
  * Main Offline Protocol class
  *
+ * **BLE Transport Management:**
+ * BLE scanning, advertising, and peer communication are now managed automatically
+ * at the native bindings level. When you call `start()`, BLE operations begin
+ * automatically if BLE is enabled in the configuration. No manual BLE setup required.
+ *
+ * **Supported Transports:**
+ * - BLE (Bluetooth Low Energy) - Automatically managed
+ * - WiFi Direct - Future support
+ * - Internet - Future support
+ *
  * @example
  * ```typescript
  * const protocol = new OfflineProtocol({
@@ -56,17 +66,17 @@ const OfflineProtocolNativeModule = NativeModules.OfflineProtocolModule
  *   console.log(`From ${event.sender}: ${event.content}`);
  * });
  *
- * // Start protocol
+ * // Start protocol (BLE automatically starts scanning and advertising)
  * await protocol.start();
  *
- * // Send message
+ * // Send message (routing handled automatically by DORS)
  * const messageId = await protocol.sendMessage({
  *   recipient: 'user456',
  *   content: 'Hello!',
  *   priority: MessagePriority.High,
  * });
  *
- * // Stop protocol
+ * // Stop protocol (BLE automatically stops)
  * await protocol.stop();
  * ```
  */
@@ -86,6 +96,24 @@ export class OfflineProtocol {
     this.config = config;
     this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
     this.setupEventSubscription();
+  }
+
+  /**
+   * Transforms the TypeScript config structure to the format expected by native modules
+   */
+  private transformConfigForNative(): any {
+    const nativeConfig = {
+      appId: this.config.appId,
+      userId: this.config.userId,
+      bleEnabled: this.config.transports?.ble?.enabled ?? true,
+      wifiDirectEnabled: this.config.transports?.wifiDirect?.enabled ?? false,
+      internetEnabled: this.config.transports?.internet?.enabled ?? false,
+      preferOnline: this.config.dors?.preferOnline ?? false,
+      initialTtl: this.config.network?.initialTtl ?? 8,
+    };
+    
+    console.log('[OfflineProtocol] Native config:', JSON.stringify(nativeConfig));
+    return nativeConfig;
   }
 
   /**
@@ -221,12 +249,25 @@ export class OfflineProtocol {
   /**
    * Starts the protocol
    *
+   * **Automatic BLE Management:**
+   * When called, this method automatically starts BLE operations if BLE is enabled:
+   * - Starts scanning for nearby devices advertising the Offline Protocol service
+   * - Starts advertising this device so others can discover it
+   * - Begins polling for fragments to send
+   * - Handles incoming fragments from peers
+   *
+   * **Permissions Required:**
+   * - iOS: Bluetooth permissions (NSBluetoothAlwaysUsageDescription in Info.plist)
+   * - Android: BLUETOOTH_SCAN, BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT (Android 12+)
+   *           or BLUETOOTH, BLUETOOTH_ADMIN, ACCESS_FINE_LOCATION (Android 11 and below)
+   *
    * @throws Error if protocol is already started or fails to start
    */
   async start(): Promise<void> {
     // Create protocol instance if not already created
     if (!this.isCreated) {
-      await OfflineProtocolNativeModule.create(JSON.stringify(this.config));
+      const nativeConfig = this.transformConfigForNative();
+      await OfflineProtocolNativeModule.create(JSON.stringify(nativeConfig));
       this.isCreated = true;
     }
 
@@ -235,6 +276,13 @@ export class OfflineProtocol {
 
   /**
    * Stops the protocol
+   *
+   * **Automatic BLE Management:**
+   * When called, this method automatically stops all BLE operations:
+   * - Stops scanning for devices
+   * - Stops advertising
+   * - Disconnects from all connected peers
+   * - Cleans up BLE resources
    *
    * @throws Error if protocol is not started or fails to stop
    */
@@ -251,7 +299,8 @@ export class OfflineProtocol {
    */
   async emitTestEvent(): Promise<void> {
     if (!this.isCreated) {
-      await OfflineProtocolNativeModule.create(JSON.stringify(this.config));
+      const nativeConfig = this.transformConfigForNative();
+      await OfflineProtocolNativeModule.create(JSON.stringify(nativeConfig));
       this.isCreated = true;
     }
     await OfflineProtocolNativeModule.emitTestEvent();
@@ -434,6 +483,121 @@ export class OfflineProtocol {
    */
   async getState(): Promise<ProtocolState> {
     return await OfflineProtocolNativeModule.getState();
+  }
+  
+  /**
+   * Sets the battery level for relay decisions
+   *
+   * @param level - Battery level (0-100)
+   */
+  async setBatteryLevel(level: number): Promise<void> {
+    return await OfflineProtocolNativeModule.setBatteryLevel(level);
+  }
+  
+  /**
+   * Gets the current battery level
+   *
+   * @returns Battery level (0-100) or null if not set
+   */
+  async getBatteryLevel(): Promise<number | null> {
+    return await OfflineProtocolNativeModule.getBatteryLevel();
+  }
+  
+  /**
+   * Sets the relay priority
+   *
+   * @param priority - Relay priority ('low', 'medium', or 'high')
+   * @throws Error if setting fails
+   */
+  async setRelayPriority(priority: 'low' | 'medium' | 'high'): Promise<void> {
+    return await OfflineProtocolNativeModule.setRelayPriority(priority);
+  }
+  
+  /**
+   * Gets the current relay priority
+   *
+   * @returns Relay priority
+   */
+  async getRelayPriority(): Promise<'low' | 'medium' | 'high'> {
+    return await OfflineProtocolNativeModule.getRelayPriority();
+  }
+  
+  /**
+   * Checks if this device is currently acting as a relay
+   *
+   * @returns True if device is a relay
+   */
+  async isRelay(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.isRelay();
+  }
+  
+  /**
+   * Gets detailed metrics for a specific transport
+   *
+   * @param transportType - Transport type
+   * @returns Transport metrics or null if not available
+   */
+  async getTransportMetrics(transportType: TransportType): Promise<{
+    packetsSent: number;
+    packetsReceived: number;
+    bytesSent: number;
+    bytesReceived: number;
+    errorRate: number;
+    avgLatencyMs: number;
+  } | null> {
+    return await OfflineProtocolNativeModule.getTransportMetrics(transportType);
+  }
+  
+  /**
+   * Forces the protocol to use a specific transport (overrides DORS)
+   *
+   * @param transportType - Transport type to force
+   * @throws Error if forcing fails
+   */
+  async forceTransport(transportType: TransportType): Promise<void> {
+    return await OfflineProtocolNativeModule.forceTransport(transportType);
+  }
+  
+  /**
+   * Releases the transport lock and lets DORS make decisions again
+   */
+  async releaseTransportLock(): Promise<void> {
+    return await OfflineProtocolNativeModule.releaseTransportLock();
+  }
+  
+  /**
+   * Updates DORS configuration at runtime
+   *
+   * @param config - DORS configuration
+   * @throws Error if update fails
+   */
+  async updateDorsConfig(config: {
+    preferOnline?: boolean;
+    switchHysteresis?: number;
+    switchCooldownSecs?: number;
+    bleToWifiRetryThreshold?: number;
+    rssiSwitchThreshold?: number;
+    congestionQueueThreshold?: number;
+    stabilityWindowSecs?: number;
+  }): Promise<void> {
+    return await OfflineProtocolNativeModule.updateDorsConfig(JSON.stringify(config));
+  }
+  
+  /**
+   * Gets the current DORS configuration
+   *
+   * @returns DORS configuration
+   */
+  async getDorsConfig(): Promise<{
+    preferOnline: boolean;
+    switchHysteresis: number;
+    switchCooldownSecs: number;
+    bleToWifiRetryThreshold: number;
+    rssiSwitchThreshold: number;
+    congestionQueueThreshold: number;
+    stabilityWindowSecs: number;
+  }> {
+    return await OfflineProtocolNativeModule.getDorsConfig();
   }
 
   /**

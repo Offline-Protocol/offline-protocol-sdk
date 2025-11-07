@@ -100,7 +100,67 @@ dictionary NetworkTopology {
     sequence<MessageStats> message_stats;
 };
 
-// Configuration for protocol creation
+// DORS (Dynamic Offline Relay Switch) configuration
+dictionary DorsConfig {
+    boolean prefer_online;
+    f32 switch_hysteresis;
+    u64 switch_cooldown_secs;
+    u32 ble_to_wifi_retry_threshold;
+    i16 rssi_switch_threshold;
+    u64 congestion_queue_threshold;
+    u64 stability_window_secs;
+};
+
+// ACK configuration
+dictionary AckConfig {
+    u64 default_timeout_ms;
+    u64 max_pending_acks;
+};
+
+// Retry configuration
+dictionary RetryConfig {
+    u32 max_retries;
+    u64 initial_delay_ms;
+    u64 max_delay_ms;
+    f32 backoff_multiplier;
+    u64 outbox_max_lifetime_ms;
+};
+
+// Deduplication configuration
+dictionary DedupConfig {
+    u64 max_tracked_messages;
+    u64 retention_time_secs;
+};
+
+// Reliability configuration
+dictionary ReliabilityConfig {
+    AckConfig ack;
+    RetryConfig retry;
+    DedupConfig dedup;
+};
+
+// Path selection configuration
+dictionary PathConfig {
+    u32 forward_to_top_k;
+    u32 max_congestion_level;
+};
+
+// Relay configuration
+dictionary RelayConfig {
+    u64 relay_threshold;
+    u8 min_battery_for_relay;
+    boolean allow_relay;
+    RelayPriority relay_priority;
+};
+
+// Transport configuration
+dictionary TransportConfig {
+    boolean ble_enabled;
+    boolean wifi_direct_enabled;
+    boolean internet_enabled;
+};
+
+// Extended configuration for protocol creation
 dictionary ProtocolConfig {
     string app_id;
     string user_id;
@@ -108,6 +168,18 @@ dictionary ProtocolConfig {
     boolean wifi_direct_enabled;
     boolean internet_enabled;
     boolean prefer_online;
+    u8 initial_ttl;
+};
+
+// Extended protocol configuration with all options
+dictionary ProtocolConfigExtended {
+    string app_id;
+    string user_id;
+    TransportConfig transport;
+    DorsConfig dors;
+    RelayConfig relay;
+    PathConfig path;
+    ReliabilityConfig reliability;
     u8 initial_ttl;
 };
 
@@ -217,6 +289,34 @@ interface OfflineProtocol {
     u64 get_median_latency();
     
     u8 get_median_hops();
+    
+    // Battery and device management
+    void set_battery_level(u8 level);
+    
+    u8? get_battery_level();
+    
+    // Relay management
+    [Throws=ProtocolError]
+    void set_relay_priority(RelayPriority priority);
+    
+    RelayPriority get_relay_priority();
+    
+    boolean is_relay();
+    
+    // Transport metrics (per-transport detailed stats)
+    TransportMetrics? get_transport_metrics(TransportType transport_type);
+    
+    // Manual transport control
+    [Throws=ProtocolError]
+    void force_transport(TransportType transport_type);
+    
+    void release_transport_lock();
+    
+    // Configuration updates (runtime)
+    [Throws=ProtocolError]
+    void update_dors_config(DorsConfig config);
+    
+    DorsConfig get_dors_config();
 };
 
 // BLE fragment for outgoing data

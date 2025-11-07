@@ -47,7 +47,12 @@ export function NetworkScreen({ events }: NetworkScreenProps) {
           state.isRelay = false;
           break;
         case 'neighbor_discovered':
-          state.neighbors.add((event as NeighborDiscoveredEvent).peer_id);
+          const neighborEvent = event as NeighborDiscoveredEvent;
+          state.neighbors.add(neighborEvent.peer_id);
+          // If no explicit transport set yet, use the transport from neighbor discovery
+          if (!state.currentTransport && neighborEvent.transport) {
+            state.currentTransport = neighborEvent.transport;
+          }
           break;
         case 'neighbor_lost':
           state.neighbors.delete((event as NeighborLostEvent).peer_id);

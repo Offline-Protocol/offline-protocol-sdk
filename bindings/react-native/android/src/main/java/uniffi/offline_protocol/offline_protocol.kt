@@ -680,9 +680,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file(
     ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport(
+    ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports(
     ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level(
+    ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress(
     ): Short
@@ -692,9 +698,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats(
     ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority(
+    ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause(
     ): Short
@@ -706,6 +718,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message(
     ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock(
+    ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
@@ -714,13 +728,19 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
     ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
+    ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics(
     ): Short
@@ -777,10 +797,16 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_delivery_success_rate(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Float
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -789,10 +815,16 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median
 ): Long
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_message_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topology(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -803,6 +835,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_fi
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -811,13 +845,19 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(`ptr`: Long,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,`metrics`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -978,10 +1018,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 28940.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 12938.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() != 62412.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 28708.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575.toShort()) {
@@ -996,10 +1045,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 30825.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 38001.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 51778.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() != 3250.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362.toShort()) {
@@ -1017,6 +1075,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1029,7 +1090,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 36955.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 14659.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161.toShort()) {
@@ -1039,6 +1106,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165.toShort()) {
@@ -1579,9 +1649,15 @@ public interface OfflineProtocolInterface {
     
     fun `finalizeFile`(`fileId`: kotlin.String)
     
+    fun `forceTransport`(`transportType`: TransportType)
+    
     fun `getActiveTransports`(): List<kotlin.String>
     
+    fun `getBatteryLevel`(): kotlin.UByte?
+    
     fun `getDeliverySuccessRate`(): kotlin.Float
+    
+    fun `getDorsConfig`(): DorsConfig
     
     fun `getFileProgress`(`fileId`: kotlin.String): FileProgress?
     
@@ -1591,9 +1667,15 @@ public interface OfflineProtocolInterface {
     
     fun `getMessageStats`(): List<MessageStats>
     
+    fun `getRelayPriority`(): RelayPriority
+    
     fun `getState`(): ProtocolState
     
     fun `getTopology`(): NetworkTopology
+    
+    fun `getTransportMetrics`(`transportType`: TransportType): TransportMetrics?
+    
+    fun `isRelay`(): kotlin.Boolean
     
     fun `pause`()
     
@@ -1605,6 +1687,8 @@ public interface OfflineProtocolInterface {
     
     fun `receiveMessage`(): kotlin.String?
     
+    fun `releaseTransportLock`()
+    
     fun `removeTransport`(`transportType`: TransportType)
     
     fun `resume`()
@@ -1613,13 +1697,19 @@ public interface OfflineProtocolInterface {
     
     fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority): kotlin.String
     
+    fun `setBatteryLevel`(`level`: kotlin.UByte)
+    
     fun `setEventCallback`(`callback`: EventCallback)
+    
+    fun `setRelayPriority`(`priority`: RelayPriority)
     
     fun `shouldEscalateToWifi`(): kotlin.Boolean
     
     fun `start`()
     
     fun `stop`()
+    
+    fun `updateDorsConfig`(`config`: DorsConfig)
     
     fun `updateTransportMetrics`(`transportType`: TransportType, `metrics`: TransportMetrics)
     
@@ -1884,6 +1974,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    
+    @Throws(ProtocolException::class)override fun `forceTransport`(`transportType`: TransportType)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(
+        it,
+        FfiConverterTypeTransportType.lower(`transportType`),_status)
+}
+    }
+    
+    
+
     override fun `getActiveTransports`(): List<kotlin.String> {
             return FfiConverterSequenceString.lift(
     callWithHandle {
@@ -1897,11 +2000,37 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `getBatteryLevel`(): kotlin.UByte? {
+            return FfiConverterOptionalUByte.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     override fun `getDeliverySuccessRate`(): kotlin.Float {
             return FfiConverterFloat.lift(
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_delivery_success_rate(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `getDorsConfig`(): DorsConfig {
+            return FfiConverterTypeDorsConfig.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(
         it,
         _status)
 }
@@ -1962,6 +2091,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `getRelayPriority`(): RelayPriority {
+            return FfiConverterTypeRelayPriority.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     override fun `getState`(): ProtocolState {
             return FfiConverterTypeProtocolState.lift(
     callWithHandle {
@@ -1981,6 +2123,32 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topology(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `getTransportMetrics`(`transportType`: TransportType): TransportMetrics? {
+            return FfiConverterOptionalTypeTransportMetrics.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
+        it,
+        FfiConverterTypeTransportType.lower(`transportType`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `isRelay`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(
         it,
         _status)
 }
@@ -2054,6 +2222,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `releaseTransportLock`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(
+        it,
+        _status)
+}
+    }
+    
+    
+
     
     @Throws(ProtocolException::class)override fun `removeTransport`(`transportType`: TransportType)
         = 
@@ -2108,6 +2288,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `setBatteryLevel`(`level`: kotlin.UByte)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(
+        it,
+        FfiConverterUByte.lower(`level`),_status)
+}
+    }
+    
+    
+
     override fun `setEventCallback`(`callback`: EventCallback)
         = 
     callWithHandle {
@@ -2115,6 +2307,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(
         it,
         FfiConverterTypeEventCallback.lower(`callback`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `setRelayPriority`(`priority`: RelayPriority)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(
+        it,
+        FfiConverterTypeRelayPriority.lower(`priority`),_status)
 }
     }
     
@@ -2154,6 +2359,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(
         it,
         _status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `updateDorsConfig`(`config`: DorsConfig)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(
+        it,
+        FfiConverterTypeDorsConfig.lower(`config`),_status)
 }
     }
     
@@ -2212,6 +2430,42 @@ public object FfiConverterTypeOfflineProtocol: FfiConverter<OfflineProtocol, Lon
 
 
 
+data class AckConfig (
+    var `defaultTimeoutMs`: kotlin.ULong
+    , 
+    var `maxPendingAcks`: kotlin.ULong
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAckConfig: FfiConverterRustBuffer<AckConfig> {
+    override fun read(buf: ByteBuffer): AckConfig {
+        return AckConfig(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AckConfig) = (
+            FfiConverterULong.allocationSize(value.`defaultTimeoutMs`) +
+            FfiConverterULong.allocationSize(value.`maxPendingAcks`)
+    )
+
+    override fun write(value: AckConfig, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`defaultTimeoutMs`, buf)
+            FfiConverterULong.write(value.`maxPendingAcks`, buf)
+    }
+}
+
+
+
 data class BleFragment (
     var `recipientId`: kotlin.String
     , 
@@ -2243,6 +2497,103 @@ public object FfiConverterTypeBleFragment: FfiConverterRustBuffer<BleFragment> {
     override fun write(value: BleFragment, buf: ByteBuffer) {
             FfiConverterString.write(value.`recipientId`, buf)
             FfiConverterSequenceUByte.write(value.`data`, buf)
+    }
+}
+
+
+
+data class DedupConfig (
+    var `maxTrackedMessages`: kotlin.ULong
+    , 
+    var `retentionTimeSecs`: kotlin.ULong
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDedupConfig: FfiConverterRustBuffer<DedupConfig> {
+    override fun read(buf: ByteBuffer): DedupConfig {
+        return DedupConfig(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DedupConfig) = (
+            FfiConverterULong.allocationSize(value.`maxTrackedMessages`) +
+            FfiConverterULong.allocationSize(value.`retentionTimeSecs`)
+    )
+
+    override fun write(value: DedupConfig, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`maxTrackedMessages`, buf)
+            FfiConverterULong.write(value.`retentionTimeSecs`, buf)
+    }
+}
+
+
+
+data class DorsConfig (
+    var `preferOnline`: kotlin.Boolean
+    , 
+    var `switchHysteresis`: kotlin.Float
+    , 
+    var `switchCooldownSecs`: kotlin.ULong
+    , 
+    var `bleToWifiRetryThreshold`: kotlin.UInt
+    , 
+    var `rssiSwitchThreshold`: kotlin.Short
+    , 
+    var `congestionQueueThreshold`: kotlin.ULong
+    , 
+    var `stabilityWindowSecs`: kotlin.ULong
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
+    override fun read(buf: ByteBuffer): DorsConfig {
+        return DorsConfig(
+            FfiConverterBoolean.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterShort.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DorsConfig) = (
+            FfiConverterBoolean.allocationSize(value.`preferOnline`) +
+            FfiConverterFloat.allocationSize(value.`switchHysteresis`) +
+            FfiConverterULong.allocationSize(value.`switchCooldownSecs`) +
+            FfiConverterUInt.allocationSize(value.`bleToWifiRetryThreshold`) +
+            FfiConverterShort.allocationSize(value.`rssiSwitchThreshold`) +
+            FfiConverterULong.allocationSize(value.`congestionQueueThreshold`) +
+            FfiConverterULong.allocationSize(value.`stabilityWindowSecs`)
+    )
+
+    override fun write(value: DorsConfig, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`preferOnline`, buf)
+            FfiConverterFloat.write(value.`switchHysteresis`, buf)
+            FfiConverterULong.write(value.`switchCooldownSecs`, buf)
+            FfiConverterUInt.write(value.`bleToWifiRetryThreshold`, buf)
+            FfiConverterShort.write(value.`rssiSwitchThreshold`, buf)
+            FfiConverterULong.write(value.`congestionQueueThreshold`, buf)
+            FfiConverterULong.write(value.`stabilityWindowSecs`, buf)
     }
 }
 
@@ -2478,6 +2829,42 @@ public object FfiConverterTypeNetworkTopology: FfiConverterRustBuffer<NetworkTop
 
 
 
+data class PathConfig (
+    var `forwardToTopK`: kotlin.UInt
+    , 
+    var `maxCongestionLevel`: kotlin.UInt
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePathConfig: FfiConverterRustBuffer<PathConfig> {
+    override fun read(buf: ByteBuffer): PathConfig {
+        return PathConfig(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PathConfig) = (
+            FfiConverterUInt.allocationSize(value.`forwardToTopK`) +
+            FfiConverterUInt.allocationSize(value.`maxCongestionLevel`)
+    )
+
+    override fun write(value: PathConfig, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`forwardToTopK`, buf)
+            FfiConverterUInt.write(value.`maxCongestionLevel`, buf)
+    }
+}
+
+
+
 data class PeerDevice (
     var `peerId`: kotlin.String
     , 
@@ -2575,6 +2962,251 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
             FfiConverterBoolean.write(value.`preferOnline`, buf)
             FfiConverterUByte.write(value.`initialTtl`, buf)
+    }
+}
+
+
+
+data class ProtocolConfigExtended (
+    var `appId`: kotlin.String
+    , 
+    var `userId`: kotlin.String
+    , 
+    var `transport`: TransportConfig
+    , 
+    var `dors`: DorsConfig
+    , 
+    var `relay`: RelayConfig
+    , 
+    var `path`: PathConfig
+    , 
+    var `reliability`: ReliabilityConfig
+    , 
+    var `initialTtl`: kotlin.UByte
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProtocolConfigExtended: FfiConverterRustBuffer<ProtocolConfigExtended> {
+    override fun read(buf: ByteBuffer): ProtocolConfigExtended {
+        return ProtocolConfigExtended(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeTransportConfig.read(buf),
+            FfiConverterTypeDorsConfig.read(buf),
+            FfiConverterTypeRelayConfig.read(buf),
+            FfiConverterTypePathConfig.read(buf),
+            FfiConverterTypeReliabilityConfig.read(buf),
+            FfiConverterUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ProtocolConfigExtended) = (
+            FfiConverterString.allocationSize(value.`appId`) +
+            FfiConverterString.allocationSize(value.`userId`) +
+            FfiConverterTypeTransportConfig.allocationSize(value.`transport`) +
+            FfiConverterTypeDorsConfig.allocationSize(value.`dors`) +
+            FfiConverterTypeRelayConfig.allocationSize(value.`relay`) +
+            FfiConverterTypePathConfig.allocationSize(value.`path`) +
+            FfiConverterTypeReliabilityConfig.allocationSize(value.`reliability`) +
+            FfiConverterUByte.allocationSize(value.`initialTtl`)
+    )
+
+    override fun write(value: ProtocolConfigExtended, buf: ByteBuffer) {
+            FfiConverterString.write(value.`appId`, buf)
+            FfiConverterString.write(value.`userId`, buf)
+            FfiConverterTypeTransportConfig.write(value.`transport`, buf)
+            FfiConverterTypeDorsConfig.write(value.`dors`, buf)
+            FfiConverterTypeRelayConfig.write(value.`relay`, buf)
+            FfiConverterTypePathConfig.write(value.`path`, buf)
+            FfiConverterTypeReliabilityConfig.write(value.`reliability`, buf)
+            FfiConverterUByte.write(value.`initialTtl`, buf)
+    }
+}
+
+
+
+data class RelayConfig (
+    var `relayThreshold`: kotlin.ULong
+    , 
+    var `minBatteryForRelay`: kotlin.UByte
+    , 
+    var `allowRelay`: kotlin.Boolean
+    , 
+    var `relayPriority`: RelayPriority
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRelayConfig: FfiConverterRustBuffer<RelayConfig> {
+    override fun read(buf: ByteBuffer): RelayConfig {
+        return RelayConfig(
+            FfiConverterULong.read(buf),
+            FfiConverterUByte.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterTypeRelayPriority.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RelayConfig) = (
+            FfiConverterULong.allocationSize(value.`relayThreshold`) +
+            FfiConverterUByte.allocationSize(value.`minBatteryForRelay`) +
+            FfiConverterBoolean.allocationSize(value.`allowRelay`) +
+            FfiConverterTypeRelayPriority.allocationSize(value.`relayPriority`)
+    )
+
+    override fun write(value: RelayConfig, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`relayThreshold`, buf)
+            FfiConverterUByte.write(value.`minBatteryForRelay`, buf)
+            FfiConverterBoolean.write(value.`allowRelay`, buf)
+            FfiConverterTypeRelayPriority.write(value.`relayPriority`, buf)
+    }
+}
+
+
+
+data class ReliabilityConfig (
+    var `ack`: AckConfig
+    , 
+    var `retry`: RetryConfig
+    , 
+    var `dedup`: DedupConfig
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReliabilityConfig: FfiConverterRustBuffer<ReliabilityConfig> {
+    override fun read(buf: ByteBuffer): ReliabilityConfig {
+        return ReliabilityConfig(
+            FfiConverterTypeAckConfig.read(buf),
+            FfiConverterTypeRetryConfig.read(buf),
+            FfiConverterTypeDedupConfig.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ReliabilityConfig) = (
+            FfiConverterTypeAckConfig.allocationSize(value.`ack`) +
+            FfiConverterTypeRetryConfig.allocationSize(value.`retry`) +
+            FfiConverterTypeDedupConfig.allocationSize(value.`dedup`)
+    )
+
+    override fun write(value: ReliabilityConfig, buf: ByteBuffer) {
+            FfiConverterTypeAckConfig.write(value.`ack`, buf)
+            FfiConverterTypeRetryConfig.write(value.`retry`, buf)
+            FfiConverterTypeDedupConfig.write(value.`dedup`, buf)
+    }
+}
+
+
+
+data class RetryConfig (
+    var `maxRetries`: kotlin.UInt
+    , 
+    var `initialDelayMs`: kotlin.ULong
+    , 
+    var `maxDelayMs`: kotlin.ULong
+    , 
+    var `backoffMultiplier`: kotlin.Float
+    , 
+    var `outboxMaxLifetimeMs`: kotlin.ULong
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRetryConfig: FfiConverterRustBuffer<RetryConfig> {
+    override fun read(buf: ByteBuffer): RetryConfig {
+        return RetryConfig(
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RetryConfig) = (
+            FfiConverterUInt.allocationSize(value.`maxRetries`) +
+            FfiConverterULong.allocationSize(value.`initialDelayMs`) +
+            FfiConverterULong.allocationSize(value.`maxDelayMs`) +
+            FfiConverterFloat.allocationSize(value.`backoffMultiplier`) +
+            FfiConverterULong.allocationSize(value.`outboxMaxLifetimeMs`)
+    )
+
+    override fun write(value: RetryConfig, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`maxRetries`, buf)
+            FfiConverterULong.write(value.`initialDelayMs`, buf)
+            FfiConverterULong.write(value.`maxDelayMs`, buf)
+            FfiConverterFloat.write(value.`backoffMultiplier`, buf)
+            FfiConverterULong.write(value.`outboxMaxLifetimeMs`, buf)
+    }
+}
+
+
+
+data class TransportConfig (
+    var `bleEnabled`: kotlin.Boolean
+    , 
+    var `wifiDirectEnabled`: kotlin.Boolean
+    , 
+    var `internetEnabled`: kotlin.Boolean
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportConfig> {
+    override fun read(buf: ByteBuffer): TransportConfig {
+        return TransportConfig(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TransportConfig) = (
+            FfiConverterBoolean.allocationSize(value.`bleEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`internetEnabled`)
+    )
+
+    override fun write(value: TransportConfig, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`bleEnabled`, buf)
+            FfiConverterBoolean.write(value.`wifiDirectEnabled`, buf)
+            FfiConverterBoolean.write(value.`internetEnabled`, buf)
     }
 }
 
@@ -2904,6 +3536,38 @@ public object FfiConverterTypeEventCallback: FfiConverterCallbackInterface<Event
 /**
  * @suppress
  */
+public object FfiConverterOptionalUByte: FfiConverterRustBuffer<kotlin.UByte?> {
+    override fun read(buf: ByteBuffer): kotlin.UByte? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUByte.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UByte?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUByte.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UByte?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUByte.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
     override fun read(buf: ByteBuffer): kotlin.Short? {
         if (buf.get().toInt() == 0) {
@@ -3054,6 +3718,38 @@ public object FfiConverterOptionalTypeFileProgress: FfiConverterRustBuffer<FileP
         } else {
             buf.put(1)
             FfiConverterTypeFileProgress.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeTransportMetrics: FfiConverterRustBuffer<TransportMetrics?> {
+    override fun read(buf: ByteBuffer): TransportMetrics? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeTransportMetrics.read(buf)
+    }
+
+    override fun allocationSize(value: TransportMetrics?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeTransportMetrics.allocationSize(value)
+        }
+    }
+
+    override fun write(value: TransportMetrics?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeTransportMetrics.write(value, buf)
         }
     }
 }

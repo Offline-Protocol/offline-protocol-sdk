@@ -19,6 +19,19 @@ import { VisualizationScreen } from './screens/VisualizationScreen';
 
 type Tab = 'messaging' | 'network' | 'visualization' | 'events';
 
+/**
+ * Offline Protocol Example App
+ * 
+ * BLE Transport is now managed automatically at the bindings level!
+ * 
+ * When you call start():
+ * - BLE scanning begins automatically (discovers nearby devices)
+ * - BLE advertising begins automatically (makes this device discoverable)
+ * - Fragment polling starts (sends queued messages)
+ * - Fragment receiving is active (receives messages from peers)
+ * 
+ * No manual BLE setup required - everything is handled natively.
+ */
 export default function App() {
   const [userId, setUserId] = useState('user_' + Math.random().toString(36).substr(2, 9));
   const [activeTab, setActiveTab] = useState<Tab>('messaging');
@@ -164,6 +177,9 @@ export default function App() {
             <Text style={styles.permissionWarningText}>
               ⚠️ Bluetooth permissions required for offline messaging
             </Text>
+            <Text style={[styles.permissionWarningText, {fontSize: 12, marginTop: 4}]}>
+              BLE operations are managed automatically at the native level
+            </Text>
             <TouchableOpacity
               style={styles.permissionButton}
               onPress={handleRequestPermissions}
@@ -181,6 +197,9 @@ export default function App() {
         >
           <Text style={styles.controlButtonText}>
             {isStarted ? 'Stop Protocol' : 'Start Protocol'}
+          </Text>
+          <Text style={[styles.controlButtonText, {fontSize: 11, opacity: 0.8, marginTop: 2}]}>
+            {isStarted ? '(BLE auto-stops)' : '(BLE auto-starts)'}
           </Text>
         </TouchableOpacity>
 

@@ -16,6 +16,8 @@ Pod::Spec.new do |s|
   # Source files
   s.source_files = [
     "OfflineProtocolModule.{h,m,swift}",
+    "TransportManager.swift",
+    "BleManager.swift",
     "Generated/offline_protocol.swift"  # UniFFI generated Swift file
   ]
 
