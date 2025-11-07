@@ -15,6 +15,19 @@ import uniffi.offline_protocol.OfflineProtocol
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
+private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
+    private val timestamps = ConcurrentHashMap<String, Long>()
+
+    fun shouldLog(key: String, intervalMs: Long = defaultIntervalMs, nowMs: Long = System.currentTimeMillis()): Boolean {
+        val last = timestamps[key]
+        if (last != null && nowMs - last < intervalMs) {
+            return false
+        }
+        timestamps[key] = nowMs
+        return true
+    }
+}
+
 /**
  * BLE Manager implementing TransportManager for Bluetooth Low Energy communication
  * Ensures iOS ↔ Android cross-platform compatibility
@@ -47,6 +60,8 @@ class BleManager(
         private const val FRAGMENT_POLL_INTERVAL_MS = 100L // 100ms
         private const val MAX_FRAGMENT_SIZE = 185
         private const val CONNECTION_TIMEOUT_MS = 10000L
+        private const val SCAN_WATCHDOG_INTERVAL_MS = 20000L
+        private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
     }
     
     // MARK: - Properties
@@ -75,6 +90,10 @@ class BleManager(
     private val deviceAddressToId = ConcurrentHashMap<String, String>()
     private val deviceIdToAddress = ConcurrentHashMap<String, String>()
     private val lastSeenRssi = ConcurrentHashMap<String, Short>()
+    private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
+    @Volatile private var lastDiscoveryAt: Long = 0L
+
+    private val logThrottler = LogThrottler()
     
     // Pending fragments waiting for device ID
     private data class PendingFragment(val data: ByteArray, val timestamp: Long)
@@ -89,6 +108,25 @@ class BleManager(
             if (state == TransportState.RUNNING) {
                 mainHandler.postDelayed(this, FRAGMENT_POLL_INTERVAL_MS)
             }
+        }
+    }
+
+    private val scanWatchdogRunnable = object : Runnable {
+        override fun run() {
+            if (!isScanning) {
+                return
+            }
+            val now = System.currentTimeMillis()
+            val idleMs = now - lastDiscoveryAt
+            if (idleMs >= SCAN_WATCHDOG_INTERVAL_MS) {
+                if (logThrottler.shouldLog("scan_watchdog", intervalMs = SCAN_WATCHDOG_INTERVAL_MS)) {
+                    Log.w(TAG, "Restarting BLE scan after ${idleMs}ms of inactivity")
+                    emitDiagnostic("warning", "Restarting BLE scan due to inactivity", mapOf("idleMs" to idleMs))
+                }
+                restartScanning("watchdog")
+                return
+            }
+            mainHandler.postDelayed(this, SCAN_WATCHDOG_HEARTBEAT_MS)
         }
     }
     
@@ -157,7 +195,7 @@ class BleManager(
             startAdvertising()
             
             // Start scanning
-            startScanning()
+            startScanning("start")
             
             // Start fragment polling
             mainHandler.post(fragmentPollingRunnable)
@@ -201,7 +239,7 @@ class BleManager(
         mainHandler.removeCallbacks(fragmentPollingRunnable)
         
         // Stop scanning
-        stopScanning()
+        stopScanning("stop")
         
         // Stop advertising
         stopAdvertising()
@@ -234,14 +272,14 @@ class BleManager(
     
     override fun pause() {
         // For Android background mode
-        stopScanning()
+        stopScanning("pause")
         mainHandler.removeCallbacks(fragmentPollingRunnable)
     }
     
     override fun resume() {
         // Resume from background
         if (state == TransportState.RUNNING) {
-            startScanning()
+            startScanning("resume")
             mainHandler.post(fragmentPollingRunnable)
         }
     }
@@ -312,10 +350,23 @@ class BleManager(
         }
     }
     
-    private fun startScanning() {
-        if (isScanning) return
+    private fun startScanning(reason: String = "manual") {
+        if (isScanning) {
+            if (logThrottler.shouldLog("scan_already_running")) {
+                Log.d(TAG, "Scan already running (reason: $reason)")
+            }
+            return
+        }
         
         try {
+            val scanner = bluetoothLeScanner
+            if (scanner == null) {
+                if (logThrottler.shouldLog("scanner_unavailable")) {
+                    Log.w(TAG, "BluetoothLeScanner unavailable; cannot start scan")
+                    emitDiagnostic("error", "BLE scanner unavailable", mapOf("reason" to reason))
+                }
+                return
+            }
             val scanSettings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
@@ -341,10 +392,14 @@ class BleManager(
                 }
             }
             
-            bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, scanCallback)
+            scanner.startScan(listOf(scanFilter), scanSettings, scanCallback)
             isScanning = true
-            
-            // Reduced logging
+            lastDiscoveryAt = System.currentTimeMillis()
+            scheduleScanWatchdog()
+            if (logThrottler.shouldLog("scan_started")) {
+                Log.i(TAG, "Started BLE scanning (reason: $reason)")
+                emitDiagnostic("info", "Started BLE scanning", mapOf("reason" to reason))
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while starting scan", e)
             emitDiagnostic("error", "Permission denied while starting scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
@@ -352,19 +407,38 @@ class BleManager(
         }
     }
     
-    private fun stopScanning() {
+    private fun stopScanning(reason: String = "manual") {
         if (!isScanning) return
         
         try {
             scanCallback?.let { bluetoothLeScanner?.stopScan(it) }
             scanCallback = null
             isScanning = false
-            Log.i(TAG, "Stopped scanning")
-            emitDiagnostic("info", "Stopped BLE scanning")
+            cancelScanWatchdog()
+            lastDiscoveryAt = 0L
+            discoveryLogTimestamps.clear()
+            if (logThrottler.shouldLog("scan_stopped")) {
+                Log.i(TAG, "Stopped scanning (reason: $reason)")
+            }
+            emitDiagnostic("info", "Stopped BLE scanning", mapOf("reason" to reason))
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while stopping scan", e)
             emitDiagnostic("error", "Permission denied while stopping scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
+    }
+    
+    private fun restartScanning(reason: String) {
+        stopScanning("restart_$reason")
+        startScanning("restart_$reason")
+    }
+    
+    private fun scheduleScanWatchdog() {
+        cancelScanWatchdog()
+        mainHandler.postDelayed(scanWatchdogRunnable, SCAN_WATCHDOG_HEARTBEAT_MS)
+    }
+    
+    private fun cancelScanWatchdog() {
+        mainHandler.removeCallbacks(scanWatchdogRunnable)
     }
     
     private fun startAdvertising() {
@@ -426,14 +500,34 @@ class BleManager(
         val device = result.device
         val rssi = result.rssi.toShort()
         val address = device.address
-        
-            // Reduced logging - only log when actually connecting
-        
+        val now = System.currentTimeMillis()
+        lastDiscoveryAt = now
+        val lastLog = discoveryLogTimestamps[address]
+        val isConnectable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            result.isConnectable
+        } else {
+            null
+        }
+        if (lastLog == null || now - lastLog > 30000) {
+            discoveryLogTimestamps[address] = now
+            Log.d(TAG, "Discovered device $address RSSI=$rssi")
+            emitDiagnostic(
+                "info",
+                "Discovered BLE device",
+                mapOf(
+                    "address" to address,
+                    "rssi" to rssi,
+                    "connectable" to (isConnectable ?: true)
+                )
+            )
+        }
         lastSeenRssi[address] = rssi
 
         // Connect to device if not already connected
         if (!gattClients.containsKey(address)) {
             connectToDevice(device)
+        } else if (logThrottler.shouldLog("discovery_existing_$address", intervalMs = 30000)) {
+            Log.v(TAG, "Device $address already connected/connecting")
         }
     }
     
@@ -463,8 +557,10 @@ class BleManager(
             val gatt = address?.let { gattClients[it] }
             
             if (gatt == null) {
-                Log.w(TAG, "No connected device for recipient: $recipientId")
-                emitDiagnostic("warning", "No connected device for BLE fragment", mapOf("recipientId" to recipientId))
+                if (logThrottler.shouldLog("missing_gatt_$recipientId")) {
+                    Log.w(TAG, "No connected device for recipient: $recipientId")
+                    emitDiagnostic("warning", "No connected device for BLE fragment", mapOf("recipientId" to recipientId))
+                }
                 return
             }
             
@@ -473,7 +569,10 @@ class BleManager(
             val characteristic = service?.getCharacteristic(MESSAGE_CHAR_UUID)
             
             if (characteristic == null) {
-                Log.w(TAG, "Message characteristic not found for recipient: $recipientId")
+                if (logThrottler.shouldLog("missing_char_$recipientId")) {
+                    Log.w(TAG, "Message characteristic not found for recipient: $recipientId")
+                    emitDiagnostic("warning", "Message characteristic missing", mapOf("recipientId" to recipientId))
+                }
                 return
             }
             
@@ -500,6 +599,14 @@ class BleManager(
                 // Queue fragment to process later when device ID is available
                 val pendingList = pendingFragments.getOrPut(address) { mutableListOf() }
                 pendingList.add(PendingFragment(data, System.currentTimeMillis()))
+                if (logThrottler.shouldLog("queue_pending_$address")) {
+                    Log.d(TAG, "Queued fragment while awaiting device ID for $address")
+                    emitDiagnostic(
+                        "info",
+                        "Queued BLE fragment pending device ID",
+                        mapOf("address" to address, "length" to data.size)
+                    )
+                }
                 
                 // Clean up old pending fragments
                 cleanupPendingFragments()

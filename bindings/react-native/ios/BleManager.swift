@@ -9,6 +9,27 @@
 import Foundation
 import CoreBluetooth
 
+private final class LogThrottler {
+    private var timestamps: [String: Date] = [:]
+    private let lock = NSLock()
+    private let defaultInterval: TimeInterval
+    
+    init(defaultInterval: TimeInterval = 5.0) {
+        self.defaultInterval = defaultInterval
+    }
+    
+    func shouldLog(key: String, interval: TimeInterval? = nil, now: Date = Date()) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let threshold = interval ?? defaultInterval
+        if let last = timestamps[key], now.timeIntervalSince(last) < threshold {
+            return false
+        }
+        timestamps[key] = now
+        return true
+    }
+}
+
 /// BLE Manager implementing TransportManager for Bluetooth Low Energy communication
 public class BleManager: NSObject, TransportManager {
     
@@ -67,6 +88,19 @@ public class BleManager: NSObject, TransportManager {
     private var fragmentsSent: UInt64 = 0
     private var fragmentsReceived: UInt64 = 0
 
+    // Logging & monitoring
+    private let logThrottler = LogThrottler()
+    private var discoveryLogTimestamps: [UUID: Date] = [:]
+    private var scanStateMonitor: DispatchSourceTimer?
+    private var lastDiscoveryDate: Date?
+    private var scanStartDate: Date?
+    private let SCAN_HEARTBEAT_INTERVAL: TimeInterval = 10.0
+    private let SCAN_RESTART_INTERVAL: TimeInterval = 20.0
+    private var connectionMonitor: DispatchSourceTimer?
+    private var connectionAttemptTimestamps: [UUID: Date] = [:]
+    private let CONNECTION_MONITOR_INTERVAL: TimeInterval = 5.0
+    private let MIN_RECONNECT_INTERVAL: TimeInterval = 3.0
+
     // MARK: - Diagnostics
     private func emitDiagnostic(_ level: String, _ message: String, context: [String: Any] = [:]) {
         delegate?.transportManager(self, didEmitDiagnostic: level, message: message, context: context)
@@ -107,14 +141,14 @@ public class BleManager: NSObject, TransportManager {
         // Initialize Central Manager (for scanning)
         centralManager = CBCentralManager(
             delegate: self,
-            queue: DispatchQueue.global(qos: .userInitiated),
+            queue: nil,
             options: [CBCentralManagerOptionShowPowerAlertKey: true]
         )
         
         // Initialize Peripheral Manager (for advertising)
         peripheralManager = CBPeripheralManager(
             delegate: self,
-            queue: DispatchQueue.global(qos: .userInitiated),
+            queue: nil,
             options: [CBPeripheralManagerOptionShowPowerAlertKey: true]
         )
         
@@ -134,7 +168,7 @@ public class BleManager: NSObject, TransportManager {
         stopFragmentPolling()
         
         // Stop scanning
-        stopScanning()
+        stopScanning(reason: "stop")
         
         // Stop advertising
         stopAdvertising()
@@ -163,14 +197,14 @@ public class BleManager: NSObject, TransportManager {
     
     public func pause() {
         // For iOS background mode
-        stopScanning()
+        stopScanning(reason: "pause")
         stopFragmentPolling()
     }
     
     public func resume() {
         // Resume from background
         if state == .running {
-            startScanning()
+            startScanning(reason: "resume")
             startFragmentPolling()
         }
     }
@@ -193,25 +227,196 @@ public class BleManager: NSObject, TransportManager {
         delegate?.transportManager(self, didChangeState: newState)
     }
     
-    private func startScanning() {
-        guard let central = centralManager, central.state == .poweredOn, !isScanning else {
+    private func startScanning(reason: String = "manual") {
+        guard let central = centralManager else {
+            if logThrottler.shouldLog(key: "scan_missing_central") {
+                print("[BleManager] Cannot start scanning – central manager not initialized")
+            }
             return
         }
         
-        // Reduced logging
+        guard central.state == .poweredOn else {
+            if logThrottler.shouldLog(key: "scan_not_powered") {
+                print("[BleManager] Skipping scan start – central state: \(central.state.rawValue)")
+                emitDiagnostic("info", "Scan start skipped", context: ["state": central.state.rawValue, "reason": reason])
+            }
+            return
+        }
+        
+        guard !isScanning else {
+            if logThrottler.shouldLog(key: "scan_already_running") {
+                print("[BleManager] Scan already running (reason: \(reason))")
+            }
+            return
+        }
+        
         central.scanForPeripherals(
             withServices: [SERVICE_UUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         )
         isScanning = true
+        scanStartDate = Date()
+        lastDiscoveryDate = scanStartDate
+        startScanMonitor()
+        if logThrottler.shouldLog(key: "scan_started") {
+            let context: [String: Any] = [
+                "reason": reason,
+                "allowDuplicates": true
+            ]
+            print("[BleManager] Started scanning (reason: \(reason))")
+            emitDiagnostic("info", "Started BLE scanning", context: context)
+        }
+        startConnectionMonitor()
     }
     
-    private func stopScanning() {
+    private func stopScanning(reason: String = "manual") {
         guard isScanning else { return }
         centralManager?.stopScan()
         isScanning = false
-        print("[BleManager] Stopped scanning")
-        emitDiagnostic("info", "Stopped BLE scanning")
+        stopScanMonitor()
+        stopConnectionMonitor()
+        scanStartDate = nil
+        lastDiscoveryDate = nil
+        connectionAttemptTimestamps.removeAll()
+        if logThrottler.shouldLog(key: "scan_stopped") {
+            print("[BleManager] Stopped scanning (reason: \(reason))")
+        }
+        emitDiagnostic("info", "Stopped BLE scanning", context: ["reason": reason])
+    }
+    
+    private func startScanMonitor() {
+        guard scanStateMonitor == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        timer.schedule(deadline: .now() + SCAN_HEARTBEAT_INTERVAL, repeating: SCAN_HEARTBEAT_INTERVAL)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            guard self.isScanning else { return }
+            let now = Date()
+            let lastActivity = self.lastDiscoveryDate ?? self.scanStartDate ?? now
+            let idleDuration = now.timeIntervalSince(lastActivity)
+            if idleDuration >= self.SCAN_RESTART_INTERVAL {
+                if self.logThrottler.shouldLog(key: "scan_watchdog", interval: self.SCAN_RESTART_INTERVAL) {
+                    print("[BleManager] Restarting scan after \(Int(idleDuration))s of inactivity")
+                    self.emitDiagnostic("warning", "Restarting BLE scan due to inactivity", context: ["idle_seconds": Int(idleDuration)])
+                }
+                self.restartScanningDueToInactivity()
+            }
+        }
+        timer.resume()
+        scanStateMonitor = timer
+    }
+    
+    private func stopScanMonitor() {
+        scanStateMonitor?.cancel()
+        scanStateMonitor = nil
+    }
+    
+    private func restartScanningDueToInactivity() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // Restart scan only if still marked as scanning
+            guard self.isScanning else { return }
+            self.centralManager?.stopScan()
+            self.isScanning = false
+            self.startScanning(reason: "watchdog")
+        }
+    }
+    
+    private func markDiscoveryEvent() {
+        lastDiscoveryDate = Date()
+    }
+    
+    private func startConnectionMonitor() {
+        guard connectionMonitor == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        timer.schedule(deadline: .now() + CONNECTION_MONITOR_INTERVAL, repeating: CONNECTION_MONITOR_INTERVAL)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            let now = Date()
+            for peripheral in self.discoveredPeripherals.values {
+                if self.connectedPeripherals[peripheral.identifier] == nil {
+                    self.attemptConnection(to: peripheral, reason: "monitor")
+                }
+            }
+            for centralId in self.pendingFragments.keys {
+                if self.centralDeviceIds[centralId] == nil && self.peripheralDeviceIds[centralId] == nil {
+                    // Ensure we periodically try to resolve device IDs for pending fragments
+                    if let last = self.connectionAttemptTimestamps[centralId], now.timeIntervalSince(last) < self.MIN_RECONNECT_INTERVAL {
+                        continue
+                    }
+                    self.connectionAttemptTimestamps[centralId] = now
+                    self.ensureDeviceId(for: centralId)
+                }
+            }
+        }
+        timer.resume()
+        connectionMonitor = timer
+    }
+    
+    private func stopConnectionMonitor() {
+        connectionMonitor?.cancel()
+        connectionMonitor = nil
+    }
+    
+    private func attemptConnection(to peripheral: CBPeripheral, reason: String, rssi: Int16? = nil) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.connectedPeripherals[peripheral.identifier] != nil {
+                return
+            }
+            let now = Date()
+            if let lastAttempt = self.connectionAttemptTimestamps[peripheral.identifier], now.timeIntervalSince(lastAttempt) < self.MIN_RECONNECT_INTERVAL {
+                return
+            }
+            self.connectionAttemptTimestamps[peripheral.identifier] = now
+            peripheral.delegate = self
+            if peripheral.state == .connected {
+                self.connectedPeripherals[peripheral.identifier] = peripheral
+                if let service = peripheral.services?.first(where: { $0.uuid == self.SERVICE_UUID }) {
+                    peripheral.discoverCharacteristics([self.MESSAGE_CHAR_UUID, self.DEVICE_ID_CHAR_UUID], for: service)
+                } else {
+                    peripheral.discoverServices([self.SERVICE_UUID])
+                }
+                return
+            }
+            self.centralManager?.connect(peripheral, options: nil)
+            if self.logThrottler.shouldLog(key: "connect_attempt_\(peripheral.identifier.uuidString)", interval: 10) {
+                print("[BleManager] Attempting connection to \(peripheral.identifier) (reason: \(reason))")
+                var context: [String: Any] = [
+                    "identifier": peripheral.identifier.uuidString,
+                    "reason": reason
+                ]
+                if let rssi = rssi {
+                    context["rssi"] = rssi
+                }
+                self.emitDiagnostic("info", "Connecting to BLE peripheral", context: context)
+            }
+        }
+    }
+
+    private func ensureDeviceId(for centralId: UUID) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // Check again with latest state
+            if self.centralDeviceIds[centralId] != nil || self.peripheralDeviceIds[centralId] != nil {
+                return
+            }
+            guard let centralManager = self.centralManager else { return }
+            var candidates = centralManager.retrievePeripherals(withIdentifiers: [centralId])
+            if candidates.isEmpty {
+                let connected = centralManager.retrieveConnectedPeripherals(withServices: [self.SERVICE_UUID])
+                candidates = connected.filter { $0.identifier == centralId }
+            }
+            guard let peripheral = candidates.first else {
+                if self.logThrottler.shouldLog(key: "missing_peripheral_\(centralId.uuidString)", interval: 15) {
+                    print("[BleManager] Unable to retrieve peripheral for central \(centralId)")
+                    self.emitDiagnostic("debug", "Unable to retrieve peripheral for central", context: ["central": centralId.uuidString])
+                }
+                return
+            }
+            self.discoveredPeripherals[peripheral.identifier] = peripheral
+            self.attemptConnection(to: peripheral, reason: "ensure_device_id")
+        }
     }
     
     private func startAdvertising() {
@@ -345,6 +550,13 @@ public class BleManager: NSObject, TransportManager {
             
             // If sender ID is missing but we have a central ID, queue the fragment
             if senderId == nil, let centralId = centralId {
+                if self.logThrottler.shouldLog(key: "queue_pending_fragment_\(centralId.uuidString)", interval: 10) {
+                    print("[BleManager] Queueing fragment while waiting for device ID (central: \(centralId))")
+                    self.emitDiagnostic("info", "Queued BLE fragment pending device ID", context: [
+                        "central": centralId.uuidString,
+                        "length": data.count
+                    ])
+                }
                 // Queue fragment to process later when device ID is available
                 if self.pendingFragments[centralId] == nil {
                     self.pendingFragments[centralId] = []
@@ -356,8 +568,7 @@ public class BleManager: NSObject, TransportManager {
                 
                 // Try to read device ID if not already reading
                 if self.centralDeviceIds[centralId] == nil && self.peripheralDeviceIds[centralId] == nil {
-                    // Device ID will be read when central connects or subscribes
-                    // For now, we'll wait for it
+                    self.ensureDeviceId(for: centralId)
                 }
                 return
             }
@@ -365,7 +576,10 @@ public class BleManager: NSObject, TransportManager {
             guard let senderId = senderId else {
                 // Only log if we don't have a central ID to queue for
                 if centralId == nil {
-                    print("[BleManager] Missing sender ID for received fragment")
+                    if self.logThrottler.shouldLog(key: "missing_sender_fallback", interval: 10) {
+                        print("[BleManager] Missing sender ID for received fragment")
+                        self.emitDiagnostic("warning", "Dropped BLE fragment without sender ID", context: ["length": data.count])
+                    }
                 }
                 return
             }
@@ -434,7 +648,7 @@ extension BleManager: CBCentralManagerDelegate {
         switch central.state {
         case .poweredOn:
             centralReady = true
-            startScanning()
+            startScanning(reason: "central_powered_on")
             startFragmentPolling()
             emitDiagnostic("info", "Central manager powered on")
             
@@ -446,7 +660,7 @@ extension BleManager: CBCentralManagerDelegate {
             
         case .poweredOff, .unauthorized, .unsupported:
             centralReady = false
-            stopScanning()
+            stopScanning(reason: "central_state_\(central.state.rawValue)")
             updateState(.unavailable)
             try? self.protocolInstance.bleStatusChanged(isAvailable: false)
             emitDiagnostic("warning", "Central manager unavailable", context: ["state": central.state.rawValue])
@@ -458,18 +672,30 @@ extension BleManager: CBCentralManagerDelegate {
     
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
         let rssiValue = RSSI.int16Value
+        markDiscoveryEvent()
         
         // Store discovered peripheral
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
         
-        // Reduced logging - only log when actually connecting
-        
-        // Connect to peripheral if not already connected
-        if connectedPeripherals[peripheral.identifier] == nil {
-            peripheral.delegate = self
-            central.connect(peripheral, options: nil)
+        let now = Date()
+        let isConnectable: Bool
+        if #available(iOS 13.0, *) {
+            isConnectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? true
+        } else {
+            isConnectable = true
         }
+        if discoveryLogTimestamps[peripheral.identifier] == nil || (now.timeIntervalSince(discoveryLogTimestamps[peripheral.identifier]!) > 30) {
+            discoveryLogTimestamps[peripheral.identifier] = now
+            print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI=\(rssiValue)")
+            emitDiagnostic("info", "Discovered BLE peripheral", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "rssi": rssiValue,
+                "connectable": isConnectable
+            ])
+        }
+        
+        attemptConnection(to: peripheral, reason: "discovery", rssi: rssiValue)
     }
     
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -477,6 +703,7 @@ extension BleManager: CBCentralManagerDelegate {
         emitDiagnostic("info", "Connected to BLE peripheral", context: ["identifier": peripheral.identifier.uuidString])
         
         connectedPeripherals[peripheral.identifier] = peripheral
+        connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
         
         // Discover services
         peripheral.discoverServices([SERVICE_UUID])
@@ -488,13 +715,24 @@ extension BleManager: CBCentralManagerDelegate {
             "identifier": peripheral.identifier.uuidString,
             "error": error?.localizedDescription ?? "unknown"
         ])
-        discoveredPeripherals.removeValue(forKey: peripheral.identifier)
-        peripheralRSSI.removeValue(forKey: peripheral.identifier)
+        connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+        DispatchQueue.main.asyncAfter(deadline: .now() + MIN_RECONNECT_INTERVAL) { [weak self] in
+            self?.attemptConnection(to: peripheral, reason: "retry_fail")
+        }
     }
     
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         let wasConnected = connectedPeripherals[peripheral.identifier] != nil
         connectedPeripherals.removeValue(forKey: peripheral.identifier)
+        if logThrottler.shouldLog(key: "disconnect_\(peripheral.identifier.uuidString)", interval: 10) {
+            let errorDescription = (error as NSError?)?.localizedDescription ?? "none"
+            print("[BleManager] Disconnected from \(peripheral.identifier) error=\(errorDescription)")
+            emitDiagnostic("warning", "Peripheral disconnected", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "error": errorDescription,
+                "willAttemptReconnect": wasConnected
+            ])
+        }
         
         // Don't remove from discovered list - keep trying to reconnect
         // Only remove RSSI if it's a permanent error
@@ -518,11 +756,10 @@ extension BleManager: CBCentralManagerDelegate {
             }
             
             // Attempt reconnection after a short delay
-            DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self = self, let central = self.centralManager else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + MIN_RECONNECT_INTERVAL) { [weak self] in
+                guard let self = self else { return }
                 if self.state == .running && self.discoveredPeripherals[peripheral.identifier] != nil {
-                    peripheral.delegate = self
-                    central.connect(peripheral, options: nil)
+                    self.attemptConnection(to: peripheral, reason: "retry_disconnect")
                 }
             }
         } else {
@@ -589,6 +826,7 @@ extension BleManager: CBPeripheralDelegate {
             if let deviceId = String(data: data, encoding: .utf8) {
                 peripheralDeviceIds[peripheral.identifier] = deviceId
                 centralDeviceIds[peripheral.identifier] = deviceId
+                connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
 
                 let rssi = peripheralRSSI[peripheral.identifier] ?? -60
                 try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
@@ -656,6 +894,16 @@ extension BleManager: CBPeripheralManagerDelegate {
         for request in requests {
             if request.characteristic.uuid == MESSAGE_CHAR_UUID, let value = request.value {
                 let senderId = centralDeviceIds[request.central.identifier] ?? peripheralDeviceIds[request.central.identifier]
+                if senderId == nil && logThrottler.shouldLog(key: "missing_sender_\(request.central.identifier.uuidString)", interval: 10) {
+                    print("[BleManager] Received write without known sender for central \(request.central.identifier)")
+                    emitDiagnostic("warning", "Received BLE fragment without sender ID", context: [
+                        "central": request.central.identifier.uuidString,
+                        "length": value.count
+                    ])
+                }
+                if senderId == nil {
+                    ensureDeviceId(for: request.central.identifier)
+                }
                 handleReceivedData(value, senderId: senderId, centralId: request.central.identifier)
             }
             
@@ -667,8 +915,7 @@ extension BleManager: CBPeripheralManagerDelegate {
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         // When central subscribes, try to get device ID if we don't have it
         if centralDeviceIds[central.identifier] == nil && peripheralDeviceIds[central.identifier] == nil {
-            // Read device ID from the central's GATT service
-            // Note: We can't directly read from central, but we'll get it when they connect as peripheral
+            ensureDeviceId(for: central.identifier)
         } else if let deviceId = peripheralDeviceIds[central.identifier] {
             centralDeviceIds[central.identifier] = deviceId
             // Process any pending fragments
