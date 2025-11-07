@@ -156,7 +156,17 @@ export default function App() {
       <RNStatusBar barStyle="dark-content" />
       
       <View style={styles.header}>
-        <Text style={styles.title}>Offline Protocol Example</Text>
+        <View style={styles.headerRow}>
+          <Text style={styles.title}>Offline Protocol Example</Text>
+          <TouchableOpacity
+            style={[styles.powerButton, isStarted ? styles.powerButtonActive : styles.powerButtonInactive]}
+            onPress={handleStartStop}
+            accessibilityRole="button"
+            accessibilityLabel={isStarted ? 'Stop protocol' : 'Start protocol'}
+          >
+            <Text style={styles.powerButtonIcon}>⏻</Text>
+          </TouchableOpacity>
+        </View>
         <View style={styles.userIdContainer}>
           <Text style={styles.userIdLabel}>User ID:</Text>
           <TextInput
@@ -189,36 +199,6 @@ export default function App() {
               </Text>
             </TouchableOpacity>
           </View>
-        )}
-
-        <TouchableOpacity
-          style={[styles.controlButton, isStarted ? styles.stopButton : styles.startButton]}
-          onPress={handleStartStop}
-        >
-          <Text style={styles.controlButtonText}>
-            {isStarted ? 'Stop Protocol' : 'Start Protocol'}
-          </Text>
-          <Text style={[styles.controlButtonText, {fontSize: 11, opacity: 0.8, marginTop: 2}]}>
-            {isStarted ? '(BLE auto-stops)' : '(BLE auto-starts)'}
-          </Text>
-        </TouchableOpacity>
-
-        {isStarted && (
-          <TouchableOpacity
-            style={[styles.controlButton, styles.testButton]}
-            onPress={async () => {
-              try {
-                await protocol?.emitTestEvent();
-                Alert.alert('Test Event', 'Event emitted! Check the Events tab to verify event system is working.');
-              } catch (err) {
-                Alert.alert('Error', err instanceof Error ? err.message : 'Failed to emit test event');
-              }
-            }}
-          >
-            <Text style={styles.controlButtonText}>
-              🧪 Test Event System
-            </Text>
-          </TouchableOpacity>
         )}
 
         <View style={styles.tabs}>
@@ -276,11 +256,38 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 5,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
     color: '#fff',
-    marginBottom: 12,
+  },
+  powerButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  powerButtonActive: {
+    backgroundColor: '#f44336',
+  },
+  powerButtonInactive: {
+    backgroundColor: '#4caf50',
+  },
+  powerButtonIcon: {
+    fontSize: 20,
+    color: '#fff',
   },
   userIdContainer: {
     flexDirection: 'row',
@@ -334,31 +341,6 @@ const styles = StyleSheet.create({
   permissionButtonText: {
     color: '#856404',
     fontSize: 14,
-    fontWeight: '600',
-  },
-  controlButton: {
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  startButton: {
-    backgroundColor: '#4caf50',
-  },
-  stopButton: {
-    backgroundColor: '#f44336',
-  },
-  testButton: {
-    backgroundColor: '#9c27b0',
-  },
-  controlButtonText: {
-    color: '#fff',
-    fontSize: 16,
     fontWeight: '600',
   },
   tabs: {

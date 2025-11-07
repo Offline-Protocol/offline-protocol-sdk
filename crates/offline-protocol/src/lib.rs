@@ -21,4 +21,6 @@ pub use error::{Error, Result};
 pub use events::{Event, EventCallback};
 pub use protocol::OfflineProtocol;
 pub use transport_manager::TransportManager;
-pub use visualization::{NetworkVisualizer, NetworkTopology, NetworkNode, NetworkLink, MessageStats, NodeRole};
+pub use visualization::{
+    MessageStats, NetworkLink, NetworkNode, NetworkTopology, NetworkVisualizer, NodeRole,
+};

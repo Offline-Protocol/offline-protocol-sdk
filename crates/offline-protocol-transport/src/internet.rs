@@ -5,8 +5,8 @@
 
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
-use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Default server address
@@ -114,7 +114,7 @@ impl InternetTransport {
     /// Called when connection status changes.
     pub fn on_status_changed(&self, status: TransportStatus) {
         *self.status.lock().unwrap() = status;
-        
+
         // Reset reconnect counter on successful connection
         if status == TransportStatus::Available {
             *self.reconnect_attempts.lock().unwrap() = 0;
@@ -129,14 +129,16 @@ impl InternetTransport {
 
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
-        serde_json::to_vec(message)
-            .map_err(|e| crate::Error::SerializationError(format!("Failed to serialize message: {}", e)))
+        serde_json::to_vec(message).map_err(|e| {
+            crate::Error::SerializationError(format!("Failed to serialize message: {}", e))
+        })
     }
 
     /// Deserializes a message from JSON bytes.
     pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        serde_json::from_slice(data)
-            .map_err(|e| crate::Error::SerializationError(format!("Failed to deserialize message: {}", e)))
+        serde_json::from_slice(data).map_err(|e| {
+            crate::Error::SerializationError(format!("Failed to deserialize message: {}", e))
+        })
     }
 
     /// Called when raw data is received (platform callback).
@@ -225,7 +227,7 @@ impl Transport for InternetTransport {
         // Check status
         if self.status() != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(
-                "Internet transport is not available".to_string()
+                "Internet transport is not available".to_string(),
             ));
         }
 
@@ -236,7 +238,7 @@ impl Transport for InternetTransport {
         // Update metrics
         let mut metrics = self.metrics.lock().unwrap();
         metrics.queue_depth = queue.len();
-        
+
         Ok(())
     }
 
@@ -337,23 +339,26 @@ mod tests {
             .connection_timeout(Duration::from_secs(10))
             .auto_reconnect(false)
             .build();
-        
+
         assert_eq!(transport.config().server_address, "ws://example.com:8080");
-        assert_eq!(transport.config().connection_timeout, Duration::from_secs(10));
+        assert_eq!(
+            transport.config().connection_timeout,
+            Duration::from_secs(10)
+        );
         assert!(!transport.config().auto_reconnect);
     }
 
     #[test]
     fn test_send_receive() {
         let transport = InternetTransport::new("test-device");
-        
+
         // Mark as available
         transport.on_status_changed(TransportStatus::Available);
-        
+
         // Send message
         let message = create_test_message();
         assert!(transport.send(&message).is_ok());
-        
+
         // Should have message in queue
         let next = transport.get_next_message().unwrap();
         assert!(next.is_some());
@@ -363,11 +368,11 @@ mod tests {
     fn test_serialization() {
         let transport = InternetTransport::new("test-device");
         let message = create_test_message();
-        
+
         // Serialize
         let data = transport.serialize_message(&message).unwrap();
         assert!(!data.is_empty());
-        
+
         // Deserialize
         let deserialized = transport.deserialize_message(&data).unwrap();
         assert_eq!(deserialized.id, message.id);
@@ -379,24 +384,23 @@ mod tests {
             .auto_reconnect(true)
             .max_reconnect_attempts(3)
             .build();
-        
+
         assert!(transport.should_reconnect());
-        
+
         transport.increment_reconnect_attempts();
         transport.increment_reconnect_attempts();
         transport.increment_reconnect_attempts();
-        
+
         assert!(!transport.should_reconnect()); // Max attempts reached
     }
 
     #[test]
     fn test_heartbeat() {
         let transport = InternetTransport::new("test-device");
-        
+
         assert!(transport.needs_heartbeat());
-        
+
         transport.update_heartbeat();
         assert!(!transport.needs_heartbeat());
     }
 }
-

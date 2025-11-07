@@ -1,9 +1,11 @@
 //! Main protocol engine.
 
 use crate::{Event, EventCallback, ProtocolConfig, Result, TransportManager};
+use chrono::Utc;
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
+use offline_protocol_transport::TransportType;
 use std::sync::{Arc, Mutex};
 
 /// Protocol state.
@@ -44,6 +46,10 @@ impl SharedState {
         }
     }
 }
+
+const ACK_FOR_KEY: &str = "ack_for";
+const ACK_HOP_COUNT_KEY: &str = "ack_hop_count";
+const ACK_TRANSPORT_KEY: &str = "ack_transport";
 
 /// Main entry point for the Offline Protocol SDK.
 ///
@@ -94,7 +100,7 @@ impl OfflineProtocol {
 
         // Create transport selector for DORS
         let transport_selector = TransportSelector::with_config(config.dors.clone());
-        
+
         // Create transport manager
         let transport_manager = TransportManager::new(transport_selector);
 
@@ -183,6 +189,68 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    fn transport_from_label(label: &str) -> TransportType {
+        match label.to_lowercase().as_str() {
+            "internet" => TransportType::Internet,
+            "wifi_direct" | "wifidirect" => TransportType::WiFiDirect,
+            _ => TransportType::BLE,
+        }
+    }
+
+    fn handle_ack_message(&mut self, message: &Message) {
+        if let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) {
+            if let Ok(message_id) = MessageId::from_str(ack_for) {
+                if let Some(pending) = self.ack_manager.remove_ack(&message_id) {
+                    let latency = Utc::now()
+                        .signed_duration_since(pending.sent_at)
+                        .num_milliseconds()
+                        .max(0) as u64;
+
+                    let hop_count = message
+                        .metadata
+                        .get(ACK_HOP_COUNT_KEY)
+                        .and_then(|v| v.parse::<u8>().ok())
+                        .unwrap_or(0);
+
+                    let transport = message
+                        .metadata
+                        .get(ACK_TRANSPORT_KEY)
+                        .map(|label| Self::transport_from_label(label))
+                        .unwrap_or(TransportType::BLE);
+
+                    let state = self.shared_state.lock().unwrap();
+                    state.emit_event(Event::message_delivered(
+                        message_id, latency, hop_count, transport,
+                    ));
+                    drop(state);
+
+                    self.transport_manager.reset_retry_count(transport);
+                }
+            }
+        }
+    }
+
+    fn send_delivery_ack(&mut self, message: &Message) -> Result<()> {
+        let sender = UserId::new(&self.config.user_id)?;
+        let recipient = message.sender.clone();
+        let app_id = AppId::new(&self.config.app_id)?;
+        let ttl = TTL::new(2).unwrap_or_else(|_| TTL::default());
+
+        let ack_message = Message::builder(sender, recipient, app_id)
+            .content(String::new())
+            .priority(MessagePriority::Low)
+            .ttl(ttl)
+            .requires_ack(false)
+            .metadata(ACK_FOR_KEY, message.id.as_str())
+            .metadata(ACK_HOP_COUNT_KEY, message.hop_count.value().to_string())
+            .metadata(ACK_TRANSPORT_KEY, "ble")
+            .build();
+
+        self.transport_manager.send(&ack_message)?;
+
+        Ok(())
+    }
+
     /// Sends a message.
     ///
     /// # Arguments
@@ -257,7 +325,7 @@ impl OfflineProtocol {
         // Emit MessageSent event
         {
             let state = self.shared_state.lock().unwrap();
-            state.emit_event(Event::message_sent(message_id.clone()));
+            state.emit_event(Event::message_sent(&message));
         }
 
         Ok(message_id)
@@ -271,40 +339,54 @@ impl OfflineProtocol {
     pub fn receive_message(&mut self) -> Option<Message> {
         let mut state = self.shared_state.lock().unwrap();
 
-        // Check if we have any queued messages
         if !state.received_messages.is_empty() {
             return Some(state.received_messages.remove(0));
         }
 
         drop(state);
 
-        // Try to receive from transport manager
-        if let Ok(Some(message)) = self.transport_manager.receive() {
-            // Check for duplicates
-            if self.deduplicator.is_duplicate(&message.id) {
-                return None; // Skip duplicate
+        loop {
+            match self.transport_manager.receive() {
+                Ok(Some(message)) => {
+                    if let Some(_) = message.metadata.get(ACK_FOR_KEY) {
+                        self.handle_ack_message(&message);
+                        continue;
+                    }
+
+                    if self.deduplicator.is_duplicate(&message.id) {
+                        continue;
+                    }
+
+                    self.deduplicator.mark_seen(message.id.clone());
+
+                    if message.requires_ack {
+                        if let Err(err) = self.send_delivery_ack(&message) {
+                            eprintln!("Failed to send delivery ACK: {}", err);
+                        }
+                    }
+
+                    let event = Event::MessageReceived {
+                        message_id: message.id.as_str(),
+                        sender: message.sender.as_str().to_string(),
+                        recipient: message.recipient.as_str().to_string(),
+                        content: message.content.clone(),
+                        hop_count: message.hop_count.value(),
+                        transport: "BLE".to_string(),
+                        timestamp: message.timestamp.as_millis(),
+                    };
+
+                    let state = self.shared_state.lock().unwrap();
+                    state.emit_event(event);
+                    drop(state);
+
+                    return Some(message);
+                }
+                Ok(None) => return None,
+                Err(err) => {
+                    eprintln!("Transport receive error: {}", err);
+                    return None;
+                }
             }
-
-            self.deduplicator.mark_seen(message.id.clone());
-
-            // Emit MessageReceived event
-            let event = Event::MessageReceived {
-                message_id: message.id.as_str(),
-                sender: message.sender.as_str().to_string(),
-                recipient: message.recipient.as_str().to_string(),
-                content: message.content.clone(),
-                hop_count: message.hop_count.value(),
-                transport: "BLE".to_string(), // Mock for now
-                timestamp: message.timestamp.as_millis(),
-            };
-
-            let state = self.shared_state.lock().unwrap();
-            state.emit_event(event);
-            drop(state);
-
-            Some(message)
-        } else {
-            None
         }
     }
 
@@ -336,14 +418,14 @@ impl OfflineProtocol {
         while let Some(entry) = self.retry_queue.dequeue_ready() {
             // Track which transport was used for retry
             let previous_transport = self.transport_manager.current_transport();
-            
+
             // Try to resend
             if self.transport_manager.send(&entry.message).is_err() {
                 // Re-enqueue with incremented retry count
                 let _ = self
                     .retry_queue
                     .enqueue(entry.message.clone(), entry.retry_count + 1);
-                
+
                 // Record retry failure for DORS
                 if let Some(transport) = previous_transport {
                     self.transport_manager.record_retry_failure(transport);
@@ -351,7 +433,7 @@ impl OfflineProtocol {
             } else {
                 // Reset ACK timer
                 self.ack_manager.increment_retry_count(&entry.message.id);
-                
+
                 // Record retry success for DORS
                 if let Some(transport) = self.transport_manager.current_transport() {
                     self.transport_manager.reset_retry_count(transport);
@@ -389,7 +471,7 @@ impl OfflineProtocol {
             // Check if WiFi Direct is already enabled
             use offline_protocol_transport::TransportType;
             let active_transports = self.transport_manager.get_active_transports();
-            
+
             if !active_transports.contains(&TransportType::WiFiDirect) {
                 // Emit event suggesting WiFi Direct enablement
                 let state = self.shared_state.lock().unwrap();
@@ -398,7 +480,7 @@ impl OfflineProtocol {
                     TransportType::WiFiDirect,
                     "DORS suggests escalating to WiFi Direct due to BLE failures".to_string(),
                 ));
-                
+
                 // Note: Actual WiFi Direct transport must be added by platform code
                 // This event serves as a signal to the application layer
             }
@@ -485,12 +567,14 @@ mod tests {
     #[test]
     fn test_send_message() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        
+
         // Add a mock transport
         let mut mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
-        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
-        
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
         protocol.start().unwrap();
 
         let result = protocol.send_message("bob", "Hello!", None);
@@ -511,7 +595,7 @@ mod tests {
         // Add a mock transport for testing
         let mut mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
-        
+
         // Queue a message in the mock transport
         let message = Message::new(
             UserId::new("alice").unwrap(),
@@ -520,8 +604,10 @@ mod tests {
             "Test message",
         );
         mock_transport.queue_message(message.clone());
-        
-        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
         protocol.start().unwrap();
 
         // Receive it
@@ -547,7 +633,9 @@ mod tests {
         use offline_protocol_transport::{mock::MockTransport, TransportType};
         let mut mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
-        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
 
         protocol.start().unwrap();
         protocol.send_message("bob", "Hello!", None).unwrap();
@@ -558,12 +646,14 @@ mod tests {
     #[test]
     fn test_deduplication() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        
+
         // Add a mock transport
         let mut mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
-        protocol.transport_manager_mut().add_transport(TransportType::BLE, Box::new(mock_transport));
-        
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
         protocol.start().unwrap();
 
         // Send same message twice

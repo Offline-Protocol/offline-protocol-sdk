@@ -768,7 +768,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private fun processProtocol() {
         try {
-            protocol?.process()
+            val instance = protocol ?: return
+            instance.process()
+            while (true) {
+                val message = instance.receiveMessage() ?: break
+                // Message events are dispatched via the event callback; no further action required here.
+            }
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Process error: ${e.message}", e)
         }

@@ -984,8 +984,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     private func processProtocol() {
+        guard let instance = protocolInstance else { return }
         do {
-            try protocolInstance?.process()
+            try instance.process()
+            while instance.receiveMessage() != nil {}
         } catch {
             print("Process error: \(error)")
         }

@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex};
 pub struct TransportManager {
     /// Available transports mapped by type.
     transports: HashMap<TransportType, Arc<Mutex<Box<dyn Transport>>>>,
-    
+
     /// Current active transport.
     current_transport: Option<TransportType>,
-    
+
     /// Transport selector (DORS).
     selector: TransportSelector,
 }
@@ -39,11 +39,7 @@ impl TransportManager {
     ///
     /// * `transport_type` - Type of transport to add
     /// * `transport` - The transport implementation
-    pub fn add_transport(
-        &mut self,
-        transport_type: TransportType,
-        transport: Box<dyn Transport>,
-    ) {
+    pub fn add_transport(&mut self, transport_type: TransportType, transport: Box<dyn Transport>) {
         self.transports
             .insert(transport_type, Arc::new(Mutex::new(transport)));
     }
@@ -171,7 +167,7 @@ impl TransportManager {
     /// * `transport_type` - Type of transport to remove
     pub fn remove_transport(&mut self, transport_type: TransportType) {
         self.transports.remove(&transport_type);
-        
+
         // Clear current transport if it was the one removed
         if self.current_transport == Some(transport_type) {
             self.current_transport = None;
@@ -268,4 +264,3 @@ mod tests {
         assert!(received.is_some());
     }
 }
-

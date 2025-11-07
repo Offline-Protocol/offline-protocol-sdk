@@ -1,6 +1,6 @@
 //! Event types and callbacks.
 
-use offline_protocol_core::{MessageId, Timestamp};
+use offline_protocol_core::{Message, MessageId};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -16,7 +16,17 @@ pub enum Event {
     MessageSent {
         /// ID of the sent message.
         message_id: String,
-        /// When the message was sent.
+        /// Sender's user ID.
+        sender: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Content of the sent message.
+        content: String,
+        /// Priority of the message when sent.
+        priority: String,
+        /// Whether the message requires an acknowledgement.
+        requires_ack: bool,
+        /// When the message was queued for delivery.
         timestamp: i64,
     },
 
@@ -139,10 +149,24 @@ pub enum Event {
 
 impl Event {
     /// Creates a MessageSent event.
-    pub fn message_sent(message_id: MessageId) -> Self {
+    pub fn message_sent(message: &Message) -> Self {
+        use offline_protocol_core::MessagePriority;
+
+        let priority = match message.priority {
+            MessagePriority::Low => "low",
+            MessagePriority::Medium => "medium",
+            MessagePriority::High => "high",
+            MessagePriority::Critical => "critical",
+        };
+
         Self::MessageSent {
-            message_id: message_id.as_str(),
-            timestamp: Timestamp::now().as_millis(),
+            message_id: message.id.as_str(),
+            sender: message.sender.as_str().to_string(),
+            recipient: message.recipient.as_str().to_string(),
+            content: message.content.clone(),
+            priority: priority.to_string(),
+            requires_ack: message.requires_ack,
+            timestamp: message.timestamp.as_millis(),
         }
     }
 
@@ -274,15 +298,38 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use offline_protocol_core::{AppId, Message, MessagePriority, UserId};
 
     #[test]
     fn test_message_sent_event() {
-        let msg_id = MessageId::new();
-        let event = Event::message_sent(msg_id.clone());
+        let message = Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("app").unwrap(),
+        )
+        .content("Hello")
+        .priority(MessagePriority::High)
+        .build();
+
+        let event = Event::message_sent(&message);
 
         match event {
-            Event::MessageSent { message_id, .. } => {
-                assert_eq!(message_id, msg_id.as_str());
+            Event::MessageSent {
+                message_id,
+                sender,
+                recipient,
+                content,
+                priority,
+                requires_ack,
+                timestamp,
+            } => {
+                assert_eq!(message_id, message.id.as_str());
+                assert_eq!(sender, message.sender.as_str());
+                assert_eq!(recipient, message.recipient.as_str());
+                assert_eq!(content, message.content);
+                assert_eq!(priority, "high");
+                assert!(requires_ack);
+                assert_eq!(timestamp, message.timestamp.as_millis());
             }
             _ => panic!("Wrong event type"),
         }

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,7 +8,10 @@ import {
   ScrollView,
   KeyboardAvoidingView,
   Platform,
+  Keyboard,
+  TouchableWithoutFeedback,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { MessagePriority, type ProtocolEvent } from '@offlineprotocol/react-native';
 import { MessageList } from '../components/MessageList';
 
@@ -29,6 +32,8 @@ export function MessagingScreen({
   const [message, setMessage] = useState('');
   const [priority, setPriority] = useState<MessagePriority>(MessagePriority.Medium);
   const [sending, setSending] = useState(false);
+  const messageInputRef = useRef<TextInput | null>(null);
+  const keyboardVerticalOffset = Platform.OS === 'ios' ? 120 : 0;
 
   // Get list of discovered neighbors from events
   const discoveredPeers = useMemo(() => {
@@ -52,6 +57,7 @@ export function MessagingScreen({
     try {
       await onSendMessage(recipient.trim(), message.trim(), priority);
       setMessage('');
+      Keyboard.dismiss();
     } finally {
       setSending(false);
     }
@@ -68,119 +74,139 @@ export function MessagingScreen({
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 20}
+      keyboardVerticalOffset={keyboardVerticalOffset}
     >
-      <ScrollView 
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
-      >
-        <View style={styles.formContainer}>
-          <Text style={styles.sectionTitle}>Send Message</Text>
-          
-          {!isStarted && (
-            <View style={styles.infoBox}>
-              <Text style={styles.infoTitle}>📱 How to Connect</Text>
-              <Text style={styles.infoText}>
-                1. Tap "Start Protocol" to begin{'\n'}
-                2. Others nearby will be auto-discovered{'\n'}
-                3. Check the "Network" tab to see connected peers{'\n'}
-                4. Copy their User ID to send messages
-              </Text>
-            </View>
-          )}
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <SafeAreaView style={styles.inner}>
+          <View style={styles.messagesSection}>
+            <MessageList events={events} currentUserId={currentUserId} />
+          </View>
 
-          {isStarted && discoveredPeers.length > 0 && (
-            <View style={styles.peersBox}>
-              <Text style={styles.peersTitle}>📡 Nearby Peers ({discoveredPeers.length})</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                {discoveredPeers.map((peerId) => (
+          <View style={styles.composerWrapper}>
+            <View style={styles.recipientSection}>
+              <View style={styles.recipientRow}>
+                <TextInput
+                  style={styles.recipientInput}
+                  value={recipient}
+                  onChangeText={setRecipient}
+                  placeholder={
+                    isStarted
+                      ? 'Select a nearby peer or enter their user ID'
+                      : 'Start the protocol to discover peers'
+                  }
+                  placeholderTextColor="#999"
+                  editable={isStarted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="next"
+                  onSubmitEditing={() => messageInputRef.current?.focus()}
+                />
+                {recipient.length > 0 && (
                   <TouchableOpacity
-                    key={peerId}
-                    style={styles.peerChip}
-                    onPress={() => setRecipient(peerId)}
+                    style={styles.clearRecipientButton}
+                    onPress={() => setRecipient('')}
                   >
-                    <Text style={styles.peerChipText} numberOfLines={1}>
-                      {peerId.substring(0, 12)}...
+                    <Text style={styles.clearRecipientText}>✕</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {isStarted && discoveredPeers.length > 0 && (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.peersScrollContent}
+                  style={styles.peerScroller}
+                >
+                  {discoveredPeers.map((peerId) => (
+                    <TouchableOpacity
+                      key={peerId}
+                      style={styles.peerChip}
+                      onPress={() => setRecipient(peerId)}
+                    >
+                      <Text style={styles.peerChipText} numberOfLines={1}>
+                        {peerId.substring(0, 18)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+
+              {!isStarted && (
+                <View style={styles.infoBox}>
+                  <Text style={styles.infoTitle}>📱 How to Connect</Text>
+                  <Text style={styles.infoText}>
+                    {[
+                      '1. Tap "Start Protocol" to begin',
+                      '2. Others nearby will be auto-discovered',
+                      '3. Check the "Network" tab to see connected peers',
+                      '4. Copy their User ID to send messages',
+                    ].join('\n')}
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.prioritySection}>
+              <Text style={styles.sectionLabel}>Priority</Text>
+              <View style={styles.priorityContainer}>
+                {priorityOptions.map((option) => (
+                  <TouchableOpacity
+                    key={option.value}
+                    style={[
+                      styles.priorityButton,
+                      priority === option.value && styles.priorityButtonActive,
+                    ]}
+                    onPress={() => setPriority(option.value)}
+                    disabled={!isStarted}
+                  >
+                    <Text
+                      style={[
+                        styles.priorityButtonText,
+                        priority === option.value && styles.priorityButtonTextActive,
+                      ]}
+                    >
+                      {option.label}
                     </Text>
                   </TouchableOpacity>
                 ))}
-              </ScrollView>
+              </View>
             </View>
-          )}
-          
-          <Text style={styles.label}>Recipient ID</Text>
-          <TextInput
-            style={styles.input}
-            value={recipient}
-            onChangeText={setRecipient}
-            placeholder="Enter recipient user ID"
-            placeholderTextColor="#999"
-            editable={isStarted}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
 
-          <Text style={styles.label}>Message</Text>
-          <TextInput
-            style={[styles.input, styles.messageInput]}
-            value={message}
-            onChangeText={setMessage}
-            placeholder="Enter your message"
-            placeholderTextColor="#999"
-            multiline
-            numberOfLines={3}
-            editable={isStarted}
-            textAlignVertical="top"
-          />
-
-          <Text style={styles.label}>Priority</Text>
-          <View style={styles.priorityContainer}>
-            {priorityOptions.map((option) => (
+            <View style={styles.composeBar}>
+              <TextInput
+                style={styles.composeInput}
+                ref={messageInputRef}
+                value={message}
+                onChangeText={setMessage}
+                placeholder={isStarted ? 'Type a message' : 'Start the protocol to chat'}
+                placeholderTextColor="#999"
+                multiline
+                editable={isStarted}
+                textAlignVertical="top"
+                returnKeyType="send"
+                blurOnSubmit
+                onSubmitEditing={handleSend}
+              />
               <TouchableOpacity
-                key={option.value}
                 style={[
-                  styles.priorityButton,
-                  priority === option.value && styles.priorityButtonActive,
+                  styles.sendButtonCircle,
+                  ((!isStarted || sending) || !recipient.trim() || !message.trim()) &&
+                    styles.sendButtonCircleDisabled,
                 ]}
-                onPress={() => setPriority(option.value)}
-                disabled={!isStarted}
+                onPress={handleSend}
+                disabled={!isStarted || sending || !recipient.trim() || !message.trim()}
               >
-                <Text
-                  style={[
-                    styles.priorityButtonText,
-                    priority === option.value && styles.priorityButtonTextActive,
-                  ]}
-                >
-                  {option.label}
-                </Text>
+                <Text style={styles.sendIcon}>{sending ? '…' : '➤'}</Text>
               </TouchableOpacity>
-            ))}
+            </View>
+
+            {!isStarted && (
+              <Text style={styles.warningText}>Start the protocol to send messages</Text>
+            )}
           </View>
-
-          <TouchableOpacity
-            style={[styles.sendButton, (!isStarted || sending) && styles.sendButtonDisabled]}
-            onPress={handleSend}
-            disabled={!isStarted || sending}
-          >
-            <Text style={styles.sendButtonText}>
-              {sending ? 'Sending...' : 'Send Message'}
-            </Text>
-          </TouchableOpacity>
-
-          {!isStarted && (
-            <Text style={styles.warningText}>
-              Start the protocol to send messages
-            </Text>
-          )}
-        </View>
-
-        <View style={styles.messagesContainer}>
-          <Text style={styles.messagesTitle}>Messages</Text>
-          <MessageList events={events} currentUserId={currentUserId} />
-        </View>
-      </ScrollView>
+        </SafeAreaView>
+      </TouchableWithoutFeedback>
     </KeyboardAvoidingView>
   );
 }
@@ -189,36 +215,92 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  scrollView: {
+  inner: {
     flex: 1,
+    backgroundColor: '#f5f5f5',
   },
-  scrollContent: {
-    flexGrow: 1,
+  messagesSection: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 4,
+    backgroundColor: '#f5f5f5',
   },
-  formContainer: {
-    padding: 16,
+  composerWrapper: {
+    borderTopWidth: 1,
+    borderTopColor: '#e0e0e0',
     backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 12,
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 3,
   },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
+  recipientSection: {
+    gap: 10,
+  },
+  recipientRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  recipientInput: {
+    flex: 1,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    fontSize: 14,
     color: '#333',
-    marginBottom: 16,
+  },
+  clearRecipientButton: {
+    marginLeft: 8,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#eef1f5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clearRecipientText: {
+    fontSize: 12,
+    color: '#555',
+  },
+  peerScroller: {
+    maxHeight: 48,
+  },
+  peersScrollContent: {
+    alignItems: 'center',
+    paddingRight: 12,
+  },
+  peerChip: {
+    backgroundColor: '#2196f3',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 18,
+    marginRight: 8,
+  },
+  peerChipText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
   },
   infoBox: {
     backgroundColor: '#e3f2fd',
     padding: 16,
     borderRadius: 8,
-    marginBottom: 16,
     borderLeftWidth: 4,
     borderLeftColor: '#2196f3',
   },
   infoTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#1976d2',
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
     marginBottom: 8,
   },
   infoText: {
@@ -226,61 +308,24 @@ const styles = StyleSheet.create({
     color: '#424242',
     lineHeight: 20,
   },
-  peersBox: {
-    backgroundColor: '#f0f4f8',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
+  prioritySection: {
+    gap: 8,
   },
-  peersTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 8,
-  },
-  peerChip: {
-    backgroundColor: '#2196f3',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 16,
-    marginRight: 8,
-    maxWidth: 150,
-  },
-  peerChipText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  label: {
-    fontSize: 14,
+  sectionLabel: {
+    fontSize: 13,
     fontWeight: '600',
     color: '#666',
-    marginBottom: 8,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 14,
-    color: '#333',
-    backgroundColor: '#fff',
-    marginBottom: 16,
-  },
-  messageInput: {
-    height: 80,
-    textAlignVertical: 'top',
   },
   priorityContainer: {
     flexDirection: 'row',
-    marginBottom: 16,
+    flexWrap: 'wrap',
     gap: 8,
   },
   priorityButton: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: '30%',
     paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 8,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: '#ddd',
     backgroundColor: '#fff',
@@ -298,37 +343,50 @@ const styles = StyleSheet.create({
   priorityButtonTextActive: {
     color: '#fff',
   },
-  sendButton: {
+  composeBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 12,
+  },
+  composeInput: {
+    flex: 1,
+    minHeight: 44,
+    maxHeight: 120,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: '#fff',
+    fontSize: 15,
+    color: '#333',
+  },
+  sendButtonCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     backgroundColor: '#2196f3',
-    paddingVertical: 14,
-    borderRadius: 8,
     alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    elevation: 4,
   },
-  sendButtonDisabled: {
-    backgroundColor: '#ccc',
+  sendButtonCircleDisabled: {
+    backgroundColor: '#b0bec5',
   },
-  sendButtonText: {
+  sendIcon: {
+    fontSize: 20,
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+    marginTop: -2,
   },
   warningText: {
-    marginTop: 8,
+    marginTop: 4,
     fontSize: 12,
     color: '#ff9800',
     textAlign: 'center',
-  },
-  messagesContainer: {
-    flex: 1,
-    padding: 16,
-    backgroundColor: '#f5f5f5',
-    minHeight: 200,
-  },
-  messagesTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 12,
   },
 });
 

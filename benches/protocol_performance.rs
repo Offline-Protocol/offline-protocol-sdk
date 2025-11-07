@@ -20,15 +20,14 @@ fn bench_protocol_start_stop(c: &mut Criterion) {
         b.iter(|| {
             let config = ProtocolConfig::new("bench", "user123");
             let mut protocol = OfflineProtocol::new(config).unwrap();
-            
+
             // Add mock transport
             let mut mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
-            protocol.transport_manager_mut().add_transport(
-                TransportType::BLE,
-                Box::new(mock_transport)
-            );
-            
+            protocol
+                .transport_manager_mut()
+                .add_transport(TransportType::BLE, Box::new(mock_transport));
+
             protocol.start().unwrap();
             protocol.stop().unwrap();
             black_box(protocol);
@@ -48,22 +47,21 @@ fn bench_send_message(c: &mut Criterion) {
             || {
                 let config = ProtocolConfig::new("bench", "user123");
                 let mut protocol = OfflineProtocol::new(config).unwrap();
-                
+
                 // Add mock transport
                 let mut mock_transport = MockTransport::new(TransportType::BLE);
                 mock_transport.start().unwrap();
-                protocol.transport_manager_mut().add_transport(
-                    TransportType::BLE,
-                    Box::new(mock_transport)
-                );
-                
+                protocol
+                    .transport_manager_mut()
+                    .add_transport(TransportType::BLE, Box::new(mock_transport));
+
                 protocol.start().unwrap();
                 protocol
             },
             |mut protocol| {
                 black_box(protocol.send_message("bob", "Hello", None).ok());
             },
-            criterion::BatchSize::LargeInput
+            criterion::BatchSize::LargeInput,
         );
     });
 }
@@ -80,22 +78,21 @@ fn bench_process_loop(c: &mut Criterion) {
             || {
                 let config = ProtocolConfig::new("bench", "user123");
                 let mut protocol = OfflineProtocol::new(config).unwrap();
-                
+
                 // Add mock transport
                 let mut mock_transport = MockTransport::new(TransportType::BLE);
                 mock_transport.start().unwrap();
-                protocol.transport_manager_mut().add_transport(
-                    TransportType::BLE,
-                    Box::new(mock_transport)
-                );
-                
+                protocol
+                    .transport_manager_mut()
+                    .add_transport(TransportType::BLE, Box::new(mock_transport));
+
                 protocol.start().unwrap();
                 protocol
             },
             |mut protocol| {
                 black_box(protocol.process().ok());
             },
-            criterion::BatchSize::LargeInput
+            criterion::BatchSize::LargeInput,
         );
     });
 }
@@ -113,4 +110,3 @@ criterion_group!(
     bench_process_loop
 );
 criterion_main!(benches);
-

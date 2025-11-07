@@ -16,6 +16,13 @@ impl MessageId {
         Self(Uuid::new_v4())
     }
 
+    /// Creates a message ID from a string representation.
+    pub fn from_str(id: &str) -> crate::Result<Self> {
+        let uuid = Uuid::parse_str(id)
+            .map_err(|e| crate::Error::InvalidMessage(format!("Invalid message id: {}", e)))?;
+        Ok(Self::from_uuid(uuid))
+    }
+
     /// Creates a message ID from a UUID.
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)

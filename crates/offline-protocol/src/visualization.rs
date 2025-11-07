@@ -135,7 +135,8 @@ impl NetworkVisualizer {
     /// Adds a link between two nodes.
     pub fn add_link(&mut self, link: NetworkLink) {
         // Remove existing link if present
-        self.links.retain(|l| !(l.from == link.from && l.to == link.to));
+        self.links
+            .retain(|l| !(l.from == link.from && l.to == link.to));
         self.links.push(link);
     }
 
@@ -147,7 +148,7 @@ impl NetworkVisualizer {
     /// Records a message delivery attempt.
     pub fn record_message(&mut self, stats: MessageStats) {
         self.message_history.push(stats);
-        
+
         // Keep only last 1000 messages
         if self.message_history.len() > 1000 {
             self.message_history.drain(0..100);
@@ -157,7 +158,7 @@ impl NetworkVisualizer {
     /// Generates a network topology snapshot.
     pub fn get_topology(&self) -> NetworkTopology {
         let stats = self.calculate_stats();
-        
+
         NetworkTopology {
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -173,9 +174,13 @@ impl NetworkVisualizer {
     /// Calculates network-wide statistics.
     fn calculate_stats(&self) -> NetworkStats {
         let total_nodes = self.nodes.len();
-        let relay_nodes = self.nodes.values().filter(|n| n.role == NodeRole::Relay).count();
+        let relay_nodes = self
+            .nodes
+            .values()
+            .filter(|n| n.role == NodeRole::Relay)
+            .count();
         let total_connections = self.links.len();
-        
+
         let avg_link_quality = if total_connections > 0 {
             self.links.iter().map(|l| l.quality).sum::<f32>() / total_connections as f32
         } else {
@@ -202,14 +207,14 @@ impl NetworkVisualizer {
         // Build adjacency map
         let nodes: Vec<_> = self.nodes.keys().cloned().collect();
         let n = nodes.len();
-        
+
         if n == 1 {
             return Some(0);
         }
 
         // Initialize distance matrix
         let mut dist = vec![vec![u8::MAX; n]; n];
-        
+
         // Set diagonal to 0
         for i in 0..n {
             dist[i][i] = 0;
@@ -266,16 +271,20 @@ impl NetworkVisualizer {
             return 0.0;
         }
 
-        let delivered = self.message_history.iter()
+        let delivered = self
+            .message_history
+            .iter()
             .filter(|m| m.delivered_at.is_some())
             .count();
-        
+
         delivered as f32 / self.message_history.len() as f32
     }
 
     /// Calculates median delivery latency.
     pub fn median_latency(&self) -> Option<u64> {
-        let mut latencies: Vec<_> = self.message_history.iter()
+        let mut latencies: Vec<_> = self
+            .message_history
+            .iter()
             .filter_map(|m| m.latency_ms)
             .collect();
 
@@ -289,7 +298,9 @@ impl NetworkVisualizer {
 
     /// Calculates median hop count.
     pub fn median_hops(&self) -> Option<u8> {
-        let mut hops: Vec<_> = self.message_history.iter()
+        let mut hops: Vec<_> = self
+            .message_history
+            .iter()
             .filter(|m| m.delivered_at.is_some())
             .map(|m| m.hop_count)
             .collect();
@@ -318,7 +329,7 @@ mod tests {
     #[test]
     fn test_add_node() {
         let mut viz = NetworkVisualizer::new("alice");
-        
+
         let node = NetworkNode {
             user_id: "bob".to_string(),
             role: NodeRole::Normal,
@@ -327,9 +338,9 @@ mod tests {
             last_seen: 0,
             transports: vec![TransportType::BLE],
         };
-        
+
         viz.update_node(node);
-        
+
         let topology = viz.get_topology();
         assert_eq!(topology.nodes.len(), 1);
         assert_eq!(topology.nodes[0].user_id, "bob");
@@ -338,7 +349,7 @@ mod tests {
     #[test]
     fn test_add_link() {
         let mut viz = NetworkVisualizer::new("alice");
-        
+
         let link = NetworkLink {
             from: "alice".to_string(),
             to: "bob".to_string(),
@@ -346,9 +357,9 @@ mod tests {
             transport: TransportType::BLE,
             rssi: Some(-50),
         };
-        
+
         viz.add_link(link);
-        
+
         let topology = viz.get_topology();
         assert_eq!(topology.links.len(), 1);
     }
@@ -356,19 +367,23 @@ mod tests {
     #[test]
     fn test_network_stats() {
         let mut viz = NetworkVisualizer::new("alice");
-        
+
         // Add nodes
         for i in 0..5 {
             viz.update_node(NetworkNode {
                 user_id: format!("node{}", i),
-                role: if i < 2 { NodeRole::Relay } else { NodeRole::Normal },
+                role: if i < 2 {
+                    NodeRole::Relay
+                } else {
+                    NodeRole::Normal
+                },
                 connection_count: 2,
                 battery_level: Some(75),
                 last_seen: 0,
                 transports: vec![TransportType::BLE],
             });
         }
-        
+
         // Add links
         viz.add_link(NetworkLink {
             from: "node0".to_string(),
@@ -377,7 +392,7 @@ mod tests {
             transport: TransportType::BLE,
             rssi: Some(-60),
         });
-        
+
         let topology = viz.get_topology();
         assert_eq!(topology.stats.total_nodes, 5);
         assert_eq!(topology.stats.relay_nodes, 2);
@@ -387,7 +402,7 @@ mod tests {
     #[test]
     fn test_message_stats() {
         let mut viz = NetworkVisualizer::new("alice");
-        
+
         viz.record_message(MessageStats {
             message_id: "msg1".to_string(),
             sender: "alice".to_string(),
@@ -399,7 +414,7 @@ mod tests {
             retry_count: 0,
             latency_ms: Some(100),
         });
-        
+
         viz.record_message(MessageStats {
             message_id: "msg2".to_string(),
             sender: "alice".to_string(),
@@ -411,7 +426,7 @@ mod tests {
             retry_count: 3,
             latency_ms: None,
         });
-        
+
         assert_eq!(viz.delivery_success_rate(), 0.5);
         assert_eq!(viz.median_latency(), Some(100));
         assert_eq!(viz.median_hops(), Some(3));
@@ -420,7 +435,7 @@ mod tests {
     #[test]
     fn test_export_json() {
         let mut viz = NetworkVisualizer::new("alice");
-        
+
         viz.update_node(NetworkNode {
             user_id: "bob".to_string(),
             role: NodeRole::Relay,
@@ -429,10 +444,9 @@ mod tests {
             last_seen: 0,
             transports: vec![TransportType::BLE, TransportType::WiFiDirect],
         });
-        
+
         let json = viz.export_json().unwrap();
         assert!(json.contains("bob"));
         assert!(json.contains("relay"));
     }
 }
-

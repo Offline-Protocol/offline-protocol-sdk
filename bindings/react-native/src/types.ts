@@ -239,6 +239,11 @@ interface BaseEvent {
 export interface MessageSentEvent extends BaseEvent {
   type: 'message_sent';
   message_id: string;
+  sender: string;
+  recipient: string;
+  content: string;
+  priority: 'low' | 'medium' | 'high' | 'critical';
+  requires_ack: boolean;
   timestamp: number;
 }
 

@@ -7,20 +7,16 @@
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
 use offline_protocol::{
+    file_transfer::FileTransferManager, Event as CoreEvent, NetworkVisualizer,
     OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
-    Event as CoreEvent, NetworkVisualizer,
-    file_transfer::FileTransferManager,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
-use offline_protocol_transport::{
-    TransportType as CoreTransportType,
-    ble::BleTransport,
-};
-use std::sync::{Arc, Mutex, RwLock};
+use offline_protocol_transport::{ble::BleTransport, TransportType as CoreTransportType};
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
-// Include the UniFFI scaffolding  
+// Include the UniFFI scaffolding
 uniffi::include_scaffolding!("offline_protocol");
 
 /// Error types for protocol operations
@@ -29,23 +25,23 @@ pub enum ProtocolError {
     /// Protocol not started
     #[error("Protocol not started")]
     NotStarted,
-    
+
     /// Protocol already started
     #[error("Protocol already started")]
     AlreadyStarted,
-    
+
     /// Invalid configuration
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
-    
+
     /// Send operation failed
     #[error("Failed to send message: {0}")]
     SendFailed(String),
-    
+
     /// Invalid state for operation
     #[error("Invalid state: {0}")]
     InvalidState(String),
-    
+
     /// Other error
     #[error("{0}")]
     Other(String),
@@ -322,9 +318,9 @@ impl OfflineProtocol {
         let ble_enabled = config.ble_enabled;
         let core_config: CoreConfig = config.into();
         core_config.validate().map_err(ProtocolError::from)?;
-        
+
         let mut protocol = CoreProtocol::new(core_config).map_err(ProtocolError::from)?;
-        
+
         // Add BLE transport if enabled
         // The transport manager owns the transport, and we'll access it through there
         if ble_enabled {
@@ -333,13 +329,13 @@ impl OfflineProtocol {
                 Box::new(BleTransport::new(user_id.clone())),
             );
         }
-        
+
         // Create the event queue and callback that will be shared with the event handler
         let event_queue = Arc::new(Mutex::new(VecDeque::new()));
         let event_queue_clone = event_queue.clone();
         let event_callback = Arc::new(RwLock::new(None::<Arc<dyn EventCallback>>));
         let event_callback_clone = event_callback.clone();
-        
+
         // Register event handler with core protocol to forward all events
         // This bridges events from the core protocol to JavaScript
         protocol.on_event(move |event| {
@@ -349,18 +345,18 @@ impl OfflineProtocol {
                 if let Some(callback) = event_callback_clone.read().unwrap().as_ref() {
                     callback.on_event(event_json.clone());
                 }
-                
+
                 // Add to event queue for polling
                 let mut queue = event_queue_clone.lock().unwrap();
                 queue.push_back(event_json);
-                
+
                 // Limit queue size to prevent memory issues
                 if queue.len() > 1000 {
                     queue.pop_front();
                 }
             }
         });
-        
+
         Ok(Self {
             inner: Mutex::new(protocol),
             state: RwLock::new(ProtocolState::Stopped),
@@ -380,18 +376,18 @@ impl OfflineProtocol {
             user_id,
         })
     }
-    
+
     // ========================================================================
     // LIFECYCLE MANAGEMENT
     // ========================================================================
-    
+
     /// Starts the protocol
     pub fn start(&self) -> Result<(), ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
         protocol.start().map_err(ProtocolError::from)?;
         *self.state.write().unwrap() = ProtocolState::Running;
         drop(protocol);
-        
+
         // Emit a network metrics event when started to verify event system is working
         let event = CoreEvent::NetworkMetrics {
             neighbor_count: 0,
@@ -400,10 +396,10 @@ impl OfflineProtocol {
             avg_latency_ms: 0,
         };
         self.emit_event(event);
-        
+
         Ok(())
     }
-    
+
     /// Stops the protocol
     pub fn stop(&self) -> Result<(), ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
@@ -411,7 +407,7 @@ impl OfflineProtocol {
         *self.state.write().unwrap() = ProtocolState::Stopped;
         Ok(())
     }
-    
+
     /// Pauses the protocol
     pub fn pause(&self) -> Result<(), ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
@@ -419,7 +415,7 @@ impl OfflineProtocol {
         *self.state.write().unwrap() = ProtocolState::Paused;
         Ok(())
     }
-    
+
     /// Resumes the protocol
     pub fn resume(&self) -> Result<(), ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
@@ -427,32 +423,32 @@ impl OfflineProtocol {
         *self.state.write().unwrap() = ProtocolState::Running;
         Ok(())
     }
-    
+
     /// Gets the current protocol state
     pub fn get_state(&self) -> ProtocolState {
         *self.state.read().unwrap()
     }
-    
+
     /// Process internal protocol operations
     pub fn process(&self) -> Result<(), ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
         protocol.process().map_err(ProtocolError::from)?;
-        
+
         // Events are handled through the event callback system registered via on_event
         // The platform code polls for events using poll_event()
-        
+
         Ok(())
     }
-    
+
     // ========================================================================
     // EVENT HANDLING
     // ========================================================================
-    
+
     /// Sets the event callback
     pub fn set_event_callback(&self, callback: Box<dyn EventCallback>) {
         *self.event_callback.write().unwrap() = Some(Arc::from(callback));
     }
-    
+
     /// Internal: Emit an event through the callback
     fn emit_event(&self, event: crate::CoreEvent) {
         // Convert event to JSON
@@ -461,25 +457,25 @@ impl OfflineProtocol {
             if let Some(callback) = self.event_callback.read().unwrap().as_ref() {
                 callback.on_event(event_json.clone());
             }
-            
+
             // Also queue it for polling
             let mut queue = self.event_queue.lock().unwrap();
             queue.push_back(event_json);
-            
+
             // Limit queue size to prevent memory issues
             if queue.len() > 1000 {
                 queue.pop_front();
             }
         }
     }
-    
+
     /// Polls for the next event (returns JSON string or None)
     pub fn poll_event(&self) -> Option<String> {
         // Get from queue
         let mut queue = self.event_queue.lock().unwrap();
         queue.pop_front()
     }
-    
+
     /// Emits a test event to verify the event system is working
     pub fn emit_test_event(&self) {
         let event = CoreEvent::NetworkMetrics {
@@ -490,11 +486,11 @@ impl OfflineProtocol {
         };
         self.emit_event(event);
     }
-    
+
     // ========================================================================
     // MESSAGING
     // ========================================================================
-    
+
     /// Sends a message
     pub fn send_message(
         &self,
@@ -506,10 +502,10 @@ impl OfflineProtocol {
         let message_id = protocol
             .send_message(&recipient, &content, Some(priority.into()))
             .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
-        
+
         Ok(message_id.as_str())
     }
-    
+
     /// Receives the next message (returns JSON string or None)
     pub fn receive_message(&self) -> Option<String> {
         let mut protocol = self.inner.lock().unwrap();
@@ -522,14 +518,15 @@ impl OfflineProtocol {
                 "timestamp": msg.timestamp.as_millis(),
                 "hop_count": msg.hop_count.value(),
                 "priority": format!("{:?}", msg.priority),
-            })).ok()
+            }))
+            .ok()
         })
     }
-    
+
     // ========================================================================
     // BLE TRANSPORT OPERATIONS
     // ========================================================================
-    
+
     /// BLE: Peer discovered
     pub fn ble_peer_discovered(&self, peer_id: String, rssi: i16) -> Result<(), ProtocolError> {
         // Update local state for tracking
@@ -545,7 +542,7 @@ impl OfflineProtocol {
         ble_state.peers.insert(peer_id.clone(), peer);
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
-        
+
         // Emit NeighborDiscovered event
         let event = CoreEvent::NeighborDiscovered {
             peer_id: peer_id.clone(),
@@ -553,33 +550,33 @@ impl OfflineProtocol {
             rssi: Some(rssi),
         };
         self.emit_event(event);
-        
+
         Ok(())
     }
-    
+
     /// BLE: Peer lost
     pub fn ble_peer_lost(&self, peer_id: String) -> Result<(), ProtocolError> {
         let mut ble_state = self.ble_state.lock().unwrap();
         ble_state.peers.remove(&peer_id);
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
-        
+
         // Emit NeighborLost event
         let event = CoreEvent::NeighborLost {
             peer_id: peer_id.clone(),
         };
         self.emit_event(event);
-        
+
         Ok(())
     }
-    
+
     /// BLE: Status changed
     pub fn ble_status_changed(&self, _is_available: bool) -> Result<(), ProtocolError> {
         // Status is now managed automatically by the BLE transport when started
         // This method is kept for backwards compatibility but is a no-op
         Ok(())
     }
-    
+
     /// BLE: Fragment received
     pub fn ble_fragment_received(
         &self,
@@ -588,32 +585,41 @@ impl OfflineProtocol {
     ) -> Result<(), ProtocolError> {
         // Get the BLE transport from transport manager
         let protocol = self.inner.lock().unwrap();
-        if let Some(transport_arc) = protocol.transport_manager().get_transport(CoreTransportType::BLE) {
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
             let transport = transport_arc.lock().unwrap();
-            
+
             // Downcast to BleTransport to access fragment handling
-            let ble_transport = transport.as_ref() as *const dyn offline_protocol_transport::Transport;
+            let ble_transport =
+                transport.as_ref() as *const dyn offline_protocol_transport::Transport;
             let ble_transport = unsafe { &*(ble_transport as *const BleTransport) };
-            
+
             // Process the fragment
-            ble_transport.on_fragment_received(fragment)
+            ble_transport
+                .on_fragment_received(fragment)
                 .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
         }
-        
+
         Ok(())
     }
-    
+
     /// BLE: Get next fragment to send
     pub fn ble_get_next_fragment(&self) -> Option<BleFragment> {
         // Get the BLE transport from transport manager
         let protocol = self.inner.lock().unwrap();
-        if let Some(transport_arc) = protocol.transport_manager().get_transport(CoreTransportType::BLE) {
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
             let transport = transport_arc.lock().unwrap();
-            
+
             // Downcast to BleTransport to access fragment methods
-            let ble_transport = transport.as_ref() as *const dyn offline_protocol_transport::Transport;
+            let ble_transport =
+                transport.as_ref() as *const dyn offline_protocol_transport::Transport;
             let ble_transport = unsafe { &*(ble_transport as *const BleTransport) };
-            
+
             // Get next fragment
             if let Ok(Some((recipient, data))) = ble_transport.get_next_fragment() {
                 return Some(BleFragment {
@@ -622,7 +628,7 @@ impl OfflineProtocol {
                 });
             }
         }
-        
+
         // Fallback to local queue for backwards compatibility
         let mut ble_state = self.ble_state.lock().unwrap();
         if let Some((recipient, data)) = ble_state.fragments.pop_front() {
@@ -631,43 +637,51 @@ impl OfflineProtocol {
                 data,
             });
         }
-        
+
         None
     }
-    
+
     /// BLE: Return fragment (marks last fragment as sent)
     pub fn ble_return_fragment(&self) {
         // This is a no-op for backwards compatibility
         // Fragment sending confirmation is handled by the transport layer
     }
-    
+
     /// BLE: Get peer count
     pub fn ble_get_peer_count(&self) -> u32 {
         let ble_state = self.ble_state.lock().unwrap();
         ble_state.peer_count
     }
-    
+
     // ========================================================================
     // TRANSPORT MANAGEMENT
     // ========================================================================
-    
+
     /// Adds Internet transport
-    pub fn add_internet_transport(&self, _server_url: String, _port: u16) -> Result<(), ProtocolError> {
+    pub fn add_internet_transport(
+        &self,
+        _server_url: String,
+        _port: u16,
+    ) -> Result<(), ProtocolError> {
         // Internet transport requires server infrastructure
         // This would need to be implemented by creating an InternetTransport instance
         // and adding it via transport_manager_mut().add_transport()
         // For now, this is not implemented as it requires network server setup
-        Err(ProtocolError::Other("Internet transport requires server infrastructure setup".to_string()))
+        Err(ProtocolError::Other(
+            "Internet transport requires server infrastructure setup".to_string(),
+        ))
     }
-    
+
     /// Adds Wi-Fi Direct transport
     pub fn add_wifi_direct_transport(&self) -> Result<(), ProtocolError> {
         // WiFi Direct transport would need to be created and added dynamically
         // This requires platform-specific WiFi Direct implementation
         // For now, this is not implemented as it's platform-specific
-        Err(ProtocolError::Other("WiFi Direct transport must be added by platform code".to_string()))
+        Err(ProtocolError::Other(
+            "WiFi Direct transport must be added by platform code".to_string(),
+        ))
     }
-    
+
     /// Removes a transport
     pub fn remove_transport(&self, transport_type: TransportType) -> Result<(), ProtocolError> {
         let core_transport_type = match transport_type {
@@ -675,19 +689,21 @@ impl OfflineProtocol {
             TransportType::Ble => CoreTransportType::BLE,
             TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
         };
-        
+
         let mut protocol = self.inner.lock().unwrap();
-        protocol.transport_manager_mut().remove_transport(core_transport_type);
+        protocol
+            .transport_manager_mut()
+            .remove_transport(core_transport_type);
         Ok(())
     }
-    
+
     /// Gets list of active transports
     pub fn get_active_transports(&self) -> Vec<String> {
         let protocol = self.inner.lock().unwrap();
         let transports = protocol.transport_manager().get_active_transports();
         transports.iter().map(|t| format!("{:?}", t)).collect()
     }
-    
+
     /// Updates transport metrics
     pub fn update_transport_metrics(
         &self,
@@ -698,21 +714,21 @@ impl OfflineProtocol {
         // This method is kept for backwards compatibility but is a no-op
         Ok(())
     }
-    
+
     // ========================================================================
     // DORS DECISION SUPPORT
     // ========================================================================
-    
+
     /// Checks if should escalate to WiFi
     pub fn should_escalate_to_wifi(&self) -> bool {
         let protocol = self.inner.lock().unwrap();
         protocol.transport_manager().should_escalate_to_wifi()
     }
-    
+
     // ========================================================================
     // FILE TRANSFER
     // ========================================================================
-    
+
     /// Sends a file
     pub fn send_file(
         &self,
@@ -721,21 +737,22 @@ impl OfflineProtocol {
         file_name: String,
     ) -> Result<String, ProtocolError> {
         // Generate file ID
-        let file_id = format!("file_{}_{}", 
+        let file_id = format!(
+            "file_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis(),
             file_name
         );
-        
+
         // Note: Actual file reading and chunking needs to be done by the platform
         // because file I/O is platform-specific. This method just generates the ID
         // and prepares tracking. Use FileTransferManager.chunk_file() on platform side.
-        
+
         Ok(file_id)
     }
-    
+
     /// Processes a file chunk
     pub fn process_file_chunk(
         &self,
@@ -744,29 +761,29 @@ impl OfflineProtocol {
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let mut file_manager = self.file_manager.lock().unwrap();
-        
+
         // Create a minimal FileChunk for processing
         use offline_protocol::file_transfer::FileChunk;
         let chunk = FileChunk {
             file_id: file_id.clone(),
             file_name: "unknown".to_string(), // Will be updated by first chunk
-            file_size: 0, // Will be updated by first chunk
-            total_chunks: 1, // Will be updated by first chunk
+            file_size: 0,                     // Will be updated by first chunk
+            total_chunks: 1,                  // Will be updated by first chunk
             chunk_index,
             chunk_data: data,
             file_checksum: String::new(),
         };
-        
+
         file_manager.process_chunk(chunk);
-        
+
         Ok(())
     }
-    
+
     /// Gets file transfer progress
     pub fn get_file_progress(&self, file_id: String) -> Option<FileProgress> {
         let file_manager = self.file_manager.lock().unwrap();
         let core_progress = file_manager.get_progress(&file_id)?;
-        
+
         Some(FileProgress {
             file_id: core_progress.file_id,
             chunks_sent: core_progress.chunks_completed,
@@ -774,116 +791,133 @@ impl OfflineProtocol {
             percentage: core_progress.percentage,
         })
     }
-    
+
     /// Finalizes a file transfer
     pub fn finalize_file(&self, file_id: String) -> Result<(), ProtocolError> {
         let mut file_manager = self.file_manager.lock().unwrap();
-        file_manager.finalize_file(&file_id)
+        file_manager
+            .finalize_file(&file_id)
             .ok_or_else(|| ProtocolError::Other("File not found or incomplete".to_string()))?;
         Ok(())
     }
-    
+
     /// Cancels a file transfer
     pub fn cancel_file_transfer(&self, file_id: String) -> Result<(), ProtocolError> {
         let mut file_manager = self.file_manager.lock().unwrap();
         file_manager.cancel_transfer(&file_id);
         Ok(())
     }
-    
+
     // ========================================================================
     // NETWORK VISUALIZATION AND METRICS
     // ========================================================================
-    
+
     /// Gets network topology
     pub fn get_topology(&self) -> Result<NetworkTopology, ProtocolError> {
         let visualizer = self.visualizer.lock().unwrap();
         let core_topology = visualizer.get_topology();
-        
+
         // Convert to uniffi types
-        let nodes = core_topology.nodes.iter().map(|n| NetworkNode {
-            node_id: n.user_id.clone(),
-            role: format!("{:?}", n.role),
-            rssi: n.battery_level.map(|b| b as i16),
-            last_seen_ms: n.last_seen as u64,
-        }).collect();
-        
-        let links = core_topology.links.iter().map(|l| NetworkLink {
-            source_id: l.from.clone(),
-            target_id: l.to.clone(),
-            transport: format!("{:?}", l.transport),
-            quality: l.quality,
-        }).collect();
-        
+        let nodes = core_topology
+            .nodes
+            .iter()
+            .map(|n| NetworkNode {
+                node_id: n.user_id.clone(),
+                role: format!("{:?}", n.role),
+                rssi: n.battery_level.map(|b| b as i16),
+                last_seen_ms: n.last_seen as u64,
+            })
+            .collect();
+
+        let links = core_topology
+            .links
+            .iter()
+            .map(|l| NetworkLink {
+                source_id: l.from.clone(),
+                target_id: l.to.clone(),
+                transport: format!("{:?}", l.transport),
+                quality: l.quality,
+            })
+            .collect();
+
         let message_stats = vec![]; // Would need to be tracked separately
-        
+
         Ok(NetworkTopology {
             nodes,
             links,
             message_stats,
         })
     }
-    
+
     /// Gets message statistics
     pub fn get_message_stats(&self) -> Vec<MessageStats> {
         let visualizer = self.visualizer.lock().unwrap();
         let core_stats = visualizer.get_message_stats();
-        
-        core_stats.iter().map(|s| MessageStats {
-            message_id: s.message_id.clone(),
-            sent_at_ms: s.sent_at as u64,
-            delivered_at_ms: s.delivered_at.map(|t| t as u64),
-            hop_count: s.hop_count,
-            status: if s.delivered_at.is_some() { "delivered" } else { "pending" }.to_string(),
-        }).collect()
+
+        core_stats
+            .iter()
+            .map(|s| MessageStats {
+                message_id: s.message_id.clone(),
+                sent_at_ms: s.sent_at as u64,
+                delivered_at_ms: s.delivered_at.map(|t| t as u64),
+                hop_count: s.hop_count,
+                status: if s.delivered_at.is_some() {
+                    "delivered"
+                } else {
+                    "pending"
+                }
+                .to_string(),
+            })
+            .collect()
     }
-    
+
     /// Gets delivery success rate
     pub fn get_delivery_success_rate(&self) -> f32 {
         let visualizer = self.visualizer.lock().unwrap();
         visualizer.delivery_success_rate()
     }
-    
+
     /// Gets median latency
     pub fn get_median_latency(&self) -> u64 {
         let visualizer = self.visualizer.lock().unwrap();
         visualizer.median_latency().unwrap_or(0)
     }
-    
+
     /// Gets median hop count
     pub fn get_median_hops(&self) -> u8 {
         let visualizer = self.visualizer.lock().unwrap();
         visualizer.median_hops().unwrap_or(0)
     }
-    
+
     // ========================================================================
     // BATTERY AND DEVICE MANAGEMENT
     // ========================================================================
-    
+
     /// Sets the battery level for relay decisions
     pub fn set_battery_level(&self, level: u8) {
         *self.battery_level.write().unwrap() = Some(level.min(100));
     }
-    
+
     /// Gets the current battery level
     pub fn get_battery_level(&self) -> Option<u8> {
         *self.battery_level.read().unwrap()
     }
-    
+
     // ========================================================================
     // RELAY MANAGEMENT
     // ========================================================================
-    
+
     /// Sets the relay priority
     pub fn set_relay_priority(&self, priority: RelayPriority) -> Result<(), ProtocolError> {
         *self.relay_priority.write().unwrap() = priority;
         Ok(())
     }
-    
+
     /// Gets the current relay priority
     pub fn get_relay_priority(&self) -> RelayPriority {
         *self.relay_priority.read().unwrap()
     }
-    
+
     /// Checks if this device is currently acting as a relay
     pub fn is_relay(&self) -> bool {
         // Check if we have enough connections and battery to be a relay
@@ -891,26 +925,29 @@ impl OfflineProtocol {
         let ble_state = self.ble_state.lock().unwrap();
         let peer_count = ble_state.peer_count;
         drop(ble_state);
-        
+
         match self.get_relay_priority() {
             RelayPriority::Low => false,
             RelayPriority::High => {
                 // High priority: be a relay if we have at least one connection
                 peer_count > 0 && battery.unwrap_or(100) > 20
-            },
+            }
             RelayPriority::Medium => {
                 // Medium priority: default threshold
                 peer_count >= 3 && battery.unwrap_or(100) > 30
-            },
+            }
         }
     }
-    
+
     // ========================================================================
     // TRANSPORT METRICS
     // ========================================================================
-    
+
     /// Gets detailed metrics for a specific transport
-    pub fn get_transport_metrics(&self, _transport_type: TransportType) -> Option<TransportMetrics> {
+    pub fn get_transport_metrics(
+        &self,
+        _transport_type: TransportType,
+    ) -> Option<TransportMetrics> {
         // Transport metrics are tracked internally by the transport implementations
         // For now, return mock data based on transport type
         // In production, this would query the actual transport
@@ -923,39 +960,39 @@ impl OfflineProtocol {
             avg_latency_ms: 0,
         })
     }
-    
+
     // ========================================================================
     // MANUAL TRANSPORT CONTROL
     // ========================================================================
-    
+
     /// Forces the protocol to use a specific transport (overrides DORS)
     pub fn force_transport(&self, transport_type: TransportType) -> Result<(), ProtocolError> {
         *self.forced_transport.write().unwrap() = Some(transport_type);
         Ok(())
     }
-    
+
     /// Releases the transport lock and lets DORS make decisions again
     pub fn release_transport_lock(&self) {
         *self.forced_transport.write().unwrap() = None;
     }
-    
+
     // ========================================================================
     // CONFIGURATION UPDATES
     // ========================================================================
-    
+
     /// Updates DORS configuration at runtime
     pub fn update_dors_config(&self, config: DorsConfig) -> Result<(), ProtocolError> {
         *self.dors_config.write().unwrap() = Some(config);
         // In a production implementation, this would update the internal DORS selector
         Ok(())
     }
-    
+
     /// Gets the current DORS configuration
     pub fn get_dors_config(&self) -> DorsConfig {
         if let Some(config) = self.dors_config.read().unwrap().clone() {
             return config;
         }
-        
+
         // Return default config
         DorsConfig {
             prefer_online: false,
@@ -984,11 +1021,11 @@ mod tests {
             prefer_online: false,
             initial_ttl: 8,
         };
-        
+
         let protocol = OfflineProtocol::new(config);
         assert!(protocol.is_ok());
     }
-    
+
     #[test]
     fn test_protocol_lifecycle() {
         let config = ProtocolConfig {
@@ -1000,23 +1037,23 @@ mod tests {
             prefer_online: false,
             initial_ttl: 8,
         };
-        
+
         let protocol = OfflineProtocol::new(config).unwrap();
         assert_eq!(protocol.get_state(), ProtocolState::Stopped);
-        
+
         assert!(protocol.start().is_ok());
         assert_eq!(protocol.get_state(), ProtocolState::Running);
-        
+
         assert!(protocol.pause().is_ok());
         assert_eq!(protocol.get_state(), ProtocolState::Paused);
-        
+
         assert!(protocol.resume().is_ok());
         assert_eq!(protocol.get_state(), ProtocolState::Running);
-        
+
         assert!(protocol.stop().is_ok());
         assert_eq!(protocol.get_state(), ProtocolState::Stopped);
     }
-    
+
     #[test]
     fn test_ble_peer_management() {
         let config = ProtocolConfig {
@@ -1028,21 +1065,25 @@ mod tests {
             prefer_online: false,
             initial_ttl: 8,
         };
-        
+
         let protocol = OfflineProtocol::new(config).unwrap();
-        
+
         assert_eq!(protocol.ble_get_peer_count(), 0);
-        
-        protocol.ble_peer_discovered("peer1".to_string(), -50).unwrap();
+
+        protocol
+            .ble_peer_discovered("peer1".to_string(), -50)
+            .unwrap();
         assert_eq!(protocol.ble_get_peer_count(), 1);
-        
-        protocol.ble_peer_discovered("peer2".to_string(), -60).unwrap();
+
+        protocol
+            .ble_peer_discovered("peer2".to_string(), -60)
+            .unwrap();
         assert_eq!(protocol.ble_get_peer_count(), 2);
-        
+
         protocol.ble_peer_lost("peer1".to_string()).unwrap();
         assert_eq!(protocol.ble_get_peer_count(), 1);
     }
-    
+
     #[test]
     fn test_file_transfer_tracking() {
         let config = ProtocolConfig {
@@ -1054,19 +1095,21 @@ mod tests {
             prefer_online: false,
             initial_ttl: 8,
         };
-        
+
         let protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Generate a file ID
-        let file_id = protocol.send_file(
-            "recipient".to_string(),
-            "/path/to/file".to_string(),
-            "test.txt".to_string()
-        ).unwrap();
-        
+        let file_id = protocol
+            .send_file(
+                "recipient".to_string(),
+                "/path/to/file".to_string(),
+                "test.txt".to_string(),
+            )
+            .unwrap();
+
         // File is not tracked until chunks are processed
         assert!(protocol.get_file_progress(file_id.clone()).is_none());
-        
+
         // Process a file chunk
         use offline_protocol::file_transfer::FileChunk;
         let chunk = FileChunk {
@@ -1078,12 +1121,12 @@ mod tests {
             chunk_data: vec![0u8; 50],
             file_checksum: "test".to_string(),
         };
-        
+
         {
             let mut file_manager = protocol.file_manager.lock().unwrap();
             file_manager.process_chunk(chunk);
         }
-        
+
         // Now we should have progress
         let progress = protocol.get_file_progress(file_id.clone());
         assert!(progress.is_some());

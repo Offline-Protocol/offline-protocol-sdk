@@ -18,6 +18,8 @@ interface Message {
   timestamp: number;
   transport?: string;
   hopCount?: number;
+  priority?: string;
+  requiresAck?: boolean;
 }
 
 interface MessageListProps {
@@ -26,6 +28,8 @@ interface MessageListProps {
 }
 
 export function MessageList({ events, currentUserId }: MessageListProps) {
+  const scrollRef = React.useRef<ScrollView>(null);
+
   // Process events into messages
   const messages: Message[] = React.useMemo(() => {
     const messageMap = new Map<string, Message>();
@@ -36,9 +40,13 @@ export function MessageList({ events, currentUserId }: MessageListProps) {
         messageMap.set(e.message_id, {
           id: e.message_id,
           type: 'sent',
-          content: '',
-          status: 'pending',
+          content: e.content,
+          sender: e.sender,
+          recipient: e.recipient,
+          status: e.requires_ack ? 'pending' : 'delivered',
           timestamp: e.timestamp,
+          priority: e.priority,
+          requiresAck: e.requires_ack,
         });
       } else if (event.type === 'message_received') {
         const e = event as MessageReceivedEvent;
@@ -52,6 +60,8 @@ export function MessageList({ events, currentUserId }: MessageListProps) {
           timestamp: e.timestamp,
           transport: e.transport,
           hopCount: e.hop_count,
+          priority: undefined,
+          requiresAck: undefined,
         });
       } else if (event.type === 'message_delivered') {
         const e = event as MessageDeliveredEvent;
@@ -60,18 +70,40 @@ export function MessageList({ events, currentUserId }: MessageListProps) {
           msg.status = 'delivered';
           msg.transport = e.transport;
           msg.hopCount = e.hop_count;
+        } else {
+          messageMap.set(e.message_id, {
+            id: e.message_id,
+            type: 'sent',
+            content: '',
+            status: 'delivered',
+            timestamp: Date.now(),
+            transport: e.transport,
+            hopCount: e.hop_count,
+          });
         }
       } else if (event.type === 'message_failed') {
         const e = event as MessageFailedEvent;
         const msg = messageMap.get(e.message_id);
         if (msg) {
           msg.status = 'failed';
+        } else {
+          messageMap.set(e.message_id, {
+            id: e.message_id,
+            type: 'sent',
+            content: '',
+            status: 'failed',
+            timestamp: Date.now(),
+          });
         }
       }
     });
 
-    return Array.from(messageMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+    return Array.from(messageMap.values()).sort((a, b) => a.timestamp - b.timestamp);
   }, [events]);
+
+  React.useEffect(() => {
+    scrollRef.current?.scrollToEnd({ animated: true });
+  }, [messages.length]);
 
   const formatTimestamp = (timestamp: number): string => {
     const date = new Date(timestamp);
@@ -92,7 +124,12 @@ export function MessageList({ events, currentUserId }: MessageListProps) {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Messages ({messages.length})</Text>
-      <ScrollView style={styles.messageList}>
+      <ScrollView
+        ref={scrollRef}
+        style={styles.messageList}
+        contentContainerStyle={styles.messageListContent}
+        showsVerticalScrollIndicator={false}
+      >
         {messages.length === 0 ? (
           <Text style={styles.emptyText}>No messages yet</Text>
         ) : (
@@ -113,18 +150,23 @@ export function MessageList({ events, currentUserId }: MessageListProps) {
                 </View>
               </View>
               {message.content && <Text style={styles.messageContent}>{message.content}</Text>}
-              {message.sender && (
-                <Text style={styles.messageInfo}>From: {message.sender}</Text>
-              )}
-              {message.recipient && (
-                <Text style={styles.messageInfo}>To: {message.recipient}</Text>
-              )}
-              {message.transport && (
-                <Text style={styles.messageInfo}>
-                  Via: {message.transport} ({message.hopCount} hops)
-                </Text>
-              )}
-              <Text style={styles.messageTimestamp}>{formatTimestamp(message.timestamp)}</Text>
+              <View style={styles.metaRow}>
+                <Text style={styles.messageTimestamp}>{formatTimestamp(message.timestamp)}</Text>
+                {message.type === 'sent' && (
+                  <Text
+                    style={[styles.statusBadgeText,
+                      message.status === 'delivered' && styles.statusDelivered,
+                      message.status === 'failed' && styles.statusFailed,
+                    ]}
+                  >
+                    {message.status === 'delivered'
+                      ? '✓✓'
+                      : message.status === 'failed'
+                      ? '⚠️'
+                      : '⏳'}
+                  </Text>
+                )}
+              </View>
             </View>
           ))
         )}
@@ -136,6 +178,10 @@ export function MessageList({ events, currentUserId }: MessageListProps) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 8,
   },
   title: {
     fontSize: 18,
@@ -146,6 +192,9 @@ const styles = StyleSheet.create({
   messageList: {
     flex: 1,
   },
+  messageListContent: {
+    paddingBottom: 16,
+  },
   emptyText: {
     textAlign: 'center',
     color: '#999',
@@ -153,19 +202,21 @@ const styles = StyleSheet.create({
     marginTop: 24,
   },
   messageItem: {
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    marginBottom: 10,
+    maxWidth: '75%',
   },
   sentMessage: {
     backgroundColor: '#e3f2fd',
     alignSelf: 'flex-end',
-    maxWidth: '80%',
+    borderBottomRightRadius: 4,
   },
   receivedMessage: {
     backgroundColor: '#f1f8e9',
     alignSelf: 'flex-start',
-    maxWidth: '80%',
+    borderBottomLeftRadius: 4,
   },
   messageHeader: {
     flexDirection: 'row',
@@ -191,17 +242,27 @@ const styles = StyleSheet.create({
   messageContent: {
     fontSize: 14,
     color: '#333',
-    marginBottom: 8,
+    marginBottom: 6,
   },
-  messageInfo: {
-    fontSize: 12,
-    color: '#666',
-    marginBottom: 4,
+  metaRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 6,
   },
   messageTimestamp: {
-    fontSize: 11,
-    color: '#999',
-    marginTop: 4,
+    fontSize: 10,
+    color: '#777',
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    color: '#ff9800',
+  },
+  statusDelivered: {
+    color: '#4caf50',
+  },
+  statusFailed: {
+    color: '#f44336',
   },
 });
 

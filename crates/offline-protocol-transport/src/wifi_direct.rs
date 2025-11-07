@@ -5,8 +5,8 @@
 
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
-use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// Maximum Wi-Fi Direct payload size (can handle large messages)
@@ -156,14 +156,16 @@ impl WifiDirectTransport {
 
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
-        serde_json::to_vec(message)
-            .map_err(|e| crate::Error::SerializationError(format!("Failed to serialize message: {}", e)))
+        serde_json::to_vec(message).map_err(|e| {
+            crate::Error::SerializationError(format!("Failed to serialize message: {}", e))
+        })
     }
 
     /// Deserializes a message from JSON bytes.
     pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        serde_json::from_slice(data)
-            .map_err(|e| crate::Error::SerializationError(format!("Failed to deserialize message: {}", e)))
+        serde_json::from_slice(data).map_err(|e| {
+            crate::Error::SerializationError(format!("Failed to deserialize message: {}", e))
+        })
     }
 
     /// Called when raw data is received (platform callback).
@@ -222,7 +224,7 @@ impl Transport for WifiDirectTransport {
         // Check status
         if self.status() != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(
-                "Wi-Fi Direct transport is not available".to_string()
+                "Wi-Fi Direct transport is not available".to_string(),
             ));
         }
 
@@ -234,7 +236,7 @@ impl Transport for WifiDirectTransport {
         // Update metrics
         let mut metrics = self.metrics.lock().unwrap();
         metrics.queue_depth = queue.len();
-        
+
         Ok(())
     }
 
@@ -322,7 +324,7 @@ mod tests {
             .auto_accept(true)
             .group_owner_intent(10)
             .build();
-        
+
         assert_eq!(transport.config().device_name, "MyDevice");
         assert!(transport.config().auto_accept);
         assert_eq!(transport.config().group_owner_intent, 10);
@@ -331,7 +333,7 @@ mod tests {
     #[test]
     fn test_peer_discovery() {
         let transport = WifiDirectTransport::new("test-device");
-        
+
         let peer = WifiDirectPeer {
             device_name: "Peer1".to_string(),
             device_address: "00:11:22:33:44:55".to_string(),
@@ -339,9 +341,9 @@ mod tests {
             last_seen: SystemTime::now(),
             connected: true,
         };
-        
+
         transport.on_peer_discovered(peer.clone());
-        
+
         let peers = transport.get_peers();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].device_name, "Peer1");
@@ -350,17 +352,17 @@ mod tests {
     #[test]
     fn test_send_receive() {
         let transport = WifiDirectTransport::new("test-device");
-        
+
         // Mark as available
         transport.on_status_changed(TransportStatus::Available);
-        
+
         // Send message
         let message = create_test_message();
         assert!(transport.send(&message).is_ok());
-        
+
         // Should have message in queue
         assert!(transport.has_pending_sends());
-        
+
         let next = transport.get_next_message().unwrap();
         assert!(next.is_some());
     }
@@ -369,14 +371,13 @@ mod tests {
     fn test_serialization() {
         let transport = WifiDirectTransport::new("test-device");
         let message = create_test_message();
-        
+
         // Serialize
         let data = transport.serialize_message(&message).unwrap();
         assert!(!data.is_empty());
-        
+
         // Deserialize
         let deserialized = transport.deserialize_message(&data).unwrap();
         assert_eq!(deserialized.id, message.id);
     }
 }
-
