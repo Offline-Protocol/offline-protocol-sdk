@@ -76,6 +76,11 @@ class BleManager(
     private val deviceIdToAddress = ConcurrentHashMap<String, String>()
     private val lastSeenRssi = ConcurrentHashMap<String, Short>()
     
+    // Pending fragments waiting for device ID
+    private data class PendingFragment(val data: ByteArray, val timestamp: Long)
+    private val pendingFragments = ConcurrentHashMap<String, MutableList<PendingFragment>>()
+    private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
+    
     // Fragment polling
     private val mainHandler = Handler(Looper.getMainLooper())
     private val fragmentPollingRunnable = object : Runnable {
@@ -214,6 +219,7 @@ class BleManager(
         deviceAddressToId.clear()
         deviceIdToAddress.clear()
         lastSeenRssi.clear()
+        pendingFragments.clear()
         
         // Close GATT server
         gattServer?.close()
@@ -338,8 +344,7 @@ class BleManager(
             bluetoothLeScanner?.startScan(listOf(scanFilter), scanSettings, scanCallback)
             isScanning = true
             
-            Log.i(TAG, "Started scanning for service: $SERVICE_UUID")
-            emitDiagnostic("info", "Started BLE scanning", mapOf("serviceUuid" to SERVICE_UUID.toString()))
+            // Reduced logging
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while starting scan", e)
             emitDiagnostic("error", "Permission denied while starting scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
@@ -394,8 +399,7 @@ class BleManager(
             
             bluetoothLeAdvertiser?.startAdvertising(settings, data, advertiseCallback)
             
-            Log.i(TAG, "Starting advertising with service: $SERVICE_UUID")
-            emitDiagnostic("info", "Starting BLE advertising", mapOf("serviceUuid" to SERVICE_UUID.toString()))
+            // Reduced logging
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while starting advertising", e)
             emitDiagnostic("error", "Permission denied while starting advertising", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
@@ -423,8 +427,7 @@ class BleManager(
         val rssi = result.rssi.toShort()
         val address = device.address
         
-        Log.d(TAG, "Discovered device: $address RSSI: $rssi")
-        emitDiagnostic("info", "Discovered BLE device", mapOf("address" to address, "rssi" to rssi))
+            // Reduced logging - only log when actually connecting
         
         lastSeenRssi[address] = rssi
 
@@ -482,8 +485,7 @@ class BleManager(
             bytesSent += data.size
             fragmentsSent++
             
-            Log.d(TAG, "Sent fragment to $recipientId: ${data.size} bytes")
-            emitDiagnostic("info", "Sent BLE fragment", mapOf("recipientId" to recipientId, "bytes" to data.size))
+            // Reduced logging - only log errors
         } catch (e: Exception) {
             Log.e(TAG, "Error polling/sending fragments", e)
             emitDiagnostic("error", "Error sending BLE fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
@@ -495,8 +497,12 @@ class BleManager(
             // Get sender device ID
             val senderId = deviceAddressToId[address]
             if (senderId == null) {
-                Log.w(TAG, "Unknown sender address: $address")
-                emitDiagnostic("warning", "Unknown sender address", mapOf("address" to address))
+                // Queue fragment to process later when device ID is available
+                val pendingList = pendingFragments.getOrPut(address) { mutableListOf() }
+                pendingList.add(PendingFragment(data, System.currentTimeMillis()))
+                
+                // Clean up old pending fragments
+                cleanupPendingFragments()
                 return
             }
             
@@ -508,13 +514,37 @@ class BleManager(
             
             bytesReceived += data.size
             fragmentsReceived++
-            
-            Log.d(TAG, "Received fragment from $senderId: ${data.size} bytes")
-            emitDiagnostic("info", "Received BLE fragment", mapOf("senderId" to senderId, "bytes" to data.size))
         } catch (e: Exception) {
             Log.e(TAG, "Error processing received fragment", e)
             emitDiagnostic("error", "Error processing received fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
+    }
+    
+    private fun processPendingFragments(address: String, deviceId: String) {
+        val fragments = pendingFragments.remove(address) ?: return
+        
+        for (fragment in fragments) {
+            try {
+                val bytes = fragment.data.map { it.toUByte() }
+                protocol.bleFragmentReceived(deviceId, bytes)
+                bytesReceived += fragment.data.size
+                fragmentsReceived++
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing pending fragment", e)
+            }
+        }
+    }
+    
+    private fun cleanupPendingFragments() {
+        val now = System.currentTimeMillis()
+        val addressesToRemove = mutableListOf<String>()
+        for ((address, fragments) in pendingFragments) {
+            fragments.removeAll { now - it.timestamp > PENDING_FRAGMENT_TIMEOUT_MS }
+            if (fragments.isEmpty()) {
+                addressesToRemove.add(address)
+            }
+        }
+        addressesToRemove.forEach { pendingFragments.remove(it) }
     }
     
     // MARK: - GATT Server Callback
@@ -527,18 +557,21 @@ class BleManager(
                     emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.i(TAG, "GATT server: Device disconnected: ${device.address}")
-                    emitDiagnostic("info", "Device disconnected from GATT server", mapOf("address" to device.address))
-                    lastSeenRssi.remove(device.address)
-                    deviceAddressToId[device.address]?.let { peerId ->
-                        try {
-                            protocol.blePeerLost(peerId)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error notifying peer lost", e)
-                            emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                    val address = device.address
+                    // Don't immediately remove - connection might be re-established
+                    // Only remove if it's a permanent error (status != 0)
+                    if (status != 0 && status != 19) { // Not normal disconnect or connection timeout
+                        lastSeenRssi.remove(address)
+                        deviceAddressToId[address]?.let { peerId ->
+                            try {
+                                protocol.blePeerLost(peerId)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error notifying peer lost", e)
+                                emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                            }
+                            deviceAddressToId.remove(address)
+                            deviceIdToAddress.remove(peerId)
                         }
-                        deviceAddressToId.remove(device.address)
-                        deviceIdToAddress.remove(peerId)
                     }
                 }
             }
@@ -608,21 +641,43 @@ class BleManager(
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.i(TAG, "GATT client: Disconnected from ${gatt.device.address}")
-                    emitDiagnostic("info", "Disconnected from BLE device", mapOf("address" to gatt.device.address))
-                    gattClients.remove(gatt.device.address)
-                    lastSeenRssi.remove(gatt.device.address)
+                    val address = gatt.device.address
+                    val wasConnected = gattClients.containsKey(address)
+                    gattClients.remove(address)
                     
-                    // Notify protocol of peer loss
-                    deviceAddressToId[gatt.device.address]?.let { deviceId ->
-                        try {
-                            protocol.blePeerLost(deviceId)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error notifying peer lost", e)
-                            emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                    // Don't remove from discovered list - keep trying to reconnect
+                    // Only remove RSSI if it's a permanent error
+                    if (status == 133) { // Connection timeout
+                        lastSeenRssi.remove(address)
+                    }
+                    
+                    // Try to reconnect if we were connected and state is still running
+                    if (wasConnected && state == TransportState.RUNNING) {
+                        // Attempt reconnection after a short delay
+                        mainHandler.postDelayed({
+                            if (state == TransportState.RUNNING && deviceAddressToId.containsKey(address)) {
+                                try {
+                                    val device = bluetoothAdapter?.getRemoteDevice(address)
+                                    if (device != null) {
+                                        connectToDevice(device)
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error reconnecting to device", e)
+                                }
+                            }
+                        }, 1000)
+                    } else {
+                        // Notify protocol of peer loss only if we're not reconnecting
+                        deviceAddressToId[address]?.let { deviceId ->
+                            try {
+                                protocol.blePeerLost(deviceId)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error notifying peer lost", e)
+                                emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                            }
+                            deviceAddressToId.remove(address)
+                            deviceIdToAddress.remove(deviceId)
                         }
-                        deviceAddressToId.remove(gatt.device.address)
-                        deviceIdToAddress.remove(deviceId)
                     }
                 }
             }
@@ -678,8 +733,8 @@ class BleManager(
                         emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                     }
                     
-                    Log.i(TAG, "Peer discovered: $deviceIdValue at ${gatt.device.address}")
-                    emitDiagnostic("info", "Peer discovered", mapOf("peerId" to deviceIdValue, "address" to gatt.device.address, "rssi" to rssi))
+                    // Process any pending fragments for this device
+                    processPendingFragments(gatt.device.address, deviceIdValue)
                 }
             }
         }

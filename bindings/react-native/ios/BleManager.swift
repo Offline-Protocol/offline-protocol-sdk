@@ -51,6 +51,10 @@ public class BleManager: NSObject, TransportManager {
     private var fragmentTimer: Timer?
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
     
+    // Pending fragments waiting for device ID
+    private var pendingFragments: [UUID: [(Data, Date)]] = [:]
+    private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0
+    
     // State tracking
     private var isScanning = false
     private var isAdvertising = false
@@ -144,6 +148,7 @@ public class BleManager: NSObject, TransportManager {
         peripheralDeviceIds.removeAll()
         peripheralRSSI.removeAll()
         centralDeviceIds.removeAll()
+        pendingFragments.removeAll()
         
         // Clean up managers
         centralManager = nil
@@ -193,8 +198,7 @@ public class BleManager: NSObject, TransportManager {
             return
         }
         
-        print("[BleManager] Starting scan for service: \(SERVICE_UUID)")
-        emitDiagnostic("info", "Started BLE scanning", context: ["serviceUuid": SERVICE_UUID.uuidString])
+        // Reduced logging
         central.scanForPeripherals(
             withServices: [SERVICE_UUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
@@ -224,8 +228,7 @@ public class BleManager: NSObject, TransportManager {
             CBAdvertisementDataLocalNameKey: "OfflineProtocol"
         ]
         
-        print("[BleManager] Starting advertising with service: \(SERVICE_UUID)")
-        emitDiagnostic("info", "Starting BLE advertising", context: ["serviceUuid": SERVICE_UUID.uuidString])
+        // Reduced logging
         peripheral.startAdvertising(advertisementData)
         isAdvertising = true
     }
@@ -333,16 +336,37 @@ public class BleManager: NSObject, TransportManager {
         bytesSent += UInt64(data.count)
         fragmentsSent += 1
         
-        print("[BleManager] Sent fragment to \(recipientId): \(data.count) bytes")
-        emitDiagnostic("info", "Sent BLE fragment", context: ["recipientId": recipientId, "bytes": data.count])
+        // Reduced logging - only log errors
     }
     
-    private func handleReceivedData(_ data: Data, senderId: String?) {
+    private func handleReceivedData(_ data: Data, senderId: String?, centralId: UUID? = nil) {
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
+            
+            // If sender ID is missing but we have a central ID, queue the fragment
+            if senderId == nil, let centralId = centralId {
+                // Queue fragment to process later when device ID is available
+                if self.pendingFragments[centralId] == nil {
+                    self.pendingFragments[centralId] = []
+                }
+                self.pendingFragments[centralId]?.append((data, Date()))
+                
+                // Clean up old pending fragments
+                self.cleanupPendingFragments()
+                
+                // Try to read device ID if not already reading
+                if self.centralDeviceIds[centralId] == nil && self.peripheralDeviceIds[centralId] == nil {
+                    // Device ID will be read when central connects or subscribes
+                    // For now, we'll wait for it
+                }
+                return
+            }
+            
             guard let senderId = senderId else {
-                print("[BleManager] Missing sender ID for received fragment")
-                emitDiagnostic("warning", "Missing sender ID for received fragment")
+                // Only log if we don't have a central ID to queue for
+                if centralId == nil {
+                    print("[BleManager] Missing sender ID for received fragment")
+                }
                 return
             }
 
@@ -352,11 +376,39 @@ public class BleManager: NSObject, TransportManager {
                 try self.protocolInstance.bleFragmentReceived(senderId: senderId, fragment: bytes)
                 self.bytesReceived += UInt64(data.count)
                 self.fragmentsReceived += 1
-                print("[BleManager] Received fragment from \(senderId): \(data.count) bytes")
-                self.emitDiagnostic("info", "Received BLE fragment", context: ["senderId": senderId, "bytes": data.count])
             } catch {
                 print("[BleManager] Error processing received fragment: \(error)")
                 self.emitDiagnostic("error", "Error processing received fragment", context: ["error": error.localizedDescription])
+            }
+        }
+    }
+    
+    private func processPendingFragments(for centralId: UUID, deviceId: String) {
+        fragmentQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard let fragments = self.pendingFragments.removeValue(forKey: centralId) else { return }
+            
+            for (data, _) in fragments {
+                let bytes = [UInt8](data)
+                do {
+                    try self.protocolInstance.bleFragmentReceived(senderId: deviceId, fragment: bytes)
+                    self.bytesReceived += UInt64(data.count)
+                    self.fragmentsReceived += 1
+                } catch {
+                    print("[BleManager] Error processing pending fragment: \(error)")
+                }
+            }
+        }
+    }
+    
+    private func cleanupPendingFragments() {
+        let now = Date()
+        for (centralId, fragments) in pendingFragments {
+            let validFragments = fragments.filter { now.timeIntervalSince($0.1) < PENDING_FRAGMENT_TIMEOUT }
+            if validFragments.isEmpty {
+                pendingFragments.removeValue(forKey: centralId)
+            } else {
+                pendingFragments[centralId] = validFragments
             }
         }
     }
@@ -411,11 +463,7 @@ extension BleManager: CBCentralManagerDelegate {
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
         
-        print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI: \(rssiValue)")
-        emitDiagnostic("info", "Discovered BLE peripheral", context: [
-            "identifier": peripheral.identifier.uuidString,
-            "rssi": rssiValue
-        ])
+        // Reduced logging - only log when actually connecting
         
         // Connect to peripheral if not already connected
         if connectedPeripherals[peripheral.identifier] == nil {
@@ -445,20 +493,43 @@ extension BleManager: CBCentralManagerDelegate {
     }
     
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        print("[BleManager] Disconnected from peripheral: \(peripheral.identifier)")
-        emitDiagnostic("info", "Disconnected from BLE peripheral", context: [
-            "identifier": peripheral.identifier.uuidString,
-            "error": error?.localizedDescription ?? "none"
-        ])
-        
+        let wasConnected = connectedPeripherals[peripheral.identifier] != nil
         connectedPeripherals.removeValue(forKey: peripheral.identifier)
-        peripheralRSSI.removeValue(forKey: peripheral.identifier)
         
-        // Notify protocol of peer loss
-        if let deviceId = peripheralDeviceIds[peripheral.identifier] {
-            try? self.protocolInstance.blePeerLost(peerId: deviceId)
-            peripheralDeviceIds.removeValue(forKey: peripheral.identifier)
-            centralDeviceIds.removeValue(forKey: peripheral.identifier)
+        // Don't remove from discovered list - keep trying to reconnect
+        // Only remove RSSI if it's a permanent error
+        if let error = error as? CBError, error.code == .connectionTimeout {
+            peripheralRSSI.removeValue(forKey: peripheral.identifier)
+        }
+        
+        // Try to reconnect if we were connected and it's not a permanent error
+        if wasConnected {
+            if let error = error as? CBError {
+                // Don't reconnect on permanent errors
+                if error.code == .connectionTimeout || error.code == .peerRemovedPairingInformation {
+                    // Permanent error - notify peer lost
+                    if let deviceId = peripheralDeviceIds[peripheral.identifier] {
+                        try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                        peripheralDeviceIds.removeValue(forKey: peripheral.identifier)
+                        centralDeviceIds.removeValue(forKey: peripheral.identifier)
+                    }
+                    return
+                }
+            }
+            
+            // Attempt reconnection after a short delay
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self = self, let central = self.centralManager else { return }
+                if self.state == .running && self.discoveredPeripherals[peripheral.identifier] != nil {
+                    peripheral.delegate = self
+                    central.connect(peripheral, options: nil)
+                }
+            }
+        } else {
+            // Wasn't connected, just notify if we had device ID
+            if let deviceId = peripheralDeviceIds[peripheral.identifier] {
+                try? self.protocolInstance.blePeerLost(peerId: deviceId)
+            }
         }
     }
 }
@@ -522,16 +593,12 @@ extension BleManager: CBPeripheralDelegate {
                 let rssi = peripheralRSSI[peripheral.identifier] ?? -60
                 try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
 
-                print("[BleManager] Peer discovered: \(deviceId)")
-                emitDiagnostic("info", "Peer discovered", context: [
-                    "peerId": deviceId,
-                    "peripheral": peripheral.identifier.uuidString,
-                    "rssi": rssi
-                ])
+                // Process any pending fragments for this device
+                processPendingFragments(for: peripheral.identifier, deviceId: deviceId)
             }
         } else if characteristic.uuid == MESSAGE_CHAR_UUID {
             // Handle received message fragment
-            handleReceivedData(data, senderId: peripheralDeviceIds[peripheral.identifier])
+            handleReceivedData(data, senderId: peripheralDeviceIds[peripheral.identifier], centralId: peripheral.identifier)
         }
     }
     
@@ -589,11 +656,7 @@ extension BleManager: CBPeripheralManagerDelegate {
         for request in requests {
             if request.characteristic.uuid == MESSAGE_CHAR_UUID, let value = request.value {
                 let senderId = centralDeviceIds[request.central.identifier] ?? peripheralDeviceIds[request.central.identifier]
-                handleReceivedData(value, senderId: senderId)
-                emitDiagnostic("info", "Received BLE write request", context: [
-                    "central": request.central.identifier.uuidString,
-                    "bytes": value.count
-                ])
+                handleReceivedData(value, senderId: senderId, centralId: request.central.identifier)
             }
             
             // Respond to write request
@@ -602,14 +665,14 @@ extension BleManager: CBPeripheralManagerDelegate {
     }
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        print("[BleManager] Central subscribed to characteristic: \(characteristic.uuid)")
-        emitDiagnostic("info", "Central subscribed", context: [
-            "central": central.identifier.uuidString,
-            "characteristic": characteristic.uuid.uuidString
-        ])
-        if centralDeviceIds[central.identifier] == nil,
-           let deviceId = peripheralDeviceIds[central.identifier] {
+        // When central subscribes, try to get device ID if we don't have it
+        if centralDeviceIds[central.identifier] == nil && peripheralDeviceIds[central.identifier] == nil {
+            // Read device ID from the central's GATT service
+            // Note: We can't directly read from central, but we'll get it when they connect as peripheral
+        } else if let deviceId = peripheralDeviceIds[central.identifier] {
             centralDeviceIds[central.identifier] = deviceId
+            // Process any pending fragments
+            processPendingFragments(for: central.identifier, deviceId: deviceId)
         }
     }
     

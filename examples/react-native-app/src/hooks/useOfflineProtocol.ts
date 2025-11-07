@@ -48,12 +48,32 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
 
       // Set up event listener
       instance.on('all', (event) => {
-        // Special formatting for diagnostic messages
+        // Filter out verbose diagnostic events
         if (event.type === 'diagnostic') {
           const diagnostic = event as DiagnosticEvent;
-          console.log('🔍', diagnostic.message, diagnostic.context ?? '');
+          const message = diagnostic.message.toLowerCase();
+          // Only log important diagnostics, skip verbose BLE operations
+          if (
+            message.includes('error') ||
+            message.includes('warning') ||
+            message.includes('peer discovered') ||
+            message.includes('peer lost') ||
+            message.includes('message received') ||
+            message.includes('message sent')
+          ) {
+            console.log('🔍', diagnostic.message, diagnostic.context ?? '');
+          }
         } else {
-          console.log('Protocol event:', event.type, event);
+          // Only log important protocol events
+          if (
+            event.type === 'neighbor_discovered' ||
+            event.type === 'neighbor_lost' ||
+            event.type === 'message_received' ||
+            event.type === 'message_sent' ||
+            event.type === 'error'
+          ) {
+            console.log('Protocol event:', event.type, event);
+          }
         }
         setEvents((prev) => [event, ...prev].slice(0, 100)); // Keep last 100 events
       });
