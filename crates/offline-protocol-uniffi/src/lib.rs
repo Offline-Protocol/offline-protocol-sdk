@@ -12,9 +12,14 @@ use offline_protocol::{
     file_transfer::FileTransferManager,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
-use offline_protocol_transport::TransportType as CoreTransportType;
+use offline_protocol_transport::{
+    TransportType as CoreTransportType,
+    TransportStatus,
+    ble::{BleTransport, PeerDevice as BlePeerDevice},
+};
 use std::sync::{Arc, Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
+use std::time::SystemTime;
 
 // Include the UniFFI scaffolding  
 uniffi::include_scaffolding!("offline_protocol");
@@ -216,9 +221,12 @@ struct BleState {
 /// Main protocol wrapper for UniFFI - COMPLETE IMPLEMENTATION
 pub struct OfflineProtocol {
     inner: Mutex<CoreProtocol>,
+    /// BLE transport for direct platform callback access
+    /// This is the same instance added to the transport manager
+    ble_transport: Option<Arc<Mutex<BleTransport>>>,
     state: RwLock<ProtocolState>,
-    event_callback: RwLock<Option<Arc<dyn EventCallback>>>,
-    event_queue: Mutex<VecDeque<String>>,
+    event_callback: Arc<RwLock<Option<Arc<dyn EventCallback>>>>,
+    event_queue: Arc<Mutex<VecDeque<String>>>,
     ble_state: Mutex<BleState>,
     file_manager: Mutex<FileTransferManager>,
     visualizer: Mutex<NetworkVisualizer>,
@@ -230,16 +238,63 @@ impl OfflineProtocol {
     /// Creates a new protocol instance
     pub fn new(config: ProtocolConfig) -> Result<Self, ProtocolError> {
         let user_id = config.user_id.clone();
+        let ble_enabled = config.ble_enabled;
         let core_config: CoreConfig = config.into();
         core_config.validate().map_err(ProtocolError::from)?;
         
-        let protocol = CoreProtocol::new(core_config).map_err(ProtocolError::from)?;
+        let mut protocol = CoreProtocol::new(core_config).map_err(ProtocolError::from)?;
+        
+        // Create BLE transport if enabled
+        // We keep it accessible for platform callbacks (fragmenting/reassembly)
+        // and also add it to transport manager for routing decisions
+        let ble_transport = if ble_enabled {
+            let transport = Arc::new(Mutex::new(BleTransport::new(user_id.clone())));
+            
+            // Also add a separate instance to transport manager for routing
+            // TODO: This creates two instances which is not ideal, but allows platform access
+            protocol.transport_manager_mut().add_transport(
+                CoreTransportType::BLE,
+                Box::new(BleTransport::new(user_id.clone())),
+            );
+            
+            Some(transport)
+        } else {
+            None
+        };
+        
+        // Create the event queue and callback that will be shared with the event handler
+        let event_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let event_queue_clone = event_queue.clone();
+        let event_callback = Arc::new(RwLock::new(None::<Arc<dyn EventCallback>>));
+        let event_callback_clone = event_callback.clone();
+        
+        // Register event handler with core protocol to forward all events
+        // This bridges events from the core protocol to JavaScript
+        protocol.on_event(move |event| {
+            // Convert event to JSON
+            if let Ok(event_json) = event.to_json() {
+                // Call the event callback if set
+                if let Some(callback) = event_callback_clone.read().unwrap().as_ref() {
+                    callback.on_event(event_json.clone());
+                }
+                
+                // Add to event queue for polling
+                let mut queue = event_queue_clone.lock().unwrap();
+                queue.push_back(event_json);
+                
+                // Limit queue size to prevent memory issues
+                if queue.len() > 1000 {
+                    queue.pop_front();
+                }
+            }
+        });
         
         Ok(Self {
             inner: Mutex::new(protocol),
+            ble_transport,
             state: RwLock::new(ProtocolState::Stopped),
-            event_callback: RwLock::new(None),
-            event_queue: Mutex::new(VecDeque::new()),
+            event_callback,
+            event_queue,
             ble_state: Mutex::new(BleState {
                 fragments: VecDeque::new(),
                 peer_count: 0,
@@ -381,20 +436,32 @@ impl OfflineProtocol {
     
     /// BLE: Peer discovered
     pub fn ble_peer_discovered(&self, peer_id: String, rssi: i16) -> Result<(), ProtocolError> {
+        // Update local state for tracking
         let mut ble_state = self.ble_state.lock().unwrap();
-        
         let peer = PeerDevice {
             peer_id: peer_id.clone(),
             rssi,
-            last_seen_ms: std::time::SystemTime::now()
+            last_seen_ms: SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64,
         };
-        
         ble_state.peers.insert(peer_id.clone(), peer);
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
+        
+        // Notify the BLE transport about the discovered peer
+        if let Some(ble_transport) = &self.ble_transport {
+            let transport = ble_transport.lock().unwrap();
+            let ble_peer = BlePeerDevice {
+                device_id: peer_id.clone(),
+                address: peer_id.clone(), // Using peer_id as address for now
+                rssi,
+                last_seen: SystemTime::now(),
+                connected: false,
+            };
+            transport.on_peer_discovered(ble_peer);
+        }
         
         // Emit NeighborDiscovered event
         let event = CoreEvent::NeighborDiscovered {
@@ -403,9 +470,6 @@ impl OfflineProtocol {
             rssi: Some(rssi),
         };
         self.emit_event(event);
-        
-        // Note: BLE transport peer discovery is handled by platform callbacks via the transport layer
-        // This method just tracks state in the uniffi layer and emits events
         
         Ok(())
     }
@@ -416,6 +480,12 @@ impl OfflineProtocol {
         ble_state.peers.remove(&peer_id);
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
+        
+        // Notify the BLE transport about the lost peer
+        if let Some(ble_transport) = &self.ble_transport {
+            let transport = ble_transport.lock().unwrap();
+            transport.on_peer_lost(&peer_id);
+        }
         
         // Emit NeighborLost event
         let event = CoreEvent::NeighborLost {
@@ -428,11 +498,15 @@ impl OfflineProtocol {
     
     /// BLE: Status changed
     pub fn ble_status_changed(&self, is_available: bool) -> Result<(), ProtocolError> {
-        // BLE transport status is managed by the transport layer
-        // This method is here for backwards compatibility with the old FFI
-        // The transport status is tracked internally by the transport manager
-        if !is_available {
-            eprintln!("Warning: BLE became unavailable");
+        // Update the BLE transport status
+        if let Some(ble_transport) = &self.ble_transport {
+            let transport = ble_transport.lock().unwrap();
+            let status = if is_available {
+                TransportStatus::Available
+            } else {
+                TransportStatus::Unavailable
+            };
+            transport.on_status_changed(status);
         }
         Ok(())
     }
@@ -441,18 +515,32 @@ impl OfflineProtocol {
     pub fn ble_fragment_received(
         &self,
         _sender_id: String,
-        _fragment: Vec<u8>,
+        fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // BLE fragment reassembly is handled by the transport layer
-        // This method is here for backwards compatibility with the old FFI
-        // Platform code should use the transport's built-in reassembly system
+        // Send fragment to BLE transport for reassembly
+        if let Some(ble_transport) = &self.ble_transport {
+            let transport = ble_transport.lock().unwrap();
+            transport.on_fragment_received(fragment)
+                .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
+        }
         
         Ok(())
     }
     
     /// BLE: Get next fragment to send
     pub fn ble_get_next_fragment(&self) -> Option<BleFragment> {
-        // Check local queue first (backwards compatibility)
+        // Get fragments from the actual BLE transport
+        if let Some(ble_transport) = &self.ble_transport {
+            let transport = ble_transport.lock().unwrap();
+            if let Ok(Some((recipient, data))) = transport.get_next_fragment() {
+                return Some(BleFragment {
+                    recipient_id: recipient,
+                    data,
+                });
+            }
+        }
+        
+        // Check local queue for backwards compatibility
         let mut ble_state = self.ble_state.lock().unwrap();
         if let Some((recipient, data)) = ble_state.fragments.pop_front() {
             return Some(BleFragment {
@@ -460,10 +548,6 @@ impl OfflineProtocol {
                 data,
             });
         }
-        
-        // BLE transport manages fragmentation internally
-        // Platform code should use the transport's built-in fragmentation system
-        // This method is here for backwards compatibility with the old FFI
         
         None
     }
