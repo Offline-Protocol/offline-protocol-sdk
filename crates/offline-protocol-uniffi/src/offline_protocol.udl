@@ -111,6 +111,10 @@ dictionary DorsConfig {
     u64 stability_window_secs;
     u64 poor_signal_duration_secs;
     u8 ttl_escalation_threshold;
+    u64 congestion_duration_secs;
+    u64 ttl_escalation_hold_secs;
+    u64 history_window_size;
+    f32 queue_recovery_ratio;
 };
 
 // ACK configuration
