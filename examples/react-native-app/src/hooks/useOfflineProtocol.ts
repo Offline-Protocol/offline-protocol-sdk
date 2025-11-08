@@ -154,7 +154,9 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
             annotatedEvent.type === 'neighbor_discovered' ||
             annotatedEvent.type === 'neighbor_lost' ||
             annotatedEvent.type === 'message_received' ||
-            annotatedEvent.type === 'message_sent'
+            annotatedEvent.type === 'message_sent' ||
+            annotatedEvent.type === 'message_delivered' ||
+            annotatedEvent.type === 'message_failed'
           ) {
             console.log('Protocol event:', annotatedEvent.type, annotatedEvent);
           }

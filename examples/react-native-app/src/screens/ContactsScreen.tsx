@@ -204,9 +204,11 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
     if (existingChat) {
       console.log(`[ContactsScreen] Existing chat found, navigating to chat detail`);
       onNavigateToChatDetail(contact.id, contact.name);
-    } else {
+      return;
+    }
+
+    if (Platform.OS === 'ios') {
       console.log(`[ContactsScreen] No existing chat, showing message prompt`);
-      // Create a quick message prompt
       Alert.prompt(
         `Message ${contact.name}`,
         'Enter your message:',
@@ -232,7 +234,11 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
         ],
         'plain-text'
       );
+      return;
     }
+
+    console.log(`[ContactsScreen] Android detected, navigating directly to chat detail`);
+    onNavigateToChatDetail(contact.id, contact.name);
   };
 
   const handleRefresh = async () => {

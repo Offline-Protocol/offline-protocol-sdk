@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useCallback, useState, useEffect } from 'react';
+import React, { createContext, useContext, useCallback, useState, useEffect, useRef } from 'react';
 import { Alert, Platform } from 'react-native';
 import { MessagePriority, type ProtocolEvent } from '@offlineprotocol/react-native';
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
@@ -35,6 +35,15 @@ export interface Chat {
   messages: Message[];
 }
 
+interface PeerProfile {
+  name: string;
+  updatedAt: number;
+}
+
+const PRESENCE_MESSAGE_PREFIX = '__presence__::';
+const PRESENCE_REBROADCAST_INTERVAL_MS = 60 * 1000;
+const PROCESSED_MESSAGE_RETENTION_MS = 10 * 60 * 1000;
+
 interface ProtocolContextType {
   // Core state
   isInitialized: boolean;
@@ -50,7 +59,7 @@ interface ProtocolContextType {
   // Protocol state
   events: ProtocolEvent[];
   insights: any;
-  batteryLevel: number;
+  batteryLevel: number | null;
   
   // Actions
   initialize: () => Promise<void>;
@@ -81,6 +90,9 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [chats, setChats] = useState<Chat[]>([]);
   const [isInitialized, setIsInitialized] = useState(false);
+  const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>({});
+  const [presenceSentPeers, setPresenceSentPeers] = useState<Record<string, number>>({});
+  const processedIncomingMessageIdsRef = useRef<Map<string, number>>(new Map());
 
   const {
     protocol,
@@ -124,10 +136,60 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     },
     relay: {
       allowRelay: true,
-      maxRelayHops: 3,
-      relayPriority: 'medium',
+      relayPriority: 'auto',
     },
   });
+
+  const getPeerDisplayName = useCallback(
+    (peerId: string) => {
+      const profile = peerProfiles[peerId];
+      if (profile && profile.name.trim().length > 0) {
+        return profile.name.trim();
+      }
+      return peerId.length > 4 ? `User ${peerId.slice(-4)}` : `User ${peerId}`;
+    },
+    [peerProfiles]
+  );
+
+  const sendPresenceToPeer = useCallback(
+    async (peerId: string) => {
+      if (peerId === currentUserId) {
+        return;
+      }
+
+      const timestamp = Date.now();
+      const payload = {
+        type: 'presence',
+        name: currentUserName,
+        userId: currentUserId,
+        timestamp,
+      };
+
+      try {
+        const result = await protocolSendMessage(
+          peerId,
+          `${PRESENCE_MESSAGE_PREFIX}${JSON.stringify(payload)}`,
+          MessagePriority.Low
+        );
+
+        if (result) {
+          setPresenceSentPeers((prev) => {
+            const lastSent = prev[peerId];
+            if (lastSent && timestamp - lastSent < 500) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [peerId]: timestamp,
+            };
+          });
+        }
+      } catch (err) {
+        console.warn('[ProtocolProvider] Failed to send presence message', peerId, err);
+      }
+    },
+    [protocolSendMessage, currentUserId, currentUserName]
+  );
 
   // Initialize protocol
   const initialize = useCallback(async () => {
@@ -167,17 +229,19 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   ) => {
     try {
       console.log(`[ProtocolProvider] Sending message to ${recipientId}: "${content}" (priority: ${priority})`);
-      await protocolSendMessage(recipientId, content, priority);
-      console.log(`[ProtocolProvider] Message sent successfully to ${recipientId}`);
-      
-      // Add message to local chat
-      const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const messageId = await protocolSendMessage(recipientId, content, priority);
+      if (!messageId) {
+        throw new Error('Message ID not returned');
+      }
+      console.log(`[ProtocolProvider] Message queued successfully to ${recipientId} with ID ${messageId}`);
+
+      const now = Date.now();
       const newMessage: Message = {
         id: messageId,
         senderId: currentUserId,
         recipientId,
         content,
-        timestamp: Date.now(),
+        timestamp: now,
         priority,
         status: 'sending',
         isFromMe: true,
@@ -188,31 +252,49 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         
         if (existingChatIndex >= 0) {
           const updatedChats = [...prevChats];
+          const existingChat = updatedChats[existingChatIndex];
           updatedChats[existingChatIndex] = {
-            ...updatedChats[existingChatIndex],
+            ...existingChat,
+            peerName: getPeerDisplayName(recipientId),
             lastMessage: newMessage,
-            messages: [...updatedChats[existingChatIndex].messages, newMessage],
+            messages: [...existingChat.messages, newMessage],
           };
           return updatedChats;
-        } else {
-          // Create new chat
-          const newChat: Chat = {
-            id: recipientId,
-            peerId: recipientId,
-            peerName: `User ${recipientId.slice(-4)}`,
-            lastMessage: newMessage,
-            unreadCount: 0,
-            isOnline: false,
-            messages: [newMessage],
-          };
-          return [...prevChats, newChat];
         }
+
+        // Create new chat
+        const newChat: Chat = {
+          id: recipientId,
+          peerId: recipientId,
+          peerName: getPeerDisplayName(recipientId),
+          lastMessage: newMessage,
+          unreadCount: 0,
+          isOnline: false,
+          messages: [newMessage],
+        };
+        return [...prevChats, newChat];
+      });
+
+      setContacts((prevContacts) => {
+        if (prevContacts.some((contact) => contact.id === recipientId)) {
+          return prevContacts;
+        }
+        return [
+          ...prevContacts,
+          {
+            id: recipientId,
+            name: getPeerDisplayName(recipientId),
+            avatar: undefined,
+            isOnline: false,
+            lastSeen: now,
+          },
+        ];
       });
     } catch (err) {
       console.error('Failed to send message:', err);
       Alert.alert('Send Error', 'Failed to send message. Please try again.');
     }
-  }, [protocolSendMessage, currentUserId]);
+  }, [protocolSendMessage, currentUserId, getPeerDisplayName]);
 
   // Mark chat as read
   const markAsRead = useCallback((chatId: string) => {
@@ -228,110 +310,355 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     setCurrentUserName(name);
   }, []);
 
-  // Process protocol events to update contacts and messages
+  // Process protocol events to update contacts, chats, and metadata
   useEffect(() => {
-    const processEvents = () => {
-      const discoveredPeers = new Set<string>();
-      const receivedMessages: Message[] = [];
+    const pruneProcessedMessages = () => {
+      const cutoff = Date.now() - PROCESSED_MESSAGE_RETENTION_MS;
+      processedIncomingMessageIdsRef.current.forEach((seenAt, messageId) => {
+        if (seenAt < cutoff) {
+          processedIncomingMessageIdsRef.current.delete(messageId);
+        }
+      });
+    };
 
-      events.forEach((event) => {
-        switch (event.type) {
-          case 'neighbor_discovered':
-            const discoveredPeerId = (event as any).peer_id;
-            console.log(`[ProtocolProvider] Neighbor discovered: ${discoveredPeerId}`);
-            discoveredPeers.add(discoveredPeerId);
+    if (events.length === 0) {
+      pruneProcessedMessages();
+      return;
+    }
+
+    const chronologicalEvents = [...events].reverse();
+    const discoveredPeers = new Set<string>();
+    const receivedMessages: Message[] = [];
+    const messageSenders = new Set<string>();
+    const sentMessageIds = new Set<string>();
+    const deliveredMessageIds = new Set<string>();
+    const failedMessageIds = new Set<string>();
+    const presenceUpdates = new Map<string, { name: string; timestamp: number }>();
+
+    chronologicalEvents.forEach((event) => {
+      switch (event.type) {
+        case 'neighbor_discovered': {
+          const peerId = (event as any).peer_id;
+          if (peerId) {
+            discoveredPeers.add(peerId);
+          }
+          break;
+        }
+        case 'neighbor_lost': {
+          const peerId = (event as any).peer_id;
+          if (peerId) {
+            discoveredPeers.delete(peerId);
+          }
+          break;
+        }
+        case 'message_sent': {
+          const sentEvent = event as any;
+          if (sentEvent.sender === currentUserId && sentEvent.message_id) {
+            sentMessageIds.add(sentEvent.message_id);
+          }
+          break;
+        }
+        case 'message_delivered': {
+          const deliveredEvent = event as any;
+          if (deliveredEvent.message_id) {
+            deliveredMessageIds.add(deliveredEvent.message_id);
+          }
+          break;
+        }
+        case 'message_failed': {
+          const failedEvent = event as any;
+          if (failedEvent.message_id) {
+            failedMessageIds.add(failedEvent.message_id);
+          }
+          break;
+        }
+        case 'message_received': {
+          const msgEvent = event as any;
+          if (!msgEvent) {
             break;
-          
-          case 'neighbor_lost':
-            const lostPeerId = (event as any).peer_id;
-            console.log(`[ProtocolProvider] Neighbor lost: ${lostPeerId}`);
-            discoveredPeers.delete(lostPeerId);
+          }
+
+          const messageId: string =
+            msgEvent.message_id || `inbound_${msgEvent.sender}_${msgEvent.timestamp ?? Date.now()}`;
+
+          if (processedIncomingMessageIdsRef.current.has(messageId)) {
             break;
-          
-          case 'message_received':
-            const msgEvent = event as any;
-            console.log(`[ProtocolProvider] Received message from ${msgEvent.sender}: "${msgEvent.content}"`);
-            const receivedMessage: Message = {
-              id: `msg_${msgEvent.timestamp}_${Math.random().toString(36).substr(2, 9)}`,
-              senderId: msgEvent.sender,
-              recipientId: currentUserId,
-              content: msgEvent.content,
-              timestamp: msgEvent.timestamp || Date.now(),
-              priority: msgEvent.priority || MessagePriority.Medium,
-              status: 'delivered',
-              isFromMe: false,
-            };
-            receivedMessages.push(receivedMessage);
+          }
+          processedIncomingMessageIdsRef.current.set(messageId, Date.now());
+
+          const rawContent = typeof msgEvent.content === 'string' ? msgEvent.content : '';
+          messageSenders.add(msgEvent.sender);
+
+          if (rawContent.startsWith(PRESENCE_MESSAGE_PREFIX)) {
+            try {
+              const payload = JSON.parse(rawContent.slice(PRESENCE_MESSAGE_PREFIX.length));
+              if (payload?.name && typeof payload.name === 'string') {
+                const presenceTimestamp = Number(payload.timestamp) || msgEvent.timestamp || Date.now();
+                presenceUpdates.set(msgEvent.sender, {
+                  name: payload.name,
+                  timestamp: presenceTimestamp,
+                });
+              }
+            } catch (err) {
+              console.warn('[ProtocolProvider] Failed to parse presence payload', err);
+            }
             break;
+          }
+
+          const normalizePriority = (value: unknown): MessagePriority => {
+            if (typeof value === 'number') {
+              switch (value) {
+                case MessagePriority.Low:
+                  return MessagePriority.Low;
+                case MessagePriority.High:
+                  return MessagePriority.High;
+                case MessagePriority.Critical:
+                  return MessagePriority.Critical;
+                case MessagePriority.Medium:
+                default:
+                  return MessagePriority.Medium;
+              }
+            }
+            if (typeof value === 'string') {
+              switch (value.toLowerCase()) {
+                case 'low':
+                  return MessagePriority.Low;
+                case 'high':
+                  return MessagePriority.High;
+                case 'critical':
+                  return MessagePriority.Critical;
+                case 'medium':
+                default:
+                  return MessagePriority.Medium;
+              }
+            }
+            return MessagePriority.Medium;
+          };
+
+          const receivedMessage: Message = {
+            id: messageId,
+            senderId: msgEvent.sender,
+            recipientId: msgEvent.recipient ?? currentUserId,
+            content: rawContent,
+            timestamp: msgEvent.timestamp || Date.now(),
+            priority: normalizePriority(msgEvent.priority),
+            status: 'delivered',
+            isFromMe: false,
+          };
+          receivedMessages.push(receivedMessage);
+          break;
+        }
+        default:
+          break;
+      }
+    });
+
+    const updatedProfiles: Record<string, PeerProfile> = { ...peerProfiles };
+    let profilesChanged = false;
+    presenceUpdates.forEach(({ name, timestamp }, peerId) => {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        return;
+      }
+      const existing = updatedProfiles[peerId];
+      if (!existing || timestamp >= existing.updatedAt) {
+        updatedProfiles[peerId] = {
+          name: trimmedName,
+          updatedAt: timestamp,
+        };
+        profilesChanged = true;
+      }
+    });
+
+    if (profilesChanged) {
+      setPeerProfiles(updatedProfiles);
+    }
+
+    const resolvePeerName = (peerId: string) => {
+      const profile = updatedProfiles[peerId];
+      if (profile && profile.name.trim().length > 0) {
+        return profile.name.trim();
+      }
+      return peerId.length > 4 ? `User ${peerId.slice(-4)}` : `User ${peerId}`;
+    };
+
+    const now = Date.now();
+
+    setContacts((prevContacts) => {
+      const contactMap = new Map<string, Contact>(prevContacts.map((contact) => [contact.id, contact]));
+      let changed = false;
+
+      discoveredPeers.forEach((peerId) => {
+        if (!contactMap.has(peerId)) {
+          contactMap.set(peerId, {
+            id: peerId,
+            name: resolvePeerName(peerId),
+            avatar: undefined,
+            isOnline: true,
+            lastSeen: now,
+            signalStrength: Math.random(),
+            distance: Math.random() > 0.6 ? 'near' : Math.random() > 0.3 ? 'medium' : 'far',
+          });
+          changed = true;
         }
       });
 
-      // Update contacts
-      setContacts(prevContacts => {
-        const updatedContacts = [...prevContacts];
-        const existingPeerIds = new Set(prevContacts.map(c => c.id));
+      messageSenders.forEach((peerId) => {
+        if (!contactMap.has(peerId)) {
+          contactMap.set(peerId, {
+            id: peerId,
+            name: resolvePeerName(peerId),
+            avatar: undefined,
+            isOnline: discoveredPeers.has(peerId),
+            lastSeen: now,
+            signalStrength: Math.random(),
+            distance: Math.random() > 0.6 ? 'near' : Math.random() > 0.3 ? 'medium' : 'far',
+          });
+          changed = true;
+        }
+      });
 
-        // Add new discovered peers
-        discoveredPeers.forEach(peerId => {
-          if (!existingPeerIds.has(peerId)) {
-            updatedContacts.push({
-              id: peerId,
-              name: `User ${peerId.slice(-4)}`,
-              isOnline: true,
-              lastSeen: Date.now(),
-              signalStrength: Math.random(),
-              distance: Math.random() > 0.6 ? 'near' : Math.random() > 0.3 ? 'medium' : 'far',
+      const nextContacts = Array.from(contactMap.values()).map((contact) => {
+        const isOnline = discoveredPeers.has(contact.id);
+        const profile = updatedProfiles[contact.id];
+        const name = profile?.name ?? contact.name;
+        const lastSeen = isOnline ? now : contact.lastSeen;
+        if (name !== contact.name || isOnline !== contact.isOnline || lastSeen !== contact.lastSeen) {
+          changed = true;
+          return {
+            ...contact,
+            name,
+            isOnline,
+            lastSeen,
+          };
+        }
+        return contact;
+      });
+
+      return changed ? nextContacts : prevContacts;
+    });
+
+    if (receivedMessages.length > 0) {
+      setChats((prevChats) => {
+        const updatedChats = [...prevChats];
+
+        receivedMessages.forEach((message) => {
+          const existingChatIndex = updatedChats.findIndex((chat) => chat.peerId === message.senderId);
+          if (existingChatIndex >= 0) {
+            const existingChat = updatedChats[existingChatIndex];
+            const nextMessages = [...existingChat.messages, message];
+            updatedChats[existingChatIndex] = {
+              ...existingChat,
+              peerName: resolvePeerName(message.senderId),
+              lastMessage: message,
+              unreadCount: existingChat.unreadCount + 1,
+              isOnline: discoveredPeers.has(message.senderId) || existingChat.isOnline,
+              messages: nextMessages,
+            };
+          } else {
+            updatedChats.push({
+              id: message.senderId,
+              peerId: message.senderId,
+              peerName: resolvePeerName(message.senderId),
+              lastMessage: message,
+              unreadCount: 1,
+              isOnline: discoveredPeers.has(message.senderId),
+              messages: [message],
             });
           }
         });
 
-        // Update online status
-        return updatedContacts.map(contact => ({
-          ...contact,
-          isOnline: discoveredPeers.has(contact.id),
-          lastSeen: discoveredPeers.has(contact.id) ? Date.now() : contact.lastSeen,
-        }));
+        return updatedChats;
       });
+    }
 
-      // Update chats with received messages
-      if (receivedMessages.length > 0) {
-        setChats(prevChats => {
-          const updatedChats = [...prevChats];
-          
-          receivedMessages.forEach(message => {
-            const existingChatIndex = updatedChats.findIndex(
-              chat => chat.peerId === message.senderId
-            );
-            
-            if (existingChatIndex >= 0) {
-              updatedChats[existingChatIndex] = {
-                ...updatedChats[existingChatIndex],
-                lastMessage: message,
-                unreadCount: updatedChats[existingChatIndex].unreadCount + 1,
-                messages: [...updatedChats[existingChatIndex].messages, message],
-              };
-            } else {
-              // Create new chat for new sender
-              const newChat: Chat = {
-                id: message.senderId,
-                peerId: message.senderId,
-                peerName: `User ${message.senderId.slice(-4)}`,
-                lastMessage: message,
-                unreadCount: 1,
-                isOnline: discoveredPeers.has(message.senderId),
-                messages: [message],
-              };
-              updatedChats.push(newChat);
+    if (
+      sentMessageIds.size > 0 ||
+      deliveredMessageIds.size > 0 ||
+      failedMessageIds.size > 0 ||
+      profilesChanged
+    ) {
+      setChats((prevChats) => {
+        let updated = false;
+
+        const nextChats = prevChats.map((chat) => {
+          let nextChat = chat;
+
+          const profile = updatedProfiles[chat.peerId];
+          if (profile && profile.name.trim().length > 0 && profile.name.trim() !== chat.peerName) {
+            nextChat = {
+              ...nextChat,
+              peerName: profile.name.trim(),
+            };
+            updated = true;
+          }
+
+          let messagesChanged = false;
+          const nextMessages = nextChat.messages.map((message): Message => {
+            if (failedMessageIds.has(message.id) && message.status !== 'failed') {
+              console.warn(`[ProtocolProvider] Message ${message.id} marked as failed`);
+              messagesChanged = true;
+              return { ...message, status: 'failed' };
             }
+            if (deliveredMessageIds.has(message.id) && message.status !== 'delivered') {
+              console.log(`[ProtocolProvider] Message ${message.id} marked as delivered`);
+              messagesChanged = true;
+              return { ...message, status: 'delivered' };
+            }
+            if (sentMessageIds.has(message.id) && message.status === 'sending') {
+              console.log(`[ProtocolProvider] Message ${message.id} marked as sent`);
+              messagesChanged = true;
+              return { ...message, status: 'sent' };
+            }
+            return message;
           });
-          
-          return updatedChats;
-        });
-      }
-    };
 
-    processEvents();
-  }, [events, currentUserId]);
+          if (messagesChanged) {
+            updated = true;
+            const lastMessage = nextMessages[nextMessages.length - 1] ?? nextChat.lastMessage;
+            return {
+              ...nextChat,
+              messages: nextMessages,
+              lastMessage,
+            };
+          }
+
+          return nextChat;
+        });
+
+        return updated ? nextChats : prevChats;
+      });
+    }
+
+    pruneProcessedMessages();
+  }, [events, currentUserId, peerProfiles, processedIncomingMessageIdsRef]);
+
+  // Reset presence broadcast cache when the local user name changes
+  useEffect(() => {
+    setPresenceSentPeers((prev) => {
+      if (Object.keys(prev).length === 0) {
+        return prev;
+      }
+      return {};
+    });
+  }, [currentUserName]);
+
+  // Broadcast presence to online peers periodically
+  useEffect(() => {
+    if (!isOnline || contacts.length === 0) {
+      return;
+    }
+    const now = Date.now();
+    contacts.forEach((contact) => {
+      if (!contact.isOnline) {
+        return;
+      }
+      const lastSent = presenceSentPeers[contact.id];
+      if (!lastSent || now - lastSent > PRESENCE_REBROADCAST_INTERVAL_MS) {
+        void sendPresenceToPeer(contact.id);
+      }
+    });
+  }, [contacts, presenceSentPeers, isOnline, sendPresenceToPeer]);
 
   // Get analytics data
   const getAnalytics = useCallback(() => {
