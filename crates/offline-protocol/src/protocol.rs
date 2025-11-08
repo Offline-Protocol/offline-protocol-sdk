@@ -1,11 +1,12 @@
 //! Main protocol engine.
 
 use crate::{Event, EventCallback, ProtocolConfig, Result, TransportManager};
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
 use offline_protocol_transport::TransportType;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Protocol state.
@@ -47,9 +48,19 @@ impl SharedState {
     }
 }
 
+#[derive(Clone)]
+struct OutboxEntry {
+    message: Message,
+    attempt_count: u32,
+    first_sent_at: DateTime<Utc>,
+    last_sent_at: DateTime<Utc>,
+    last_transport: Option<TransportType>,
+}
+
 const ACK_FOR_KEY: &str = "ack_for";
 const ACK_HOP_COUNT_KEY: &str = "ack_hop_count";
 const ACK_TRANSPORT_KEY: &str = "ack_transport";
+const MAX_OUTBOX_ENTRIES: usize = 500;
 
 /// Main entry point for the Offline Protocol SDK.
 ///
@@ -82,6 +93,9 @@ pub struct OfflineProtocol {
 
     /// Shared mutable state.
     shared_state: Arc<Mutex<SharedState>>,
+
+    /// Messages awaiting delivery/acknowledgment (store-and-forward outbox).
+    outbox: HashMap<MessageId, OutboxEntry>,
 }
 
 impl OfflineProtocol {
@@ -115,6 +129,7 @@ impl OfflineProtocol {
             retry_queue: RetryQueue::with_config(config.reliability.retry.clone()),
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),
             shared_state: Arc::new(Mutex::new(SharedState::new())),
+            outbox: HashMap::new(),
             config,
         })
     }
@@ -220,11 +235,20 @@ impl OfflineProtocol {
 
                     let state = self.shared_state.lock().unwrap();
                     state.emit_event(Event::message_delivered(
-                        message_id, latency, hop_count, transport,
+                        message_id.clone(),
+                        latency,
+                        hop_count,
+                        transport,
                     ));
                     drop(state);
 
                     self.transport_manager.reset_retry_count(transport);
+                    self.transport_manager.record_delivery_success(
+                        transport,
+                        latency.min(u32::MAX as u64) as u32,
+                        hop_count,
+                    );
+                    self.remove_outbox_entry(&message_id);
                 }
             }
         }
@@ -301,14 +325,38 @@ impl OfflineProtocol {
         // Mark as seen
         self.deduplicator.mark_seen(message_id.clone());
 
-        // Track previous transport
+        // Track previous transport before sending
         let previous_transport = self.transport_manager.current_transport();
 
-        // Send via transport manager (DORS will select best transport)
-        self.transport_manager.send(&message)?;
+        // Attempt to send via transport manager (DORS will select best transport)
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
+        match send_result {
+            Ok(()) => {
+                self.mark_message_sent(&message, current_transport, Some(1));
+                self.ensure_ack_registration(&message)?;
+            }
+            Err(err) => {
+                // Persist message to outbox and schedule retry
+                self.ensure_outbox_entry(&message);
+                if let Err(enqueue_err) = self.retry_queue.enqueue(message.clone(), 0) {
+                    return Err(enqueue_err.into());
+                }
+
+                if let Some(transport) = current_transport.or(previous_transport) {
+                    self.transport_manager.record_retry_failure(transport);
+                }
+
+                eprintln!(
+                    "⚠️ Deferred message {} due to send error: {}",
+                    message.id.as_str(),
+                    err
+                );
+            }
+        }
 
         // Check if transport switched
-        let current_transport = self.transport_manager.current_transport();
         if current_transport != previous_transport {
             if let Some(new_transport) = current_transport {
                 let state = self.shared_state.lock().unwrap();
@@ -318,12 +366,6 @@ impl OfflineProtocol {
                     "DORS selected better transport".to_string(),
                 ));
             }
-        }
-
-        // Register for ACK if required
-        if message.requires_ack {
-            self.ack_manager
-                .register_pending_ack(message_id.clone(), None)?;
         }
 
         // Emit MessageSent event
@@ -423,6 +465,8 @@ impl OfflineProtocol {
             // Track which transport was used for retry
             let previous_transport = self.transport_manager.current_transport();
 
+            self.ensure_outbox_entry(&entry.message);
+
             // Try to resend
             if self.transport_manager.send(&entry.message).is_err() {
                 // Re-enqueue with incremented retry count
@@ -435,40 +479,94 @@ impl OfflineProtocol {
                     self.transport_manager.record_retry_failure(transport);
                 }
             } else {
-                // Reset ACK timer
-                self.ack_manager.increment_retry_count(&entry.message.id);
+                let current_transport = self.transport_manager.current_transport();
+                let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
 
+                if !ack_registered_now {
+                    self.ack_manager.increment_retry_count(&entry.message.id);
+                }
+                self.mark_message_sent(
+                    &entry.message,
+                    current_transport,
+                    Some(entry.retry_count.saturating_add(1)),
+                );
+
+                // Reset ACK timer
                 // Record retry success for DORS
-                if let Some(transport) = self.transport_manager.current_transport() {
+                if let Some(transport) = current_transport {
                     self.transport_manager.reset_retry_count(transport);
                 }
             }
         }
 
         // Check for timed out ACKs
-        let timed_out = self.ack_manager.get_timed_out_acks();
-        for message_id in timed_out {
-            // Try to get the pending ACK info
-            if let Some(pending) = self.ack_manager.get_pending_ack(&message_id) {
-                // Emit MessageFailed event if max retries exceeded
-                if pending.retry_count >= self.config.reliability.retry.max_retries {
-                    let state = self.shared_state.lock().unwrap();
-                    state.emit_event(Event::message_failed(
-                        message_id.clone(),
-                        "Max retries exceeded".to_string(),
-                        pending.retry_count,
-                    ));
-                    drop(state);
+        let timed_out = self.ack_manager.drain_timed_out();
+        for pending in timed_out {
+            let message_id = pending.message_id.clone();
 
-                    // Remove from ACK manager
-                    self.ack_manager.remove_ack(&message_id);
+            if pending.retry_count >= self.config.reliability.retry.max_retries {
+                let state = self.shared_state.lock().unwrap();
+                state.emit_event(Event::message_failed(
+                    message_id.clone(),
+                    "Max retries exceeded".to_string(),
+                    pending.retry_count,
+                ));
+                drop(state);
+
+                self.ack_manager.remove_ack(&message_id);
+                if let Some(entry) = self.remove_outbox_entry(&message_id) {
+                    if let Some(transport) = entry.last_transport {
+                        self.transport_manager.record_delivery_failure(transport);
+                    }
                 }
+                continue;
+            }
+
+            if let Some(entry) = self.outbox.get(&message_id) {
+                let message_clone = entry.message.clone();
+                let last_transport = entry.last_transport;
+
+                match self.retry_queue.enqueue(message_clone, pending.retry_count) {
+                    Ok(()) => {
+                        if let Some(transport) = last_transport {
+                            self.transport_manager.record_retry_failure(transport);
+                        }
+                    }
+                    Err(_) => {
+                        let state = self.shared_state.lock().unwrap();
+                        state.emit_event(Event::message_failed(
+                            message_id.clone(),
+                            "Retry queue unavailable".to_string(),
+                            pending.retry_count,
+                        ));
+                        drop(state);
+
+                        self.ack_manager.remove_ack(&message_id);
+                        if let Some(entry) = self.remove_outbox_entry(&message_id) {
+                            if let Some(transport) = entry.last_transport {
+                                self.transport_manager.record_delivery_failure(transport);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No outbox entry - treat as failure
+                let state = self.shared_state.lock().unwrap();
+                state.emit_event(Event::message_failed(
+                    message_id.clone(),
+                    "Message missing from outbox (cannot retry)".to_string(),
+                    pending.retry_count,
+                ));
+                drop(state);
+
+                self.ack_manager.remove_ack(&message_id);
             }
         }
 
         // Cleanup expired entries
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
+        self.cleanup_outbox();
 
         // Check for DORS escalation signal
         if self.transport_manager.should_escalate_to_wifi() {
@@ -515,12 +613,125 @@ impl OfflineProtocol {
     pub fn transport_manager(&self) -> &TransportManager {
         &self.transport_manager
     }
+
+    fn ensure_outbox_entry(&mut self, message: &Message) {
+        if !message.requires_ack {
+            return;
+        }
+
+        if !self.outbox.contains_key(&message.id) && self.outbox.len() >= MAX_OUTBOX_ENTRIES {
+            if let Some((oldest_id, last_transport)) = self
+                .outbox
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_sent_at)
+                .map(|(id, entry)| (id.clone(), entry.last_transport))
+            {
+                if let Some(transport) = last_transport {
+                    self.transport_manager.record_delivery_failure(transport);
+                }
+                self.outbox.remove(&oldest_id);
+            }
+        }
+
+        self.outbox
+            .entry(message.id.clone())
+            .or_insert_with(|| OutboxEntry {
+                message: message.clone(),
+                attempt_count: 0,
+                first_sent_at: Utc::now(),
+                last_sent_at: Utc::now(),
+                last_transport: None,
+            });
+    }
+
+    fn mark_message_sent(
+        &mut self,
+        message: &Message,
+        transport: Option<TransportType>,
+        attempt_hint: Option<u32>,
+    ) {
+        if !message.requires_ack {
+            return;
+        }
+
+        let now = Utc::now();
+        let entry = self
+            .outbox
+            .entry(message.id.clone())
+            .or_insert_with(|| OutboxEntry {
+                message: message.clone(),
+                attempt_count: 0,
+                first_sent_at: now,
+                last_sent_at: now,
+                last_transport: transport,
+            });
+
+        entry.message = message.clone();
+        if entry.attempt_count == 0 {
+            entry.first_sent_at = now;
+        }
+        entry.attempt_count = attempt_hint.unwrap_or(entry.attempt_count.saturating_add(1));
+        entry.last_sent_at = now;
+        entry.last_transport = transport;
+    }
+
+    fn remove_outbox_entry(&mut self, message_id: &MessageId) -> Option<OutboxEntry> {
+        self.outbox.remove(message_id)
+    }
+
+    fn cleanup_outbox(&mut self) {
+        if self.outbox.is_empty() {
+            return;
+        }
+
+        let cutoff = Utc::now()
+            - ChronoDuration::milliseconds(
+                self.config.reliability.retry.outbox_max_lifetime_ms as i64,
+            );
+
+        let mut expired_ids = Vec::new();
+        for (message_id, entry) in &self.outbox {
+            if entry.last_sent_at >= cutoff {
+                continue;
+            }
+
+            if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
+                continue;
+            }
+
+            expired_ids.push((message_id.clone(), entry.last_transport));
+        }
+
+        for (message_id, last_transport) in expired_ids {
+            if let Some(transport) = last_transport {
+                self.transport_manager.record_delivery_failure(transport);
+            }
+            self.outbox.remove(&message_id);
+        }
+    }
+
+    fn ensure_ack_registration(&mut self, message: &Message) -> Result<bool> {
+        if !message.requires_ack {
+            return Ok(false);
+        }
+
+        if self.ack_manager.is_waiting_for_ack(&message.id) {
+            Ok(false)
+        } else {
+            self.ack_manager
+                .register_pending_ack(message.id.clone(), None)?;
+            Ok(true)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
+    use std::thread;
+    use std::time::Duration;
 
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig::new("test-app", "user123")
@@ -675,6 +886,36 @@ mod tests {
 
         // Process should not fail
         assert!(protocol.process().is_ok());
+    }
+
+    #[test]
+    fn test_ack_timeout_requeues_message() {
+        let mut config = create_test_config();
+        config.reliability.ack.default_timeout_ms = 10;
+        config.reliability.retry.initial_delay_ms = 5;
+        config.reliability.retry.max_retries = 2;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
+
+        protocol.start().unwrap();
+
+        protocol.send_message("bob", "Hello!", None).unwrap();
+        assert_eq!(mock_transport.sent_messages().len(), 1);
+
+        thread::sleep(Duration::from_millis(15));
+        protocol.process().unwrap();
+        thread::sleep(Duration::from_millis(10));
+        protocol.process().unwrap();
+
+        assert!(
+            mock_transport.sent_messages().len() >= 2,
+            "Expected retry to resend message"
+        );
     }
 
     #[test]

@@ -105,6 +105,10 @@ interface ProtocolConfig {
     stabilityWindowSecs?: number; // Stability verification window (default: 8)
     poorSignalDurationSecs?: number; // Seconds RSSI must remain poor before escalating (default: 10)
     ttlEscalationThreshold?: number; // TTL value considered near exhaustion (default: 2)
+    congestionDurationSecs?: number; // Seconds congestion must persist before escalation (default: 10)
+    ttlEscalationHoldSecs?: number; // Seconds to keep TTL alarm active (default: 20)
+    historyWindowSize?: number; // Number of history samples for smoothing (default: 10)
+    queueRecoveryRatio?: number; // Queue ratio indicating congestion recovery (default: 0.5)
   };
   relay?: {                     // Relay configuration
     allowRelay?: boolean;       // Allow device to act as relay (default: true)

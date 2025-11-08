@@ -151,6 +151,13 @@ export class OfflineProtocol {
           stabilityWindowSecs: dorsSource.stabilityWindowSecs ?? 8,
           poorSignalDurationSecs: dorsSource.poorSignalDurationSecs ?? 10,
           ttlEscalationThreshold: dorsSource.ttlEscalationThreshold ?? 2,
+          congestionDurationSecs: dorsSource.congestionDurationSecs ?? 10,
+          ttlEscalationHoldSecs: dorsSource.ttlEscalationHoldSecs ?? 20,
+          historyWindowSize: Math.max(1, dorsSource.historyWindowSize ?? 10),
+          queueRecoveryRatio: Math.min(
+            1,
+            Math.max(0, dorsSource.queueRecoveryRatio ?? 0.5)
+          ),
         })
       : undefined;
 
@@ -751,8 +758,37 @@ export class OfflineProtocol {
     stabilityWindowSecs?: number;
     poorSignalDurationSecs?: number;
     ttlEscalationThreshold?: number;
+    congestionDurationSecs?: number;
+    ttlEscalationHoldSecs?: number;
+    historyWindowSize?: number;
+    queueRecoveryRatio?: number;
   }): Promise<void> {
-    return await OfflineProtocolNativeModule.updateDorsConfig(JSON.stringify(config));
+    const payload = { ...config };
+    if (payload.switchHysteresis !== undefined) {
+      payload.switchHysteresis = Math.max(0, payload.switchHysteresis);
+    }
+    if (payload.switchCooldownSecs !== undefined) {
+      payload.switchCooldownSecs = Math.max(0, payload.switchCooldownSecs);
+    }
+    if (payload.congestionDurationSecs !== undefined) {
+      payload.congestionDurationSecs = Math.max(0, payload.congestionDurationSecs);
+    }
+    if (payload.ttlEscalationHoldSecs !== undefined) {
+      payload.ttlEscalationHoldSecs = Math.max(1, payload.ttlEscalationHoldSecs);
+    }
+    if (payload.historyWindowSize !== undefined) {
+      payload.historyWindowSize = Math.max(
+        1,
+        Math.min(100, Math.round(payload.historyWindowSize))
+      );
+    }
+    if (payload.queueRecoveryRatio !== undefined) {
+      payload.queueRecoveryRatio = Math.min(
+        1,
+        Math.max(0, payload.queueRecoveryRatio)
+      );
+    }
+    return await OfflineProtocolNativeModule.updateDorsConfig(JSON.stringify(payload));
   }
   
   /**
@@ -770,6 +806,10 @@ export class OfflineProtocol {
     stabilityWindowSecs: number;
     poorSignalDurationSecs: number;
     ttlEscalationThreshold: number;
+    congestionDurationSecs: number;
+    ttlEscalationHoldSecs: number;
+    historyWindowSize: number;
+    queueRecoveryRatio: number;
   }> {
     return await OfflineProtocolNativeModule.getDorsConfig();
   }

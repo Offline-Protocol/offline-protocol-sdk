@@ -10,6 +10,7 @@ use offline_protocol_router::TransportSelector;
 use offline_protocol_transport::{Transport, TransportMetrics, TransportStatus, TransportType};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Manages multiple transports and handles transport selection.
 pub struct TransportManager {
@@ -21,6 +22,80 @@ pub struct TransportManager {
 
     /// Transport selector (DORS).
     selector: TransportSelector,
+
+    /// Locally observed delivery outcomes used to enrich transport metrics.
+    observations: HashMap<TransportType, ObservedStats>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ObservedStats {
+    success_count: u32,
+    failure_count: u32,
+    latency_ema: Option<f32>,
+    hop_ema: Option<f32>,
+    last_success_at: Option<Instant>,
+}
+
+impl ObservedStats {
+    fn record_success(&mut self, latency_ms: u32, hop_count: u8) {
+        self.success_count = self.success_count.saturating_add(1);
+        self.latency_ema = Some(update_ema(self.latency_ema, latency_ms as f32, 0.3));
+        self.hop_ema = Some(update_ema(self.hop_ema, hop_count as f32, 0.2));
+        self.last_success_at = Some(Instant::now());
+        self.compact();
+    }
+
+    fn record_failure(&mut self) {
+        self.failure_count = self.failure_count.saturating_add(1);
+        self.compact();
+    }
+
+    fn compact(&mut self) {
+        let total = self.success_count.saturating_add(self.failure_count);
+        if total > 10_000 {
+            self.success_count /= 2;
+            self.failure_count /= 2;
+        }
+    }
+
+    fn delivery_ratio(&self) -> Option<f32> {
+        let total = self.success_count + self.failure_count;
+        if total == 0 {
+            None
+        } else {
+            Some(self.success_count as f32 / total as f32)
+        }
+    }
+
+    fn drop_ratio(&self) -> Option<f32> {
+        self.delivery_ratio()
+            .map(|ratio| (1.0 - ratio).clamp(0.0, 1.0))
+    }
+
+    fn apply_to_metrics(&self, metrics: &mut TransportMetrics) {
+        if self.success_count + self.failure_count > 0 {
+            metrics.success_count = self.success_count;
+            metrics.failure_count = self.failure_count;
+            metrics.delivery_ratio = self.delivery_ratio();
+            metrics.drop_rate = self.drop_ratio();
+        }
+
+        if let Some(latency) = self.latency_ema {
+            metrics.latency_ms = Some(latency.round().clamp(0.0, u32::MAX as f32) as u32);
+        }
+
+        if let Some(hop) = self.hop_ema {
+            metrics.average_hop_count = Some(hop);
+        }
+    }
+}
+
+fn update_ema(current: Option<f32>, new_value: f32, alpha: f32) -> f32 {
+    let alpha = alpha.clamp(0.0, 1.0);
+    match current {
+        Some(existing) => existing * (1.0 - alpha) + new_value * alpha,
+        None => new_value,
+    }
 }
 
 impl TransportManager {
@@ -30,6 +105,7 @@ impl TransportManager {
             transports: HashMap::new(),
             current_transport: None,
             selector,
+            observations: HashMap::new(),
         }
     }
 
@@ -102,14 +178,18 @@ impl TransportManager {
             let transport_lock = transport.lock().unwrap();
             match transport_lock.receive() {
                 Ok(Some(message)) => {
-                    eprintln!("📨 TransportManager found message from {:?}: {} -> {}", 
-                        transport_type, message.sender.as_str(), message.recipient.as_str());
+                    eprintln!(
+                        "📨 TransportManager found message from {:?}: {} -> {}",
+                        transport_type,
+                        message.sender.as_str(),
+                        message.recipient.as_str()
+                    );
                     eprintln!("📬 Message content: {}", message.content);
                     return Ok(Some((*transport_type, message)));
-                },
+                }
                 Ok(None) => {
                     // No message from this transport, continue checking others
-                },
+                }
                 Err(e) => {
                     eprintln!("❌ Transport {:?} receive error: {}", transport_type, e);
                 }
@@ -127,9 +207,20 @@ impl TransportManager {
         let mut available = HashMap::new();
 
         for (transport_type, transport) in &self.transports {
-            let transport_lock = transport.lock().unwrap();
-            if transport_lock.status() == TransportStatus::Available {
-                available.insert(*transport_type, transport_lock.metrics());
+            let maybe_metrics = {
+                let transport_lock = transport.lock().unwrap();
+                if transport_lock.status() == TransportStatus::Available {
+                    Some(transport_lock.metrics())
+                } else {
+                    None
+                }
+            };
+
+            if let Some(mut metrics) = maybe_metrics {
+                if let Some(stats) = self.observations.get(transport_type) {
+                    stats.apply_to_metrics(&mut metrics);
+                }
+                available.insert(*transport_type, metrics);
             }
         }
 
@@ -183,6 +274,8 @@ impl TransportManager {
         if self.current_transport == Some(transport_type) {
             self.current_transport = None;
         }
+
+        self.observations.remove(&transport_type);
     }
 
     /// Gets a list of all active transport types.
@@ -207,6 +300,23 @@ impl TransportManager {
     /// Resets retry count for the given transport after successful delivery.
     pub fn reset_retry_count(&mut self, transport_type: TransportType) {
         self.selector.reset_retry_count(transport_type);
+    }
+
+    /// Records a successful end-to-end delivery for the given transport.
+    pub fn record_delivery_success(
+        &mut self,
+        transport_type: TransportType,
+        latency_ms: u32,
+        hop_count: u8,
+    ) {
+        let stats = self.observations.entry(transport_type).or_default();
+        stats.record_success(latency_ms, hop_count);
+    }
+
+    /// Records a delivery failure (after exhausting retries) for the given transport.
+    pub fn record_delivery_failure(&mut self, transport_type: TransportType) {
+        let stats = self.observations.entry(transport_type).or_default();
+        stats.record_failure();
     }
 }
 
@@ -273,5 +383,44 @@ mod tests {
 
         let received = manager.receive().unwrap();
         assert!(matches!(received, Some((TransportType::BLE, _))));
+    }
+
+    #[test]
+    fn test_record_delivery_success_enriches_metrics() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        manager.record_delivery_success(TransportType::BLE, 150, 2);
+
+        let metrics = manager.get_available_transports();
+        let ble_metrics = metrics.get(&TransportType::BLE).expect("metrics");
+
+        assert_eq!(ble_metrics.success_count, 1);
+        assert_eq!(ble_metrics.failure_count, 0);
+        assert!(ble_metrics.delivery_ratio.expect("delivery ratio") > 0.99);
+        assert_eq!(ble_metrics.average_hop_count, Some(2.0));
+        assert_eq!(ble_metrics.latency_ms, Some(150));
+    }
+
+    #[test]
+    fn test_record_delivery_failure_enriches_metrics() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        manager.record_delivery_failure(TransportType::BLE);
+        let metrics = manager.get_available_transports();
+        let ble_metrics = metrics.get(&TransportType::BLE).expect("metrics");
+
+        assert_eq!(ble_metrics.success_count, 0);
+        assert_eq!(ble_metrics.failure_count, 1);
+        assert!(ble_metrics.drop_rate.expect("drop ratio") > 0.99);
     }
 }

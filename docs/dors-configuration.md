@@ -15,6 +15,8 @@ DORS evaluates each available transport using multiple factors:
 3. **Bandwidth** (throughput capability)
 4. **Congestion** (queue depth and failure rate)
 5. **Energy Efficiency** (battery impact)
+6. **Reliability** (recent delivery success ratio)
+7. **Available Capacity** (current queue pressure / load)
 
 Each factor is scored 0-100, then weighted according to the transport type's characteristics.
 
@@ -22,23 +24,33 @@ Each factor is scored 0-100, then weighted according to the transport type's cha
 
 **BLE Transport:**
 ```
-Total Score = (Signal × 0.3) + (Energy × 0.3) + (Congestion × 0.2) + (Proximity × 0.2)
+Total Score = (Signal × 0.30) + (Energy × 0.30) + (Congestion × 0.15)
+            + (Proximity × 0.15) + (Reliability × 0.05) + (Load × 0.05)
 ```
-- Optimized for energy efficiency and signal quality
+- Optimized for energy efficiency, signal quality, and available capacity
 - Best for: Dense urban areas, low-power devices, short-range mesh
 
 **WiFi Direct Transport:**
 ```
-Total Score = (Bandwidth × 0.4) + (Proximity × 0.3) + (Congestion × 0.3)
+Total Score = (Bandwidth × 0.35) + (Proximity × 0.20) + (Congestion × 0.20)
+            + (Reliability × 0.15) + (Load × 0.10)
 ```
 - Optimized for high throughput and direct peer connections
 - Best for: File transfers, video streaming, high-bandwidth needs
 
 **Internet Transport:**
 ```
-Total Score = 100 (if preferOnline: true) or 0 (if preferOnline: false)
+Baseline Score = preferOnline ? 20 : 0
+Total Score = clamp(
+  Baseline
+  + (Bandwidth × 0.40)
+  + (Reliability × 0.30)
+  + (Congestion × 0.20)
+  + (Energy × 0.10),
+  0, 100
+)
 ```
-- Binary decision based on online-first vs offline-first mode
+- Prioritises server connectivity while still considering reliability and congestion
 - Best for: Hybrid apps with server infrastructure
 
 ### Switching Algorithm
@@ -55,8 +67,9 @@ Only when all three conditions are met will DORS switch transports.
 
 DORS can automatically escalate from BLE to WiFi Direct when:
 - BLE retry failures reach threshold (default: 2 failures)
-- RSSI drops below threshold (default: -85 dBm)
-- Queue depth exceeds congestion threshold (default: 50 messages)
+- RSSI stays below the threshold for `poorSignalDurationSecs` seconds (default: 10s)
+- Queue depth stays above `congestionQueueThreshold` for `congestionDurationSecs` seconds (default: 10s)
+- Messages repeatedly approach TTL exhaustion (≤ `ttlEscalationThreshold`, default: 2)
 
 ## Configuration Parameters
 
@@ -97,6 +110,10 @@ const config = {
     stabilityWindowSecs: 8,
     poorSignalDurationSecs: 10,
     ttlEscalationThreshold: 2,
+    congestionDurationSecs: 10,
+    ttlEscalationHoldSecs: 20,
+    historyWindowSize: 10,
+    queueRecoveryRatio: 0.5,
   },
 };
 ```
@@ -114,6 +131,10 @@ const config = {
 | `stabilityWindowSecs` | number | `8` | 1-60 | Duration to verify new transport stability |
 | `poorSignalDurationSecs` | number | `10` | 1-60 | Seconds RSSI must remain below threshold before escalating |
 | `ttlEscalationThreshold` | number | `2` | 1-6 | TTL value considered near exhaustion for escalation logic |
+| `congestionDurationSecs` | number | `10` | 0-120 | Seconds congestion must persist before escalating to WiFi Direct |
+| `ttlEscalationHoldSecs` | number | `20` | 1-120 | Seconds to keep TTL escalation flag active after detection |
+| `historyWindowSize` | number | `10` | 5-50 | Number of historical samples retained for smoothing scores |
+| `queueRecoveryRatio` | number | `0.5` | 0.1-0.9 | Queue ratio that clears congestion flag (e.g., 0.5 = 50% of threshold) |
 
 ## Use Case Examples
 

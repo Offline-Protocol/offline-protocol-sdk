@@ -41,6 +41,8 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
     preferOnline: false,
     switchHysteresis: 10,  // More aggressive switching
     ble_to_wifi_retry_threshold: 1,  // Switch faster
+    congestionDurationSecs: 5,  // Require 5s sustained congestion before escalating
+    ttlEscalationHoldSecs: 30,  // Keep TTL alarm active for 30s
   },
   
   relay: {
@@ -85,6 +87,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
     preferOnline: true,  // Online-first
     switchHysteresis: 15,
     switchCooldownSecs: 20,
+    historyWindowSize: 12,
   },
   
   relay: {
@@ -117,6 +120,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   dors: {
     preferOnline: true,
     ble_to_wifi_retry_threshold: 1,  // Quick escalation to WiFi
+    queueRecoveryRatio: 0.4,  // De-escalate when queues recover to 40%
   },
   
   relay: {

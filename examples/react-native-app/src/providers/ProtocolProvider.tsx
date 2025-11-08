@@ -133,6 +133,10 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       stabilityWindowSecs: 8,
       poorSignalDurationSecs: 10,
       ttlEscalationThreshold: 2,
+      congestionDurationSecs: 10,
+      ttlEscalationHoldSecs: 20,
+      historyWindowSize: 10,
+      queueRecoveryRatio: 0.5,
     },
     relay: {
       allowRelay: true,

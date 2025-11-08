@@ -2556,6 +2556,14 @@ data class DorsConfig (
     var `poorSignalDurationSecs`: kotlin.ULong
     , 
     var `ttlEscalationThreshold`: kotlin.UByte
+    , 
+    var `congestionDurationSecs`: kotlin.ULong
+    , 
+    var `ttlEscalationHoldSecs`: kotlin.ULong
+    , 
+    var `historyWindowSize`: kotlin.ULong
+    , 
+    var `queueRecoveryRatio`: kotlin.Float
     
 ){
     
@@ -2579,6 +2587,10 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterUByte.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterFloat.read(buf),
         )
     }
 
@@ -2591,7 +2603,11 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterULong.allocationSize(value.`congestionQueueThreshold`) +
             FfiConverterULong.allocationSize(value.`stabilityWindowSecs`) +
             FfiConverterULong.allocationSize(value.`poorSignalDurationSecs`) +
-            FfiConverterUByte.allocationSize(value.`ttlEscalationThreshold`)
+            FfiConverterUByte.allocationSize(value.`ttlEscalationThreshold`) +
+            FfiConverterULong.allocationSize(value.`congestionDurationSecs`) +
+            FfiConverterULong.allocationSize(value.`ttlEscalationHoldSecs`) +
+            FfiConverterULong.allocationSize(value.`historyWindowSize`) +
+            FfiConverterFloat.allocationSize(value.`queueRecoveryRatio`)
     )
 
     override fun write(value: DorsConfig, buf: ByteBuffer) {
@@ -2604,6 +2620,10 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterULong.write(value.`stabilityWindowSecs`, buf)
             FfiConverterULong.write(value.`poorSignalDurationSecs`, buf)
             FfiConverterUByte.write(value.`ttlEscalationThreshold`, buf)
+            FfiConverterULong.write(value.`congestionDurationSecs`, buf)
+            FfiConverterULong.write(value.`ttlEscalationHoldSecs`, buf)
+            FfiConverterULong.write(value.`historyWindowSize`, buf)
+            FfiConverterFloat.write(value.`queueRecoveryRatio`, buf)
     }
 }
 

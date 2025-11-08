@@ -75,6 +75,13 @@ impl Transport for MockTransport {
         let mut metrics = self.metrics.lock().unwrap();
         metrics.success_count += 1;
         metrics.queue_depth = metrics.queue_depth.saturating_sub(1);
+        metrics.congestion = (metrics.queue_depth as f32 / 10.0).clamp(0.0, 1.0);
+        let total = metrics.success_count + metrics.failure_count;
+        if total > 0 {
+            let ratio = metrics.success_count as f32 / total as f32;
+            metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
+            metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+        }
 
         Ok(())
     }

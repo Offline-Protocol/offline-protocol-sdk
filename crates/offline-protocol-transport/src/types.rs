@@ -44,6 +44,7 @@ impl fmt::Display for TransportType {
 }
 /// Transport metrics for monitoring and decision making.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TransportMetrics {
     /// Received Signal Strength Indicator in dBm.
     pub rssi: Option<i16>,
@@ -59,6 +60,22 @@ pub struct TransportMetrics {
     pub success_count: u32,
     /// Number of failed sends in last minute.
     pub failure_count: u32,
+    /// Battery level of the hosting device (0-100).
+    pub battery_level: Option<u8>,
+    /// Indicates if the device is currently charging.
+    pub is_charging: bool,
+    /// Number of concurrent connections participating in relay duties.
+    pub relay_connection_count: u8,
+    /// Whether this node is actively acting as a relay on this transport.
+    pub is_active_relay: bool,
+    /// Recently observed end-to-end delivery ratio (0.0-1.0).
+    pub delivery_ratio: Option<f32>,
+    /// Recently observed drop rate (0.0-1.0).
+    pub drop_rate: Option<f32>,
+    /// Average hop count recorded for messages on this transport.
+    pub average_hop_count: Option<f32>,
+    /// Estimated per-byte energy cost (abstract units, higher is more expensive).
+    pub energy_cost: Option<f32>,
 }
 
 impl Default for TransportMetrics {
@@ -71,7 +88,50 @@ impl Default for TransportMetrics {
             queue_depth: 0,
             success_count: 0,
             failure_count: 0,
+            battery_level: None,
+            is_charging: false,
+            relay_connection_count: 0,
+            is_active_relay: false,
+            delivery_ratio: None,
+            drop_rate: None,
+            average_hop_count: None,
+            energy_cost: None,
         }
+    }
+}
+
+impl TransportMetrics {
+    /// Calculates the effective delivery ratio, falling back to success/failure counters.
+    pub fn effective_delivery_ratio(&self) -> Option<f32> {
+        if let Some(ratio) = self.delivery_ratio {
+            return Some(ratio.clamp(0.0, 1.0));
+        }
+
+        let total = self.success_count + self.failure_count;
+        if total == 0 {
+            None
+        } else {
+            Some((self.success_count as f32 / total as f32).clamp(0.0, 1.0))
+        }
+    }
+
+    /// Calculates the effective drop ratio, falling back to success/failure counters.
+    pub fn effective_drop_ratio(&self) -> Option<f32> {
+        if let Some(rate) = self.drop_rate {
+            return Some(rate.clamp(0.0, 1.0));
+        }
+
+        let total = self.success_count + self.failure_count;
+        if total == 0 {
+            None
+        } else {
+            Some((self.failure_count as f32 / total as f32).clamp(0.0, 1.0))
+        }
+    }
+
+    /// Returns the total number of success/failure samples tracked.
+    pub fn sample_count(&self) -> u32 {
+        self.success_count + self.failure_count
     }
 }
 

@@ -11,7 +11,9 @@ use offline_protocol::{
     OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
-use offline_protocol_transport::{ble::BleTransport, Transport, TransportType as CoreTransportType};
+use offline_protocol_transport::{
+    ble::BleTransport, Transport, TransportType as CoreTransportType,
+};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
@@ -182,6 +184,10 @@ pub struct DorsConfig {
     pub stability_window_secs: u64,
     pub poor_signal_duration_secs: u64,
     pub ttl_escalation_threshold: u8,
+    pub congestion_duration_secs: u64,
+    pub ttl_escalation_hold_secs: u64,
+    pub history_window_size: u64,
+    pub queue_recovery_ratio: f32,
 }
 
 /// ACK configuration
@@ -327,10 +333,9 @@ impl OfflineProtocol {
         // The transport manager owns the transport, and we'll access it through there
         if ble_enabled {
             let ble_transport = BleTransport::new(user_id.clone());
-            protocol.transport_manager_mut().add_transport(
-                CoreTransportType::BLE,
-                Box::new(ble_transport),
-            );
+            protocol
+                .transport_manager_mut()
+                .add_transport(CoreTransportType::BLE, Box::new(ble_transport));
         }
 
         // Create the event queue and callback that will be shared with the event handler
@@ -389,7 +394,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         protocol.start().map_err(ProtocolError::from)?;
         *self.state.write().unwrap() = ProtocolState::Running;
-        
+
         // Ensure BLE transport is set to Available immediately when protocol starts
         // This fixes the issue where messages get stuck because BLE transport status is Unavailable
         if let Some(transport_arc) = protocol
@@ -399,10 +404,11 @@ impl OfflineProtocol {
             let transport = transport_arc.lock().unwrap();
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 // Force BLE transport to Available status - the native layer will manage actual BLE availability
-                ble_transport.on_status_changed(offline_protocol_transport::TransportStatus::Available);
+                ble_transport
+                    .on_status_changed(offline_protocol_transport::TransportStatus::Available);
             }
         }
-        
+
         drop(protocol);
 
         // Emit a network metrics event when started to verify event system is working
@@ -516,7 +522,7 @@ impl OfflineProtocol {
         priority: MessagePriority,
     ) -> Result<String, ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
-        
+
         // CRITICAL FIX: Ensure BLE transport is available before attempting to send
         if let Some(transport_arc) = protocol
             .transport_manager()
@@ -524,13 +530,15 @@ impl OfflineProtocol {
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available {
+                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available
+                {
                     // Force status to Available if BLE is supposed to be enabled
-                    ble_transport.on_status_changed(offline_protocol_transport::TransportStatus::Available);
+                    ble_transport
+                        .on_status_changed(offline_protocol_transport::TransportStatus::Available);
                 }
             }
         }
-        
+
         let message_id = protocol
             .send_message(&recipient, &content, Some(priority.into()))
             .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
@@ -617,11 +625,11 @@ impl OfflineProtocol {
                 } else {
                     offline_protocol_transport::TransportStatus::Unavailable
                 };
-                
+
                 ble_transport.on_status_changed(new_status);
             }
         }
-        
+
         Ok(())
     }
 
@@ -643,9 +651,9 @@ impl OfflineProtocol {
                 // Safe downcast to BleTransport using Any trait
                 if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                     // Process the fragment
-                    ble_transport
-                        .on_fragment_received(fragment)
-                        .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
+                    ble_transport.on_fragment_received(fragment).map_err(|e| {
+                        ProtocolError::Other(format!("Fragment processing failed: {}", e))
+                    })?;
                 } else {
                     return Err(ProtocolError::Other(
                         "BLE transport not available or wrong type".to_string(),
@@ -678,10 +686,12 @@ impl OfflineProtocol {
             // Safe downcast to BleTransport using Any trait
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 // Ensure BLE is available for fragment polling
-                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available {
-                    ble_transport.on_status_changed(offline_protocol_transport::TransportStatus::Available);
+                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available
+                {
+                    ble_transport
+                        .on_status_changed(offline_protocol_transport::TransportStatus::Available);
                 }
-                
+
                 // Get next fragment
                 if let Ok(Some((recipient, data))) = ble_transport.get_next_fragment() {
                     return Some(BleFragment {
@@ -1067,6 +1077,10 @@ impl OfflineProtocol {
             stability_window_secs: 8,
             poor_signal_duration_secs: 10,
             ttl_escalation_threshold: 2,
+            congestion_duration_secs: 10,
+            ttl_escalation_hold_secs: 20,
+            history_window_size: 10,
+            queue_recovery_ratio: 0.5,
         }
     }
 }

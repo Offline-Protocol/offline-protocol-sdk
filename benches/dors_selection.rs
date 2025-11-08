@@ -28,6 +28,14 @@ fn create_transport_metrics() -> HashMap<TransportType, TransportMetrics> {
             queue_depth: 5,
             success_count: 95,
             failure_count: 5,
+            battery_level: Some(78),
+            is_charging: false,
+            relay_connection_count: 4,
+            is_active_relay: true,
+            delivery_ratio: Some(0.95),
+            drop_rate: Some(0.05),
+            average_hop_count: Some(2.1),
+            energy_cost: Some(0.15),
         },
     );
 
@@ -41,6 +49,14 @@ fn create_transport_metrics() -> HashMap<TransportType, TransportMetrics> {
             queue_depth: 0,
             success_count: 99,
             failure_count: 1,
+            battery_level: Some(82),
+            is_charging: true,
+            relay_connection_count: 1,
+            is_active_relay: false,
+            delivery_ratio: Some(0.99),
+            drop_rate: Some(0.01),
+            average_hop_count: Some(1.1),
+            energy_cost: Some(0.05),
         },
     );
 
@@ -54,6 +70,14 @@ fn create_transport_metrics() -> HashMap<TransportType, TransportMetrics> {
             queue_depth: 2,
             success_count: 98,
             failure_count: 2,
+            battery_level: Some(76),
+            is_charging: false,
+            relay_connection_count: 5,
+            is_active_relay: true,
+            delivery_ratio: Some(0.96),
+            drop_rate: Some(0.04),
+            average_hop_count: Some(1.5),
+            energy_cost: Some(0.25),
         },
     );
 

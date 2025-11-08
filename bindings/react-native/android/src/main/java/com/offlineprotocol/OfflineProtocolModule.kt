@@ -5,6 +5,8 @@ import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.max
+import kotlin.math.min
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -92,16 +94,29 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun applyInitialRuntimeConfig(proto: OfflineProtocol, json: JSONObject) {
         json.optJSONObject("dors")?.let { dorsJson ->
             try {
+                val historyWindowSize = dorsJson
+                    .optLong("historyWindowSize", dorsJson.optLong("history_window_size", 10L))
+                    .let { max(1L, min(100L, it)) }
+                    .toULong()
+                val queueRecoveryRatio = dorsJson
+                    .optDouble("queueRecoveryRatio", dorsJson.optDouble("queue_recovery_ratio", 0.5))
+                    .toFloat()
+                    .coerceIn(0f, 1f)
+
                 val dorsConfig = DorsConfig(
                     preferOnline = dorsJson.optBoolean("preferOnline", dorsJson.optBoolean("prefer_online", false)),
-                    switchHysteresis = dorsJson.optDouble("switchHysteresis", dorsJson.optDouble("switch_hysteresis", 15.0)).toFloat(),
-                    switchCooldownSecs = dorsJson.optLong("switchCooldownSecs", dorsJson.optLong("switch_cooldown_secs", 20L)).toULong(),
+                    switchHysteresis = dorsJson.optDouble("switchHysteresis", dorsJson.optDouble("switch_hysteresis", 15.0)).toFloat().coerceAtLeast(0f),
+                    switchCooldownSecs = dorsJson.optLong("switchCooldownSecs", dorsJson.optLong("switch_cooldown_secs", 20L)).coerceAtLeast(0).toULong(),
                     bleToWifiRetryThreshold = dorsJson.optInt("bleToWifiRetryThreshold", dorsJson.optInt("ble_to_wifi_retry_threshold", 2)).toUInt(),
                     rssiSwitchThreshold = dorsJson.optInt("rssiSwitchThreshold", dorsJson.optInt("rssi_switch_threshold", -85)).toShort(),
                     congestionQueueThreshold = dorsJson.optLong("congestionQueueThreshold", dorsJson.optLong("congestion_queue_threshold", 50L)).toULong(),
                     stabilityWindowSecs = dorsJson.optLong("stabilityWindowSecs", dorsJson.optLong("stability_window_secs", 8L)).toULong(),
                     poorSignalDurationSecs = dorsJson.optLong("poorSignalDurationSecs", dorsJson.optLong("poor_signal_duration_secs", 10L)).toULong(),
-                    ttlEscalationThreshold = dorsJson.optInt("ttlEscalationThreshold", dorsJson.optInt("ttl_escalation_threshold", 2)).toUByte()
+                    ttlEscalationThreshold = dorsJson.optInt("ttlEscalationThreshold", dorsJson.optInt("ttl_escalation_threshold", 2)).toUByte(),
+                    congestionDurationSecs = dorsJson.optLong("congestionDurationSecs", dorsJson.optLong("congestion_duration_secs", 10L)).coerceAtLeast(0).toULong(),
+                    ttlEscalationHoldSecs = dorsJson.optLong("ttlEscalationHoldSecs", dorsJson.optLong("ttl_escalation_hold_secs", 20L)).coerceAtLeast(1).toULong(),
+                    historyWindowSize = historyWindowSize,
+                    queueRecoveryRatio = queueRecoveryRatio
                 )
                 proto.updateDorsConfig(dorsConfig)
                 emitDiagnostic("info", "Applied initial DORS config")
@@ -782,14 +797,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val json = JSONObject(configJson)
             val dorsConfig = DorsConfig(
                 preferOnline = json.optBoolean("preferOnline", false),
-                switchHysteresis = json.optDouble("switchHysteresis", 15.0).toFloat(),
-                switchCooldownSecs = json.optLong("switchCooldownSecs", 20).toULong(),
+                switchHysteresis = json.optDouble("switchHysteresis", 15.0).toFloat().coerceAtLeast(0f),
+                switchCooldownSecs = json.optLong("switchCooldownSecs", 20).coerceAtLeast(0).toULong(),
                 bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", 2).toUInt(),
                 rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", -85).toShort(),
                 congestionQueueThreshold = json.optLong("congestionQueueThreshold", 50).toULong(),
                 stabilityWindowSecs = json.optLong("stabilityWindowSecs", 8).toULong(),
                 poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", 10).toULong(),
-                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", 2).toUByte()
+                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", 2).toUByte(),
+                congestionDurationSecs = json.optLong("congestionDurationSecs", 10).coerceAtLeast(0).toULong(),
+                ttlEscalationHoldSecs = json.optLong("ttlEscalationHoldSecs", 20).coerceAtLeast(1).toULong(),
+                historyWindowSize = json.optLong("historyWindowSize", 10).let { max(1L, min(100L, it)) }.toULong(),
+                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", 0.5).toFloat().coerceIn(0f, 1f)
             )
             
             protocol?.updateDorsConfig(dorsConfig)
@@ -814,6 +833,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 map.putInt("stabilityWindowSecs", config.stabilityWindowSecs.toInt())
                 map.putInt("poorSignalDurationSecs", config.poorSignalDurationSecs.toInt())
                 map.putInt("ttlEscalationThreshold", config.ttlEscalationThreshold.toInt())
+                map.putInt("congestionDurationSecs", config.congestionDurationSecs.toInt())
+                map.putInt("ttlEscalationHoldSecs", config.ttlEscalationHoldSecs.toInt())
+                map.putInt("historyWindowSize", config.historyWindowSize.toInt())
+                map.putDouble("queueRecoveryRatio", config.queueRecoveryRatio.toDouble())
                 promise.resolve(map)
             } else {
                 promise.resolve(null)

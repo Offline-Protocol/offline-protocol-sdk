@@ -33,6 +33,7 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 - **Theme Selection**: Light, dark, or system theme options
 - **Notification Controls**: Granular notification preferences
 - **Protocol Settings**: Advanced configuration options
+- **Dynamic Routing Controls**: Toggle offline-only vs hybrid mode and tune DORS thresholds live
 
 ## Architecture
 
@@ -127,6 +128,8 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 - **Automatic Transport Management**: BLE and WiFi Direct handled automatically
 - **Message Routing**: Intelligent message routing through mesh network
 - **Connection Management**: Automatic peer discovery and connection handling
+- **Store-and-Forward Queue**: Messages automatically queued and retried when peers return
+- **Live Metrics**: Inspect transport queue depth, retry counters, and energy hints from the SDK
 - **Error Handling**: Comprehensive error handling and recovery
 
 ### Performance Optimizations

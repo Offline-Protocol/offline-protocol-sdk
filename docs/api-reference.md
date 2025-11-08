@@ -92,6 +92,10 @@ pub struct DorsConfig {
     pub stability_window_secs: u64,    // Stability check window (default: 8)
     pub poor_signal_duration_secs: u64, // Seconds RSSI must remain poor before escalating (default: 10)
     pub ttl_escalation_threshold: u8,   // TTL value considered near exhaustion (default: 2)
+    pub congestion_duration_secs: u64,  // Seconds congestion must persist before escalating (default: 10)
+    pub ttl_escalation_hold_secs: u64,  // Seconds to keep TTL alarm active (default: 20)
+    pub history_window_size: usize,     // Samples to retain for scoring history (default: 10)
+    pub queue_recovery_ratio: f32,      // Queue ratio that clears congestion flag (default: 0.5)
     pub prefer_online: bool,           // Online-first mode (default: false)
 }
 ```

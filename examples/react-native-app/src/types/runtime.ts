@@ -28,6 +28,10 @@ export const DEFAULT_DORS_CONFIG: DorsRuntimeConfig = {
   stabilityWindowSecs: 8,
   poorSignalDurationSecs: 10,
   ttlEscalationThreshold: 2,
+  congestionDurationSecs: 10,
+  ttlEscalationHoldSecs: 20,
+  historyWindowSize: 10,
+  queueRecoveryRatio: 0.5,
 };
 
 export const normalizeRelayPriority = (priority: string): NativeRelayPriority | null => {

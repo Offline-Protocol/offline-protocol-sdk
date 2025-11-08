@@ -384,7 +384,19 @@ const config: ProtocolConfig = {
 
   // DORS (Dynamic Offline Routing Strategy) configuration
   dors: {
-    preferOnline: true,        // Prefer online routes when available
+    preferOnline: true,               // Prefer online routes when available
+    switchHysteresis: 15,             // Minimum score delta before switching transports
+    switchCooldownSecs: 20,           // Cooldown between switches
+    bleToWifiRetryThreshold: 2,       // Retries before escalating to Wi-Fi Direct
+    rssiSwitchThreshold: -85,         // RSSI threshold for escalation
+    congestionQueueThreshold: 50,     // Queue depth considered congested
+    stabilityWindowSecs: 8,           // Sliding window for stability checks
+    poorSignalDurationSecs: 10,       // Seconds RSSI must remain poor
+    ttlEscalationThreshold: 2,        // TTL considered near exhaustion
+    congestionDurationSecs: 10,       // How long congestion must persist
+    ttlEscalationHoldSecs: 20,        // How long to keep TTL alarm sticky
+    historyWindowSize: 10,            // Number of samples for DORS smoothing
+    queueRecoveryRatio: 0.5,          // Ratio at which congestion is considered resolved
   },
 
   // Relay configuration

@@ -240,6 +240,7 @@ impl Transport for WifiDirectTransport {
         // Update metrics
         let mut metrics = self.metrics.lock().unwrap();
         metrics.queue_depth = queue.len();
+        metrics.congestion = ((metrics.queue_depth as f32) / 20.0).clamp(0.0, 1.0);
 
         Ok(())
     }

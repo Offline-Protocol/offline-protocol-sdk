@@ -1304,10 +1304,14 @@ public struct DorsConfig: Equatable, Hashable {
     public var stabilityWindowSecs: UInt64
     public var poorSignalDurationSecs: UInt64
     public var ttlEscalationThreshold: UInt8
+    public var congestionDurationSecs: UInt64
+    public var ttlEscalationHoldSecs: UInt64
+    public var historyWindowSize: UInt64
+    public var queueRecoveryRatio: Float
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64, poorSignalDurationSecs: UInt64, ttlEscalationThreshold: UInt8) {
+    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64, poorSignalDurationSecs: UInt64, ttlEscalationThreshold: UInt8, congestionDurationSecs: UInt64, ttlEscalationHoldSecs: UInt64, historyWindowSize: UInt64, queueRecoveryRatio: Float) {
         self.preferOnline = preferOnline
         self.switchHysteresis = switchHysteresis
         self.switchCooldownSecs = switchCooldownSecs
@@ -1317,6 +1321,10 @@ public struct DorsConfig: Equatable, Hashable {
         self.stabilityWindowSecs = stabilityWindowSecs
         self.poorSignalDurationSecs = poorSignalDurationSecs
         self.ttlEscalationThreshold = ttlEscalationThreshold
+        self.congestionDurationSecs = congestionDurationSecs
+        self.ttlEscalationHoldSecs = ttlEscalationHoldSecs
+        self.historyWindowSize = historyWindowSize
+        self.queueRecoveryRatio = queueRecoveryRatio
     }
 
     
@@ -1341,7 +1349,11 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
                 congestionQueueThreshold: FfiConverterUInt64.read(from: &buf), 
                 stabilityWindowSecs: FfiConverterUInt64.read(from: &buf), 
                 poorSignalDurationSecs: FfiConverterUInt64.read(from: &buf), 
-                ttlEscalationThreshold: FfiConverterUInt8.read(from: &buf)
+                ttlEscalationThreshold: FfiConverterUInt8.read(from: &buf), 
+                congestionDurationSecs: FfiConverterUInt64.read(from: &buf), 
+                ttlEscalationHoldSecs: FfiConverterUInt64.read(from: &buf), 
+                historyWindowSize: FfiConverterUInt64.read(from: &buf), 
+                queueRecoveryRatio: FfiConverterFloat.read(from: &buf)
         )
     }
 
@@ -1355,6 +1367,10 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.stabilityWindowSecs, into: &buf)
         FfiConverterUInt64.write(value.poorSignalDurationSecs, into: &buf)
         FfiConverterUInt8.write(value.ttlEscalationThreshold, into: &buf)
+        FfiConverterUInt64.write(value.congestionDurationSecs, into: &buf)
+        FfiConverterUInt64.write(value.ttlEscalationHoldSecs, into: &buf)
+        FfiConverterUInt64.write(value.historyWindowSize, into: &buf)
+        FfiConverterFloat.write(value.queueRecoveryRatio, into: &buf)
     }
 }
 

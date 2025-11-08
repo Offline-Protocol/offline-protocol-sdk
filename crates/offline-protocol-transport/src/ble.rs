@@ -12,7 +12,7 @@ use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration as StdDuration, SystemTime};
 
 /// UUID for the Offline Protocol GATT service
 pub const SERVICE_UUID: &str = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
@@ -29,6 +29,12 @@ pub const MAX_FRAGMENT_SIZE: usize = 185;
 
 /// Fragment timeout - if fragments aren't all received within 30s, discard
 pub const FRAGMENT_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum number of concurrent fragment assemblies we buffer before evicting the oldest.
+pub const MAX_FRAGMENT_ASSEMBLIES: usize = 64;
+
+/// Maximum allowed fragments for a single BLE message to avoid memory blow-up.
+pub const MAX_FRAGMENT_COUNT: usize = 512;
 
 /// Peer device information
 #[derive(Debug, Clone)]
@@ -184,18 +190,69 @@ impl BleTransport {
         let fragment_len = self.pending_fragments.lock().unwrap().len();
         let mut metrics = self.metrics.lock().unwrap();
         metrics.queue_depth = send_len + fragment_len;
+        let heuristic_capacity = 50_f32;
+        metrics.congestion = ((metrics.queue_depth as f32) / heuristic_capacity).clamp(0.0, 1.0);
     }
 
     /// Records a successful send for metrics tracking.
     pub fn record_send_success(&self) {
         let mut metrics = self.metrics.lock().unwrap();
         metrics.success_count = metrics.success_count.saturating_add(1);
+        let total = metrics.success_count + metrics.failure_count;
+        if total > 0 {
+            let ratio = metrics.success_count as f32 / total as f32;
+            metrics.delivery_ratio = Some(ratio);
+            metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+        }
     }
 
     /// Records a failed send for metrics tracking.
     pub fn record_send_failure(&self) {
         let mut metrics = self.metrics.lock().unwrap();
         metrics.failure_count = metrics.failure_count.saturating_add(1);
+        let total = metrics.success_count + metrics.failure_count;
+        if total > 0 {
+            let drop_ratio = metrics.failure_count as f32 / total as f32;
+            metrics.drop_rate = Some(drop_ratio.clamp(0.0, 1.0));
+            metrics.delivery_ratio = Some((1.0 - drop_ratio).clamp(0.0, 1.0));
+        }
+    }
+
+    fn record_latency(&self, latency_ms: u128) {
+        let value = latency_ms.min(u128::from(u32::MAX)) as u32;
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.latency_ms = Some(match metrics.latency_ms {
+            Some(existing) => {
+                let ema = (existing as f32 * 0.7) + (value as f32 * 0.3);
+                ema as u32
+            }
+            None => value,
+        });
+    }
+
+    fn cleanup_fragment_buffers(&self) {
+        let mut buffers = self.fragment_buffers.lock().unwrap();
+        let now = SystemTime::now();
+        let mut expired = Vec::new();
+
+        for (message_id, assembly) in buffers.iter() {
+            if now
+                .duration_since(assembly.started_at)
+                .unwrap_or_else(|_| StdDuration::from_secs(0))
+                > StdDuration::from_secs(FRAGMENT_TIMEOUT_SECS)
+            {
+                expired.push(message_id.clone());
+            }
+        }
+
+        for message_id in expired {
+            buffers.remove(&message_id);
+            self.record_send_failure();
+            eprintln!(
+                "⏱️ Dropped expired BLE fragment assembly for message {}",
+                message_id
+            );
+        }
     }
 
     /// Gets current queue depth for metrics.
@@ -266,6 +323,12 @@ impl BleTransport {
         if total_fragments == 0 {
             return Err(crate::Error::Other("Empty message".to_string()));
         }
+        if total_fragments > MAX_FRAGMENT_COUNT {
+            return Err(crate::Error::Other(
+                "Message would require too many BLE fragments".to_string(),
+            ));
+        }
+
         if total_fragments > u16::MAX as usize {
             return Err(crate::Error::Other(
                 "Message too large to fragment".to_string(),
@@ -286,6 +349,8 @@ impl BleTransport {
     ///
     /// Returns Ok(Some(Message)) if message is complete, Ok(None) if more fragments needed.
     pub fn process_fragment(&self, fragment_data: &[u8]) -> Result<Option<Message>> {
+        self.cleanup_fragment_buffers();
+
         // Decode fragment from binary format
         let fragment = decode_fragment(fragment_data)?;
 
@@ -293,55 +358,82 @@ impl BleTransport {
             return Ok(Some(self.deserialize_message(&fragment.data)?));
         }
 
-        // Multi-fragment message - add to reassembly buffer
-        let mut buffers = self.fragment_buffers.lock().unwrap();
+        let mut completed_payload: Option<Vec<u8>> = None;
+        let mut assembly_started_at: Option<SystemTime> = None;
+        let mut evicted = false;
 
-        // Cleanup expired buffers first
-        let now = SystemTime::now();
-        buffers.retain(|_, assembly| {
-            now.duration_since(assembly.started_at)
-                .map(|d| d.as_secs() < FRAGMENT_TIMEOUT_SECS)
-                .unwrap_or(false)
-        });
+        {
+            // Multi-fragment message - add to reassembly buffer
+            let mut buffers = self.fragment_buffers.lock().unwrap();
+            let now = SystemTime::now();
 
-        // Get or create assembly buffer
-        let assembly = buffers
-            .entry(fragment.message_id.clone())
-            .or_insert_with(|| FragmentAssembly {
-                total_fragments: fragment.total_fragments,
-                fragments: HashMap::new(),
-                started_at: now,
-            });
-
-        // Validate fragment
-        if assembly.total_fragments != fragment.total_fragments {
-            return Err(crate::Error::Other(format!(
-                "Fragment count mismatch: expected {}, got {}",
-                assembly.total_fragments, fragment.total_fragments
-            )));
-        }
-
-        assembly
-            .fragments
-            .insert(fragment.fragment_index, fragment.data);
-
-        // Check if complete
-        if assembly.fragments.len() == assembly.total_fragments as usize {
-            // Reassemble message
-            let mut complete_data = Vec::new();
-            for i in 0..assembly.total_fragments {
-                if let Some(data) = assembly.fragments.get(&i) {
-                    complete_data.extend_from_slice(data);
-                } else {
-                    return Err(crate::Error::Other(format!("Missing fragment {}", i)));
+            if !buffers.contains_key(&fragment.message_id)
+                && buffers.len() >= MAX_FRAGMENT_ASSEMBLIES
+            {
+                if let Some(oldest_id) = buffers
+                    .iter()
+                    .min_by_key(|(_, assembly)| assembly.started_at)
+                    .map(|(id, _)| id.clone())
+                {
+                    buffers.remove(&oldest_id);
+                    evicted = true;
                 }
             }
 
-            // Remove assembly buffer
-            buffers.remove(&fragment.message_id);
+            // Get or create assembly buffer
+            let assembly = buffers
+                .entry(fragment.message_id.clone())
+                .or_insert_with(|| FragmentAssembly {
+                    total_fragments: fragment.total_fragments,
+                    fragments: HashMap::new(),
+                    started_at: now,
+                });
+
+            // Validate fragment
+            if assembly.total_fragments != fragment.total_fragments {
+                return Err(crate::Error::Other(format!(
+                    "Fragment count mismatch: expected {}, got {}",
+                    assembly.total_fragments, fragment.total_fragments
+                )));
+            }
+
+            assembly
+                .fragments
+                .insert(fragment.fragment_index, fragment.data);
+
+            // Check if complete
+            if assembly.fragments.len() == assembly.total_fragments as usize {
+                // Reassemble message
+                let mut complete_data = Vec::new();
+                for i in 0..assembly.total_fragments {
+                    if let Some(data) = assembly.fragments.get(&i) {
+                        complete_data.extend_from_slice(data);
+                    } else {
+                        return Err(crate::Error::Other(format!("Missing fragment {}", i)));
+                    }
+                }
+
+                assembly_started_at = Some(assembly.started_at);
+                buffers.remove(&fragment.message_id);
+                completed_payload = Some(complete_data);
+            }
+        }
+
+        if evicted {
+            self.record_send_failure();
+        }
+
+        if let Some(payload) = completed_payload {
+            let start = assembly_started_at.unwrap_or_else(SystemTime::now);
+            let latency = SystemTime::now()
+                .duration_since(start)
+                .unwrap_or_else(|_| StdDuration::from_millis(0))
+                .as_millis();
+            self.record_latency(latency);
 
             // Deserialize complete message
-            return Ok(Some(self.deserialize_message(&complete_data)?));
+            let message = self.deserialize_message(&payload)?;
+            return Ok(Some(message));
         }
 
         // More fragments needed
@@ -357,8 +449,12 @@ impl BleTransport {
                 // Message complete - queue it
                 let mut queue = self.receive_queue.lock().unwrap();
                 queue.push_back(message.clone());
-                eprintln!("🎉 COMPLETE MESSAGE ASSEMBLED: {} from {} to {}", 
-                    message.id.as_str(), message.sender.as_str(), message.recipient.as_str());
+                eprintln!(
+                    "🎉 COMPLETE MESSAGE ASSEMBLED: {} from {} to {}",
+                    message.id.as_str(),
+                    message.sender.as_str(),
+                    message.recipient.as_str()
+                );
                 eprintln!("📬 Message content: {}", message.content);
                 Ok(())
             }
@@ -548,12 +644,13 @@ impl Transport for BleTransport {
 
     fn send(&self, message: &Message) -> Result<()> {
         let status = self.status();
-        
+
         // Check status
         if status != TransportStatus::Available {
-            return Err(crate::Error::TransportNotAvailable(
-                format!("BLE transport is not available (status: {:?})", status),
-            ));
+            return Err(crate::Error::TransportNotAvailable(format!(
+                "BLE transport is not available (status: {:?})",
+                status
+            )));
         }
 
         // Determine recipient and add to send queue

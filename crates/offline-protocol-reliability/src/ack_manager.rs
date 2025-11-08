@@ -38,7 +38,7 @@ pub struct PendingAck {
 impl PendingAck {
     /// Checks if this ACK has timed out.
     pub fn is_timed_out(&self) -> bool {
-        if self.status == AckStatus::Received {
+        if self.status != AckStatus::Pending {
             return false;
         }
 
@@ -144,6 +144,18 @@ impl AckManager {
         }
     }
 
+    /// Drains all ACKs that have timed out and marks them as timed out.
+    pub fn drain_timed_out(&mut self) -> Vec<PendingAck> {
+        let mut timed_out = Vec::new();
+        for pending in self.pending_acks.values_mut() {
+            if pending.is_timed_out() {
+                pending.status = AckStatus::TimedOut;
+                timed_out.push(pending.clone());
+            }
+        }
+        timed_out
+    }
+
     /// Removes an ACK from tracking (e.g., after successful delivery).
     pub fn remove_ack(&mut self, message_id: &MessageId) -> Option<PendingAck> {
         self.pending_acks.remove(message_id)
@@ -167,6 +179,7 @@ impl AckManager {
         if let Some(pending) = self.pending_acks.get_mut(message_id) {
             pending.retry_count += 1;
             pending.sent_at = Utc::now(); // Reset timer for retry
+            pending.status = AckStatus::Pending;
         }
     }
 
@@ -187,13 +200,7 @@ impl AckManager {
 
     /// Cleans up timed out ACKs by marking them as timed out.
     fn cleanup_timed_out(&mut self) {
-        let timed_out: Vec<MessageId> = self.get_timed_out_acks();
-
-        for message_id in timed_out {
-            if let Some(pending) = self.pending_acks.get_mut(&message_id) {
-                pending.status = AckStatus::TimedOut;
-            }
-        }
+        self.drain_timed_out();
     }
 
     /// Removes all ACKs with TimedOut status that are older than a given duration.
@@ -250,15 +257,15 @@ mod tests {
             .unwrap();
 
         // Not timed out immediately
-        assert!(manager.get_timed_out_acks().is_empty());
+        assert!(manager.drain_timed_out().is_empty());
 
         // Wait for timeout
         thread::sleep(Duration::from_millis(60));
 
         // Should be timed out now
-        let timed_out = manager.get_timed_out_acks();
+        let timed_out = manager.drain_timed_out();
         assert_eq!(timed_out.len(), 1);
-        assert_eq!(timed_out[0], msg_id);
+        assert_eq!(timed_out[0].message_id, msg_id);
     }
 
     #[test]

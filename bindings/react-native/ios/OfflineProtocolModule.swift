@@ -127,6 +127,20 @@ class OfflineProtocolModule: RCTEventEmitter {
             let ttlThreshold = UInt8((dorsDict["ttlEscalationThreshold"] as? NSNumber)?.uint8Value
                                      ?? (dorsDict["ttl_escalation_threshold"] as? NSNumber)?.uint8Value
                                      ?? 2)
+        let congestionDuration = UInt64((dorsDict["congestionDurationSecs"] as? NSNumber)?.uint64Value
+                                        ?? (dorsDict["congestion_duration_secs"] as? NSNumber)?.uint64Value
+                                        ?? 10)
+        let ttlHold = UInt64((dorsDict["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value
+                             ?? (dorsDict["ttl_escalation_hold_secs"] as? NSNumber)?.uint64Value
+                             ?? 20)
+        let historyWindowRaw = UInt64((dorsDict["historyWindowSize"] as? NSNumber)?.uint64Value
+                                      ?? (dorsDict["history_window_size"] as? NSNumber)?.uint64Value
+                                      ?? 10)
+        let historyWindow = max(1, min(100, Int(historyWindowRaw)))
+        let rawQueueRecovery = Float((dorsDict["queueRecoveryRatio"] as? NSNumber)?.floatValue
+                                     ?? (dorsDict["queue_recovery_ratio"] as? NSNumber)?.floatValue
+                                     ?? 0.5)
+        let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
 
             let dorsConfig = DorsConfig(
                 preferOnline: preferOnline,
@@ -137,7 +151,11 @@ class OfflineProtocolModule: RCTEventEmitter {
                 congestionQueueThreshold: congestionThreshold,
                 stabilityWindowSecs: stabilityWindow,
                 poorSignalDurationSecs: poorSignalDuration,
-                ttlEscalationThreshold: ttlThreshold
+            ttlEscalationThreshold: ttlThreshold,
+            congestionDurationSecs: congestionDuration,
+            ttlEscalationHoldSecs: ttlHold,
+            historyWindowSize: UInt64(historyWindow),
+            queueRecoveryRatio: queueRecovery
             )
 
             do {
@@ -875,17 +893,27 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             let poorSignalDuration = (config["poorSignalDurationSecs"] as? NSNumber)?.uint64Value ?? 10
             let ttlThreshold = (config["ttlEscalationThreshold"] as? NSNumber)?.uint8Value ?? 2
+            let congestionDuration = max((config["congestionDurationSecs"] as? NSNumber)?.uint64Value ?? 10, 0)
+            let ttlHold = max((config["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value ?? 20, 1)
+            let historyWindowRaw = (config["historyWindowSize"] as? NSNumber)?.uint64Value ?? 10
+            let historyWindow = max(1, min(100, Int(historyWindowRaw)))
+            let rawQueueRecovery = (config["queueRecoveryRatio"] as? NSNumber)?.floatValue ?? 0.5
+            let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
             
             let dorsConfig = DorsConfig(
                 preferOnline: config["preferOnline"] as? Bool ?? false,
-                switchHysteresis: config["switchHysteresis"] as? Float ?? 15.0,
-                switchCooldownSecs: config["switchCooldownSecs"] as? UInt64 ?? 20,
-                bleToWifiRetryThreshold: config["bleToWifiRetryThreshold"] as? UInt32 ?? 2,
-                rssiSwitchThreshold: config["rssiSwitchThreshold"] as? Int16 ?? -85,
-                congestionQueueThreshold: config["congestionQueueThreshold"] as? UInt64 ?? 50,
-                stabilityWindowSecs: config["stabilityWindowSecs"] as? UInt64 ?? 8,
+                switchHysteresis: max((config["switchHysteresis"] as? NSNumber)?.floatValue ?? 15.0, 0),
+                switchCooldownSecs: max((config["switchCooldownSecs"] as? NSNumber)?.uint64Value ?? 20, 0),
+                bleToWifiRetryThreshold: (config["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value ?? 2,
+                rssiSwitchThreshold: (config["rssiSwitchThreshold"] as? NSNumber)?.int16Value ?? -85,
+                congestionQueueThreshold: (config["congestionQueueThreshold"] as? NSNumber)?.uint64Value ?? 50,
+                stabilityWindowSecs: (config["stabilityWindowSecs"] as? NSNumber)?.uint64Value ?? 8,
                 poorSignalDurationSecs: poorSignalDuration,
-                ttlEscalationThreshold: ttlThreshold
+                ttlEscalationThreshold: ttlThreshold,
+                congestionDurationSecs: UInt64(congestionDuration),
+                ttlEscalationHoldSecs: UInt64(ttlHold),
+                historyWindowSize: UInt64(historyWindow),
+                queueRecoveryRatio: queueRecovery
             )
             
             try proto.updateDorsConfig(config: dorsConfig)
@@ -911,7 +939,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             "congestionQueueThreshold": config.congestionQueueThreshold,
             "stabilityWindowSecs": config.stabilityWindowSecs,
             "poorSignalDurationSecs": config.poorSignalDurationSecs,
-            "ttlEscalationThreshold": config.ttlEscalationThreshold
+            "ttlEscalationThreshold": config.ttlEscalationThreshold,
+            "congestionDurationSecs": config.congestionDurationSecs,
+            "ttlEscalationHoldSecs": config.ttlEscalationHoldSecs,
+            "historyWindowSize": config.historyWindowSize,
+            "queueRecoveryRatio": config.queueRecoveryRatio
         ]
         resolver(configDict)
     }

@@ -56,6 +56,10 @@ const STEP_CONFIG = {
   hysteresis: 1,
   cooldown: 5,
   retryThreshold: 1,
+  congestionDuration: 5,
+  ttlHold: 5,
+  historyWindow: 1,
+  queueRatio: 0.05,
 };
 
 const DEFAULT_FILE_PAYLOAD: SendFileParams = {
@@ -124,13 +128,29 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
   );
 
   const handleDorsStep = useCallback(
-    async (key: keyof DorsRuntimeConfig, delta: number) => {
+    async (
+      key: keyof DorsRuntimeConfig,
+      delta: number,
+      options?: { min?: number; max?: number; precision?: number }
+    ) => {
       if (!isStarted) {
         return;
       }
       const current = dorsConfig[key] as number | boolean;
       if (typeof current === 'number') {
-        const next = Math.max(0, Math.round((current as number) + delta));
+        const precision = options?.precision ?? 0;
+        const factor = Math.pow(10, precision);
+        let next = ((current as number) + delta);
+        next = Math.round(next * factor) / factor;
+        if (options?.min !== undefined) {
+          next = Math.max(options.min, next);
+        }
+        if (options?.max !== undefined) {
+          next = Math.min(options.max, next);
+        }
+        if (options?.min === undefined && options?.max === undefined) {
+          next = Math.max(0, next);
+        }
         await onUpdateDors({ [key]: next } as Partial<DorsRuntimeConfig>);
       }
     },
@@ -317,21 +337,85 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
           <StepperRow
             label="Switch hysteresis"
             value={dorsConfig.switchHysteresis}
-            onChange={(delta) => handleDorsStep('switchHysteresis', delta * STEP_CONFIG.hysteresis)}
+            onChange={(delta) =>
+              handleDorsStep('switchHysteresis', delta * STEP_CONFIG.hysteresis, {
+                min: 0,
+                max: 100,
+              })
+            }
             suffix=" pts"
             disabled={!isStarted}
           />
           <StepperRow
             label="Switch cooldown"
             value={dorsConfig.switchCooldownSecs}
-            onChange={(delta) => handleDorsStep('switchCooldownSecs', delta * STEP_CONFIG.cooldown)}
+            onChange={(delta) =>
+              handleDorsStep('switchCooldownSecs', delta * STEP_CONFIG.cooldown, {
+                min: 0,
+                max: 120,
+              })
+            }
             suffix=" s"
             disabled={!isStarted}
           />
           <StepperRow
             label="BLE ➜ Wi-Fi retries"
             value={dorsConfig.bleToWifiRetryThreshold}
-            onChange={(delta) => handleDorsStep('bleToWifiRetryThreshold', delta * STEP_CONFIG.retryThreshold)}
+            onChange={(delta) =>
+              handleDorsStep('bleToWifiRetryThreshold', delta * STEP_CONFIG.retryThreshold, {
+                min: 0,
+                max: 5,
+              })
+            }
+            disabled={!isStarted}
+          />
+          <StepperRow
+            label="Congestion duration"
+            value={dorsConfig.congestionDurationSecs}
+            onChange={(delta) =>
+              handleDorsStep('congestionDurationSecs', delta * STEP_CONFIG.congestionDuration, {
+                min: 0,
+                max: 120,
+              })
+            }
+            suffix=" s"
+            disabled={!isStarted}
+          />
+          <StepperRow
+            label="TTL hold window"
+            value={dorsConfig.ttlEscalationHoldSecs}
+            onChange={(delta) =>
+              handleDorsStep('ttlEscalationHoldSecs', delta * STEP_CONFIG.ttlHold, {
+                min: 1,
+                max: 180,
+              })
+            }
+            suffix=" s"
+            disabled={!isStarted}
+          />
+          <StepperRow
+            label="History window"
+            value={dorsConfig.historyWindowSize}
+            onChange={(delta) =>
+              handleDorsStep('historyWindowSize', delta * STEP_CONFIG.historyWindow, {
+                min: 1,
+                max: 100,
+              })
+            }
+            suffix=" samples"
+            disabled={!isStarted}
+          />
+          <StepperRow
+            label="Queue recovery target"
+            value={Math.round(dorsConfig.queueRecoveryRatio * 100)}
+            onChange={(delta) =>
+              handleDorsStep(
+                'queueRecoveryRatio',
+                delta * STEP_CONFIG.queueRatio,
+                { min: 0, max: 1, precision: 2 }
+              )
+            }
+            suffix="%"
             disabled={!isStarted}
           />
         </View>

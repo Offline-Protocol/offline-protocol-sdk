@@ -190,6 +190,14 @@ export interface ProtocolConfig {
     poorSignalDurationSecs?: number;
     /** TTL threshold that signals impending exhaustion (default: 2) */
     ttlEscalationThreshold?: number;
+    /** Duration congestion must persist before escalating (default: 10) */
+    congestionDurationSecs?: number;
+    /** Duration to keep TTL escalation signal active (default: 20) */
+    ttlEscalationHoldSecs?: number;
+    /** Number of history samples to retain for smoothing (default: 10) */
+    historyWindowSize?: number;
+    /** Queue depth ratio indicating recovery (default: 0.5) */
+    queueRecoveryRatio?: number;
   };
   /** Relay configuration (optional) */
   relay?: RelayConfig;
