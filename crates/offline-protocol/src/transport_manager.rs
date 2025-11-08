@@ -100,8 +100,19 @@ impl TransportManager {
         // Check all transports for messages
         for (transport_type, transport) in &self.transports {
             let transport_lock = transport.lock().unwrap();
-            if let Ok(Some(message)) = transport_lock.receive() {
-                return Ok(Some((*transport_type, message)));
+            match transport_lock.receive() {
+                Ok(Some(message)) => {
+                    eprintln!("📨 TransportManager found message from {:?}: {} -> {}", 
+                        transport_type, message.sender.as_str(), message.recipient.as_str());
+                    eprintln!("📬 Message content: {}", message.content);
+                    return Ok(Some((*transport_type, message)));
+                },
+                Ok(None) => {
+                    // No message from this transport, continue checking others
+                },
+                Err(e) => {
+                    eprintln!("❌ Transport {:?} receive error: {}", transport_type, e);
+                }
             }
         }
         Ok(None)

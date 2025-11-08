@@ -356,16 +356,20 @@ impl BleTransport {
             Ok(Some(message)) => {
                 // Message complete - queue it
                 let mut queue = self.receive_queue.lock().unwrap();
-                queue.push_back(message);
+                queue.push_back(message.clone());
+                eprintln!("🎉 COMPLETE MESSAGE ASSEMBLED: {} from {} to {}", 
+                    message.id.as_str(), message.sender.as_str(), message.recipient.as_str());
+                eprintln!("📬 Message content: {}", message.content);
                 Ok(())
             }
             Ok(None) => {
                 // More fragments needed
+                eprintln!("📦 Fragment received, more needed for complete message");
                 Ok(())
             }
             Err(e) => {
                 // Log error but don't fail - just drop bad fragment
-                eprintln!("Error processing fragment: {}", e);
+                eprintln!("❌ Error processing fragment: {}", e);
                 Ok(())
             }
         }
@@ -375,6 +379,7 @@ impl BleTransport {
     ///
     /// Returns (recipient, fragment_data) or None if no messages to send.
     pub fn get_next_fragment(&self) -> Result<Option<(String, Vec<u8>)>> {
+        // Check for pending fragments first
         if let Some(fragment) = {
             let mut pending = self.pending_fragments.lock().unwrap();
             pending.pop_front()
@@ -525,6 +530,10 @@ fn decode_fragment(fragment_data: &[u8]) -> Result<DecodedFragment> {
 }
 
 impl Transport for BleTransport {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn transport_type(&self) -> TransportType {
         TransportType::BLE
     }
@@ -538,10 +547,12 @@ impl Transport for BleTransport {
     }
 
     fn send(&self, message: &Message) -> Result<()> {
+        let status = self.status();
+        
         // Check status
-        if self.status() != TransportStatus::Available {
+        if status != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(
-                "BLE transport is not available".to_string(),
+                format!("BLE transport is not available (status: {:?})", status),
             ));
         }
 

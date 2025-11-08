@@ -263,6 +263,14 @@ class OfflineProtocolModule: RCTEventEmitter {
                     try manager.start()
                     print("[OfflineProtocolModule] BLE Manager started")
                     emitDiagnostic(level: "info", message: "BLE manager started")
+                    
+                    // CRITICAL FIX: Ensure bleStatusChanged(true) is called even if timing is off
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        print("[OfflineProtocolModule] Backup bleStatusChanged(true) call")
+                        self?.emitDiagnostic(level: "info", message: "Backup call to protocol.bleStatusChanged(true)")
+                        try? self?.protocolInstance?.bleStatusChanged(isAvailable: true)
+                        self?.emitDiagnostic(level: "info", message: "Backup bleStatusChanged(true) completed")
+                    }
                 } catch {
                     print("[OfflineProtocolModule] Warning: Failed to start BLE Manager: \(error.localizedDescription)")
                     emitDiagnostic(level: "error", message: "Failed to start BLE manager", context: [

@@ -75,6 +75,7 @@ public class BleManager: NSObject, TransportManager {
     // Pending fragments waiting for device ID
     private var pendingFragments: [UUID: [(Data, Date)]] = [:]
     private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0
+    private var pendingOutboundFragments: [String: [Data]] = [:]
     
     // State tracking
     private var isScanning = false
@@ -188,6 +189,7 @@ public class BleManager: NSObject, TransportManager {
         peripheralRSSI.removeAll()
         centralDeviceIds.removeAll()
         pendingFragments.removeAll()
+        pendingOutboundFragments.removeAll()
         
         // Clean up managers
         centralManager = nil
@@ -549,8 +551,17 @@ public class BleManager: NSObject, TransportManager {
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
             
+            if self.flushPendingOutboundFragments() {
+                return
+            }
+            
             // Poll for next fragment from protocol
             if let fragment = self.protocolInstance.bleGetNextFragment() {
+                print("[BleManager] Got fragment for recipient: \(fragment.recipientId), size: \(fragment.data.count)")
+                self.emitDiagnostic("debug", "Polling got fragment", context: [
+                    "recipientId": fragment.recipientId,
+                    "fragmentSize": fragment.data.count
+                ])
                 self.sendFragment(fragment)
             }
         }
@@ -560,36 +571,103 @@ public class BleManager: NSObject, TransportManager {
         let recipientId = fragment.recipientId
         let data = Data(fragment.data)
         
-        // Find peripheral with matching device ID
-        var targetPeripheral: CBPeripheral?
-        for (uuid, deviceId) in peripheralDeviceIds {
-            if deviceId == recipientId, let peripheral = connectedPeripherals[uuid] {
-                targetPeripheral = peripheral
-                break
+        let sendResult = sendFragmentData(recipientId: recipientId, data: data)
+        print("[BleManager] Fragment send result for \(recipientId): \(sendResult)")
+        
+        if !sendResult {
+            print("[BleManager] Failed to send fragment immediately, queuing for retry")
+            enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
+        } else {
+            print("[BleManager] Fragment sent successfully to \(recipientId)")
+            emitDiagnostic("debug", "Fragment sent successfully", context: ["recipientId": recipientId])
+        }
+    }
+
+    private func flushPendingOutboundFragments() -> Bool {
+        var hasUnsentFragments = false
+        let recipients = Array(pendingOutboundFragments.keys)
+        
+        for recipientId in recipients {
+            guard var queue = pendingOutboundFragments[recipientId] else { continue }
+            var sentAllForRecipient = true
+            
+            while !queue.isEmpty {
+                let data = queue.first!
+                if sendFragmentData(recipientId: recipientId, data: data) {
+                    queue.removeFirst()
+                } else {
+                    sentAllForRecipient = false
+                    break
+                }
+            }
+            
+            if queue.isEmpty {
+                pendingOutboundFragments.removeValue(forKey: recipientId)
+            } else {
+                pendingOutboundFragments[recipientId] = queue
+                if !sentAllForRecipient {
+                    hasUnsentFragments = true
+                }
             }
         }
         
-        guard let peripheral = targetPeripheral else {
-            print("[BleManager] No connected peripheral for recipient: \(recipientId)")
-            emitDiagnostic("warning", "No connected peripheral for BLE fragment", context: ["recipientId": recipientId])
-            return
+        return hasUnsentFragments
+    }
+    
+    private func enqueuePendingOutboundFragment(recipientId: String, data: Data) {
+        var queue = pendingOutboundFragments[recipientId] ?? []
+        queue.append(data)
+        pendingOutboundFragments[recipientId] = queue
+    }
+    
+    private func sendFragmentData(recipientId: String, data: Data) -> Bool {
+        guard let peripheral = findPeripheral(for: recipientId) else {
+            if logThrottler.shouldLog(key: "missing_peripheral_\(recipientId)") {
+                print("[BleManager] No connected peripheral for recipient: \(recipientId)")
+                emitDiagnostic("warning", "No connected peripheral for BLE fragment", context: ["recipientId": recipientId])
+            }
+            return false
         }
         
-        // Find message characteristic
-        guard let service = peripheral.services?.first(where: { $0.uuid == SERVICE_UUID }),
-              let characteristic = service.characteristics?.first(where: { $0.uuid == MESSAGE_CHAR_UUID }) else {
-            print("[BleManager] Message characteristic not found")
-            emitDiagnostic("warning", "Message characteristic not found", context: ["recipientId": recipientId])
-            return
+        guard let (service, characteristic) = findMessageCharacteristic(on: peripheral) else {
+            if logThrottler.shouldLog(key: "missing_char_\(recipientId)") {
+                print("[BleManager] Message characteristic not found for recipient: \(recipientId)")
+                emitDiagnostic("warning", "Message characteristic not found", context: ["recipientId": recipientId])
+            }
+            return false
         }
         
-        // Write data without response
+        if #available(iOS 11.0, *) {
+            if !peripheral.canSendWriteWithoutResponse {
+                if logThrottler.shouldLog(key: "write_backpressure_\(recipientId)", interval: 2.0) {
+                    print("[BleManager] Cannot send fragment yet, write buffer full for recipient: \(recipientId)")
+                    emitDiagnostic("info", "BLE write buffer full, retrying", context: ["recipientId": recipientId])
+                }
+                return false
+            }
+        }
+        
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-        
         bytesSent += UInt64(data.count)
         fragmentsSent += 1
-        
-        // Reduced logging - only log errors
+        return true
+    }
+    
+    private func findPeripheral(for recipientId: String) -> CBPeripheral? {
+        for (uuid, deviceId) in peripheralDeviceIds where deviceId == recipientId {
+            if let peripheral = connectedPeripherals[uuid] {
+                return peripheral
+            }
+        }
+        return nil
+    }
+    
+    private func findMessageCharacteristic(on peripheral: CBPeripheral) -> (CBService, CBCharacteristic)? {
+        guard let service = peripheral.services?.first(where: { $0.uuid == SERVICE_UUID }),
+              let characteristic = service.characteristics?.first(where: { $0.uuid == MESSAGE_CHAR_UUID }) else {
+            return nil
+        }
+        return (service, characteristic)
     }
     
     private func handleReceivedData(_ data: Data, senderId: String?, centralId: UUID? = nil) {
@@ -635,12 +713,36 @@ public class BleManager: NSObject, TransportManager {
             let bytes = [UInt8](data)
 
             do {
+                print("[BleManager] 📥 RECEIVED FRAGMENT from \(senderId), size: \(data.count)")
+                self.emitDiagnostic("info", "Fragment received from BLE", context: [
+                    "senderId": senderId,
+                    "fragmentSize": data.count
+                ])
+                
                 try self.protocolInstance.bleFragmentReceived(senderId: senderId, fragment: bytes)
+                print("[BleManager] ✅ Fragment processed successfully for sender: \(senderId)")
+                
+                // CRITICAL FIX: Immediately check if this completed a message
+                if let completedMessage = self.protocolInstance.receiveMessage() {
+                    print("[BleManager] 🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
+                    print("[BleManager] 📬 Received message: \(completedMessage)")
+                    self.emitDiagnostic("info", "Complete message assembled from fragments", context: [
+                        "senderId": senderId,
+                        "messageContent": completedMessage
+                    ])
+                } else {
+                    print("[BleManager] 📦 Fragment processed, waiting for more fragments to complete message")
+                }
+                
                 self.bytesReceived += UInt64(data.count)
                 self.fragmentsReceived += 1
             } catch {
-                print("[BleManager] Error processing received fragment: \(error)")
-                self.emitDiagnostic("error", "Error processing received fragment", context: ["error": error.localizedDescription])
+                print("[BleManager] ❌ Error processing fragment from \(senderId): \(error)")
+                self.emitDiagnostic("error", "Error processing received fragment", context: [
+                    "senderId": senderId,
+                    "fragmentSize": data.count,
+                    "error": error.localizedDescription
+                ])
             }
         }
     }
@@ -703,7 +805,11 @@ extension BleManager: CBCentralManagerDelegate {
             // If both central and peripheral are ready, mark as running
             if peripheralReady && state == .starting {
                 updateState(.running)
+                print("[BleManager] BLE Manager ready - calling bleStatusChanged(true)")
+                emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
                 try? self.protocolInstance.bleStatusChanged(isAvailable: true)
+                print("[BleManager] Called protocol.bleStatusChanged(true)")
+                emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
             }
             
         case .poweredOff, .unauthorized, .unsupported:
@@ -913,7 +1019,11 @@ extension BleManager: CBPeripheralManagerDelegate {
             // If both central and peripheral are ready, mark as running
             if centralReady && state == .starting {
                 updateState(.running)
+                print("[BleManager] BLE Manager ready (peripheral) - calling bleStatusChanged(true)")
+                emitDiagnostic("info", "About to call protocol.bleStatusChanged(true) from peripheral")
                 try? self.protocolInstance.bleStatusChanged(isAvailable: true)
+                print("[BleManager] Called protocol.bleStatusChanged(true) from peripheral")
+                emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true) from peripheral")
             }
             
         case .poweredOff, .unauthorized, .unsupported:
@@ -940,7 +1050,15 @@ extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
         for request in requests {
+            print("[BleManager] 📨 GATT WRITE REQUEST from \(request.central.identifier), char: \(request.characteristic.uuid), size: \(request.value?.count ?? 0)")
+            emitDiagnostic("info", "GATT write request received", context: [
+                "centralId": request.central.identifier.uuidString,
+                "characteristicUuid": request.characteristic.uuid.uuidString,
+                "dataSize": request.value?.count ?? 0
+            ])
+            
             if request.characteristic.uuid == MESSAGE_CHAR_UUID, let value = request.value {
+                print("[BleManager] 📥 MESSAGE CHARACTERISTIC WRITE from \(request.central.identifier), processing...")
                 let senderId = centralDeviceIds[request.central.identifier] ?? peripheralDeviceIds[request.central.identifier]
                 if senderId == nil && logThrottler.shouldLog(key: "missing_sender_\(request.central.identifier.uuidString)", interval: 10) {
                     print("[BleManager] Received write without known sender for central \(request.central.identifier)")
@@ -953,10 +1071,13 @@ extension BleManager: CBPeripheralManagerDelegate {
                     ensureDeviceId(for: request.central.identifier)
                 }
                 handleReceivedData(value, senderId: senderId, centralId: request.central.identifier)
+            } else {
+                print("[BleManager] ❌ Unknown characteristic write: \(request.characteristic.uuid)")
             }
             
             // Respond to write request
             peripheral.respond(to: request, withResult: .success)
+            print("[BleManager] ✅ Sent success response to \(request.central.identifier)")
         }
     }
     

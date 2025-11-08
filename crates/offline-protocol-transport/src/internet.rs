@@ -211,6 +211,10 @@ impl InternetTransport {
 }
 
 impl Transport for InternetTransport {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn transport_type(&self) -> TransportType {
         TransportType::Internet
     }

@@ -138,7 +138,7 @@ interface ChatDetailScreenProps {
 export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile }: ChatDetailScreenProps) {
   const { theme } = useTheme();
   
-  const { chats, contacts, sendMessage, currentUserId } = useProtocol();
+  const { chats, contacts, sendMessage, currentUserId, isOnline, connectedPeersCount } = useProtocol();
   const [inputText, setInputText] = useState('');
   const [priority, setPriority] = useState<MessagePriority>(MessagePriority.Medium);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -149,6 +149,7 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   const chat = chats.find(c => c.peerId === peerId);
   const contact = contacts.find(c => c.id === peerId);
   const messages = chat?.messages || [];
+  const isPeerOnline = contact?.isOnline ?? false;
   
   const avatarColor = generateAvatarColor(peerId);
   const initials = getUserInitials(peerName);
@@ -310,6 +311,50 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     }
   };
 
+  const renderStatusBanner = () => {
+    if (!isOnline) {
+      return (
+        <View style={[
+          styles.statusBanner,
+          { backgroundColor: `${theme.colors.error}22`, borderColor: theme.colors.error }
+        ]}>
+          <Icon name="alert-circle" size={16} color={theme.colors.error} style={{ marginRight: 8 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.statusBannerTitle, { color: theme.colors.error }]}>
+              Messenger offline
+            </Text>
+            <Text style={[styles.statusBannerSubtitle, { color: theme.colors.textSecondary }]}>
+              Messages will send automatically when service restarts.
+            </Text>
+          </View>
+        </View>
+      );
+    }
+
+    if (!isPeerOnline) {
+      return (
+        <View style={[
+          styles.statusBanner,
+          { backgroundColor: `${theme.colors.warning}22`, borderColor: theme.colors.warning }
+        ]}>
+          <Icon name="time" size={16} color={theme.colors.warning} style={{ marginRight: 8 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.statusBannerTitle, { color: theme.colors.warning }]}>
+              Waiting for {peerName}
+            </Text>
+            <Text style={[styles.statusBannerSubtitle, { color: theme.colors.textSecondary }]}>
+              {connectedPeersCount > 0
+                ? 'We will deliver this message once they come back online.'
+                : 'Keep the app open so nearby peers can relay your message.'}
+            </Text>
+          </View>
+        </View>
+      );
+    }
+
+    return null;
+  };
+
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
       {renderHeader()}
@@ -318,6 +363,7 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
+        {renderStatusBanner()}
         {/* Messages */}
         <FlatList
           ref={flatListRef}
@@ -395,17 +441,27 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
               style={[
                 styles.sendButton,
                 {
-                  backgroundColor: inputText.trim() ? theme.colors.primary : theme.colors.border,
+                  backgroundColor: !isOnline
+                    ? theme.colors.border
+                    : inputText.trim()
+                      ? theme.colors.primary
+                      : theme.colors.border,
                 },
               ]}
               onPress={handleSend}
-              disabled={!inputText.trim()}
+              disabled={!inputText.trim() || !isOnline}
               activeOpacity={0.8}
             >
               <Icon
                 name="send"
                 size={20}
-                color={inputText.trim() ? theme.colors.textInverse : theme.colors.textSecondary}
+                color={
+                  !isOnline
+                    ? theme.colors.textSecondary
+                    : inputText.trim()
+                      ? theme.colors.textInverse
+                      : theme.colors.textSecondary
+                }
               />
             </TouchableOpacity>
           </View>
@@ -564,6 +620,26 @@ const styles = StyleSheet.create({
     fontSize: 16,
     textAlign: 'center',
     lineHeight: 22,
+  },
+  statusBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  statusBannerTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  statusBannerSubtitle: {
+    fontSize: 12,
+    lineHeight: 16,
   },
   inputContainer: {
     borderTopWidth: 1,

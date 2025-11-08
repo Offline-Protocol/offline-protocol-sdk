@@ -11,7 +11,7 @@ use offline_protocol::{
     OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
-use offline_protocol_transport::{ble::BleTransport, TransportType as CoreTransportType};
+use offline_protocol_transport::{ble::BleTransport, Transport, TransportType as CoreTransportType};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
@@ -326,9 +326,10 @@ impl OfflineProtocol {
         // Add BLE transport if enabled
         // The transport manager owns the transport, and we'll access it through there
         if ble_enabled {
+            let ble_transport = BleTransport::new(user_id.clone());
             protocol.transport_manager_mut().add_transport(
                 CoreTransportType::BLE,
-                Box::new(BleTransport::new(user_id.clone())),
+                Box::new(ble_transport),
             );
         }
 
@@ -388,6 +389,20 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         protocol.start().map_err(ProtocolError::from)?;
         *self.state.write().unwrap() = ProtocolState::Running;
+        
+        // Ensure BLE transport is set to Available immediately when protocol starts
+        // This fixes the issue where messages get stuck because BLE transport status is Unavailable
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                // Force BLE transport to Available status - the native layer will manage actual BLE availability
+                ble_transport.on_status_changed(offline_protocol_transport::TransportStatus::Available);
+            }
+        }
+        
         drop(protocol);
 
         // Emit a network metrics event when started to verify event system is working
@@ -501,6 +516,21 @@ impl OfflineProtocol {
         priority: MessagePriority,
     ) -> Result<String, ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
+        
+        // CRITICAL FIX: Ensure BLE transport is available before attempting to send
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available {
+                    // Force status to Available if BLE is supposed to be enabled
+                    ble_transport.on_status_changed(offline_protocol_transport::TransportStatus::Available);
+                }
+            }
+        }
+        
         let message_id = protocol
             .send_message(&recipient, &content, Some(priority.into()))
             .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
@@ -573,9 +603,25 @@ impl OfflineProtocol {
     }
 
     /// BLE: Status changed
-    pub fn ble_status_changed(&self, _is_available: bool) -> Result<(), ProtocolError> {
-        // Status is now managed automatically by the BLE transport when started
-        // This method is kept for backwards compatibility but is a no-op
+    pub fn ble_status_changed(&self, is_available: bool) -> Result<(), ProtocolError> {
+        // Update the BLE transport status based on platform availability
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                let new_status = if is_available {
+                    offline_protocol_transport::TransportStatus::Available
+                } else {
+                    offline_protocol_transport::TransportStatus::Unavailable
+                };
+                
+                ble_transport.on_status_changed(new_status);
+            }
+        }
+        
         Ok(())
     }
 
@@ -585,23 +631,35 @@ impl OfflineProtocol {
         _sender_id: String,
         fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // Get the BLE transport from transport manager
-        let protocol = self.inner.lock().unwrap();
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
+        // Process the fragment first
         {
-            let transport = transport_arc.lock().unwrap();
+            let protocol = self.inner.lock().unwrap();
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                let transport = transport_arc.lock().unwrap();
 
-            // Downcast to BleTransport to access fragment handling
-            let ble_transport =
-                transport.as_ref() as *const dyn offline_protocol_transport::Transport;
-            let ble_transport = unsafe { &*(ble_transport as *const BleTransport) };
+                // Safe downcast to BleTransport using Any trait
+                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                    // Process the fragment
+                    ble_transport
+                        .on_fragment_received(fragment)
+                        .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
+                } else {
+                    return Err(ProtocolError::Other(
+                        "BLE transport not available or wrong type".to_string(),
+                    ));
+                }
+            }
+        }
 
-            // Process the fragment
-            ble_transport
-                .on_fragment_received(fragment)
-                .map_err(|e| ProtocolError::Other(format!("Fragment processing failed: {}", e)))?;
+        // CRITICAL FIX: Immediately process any completed messages and emit events
+        // This prevents the lag waiting for the 100ms polling cycle
+        let mut protocol = self.inner.lock().unwrap();
+        while let Some(_message) = protocol.receive_message() {
+            // Message will emit MessageReceived event automatically
+            // Just ensure the receive_message() loop runs to trigger events
         }
 
         Ok(())
@@ -609,7 +667,7 @@ impl OfflineProtocol {
 
     /// BLE: Get next fragment to send
     pub fn ble_get_next_fragment(&self) -> Option<BleFragment> {
-        // Get the BLE transport from transport manager
+        // CRITICAL FIX: Ensure BLE transport is available for fragment polling
         let protocol = self.inner.lock().unwrap();
         if let Some(transport_arc) = protocol
             .transport_manager()
@@ -617,17 +675,20 @@ impl OfflineProtocol {
         {
             let transport = transport_arc.lock().unwrap();
 
-            // Downcast to BleTransport to access fragment methods
-            let ble_transport =
-                transport.as_ref() as *const dyn offline_protocol_transport::Transport;
-            let ble_transport = unsafe { &*(ble_transport as *const BleTransport) };
-
-            // Get next fragment
-            if let Ok(Some((recipient, data))) = ble_transport.get_next_fragment() {
-                return Some(BleFragment {
-                    recipient_id: recipient,
-                    data,
-                });
+            // Safe downcast to BleTransport using Any trait
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                // Ensure BLE is available for fragment polling
+                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available {
+                    ble_transport.on_status_changed(offline_protocol_transport::TransportStatus::Available);
+                }
+                
+                // Get next fragment
+                if let Ok(Some((recipient, data))) = ble_transport.get_next_fragment() {
+                    return Some(BleFragment {
+                        recipient_id: recipient,
+                        data,
+                    });
+                }
             }
         }
 

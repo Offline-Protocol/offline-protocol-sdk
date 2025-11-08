@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import uniffi.offline_protocol.OfflineProtocol
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import android.bluetooth.BluetoothStatusCodes
 
 private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
     private val timestamps = ConcurrentHashMap<String, Long>()
@@ -99,6 +100,7 @@ class BleManager(
     private data class PendingFragment(val data: ByteArray, val timestamp: Long)
     private val pendingFragments = ConcurrentHashMap<String, MutableList<PendingFragment>>()
     private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
+    private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
     
     // Fragment polling
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -110,6 +112,8 @@ class BleManager(
             }
         }
     }
+
+    private val pendingOutboundFragments = mutableMapOf<String, MutableList<ByteArray>>()
 
     private val scanWatchdogRunnable = object : Runnable {
         override fun run() {
@@ -201,7 +205,21 @@ class BleManager(
             mainHandler.post(fragmentPollingRunnable)
             
             updateState(TransportState.RUNNING)
-            protocol.bleStatusChanged(true)
+            Log.i(TAG, "BLE Manager started successfully - calling bleStatusChanged(true)")
+            Log.i(TAG, "About to call protocol.bleStatusChanged(true)")
+            emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
+            
+            try {
+                protocol.bleStatusChanged(true)
+                Log.i(TAG, "Successfully called protocol.bleStatusChanged(true)")
+                emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to call protocol.bleStatusChanged(true): ${e.message}", e)
+                emitDiagnostic("error", "Failed to call protocol.bleStatusChanged(true)", mapOf(
+                    "error" to (e.message ?: "unknown"),
+                    "exception" to e.javaClass.simpleName
+                ))
+            }
             
             Log.i(TAG, "BLE Manager started successfully - scanning and advertising active")
             emitDiagnostic(
@@ -546,49 +564,135 @@ class BleManager(
     
     private fun pollAndSendFragments() {
         try {
+            if (flushPendingOutboundFragments()) {
+                return
+            }
+
             // Poll for next fragment from protocol
-            val fragment = protocol.bleGetNextFragment() ?: return
+            val fragment = try {
+                protocol.bleGetNextFragment()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error calling bleGetNextFragment(): ${e.message}", e)
+                emitDiagnostic("error", "Error calling bleGetNextFragment", mapOf(
+                    "error" to (e.message ?: "unknown"),
+                    "exception" to e.javaClass.simpleName
+                ))
+                return
+            }
+            
+            if (fragment == null) {
+                // No fragment available - this is normal most of the time
+                // Only log occasionally to avoid spam
+                if (logThrottler.shouldLog("no_fragments", intervalMs = 10000)) {
+                    Log.d(TAG, "No fragments available from protocol")
+                }
+                return
+            }
+            
+            Log.i(TAG, "🚀 GOT FRAGMENT for recipient: ${fragment.recipientId}, size: ${fragment.data.size}")
+            emitDiagnostic("debug", "Polling got fragment", mapOf(
+                "recipientId" to fragment.recipientId,
+                "fragmentSize" to fragment.data.size
+            ))
             
             val recipientId = fragment.recipientId
             val data = fragment.data.map { it.toByte() }.toByteArray()
             
-            // Find GATT client for recipient
-            val address = deviceIdToAddress[recipientId]
-            val gatt = address?.let { gattClients[it] }
+            val sendResult = sendFragmentData(recipientId, data)
+            Log.d(TAG, "Fragment send result for $recipientId: $sendResult")
             
-            if (gatt == null) {
-                if (logThrottler.shouldLog("missing_gatt_$recipientId")) {
-                    Log.w(TAG, "No connected device for recipient: $recipientId")
-                    emitDiagnostic("warning", "No connected device for BLE fragment", mapOf("recipientId" to recipientId))
-                }
-                return
+            if (!sendResult) {
+                Log.w(TAG, "Failed to send fragment immediately, queuing for retry")
+                enqueuePendingOutboundFragment(recipientId, data)
+            } else {
+                Log.d(TAG, "Fragment sent successfully to $recipientId")
+                emitDiagnostic("debug", "Fragment sent successfully", mapOf("recipientId" to recipientId))
             }
-            
-            // Find message characteristic
-            val service = gatt.getService(SERVICE_UUID)
-            val characteristic = service?.getCharacteristic(MESSAGE_CHAR_UUID)
-            
-            if (characteristic == null) {
-                if (logThrottler.shouldLog("missing_char_$recipientId")) {
-                    Log.w(TAG, "Message characteristic not found for recipient: $recipientId")
-                    emitDiagnostic("warning", "Message characteristic missing", mapOf("recipientId" to recipientId))
-                }
-                return
-            }
-            
-            // Write data
-            characteristic.value = data
-            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            gatt.writeCharacteristic(characteristic)
-            
-            bytesSent += data.size
-            fragmentsSent++
-            
-            // Reduced logging - only log errors
         } catch (e: Exception) {
             Log.e(TAG, "Error polling/sending fragments", e)
             emitDiagnostic("error", "Error sending BLE fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
+    }
+
+    private fun flushPendingOutboundFragments(): Boolean {
+        var hasUnsentFragments = false
+
+        val recipients = pendingOutboundFragments.keys.toList()
+        for (recipientId in recipients) {
+            val queue = pendingOutboundFragments[recipientId] ?: continue
+            val iterator = queue.listIterator()
+            while (iterator.hasNext()) {
+                val data = iterator.next()
+                if (sendFragmentData(recipientId, data)) {
+                    iterator.remove()
+                } else {
+                    hasUnsentFragments = true
+                    break
+                }
+            }
+            if (queue.isEmpty()) {
+                pendingOutboundFragments.remove(recipientId)
+            }
+        }
+
+        return hasUnsentFragments
+    }
+
+    private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
+        val queue = pendingOutboundFragments.getOrPut(recipientId) { mutableListOf() }
+        queue.add(data)
+    }
+
+    private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
+        // Find GATT client for recipient
+        val address = deviceIdToAddress[recipientId]
+        val gatt = address?.let { gattClients[it] }
+        
+        if (gatt == null) {
+            if (logThrottler.shouldLog("missing_gatt_$recipientId")) {
+                Log.w(TAG, "No connected device for recipient: $recipientId")
+                emitDiagnostic("warning", "No connected device for BLE fragment", mapOf("recipientId" to recipientId))
+            }
+            return false
+        }
+        
+        val service = gatt.getService(SERVICE_UUID)
+        val characteristic = service?.getCharacteristic(MESSAGE_CHAR_UUID)
+        
+        if (service == null || characteristic == null) {
+            if (logThrottler.shouldLog("missing_char_$recipientId")) {
+                Log.w(TAG, "Message characteristic not found for recipient: $recipientId")
+                emitDiagnostic("warning", "Message characteristic missing", mapOf("recipientId" to recipientId))
+            }
+            return false
+        }
+
+        characteristic.value = data
+        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+
+        val writeOk = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothStatusCodes.SUCCESS
+            } else {
+                gatt.writeCharacteristic(characteristic)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing characteristic", e)
+            emitDiagnostic("error", "Error writing BLE fragment", mapOf("recipientId" to recipientId, "exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+            false
+        }
+
+        if (!writeOk) {
+            if (logThrottler.shouldLog("write_failed_$recipientId", intervalMs = 2000)) {
+                Log.w(TAG, "Failed to write BLE fragment for $recipientId")
+                emitDiagnostic("warning", "Failed to write BLE fragment", mapOf("recipientId" to recipientId))
+            }
+            return false
+        }
+        
+        bytesSent += data.size
+        fragmentsSent++
+        return true
     }
     
     private fun handleReceivedData(data: ByteArray, address: String) {
@@ -608,6 +712,41 @@ class BleManager(
                     )
                 }
                 
+                // Proactively attempt to resolve the device ID by initiating a client connection
+                bluetoothAdapter?.let { adapter ->
+                    try {
+                        val device = adapter.getRemoteDevice(address)
+                        mainHandler.post {
+                            val hasGattClient = gattClients.containsKey(device.address)
+                            val mappedId = deviceAddressToId[device.address]
+                            val now = System.currentTimeMillis()
+                            val lastAttempt = deviceIdResolutionAttempts[address] ?: 0L
+                            val shouldAttempt = now - lastAttempt > PENDING_FRAGMENT_TIMEOUT_MS
+                            if ((!hasGattClient || mappedId.isNullOrEmpty()) && shouldAttempt) {
+                                deviceIdResolutionAttempts[address] = now
+                                if (logThrottler.shouldLog("resolve_device_$address", intervalMs = 5000)) {
+                                    Log.d(TAG, "Attempting to resolve device ID for $address via client connection")
+                                    emitDiagnostic(
+                                        "debug",
+                                        "Resolving BLE sender device ID",
+                                        mapOf("address" to address, "hasGattClient" to hasGattClient, "knownId" to (mappedId != null))
+                                    )
+                                }
+                                connectToDevice(device)
+                            }
+                        }
+                    } catch (e: IllegalArgumentException) {
+                        if (logThrottler.shouldLog("resolve_device_error_$address", intervalMs = 10000)) {
+                            Log.w(TAG, "Failed to obtain remote device for address $address", e)
+                            emitDiagnostic(
+                                "warning",
+                                "Failed to resolve BLE device for pending fragment",
+                                mapOf("address" to address, "message" to (e.message ?: "unknown"))
+                            )
+                        }
+                    }
+                }
+
                 // Clean up old pending fragments
                 cleanupPendingFragments()
                 return
@@ -617,7 +756,37 @@ class BleManager(
             val bytes = data.map { it.toUByte() }
             
             // Pass to protocol
-            protocol.bleFragmentReceived(senderId, bytes)
+            Log.i(TAG, "📥 RECEIVED FRAGMENT from $senderId, size: ${data.size}")
+            emitDiagnostic("info", "Fragment received from BLE", mapOf(
+                "senderId" to senderId,
+                "fragmentSize" to data.size
+            ))
+            
+            try {
+                protocol.bleFragmentReceived(senderId, bytes)
+                Log.i(TAG, "✅ Fragment processed successfully for sender: $senderId")
+                
+                // CRITICAL: Immediately check if this completed a message
+                val completedMessage = protocol.receiveMessage()
+                if (completedMessage != null) {
+                    Log.i(TAG, "🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
+                    Log.i(TAG, "📬 Received message: $completedMessage")
+                    emitDiagnostic("info", "Complete message assembled from fragments", mapOf(
+                        "senderId" to senderId,
+                        "messageContent" to completedMessage
+                    ))
+                } else {
+                    Log.d(TAG, "📦 Fragment processed, waiting for more fragments to complete message")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error processing fragment from $senderId: ${e.message}", e)
+                emitDiagnostic("error", "Error processing received fragment", mapOf(
+                    "senderId" to senderId,
+                    "fragmentSize" to data.size,
+                    "error" to (e.message ?: "unknown"),
+                    "exception" to e.javaClass.simpleName
+                ))
+            }
             
             bytesReceived += data.size
             fragmentsReceived++
@@ -628,6 +797,7 @@ class BleManager(
     }
     
     private fun processPendingFragments(address: String, deviceId: String) {
+        deviceIdResolutionAttempts.remove(address)
         val fragments = pendingFragments.remove(address) ?: return
         
         for (fragment in fragments) {
@@ -678,6 +848,7 @@ class BleManager(
                             }
                             deviceAddressToId.remove(address)
                             deviceIdToAddress.remove(peerId)
+                            deviceIdResolutionAttempts.remove(address)
                         }
                     }
                 }
@@ -713,14 +884,25 @@ class BleManager(
             value: ByteArray
         ) {
             try {
+                Log.i(TAG, "📨 GATT WRITE REQUEST from ${device.address}, char: ${characteristic.uuid}, size: ${value.size}")
+                emitDiagnostic("info", "GATT write request received", mapOf(
+                    "deviceAddress" to device.address,
+                    "characteristicUuid" to characteristic.uuid.toString(),
+                    "dataSize" to value.size,
+                    "responseNeeded" to responseNeeded
+                ))
+                
                 if (characteristic.uuid == MESSAGE_CHAR_UUID) {
+                    Log.i(TAG, "📥 MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
                     // Handle incoming fragment
                     handleReceivedData(value, device.address)
                     
                     if (responseNeeded) {
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                        Log.d(TAG, "✅ Sent GATT_SUCCESS response to ${device.address}")
                     }
                 } else {
+                    Log.w(TAG, "❌ Unknown characteristic write: ${characteristic.uuid}")
                     if (responseNeeded) {
                         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
                     }
@@ -784,6 +966,7 @@ class BleManager(
                             }
                             deviceAddressToId.remove(address)
                             deviceIdToAddress.remove(deviceId)
+                    deviceIdResolutionAttempts.remove(address)
                         }
                     }
                 }

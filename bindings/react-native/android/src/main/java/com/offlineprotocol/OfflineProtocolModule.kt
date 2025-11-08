@@ -23,6 +23,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var processScheduler: ScheduledExecutorService? = null
     private var listenerCount: Int = 0
     private var currentConfig: ProtocolConfig? = null
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     companion object {
         const val NAME = "OfflineProtocolModule"
@@ -264,6 +265,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     manager.start()
                     android.util.Log.i(NAME, "BLE Manager started")
                     emitDiagnostic("info", "BLE manager started")
+                    
+                    // CRITICAL FIX: Backup bleStatusChanged(true) call in case timing is off
+                    mainHandler.postDelayed({
+                        android.util.Log.i(NAME, "Backup bleStatusChanged(true) call")
+                        emitDiagnostic("info", "Backup call to protocol.bleStatusChanged(true)")
+                        try {
+                            protocol?.bleStatusChanged(true)
+                            emitDiagnostic("info", "Backup bleStatusChanged(true) completed")
+                        } catch (e: Exception) {
+                            android.util.Log.w(NAME, "Backup bleStatusChanged failed: ${e.message}")
+                        }
+                    }, 1000) // 1 second delay
                 } catch (e: Exception) {
                     android.util.Log.w(NAME, "Warning: Failed to start BLE Manager: ${e.message}")
                     emitDiagnostic("error", "Failed to start BLE manager", mapOf(
@@ -837,13 +850,36 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun processProtocol() {
         try {
             val instance = protocol ?: return
+            
+            // Add debug logging to verify process is being called
+            if (System.currentTimeMillis() % 5000 < 100) { // Log every ~5 seconds
+                android.util.Log.d(NAME, "🔄 Processing protocol...")
+            }
+            
             instance.process()
+            
+            var messageCount = 0
             while (true) {
                 val message = instance.receiveMessage() ?: break
+                messageCount++
+                android.util.Log.i(NAME, "🎉 PROTOCOL RECEIVED MESSAGE #$messageCount: $message")
+                emitDiagnostic("info", "Protocol received message", mapOf(
+                    "messageNumber" to messageCount,
+                    "messageJson" to (message ?: "null")
+                ))
                 // Message events are dispatched via the event callback; no further action required here.
+            }
+            
+            // Only log when messages are found to avoid spam
+            if (messageCount > 0) {
+                android.util.Log.i(NAME, "📬 Processed $messageCount received messages")
             }
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Process error: ${e.message}", e)
+            emitDiagnostic("error", "Protocol process error", mapOf(
+                "error" to (e.message ?: "unknown"),
+                "exception" to e.javaClass.simpleName
+            ))
         }
     }
 

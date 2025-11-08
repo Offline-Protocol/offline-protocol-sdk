@@ -208,6 +208,10 @@ impl WifiDirectTransport {
 }
 
 impl Transport for WifiDirectTransport {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn transport_type(&self) -> TransportType {
         TransportType::WiFiDirect
     }

@@ -51,6 +51,10 @@ impl MockTransport {
 }
 
 impl Transport for MockTransport {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn transport_type(&self) -> TransportType {
         self.transport_type
     }

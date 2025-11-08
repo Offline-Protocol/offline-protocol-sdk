@@ -149,6 +149,11 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
             console.log('🔍', diagnostic.message, diagnostic.context ?? '');
           }
         } else {
+          // CRITICAL: Always log message_received events for debugging
+          if (annotatedEvent.type === 'message_received') {
+            console.log('🎉 MESSAGE_RECEIVED EVENT:', annotatedEvent);
+          }
+          
           // Only log important protocol events
           if (
             annotatedEvent.type === 'neighbor_discovered' ||

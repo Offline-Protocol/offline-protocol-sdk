@@ -2,6 +2,7 @@
 
 use crate::{Result, TransportMetrics, TransportType};
 use offline_protocol_core::Message;
+use std::any::Any;
 
 /// Status of a transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +23,9 @@ pub enum TransportStatus {
 ///
 /// This trait defines the interface that all transport implementations must follow.
 /// Implementations handle the platform-specific details of sending and receiving messages.
-pub trait Transport: Send + Sync {
+pub trait Transport: Send + Sync + Any {
+    /// Returns this transport as `&dyn Any` for safe downcasting.
+    fn as_any(&self) -> &dyn Any;
     /// Returns the type of this transport.
     fn transport_type(&self) -> TransportType;
 
