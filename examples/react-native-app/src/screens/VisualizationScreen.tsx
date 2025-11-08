@@ -2,15 +2,21 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Dimensions } from 'react-native';
 import type { OfflineProtocol } from '@offlineprotocol/react-native';
 import type { NetworkTopology, NetworkNode, NetworkLink, MessageDeliveryStats } from '@offlineprotocol/react-native';
+import type { DerivedInsights } from '../utils/deriveInsights';
 
 interface VisualizationScreenProps {
   protocol: OfflineProtocol | null;
   isStarted: boolean;
+  insights: DerivedInsights;
 }
 
 const { width } = Dimensions.get('window');
 
-export function VisualizationScreen({ protocol, isStarted }: VisualizationScreenProps) {
+function formatSwitchTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+export function VisualizationScreen({ protocol, isStarted, insights }: VisualizationScreenProps) {
   const [topology, setTopology] = useState<NetworkTopology | null>(null);
   const [messageStats, setMessageStats] = useState<MessageDeliveryStats[]>([]);
   const [successRate, setSuccessRate] = useState<number | null>(null);
@@ -18,6 +24,17 @@ export function VisualizationScreen({ protocol, isStarted }: VisualizationScreen
   const [medianHops, setMedianHops] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const messageMetrics = insights.messageMetrics;
+  const dorsMetrics = insights.dorsMetrics;
+  const neighborMetrics = insights.neighborMetrics;
+  const successRateDisplay =
+    successRate ?? (messageMetrics.successRate !== null ? messageMetrics.successRate : null);
+  const medianLatencyDisplay =
+    medianLatency ?? (messageMetrics.averageLatencyMs !== null ? messageMetrics.averageLatencyMs : null);
+  const medianHopsDisplay =
+    medianHops ?? (messageMetrics.averageHopCount !== null ? messageMetrics.averageHopCount : null);
+  const totalMessages = messageMetrics.sent + messageMetrics.received;
+  const recentSwitches = dorsMetrics.switches.slice().reverse().slice(0, 8);
 
   const loadVisualizationData = async () => {
     if (!protocol || !isStarted) {
@@ -100,30 +117,28 @@ export function VisualizationScreen({ protocol, isStarted }: VisualizationScreen
         <View style={styles.metricsGrid}>
           <View style={styles.metricCard}>
             <Text style={styles.metricValue}>
-              {successRate !== null ? `${(successRate * 100).toFixed(1)}%` : '-'}
+              {successRateDisplay !== null ? `${(successRateDisplay * 100).toFixed(1)}%` : '-'}
             </Text>
             <Text style={styles.metricLabel}>Success Rate</Text>
           </View>
           
           <View style={styles.metricCard}>
             <Text style={styles.metricValue}>
-              {medianLatency !== null ? `${medianLatency}ms` : '-'}
+              {medianLatencyDisplay !== null ? `${Math.round(medianLatencyDisplay)}ms` : '-'}
             </Text>
             <Text style={styles.metricLabel}>Median Latency</Text>
           </View>
           
           <View style={styles.metricCard}>
             <Text style={styles.metricValue}>
-              {medianHops !== null ? medianHops : '-'}
+              {medianHopsDisplay !== null ? medianHopsDisplay.toFixed(1) : '-'}
             </Text>
             <Text style={styles.metricLabel}>Median Hops</Text>
           </View>
           
           <View style={styles.metricCard}>
-            <Text style={styles.metricValue}>
-              {messageStats.length}
-            </Text>
-            <Text style={styles.metricLabel}>Total Messages</Text>
+            <Text style={styles.metricValue}>{totalMessages}</Text>
+            <Text style={styles.metricLabel}>Messages Processed</Text>
           </View>
         </View>
       </View>
@@ -262,6 +277,25 @@ export function VisualizationScreen({ protocol, isStarted }: VisualizationScreen
         </>
       )}
 
+      {recentSwitches.length > 0 && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>🚦 DORS Timeline</Text>
+          <View style={styles.card}>
+            {recentSwitches.map((entry, index) => (
+              <View key={`${entry.at}-${index}`} style={styles.timelineItem}>
+                <View style={styles.timelineHeader}>
+                  <Text style={styles.timelineRoute}>
+                    {(entry.from ?? 'None')} → {entry.to}
+                  </Text>
+                  <Text style={styles.timelineTimestamp}>{formatSwitchTime(entry.at)}</Text>
+                </View>
+                <Text style={styles.timelineReason}>{entry.reason}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      )}
+
       {/* Recent Message Stats */}
       {messageStats.length > 0 && (
         <View style={styles.section}>
@@ -366,6 +400,30 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#333',
     marginBottom: 12,
+  },
+  timelineItem: {
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  timelineHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  timelineRoute: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1d4ed8',
+  },
+  timelineTimestamp: {
+    fontSize: 12,
+    color: '#64748b',
+  },
+  timelineReason: {
+    fontSize: 12,
+    color: '#475569',
   },
   metricsGrid: {
     flexDirection: 'row',

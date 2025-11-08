@@ -95,11 +95,16 @@ public class BleManager: NSObject, TransportManager {
     private var lastDiscoveryDate: Date?
     private var scanStartDate: Date?
     private let SCAN_HEARTBEAT_INTERVAL: TimeInterval = 10.0
-    private let SCAN_RESTART_INTERVAL: TimeInterval = 20.0
+    private let SCAN_RESTART_INTERVAL: TimeInterval = 30.0
     private var connectionMonitor: DispatchSourceTimer?
     private var connectionAttemptTimestamps: [UUID: Date] = [:]
     private let CONNECTION_MONITOR_INTERVAL: TimeInterval = 5.0
-    private let MIN_RECONNECT_INTERVAL: TimeInterval = 3.0
+    private let MIN_RECONNECT_INTERVAL: TimeInterval = 5.0
+    private var scanRestartCount: Int = 0
+    private var lastCentralReset: Date?
+    private let MAX_CONSECUTIVE_SCAN_RESTARTS = 3
+    private let CENTRAL_RESET_BACKOFF: TimeInterval = 45.0
+    private let MINIMUM_RSSI_TO_CONNECT: Int16 = -90
 
     // MARK: - Diagnostics
     private func emitDiagnostic(_ level: String, _ message: String, context: [String: Any] = [:]) {
@@ -249,6 +254,10 @@ public class BleManager: NSObject, TransportManager {
             }
             return
         }
+
+        if reason != "watchdog" {
+            scanRestartCount = 0
+        }
         
         central.scanForPeripherals(
             withServices: [SERVICE_UUID],
@@ -267,6 +276,13 @@ public class BleManager: NSObject, TransportManager {
             emitDiagnostic("info", "Started BLE scanning", context: context)
         }
         startConnectionMonitor()
+
+        // Rehydrate previously connected peripherals to avoid waiting for advertisements
+        let retainedPeripherals = central.retrieveConnectedPeripherals(withServices: [SERVICE_UUID])
+        for peripheral in retainedPeripherals {
+            discoveredPeripherals[peripheral.identifier] = peripheral
+            attemptConnection(to: peripheral, reason: "retrieve_connected")
+        }
     }
     
     private func stopScanning(reason: String = "manual") {
@@ -318,8 +334,30 @@ public class BleManager: NSObject, TransportManager {
             guard self.isScanning else { return }
             self.centralManager?.stopScan()
             self.isScanning = false
+            self.scanRestartCount += 1
             self.startScanning(reason: "watchdog")
+            self.evaluateCentralHealthAfterRestart()
         }
+    }
+    
+    private func evaluateCentralHealthAfterRestart() {
+        guard scanRestartCount >= MAX_CONSECUTIVE_SCAN_RESTARTS else { return }
+        let now = Date()
+        if let lastReset = lastCentralReset, now.timeIntervalSince(lastReset) < CENTRAL_RESET_BACKOFF {
+            return
+        }
+        emitDiagnostic("warning", "Resetting BLE central due to repeated scan stalls", context: [
+            "restartCount": scanRestartCount
+        ])
+        centralReady = false
+        centralManager?.stopScan()
+        centralManager = CBCentralManager(
+            delegate: self,
+            queue: nil,
+            options: [CBCentralManagerOptionShowPowerAlertKey: true]
+        )
+        lastCentralReset = now
+        scanRestartCount = 0
     }
     
     private func markDiscoveryEvent() {
@@ -366,6 +404,16 @@ public class BleManager: NSObject, TransportManager {
             }
             let now = Date()
             if let lastAttempt = self.connectionAttemptTimestamps[peripheral.identifier], now.timeIntervalSince(lastAttempt) < self.MIN_RECONNECT_INTERVAL {
+                return
+            }
+            if let effectiveRSSI = rssi ?? self.peripheralRSSI[peripheral.identifier], effectiveRSSI < self.MINIMUM_RSSI_TO_CONNECT {
+                if self.logThrottler.shouldLog(key: "rssi_skip_\(peripheral.identifier.uuidString)", interval: 10) {
+                    self.emitDiagnostic("debug", "Skipping BLE connect due to weak RSSI", context: [
+                        "rssi": effectiveRSSI,
+                        "threshold": self.MINIMUM_RSSI_TO_CONNECT,
+                        "reason": reason
+                    ])
+                }
                 return
             }
             self.connectionAttemptTimestamps[peripheral.identifier] = now

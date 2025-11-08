@@ -10,9 +10,25 @@ import type {
   NetworkMetricsEvent,
   DiagnosticEvent,
 } from '@offlineprotocol/react-native';
+import type { DerivedInsights } from '../utils/deriveInsights';
+
+const TRANSPORT_THEME: Record<string, { background: string; border: string; text: string }> = {
+  BLE: { background: '#dbeafe', border: '#1d4ed8', text: '#1d4ed8' },
+  WiFiDirect: { background: '#ffedd5', border: '#c2410c', text: '#c2410c' },
+  Internet: { background: '#dcfce7', border: '#15803d', text: '#15803d' },
+};
+
+function getTransportTheme(transport: string) {
+  return TRANSPORT_THEME[transport] ?? { background: '#e2e8f0', border: '#cbd5f5', text: '#0f172a' };
+}
+
+function formatTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 interface NetworkScreenProps {
   events: ProtocolEvent[];
+  insights: DerivedInsights;
 }
 
 interface NetworkState {
@@ -27,13 +43,28 @@ interface NetworkState {
   } | null;
 }
 
-export function NetworkScreen({ events }: NetworkScreenProps) {
+export function NetworkScreen({ events, insights }: NetworkScreenProps) {
+  const dorsMetrics = insights.dorsMetrics;
+  const neighborMetrics = insights.neighborMetrics;
+  const networkSummary = insights.networkSummary;
+  const messageMetrics = insights.messageMetrics;
   const networkState = React.useMemo((): NetworkState => {
     const state: NetworkState = {
-      currentTransport: null,
+      currentTransport: dorsMetrics.currentTransport,
       isRelay: false,
-      neighbors: new Set(),
-      metrics: null,
+      neighbors: new Set(neighborMetrics.peers),
+      metrics:
+        networkSummary.neighborCount !== null &&
+        networkSummary.relayCount !== null &&
+        networkSummary.deliveryRatio !== null &&
+        networkSummary.avgLatencyMs !== null
+          ? {
+              neighborCount: networkSummary.neighborCount,
+              relayCount: networkSummary.relayCount,
+              deliveryRatio: networkSummary.deliveryRatio,
+              avgLatencyMs: networkSummary.avgLatencyMs,
+            }
+          : null,
     };
 
     events.forEach((event) => {
@@ -110,14 +141,12 @@ export function NetworkScreen({ events }: NetworkScreenProps) {
     });
 
     return state;
-  }, [events]);
+  }, [dorsMetrics.currentTransport, events, neighborMetrics.peers, networkSummary.avgLatencyMs, networkSummary.deliveryRatio, networkSummary.neighborCount, networkSummary.relayCount]);
 
-  const transportHistory = React.useMemo(() => {
-    return events
-      .filter((e) => e.type === 'transport_switched')
-      .slice(0, 10)
-      .map((e) => e as TransportSwitchedEvent);
-  }, [events]);
+  const transportHistory = React.useMemo(
+    () => dorsMetrics.switches.slice().reverse().slice(0, 10),
+    [dorsMetrics.switches],
+  );
 
   const discoveredNeighbors = React.useMemo(() => {
     return events
@@ -125,6 +154,17 @@ export function NetworkScreen({ events }: NetworkScreenProps) {
       .slice(0, 10)
       .map((e) => e as NeighborDiscoveredEvent);
   }, [events]);
+
+  const transportHealthEntries = React.useMemo(
+    () => Object.entries(dorsMetrics.transportHealth),
+    [dorsMetrics.transportHealth],
+  );
+
+  const deliveryRateLabel =
+    messageMetrics.successRate !== null ? `${Math.round(messageMetrics.successRate * 100)}%` : '—';
+  const avgLatencyLabel =
+    messageMetrics.averageLatencyMs !== null ? `${Math.round(messageMetrics.averageLatencyMs)} ms` : '—';
+  const summaryMetrics = networkState.metrics;
 
   return (
     <ScrollView style={styles.container}>
@@ -143,9 +183,9 @@ export function NetworkScreen({ events }: NetworkScreenProps) {
         
         <View style={styles.card}>
           <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>Transport:</Text>
+            <Text style={styles.statusLabel}>Active Transport:</Text>
             <Text style={styles.statusValue}>
-              {networkState.currentTransport || 'None'}
+              {dorsMetrics.currentTransport ?? networkState.currentTransport ?? 'Automatic'}
             </Text>
           </View>
           
@@ -159,43 +199,125 @@ export function NetworkScreen({ events }: NetworkScreenProps) {
           </View>
           
           <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>Connected Neighbors:</Text>
-            <Text style={styles.statusValue}>{networkState.neighbors.size}</Text>
+            <Text style={styles.statusLabel}>Neighbors:</Text>
+            <Text style={styles.statusValue}>{neighborMetrics.total}</Text>
           </View>
+
+          <View style={styles.statusRow}>
+            <Text style={styles.statusLabel}>Delivery Rate:</Text>
+            <Text style={styles.statusValue}>{deliveryRateLabel}</Text>
+          </View>
+
+          <View style={styles.statusRow}>
+            <Text style={styles.statusLabel}>Avg Latency:</Text>
+            <Text style={styles.statusValue}>{avgLatencyLabel}</Text>
+          </View>
+
+          <View style={styles.statusRow}>
+            <Text style={styles.statusLabel}>Pending:</Text>
+            <Text style={styles.statusValue}>{messageMetrics.pending}</Text>
+          </View>
+
+          <View style={styles.statusMiniGrid}>
+            {[
+              { label: 'Sent', value: messageMetrics.sent },
+              { label: 'Received', value: messageMetrics.received },
+              { label: 'Delivered', value: messageMetrics.delivered },
+            ].map((item, index, arr) => (
+              <View
+                key={item.label}
+                style={[
+                  styles.statusMiniCard,
+                  index !== arr.length - 1 && styles.statusMiniCardSpacer,
+                ]}
+              >
+                <Text style={styles.statusMiniValue}>{item.value}</Text>
+                <Text style={styles.statusMiniLabel}>{item.label}</Text>
+              </View>
+            ))}
+          </View>
+
+          {dorsMetrics.lastSwitch ? (
+            <View style={styles.switchCard}>
+              <Text style={styles.switchTitle}>Last DORS decision</Text>
+              <Text style={styles.switchRoute}>
+                {(dorsMetrics.lastSwitch.from ?? 'None')} → {dorsMetrics.lastSwitch.to}
+              </Text>
+              <Text style={styles.switchReason}>{dorsMetrics.lastSwitch.reason}</Text>
+              <Text style={styles.switchTimestamp}>{formatTime(dorsMetrics.lastSwitch.at)}</Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
-      {networkState.metrics && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Network Metrics</Text>
           
           <View style={styles.card}>
             <View style={styles.metricRow}>
-              <Text style={styles.metricLabel}>Neighbor Count</Text>
-              <Text style={styles.metricValue}>{networkState.metrics.neighborCount}</Text>
+            <Text style={styles.metricLabel}>Live Neighbors</Text>
+            <Text style={styles.metricValue}>{neighborMetrics.total}</Text>
             </View>
             
             <View style={styles.metricRow}>
               <Text style={styles.metricLabel}>Relay Count</Text>
-              <Text style={styles.metricValue}>{networkState.metrics.relayCount}</Text>
+            <Text style={styles.metricValue}>
+              {summaryMetrics ? summaryMetrics.relayCount : '—'}
+            </Text>
             </View>
             
             <View style={styles.metricRow}>
               <Text style={styles.metricLabel}>Delivery Ratio</Text>
               <Text style={styles.metricValue}>
-                {(networkState.metrics.deliveryRatio * 100).toFixed(1)}%
+              {summaryMetrics
+                ? `${(summaryMetrics.deliveryRatio * 100).toFixed(1)}%`
+                : deliveryRateLabel}
               </Text>
             </View>
             
             <View style={styles.metricRow}>
               <Text style={styles.metricLabel}>Avg Latency</Text>
               <Text style={styles.metricValue}>
-                {networkState.metrics.avgLatencyMs.toFixed(0)}ms
+              {summaryMetrics
+                ? `${summaryMetrics.avgLatencyMs.toFixed(0)}ms`
+                : avgLatencyLabel}
               </Text>
             </View>
           </View>
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Transport Health</Text>
+        
+        {transportHealthEntries.length === 0 ? (
+          <Text style={styles.emptyText}>No transport usage yet</Text>
+        ) : (
+          <View style={styles.card}>
+            {transportHealthEntries.map(([transport, stats]) => {
+              const theme = getTransportTheme(transport);
+              return (
+                <View key={transport} style={styles.healthItem}>
+                  <View
+                    style={[
+                      styles.healthChip,
+                      { backgroundColor: theme.background, borderColor: theme.border },
+                    ]}
+                  >
+                    <Text style={[styles.healthChipText, { color: theme.text }]}>{transport}</Text>
+                  </View>
+                  <View style={styles.healthStatsRow}>
+                    <Text style={styles.healthStat}>{`Delivered ${stats.delivered}`}</Text>
+                    <Text style={styles.healthStat}>{`Received ${stats.received}`}</Text>
+                    <Text style={styles.healthStat}>
+                      {stats.lastSeenAt ? `Last ${formatTime(stats.lastSeenAt)}` : 'No traffic yet'}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
         </View>
       )}
+      </View>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Transport History</Text>
@@ -204,12 +326,15 @@ export function NetworkScreen({ events }: NetworkScreenProps) {
           <Text style={styles.emptyText}>No transport switches yet</Text>
         ) : (
           <View style={styles.card}>
-            {transportHistory.map((event, index) => (
-              <View key={index} style={styles.historyItem}>
+            {transportHistory.map((entry, index) => (
+              <View key={`${entry.at}-${index}`} style={styles.historyItem}>
+                <View style={styles.historyHeader}>
                 <Text style={styles.historyTransport}>
-                  {event.from || 'None'} → {event.to}
+                    {(entry.from ?? 'None')} → {entry.to}
                 </Text>
-                <Text style={styles.historyReason}>{event.reason}</Text>
+                  <Text style={styles.historyTimestamp}>{formatTime(entry.at)}</Text>
+                </View>
+                <Text style={styles.historyReason}>{entry.reason}</Text>
               </View>
             ))}
           </View>
@@ -299,6 +424,64 @@ const styles = StyleSheet.create({
     color: '#333',
     fontWeight: '600',
   },
+  statusMiniGrid: {
+    flexDirection: 'row',
+    marginTop: 12,
+    marginBottom: 8,
+  },
+  statusMiniCard: {
+    flex: 1,
+    backgroundColor: '#eef2ff',
+    borderRadius: 12,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  statusMiniCardSpacer: {
+    marginRight: 8,
+  },
+  statusMiniValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#1d4ed8',
+  },
+  statusMiniLabel: {
+    fontSize: 11,
+    color: '#475569',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginTop: 2,
+  },
+  switchCard: {
+    marginTop: 12,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  switchTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#475569',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 4,
+  },
+  switchRoute: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  switchReason: {
+    fontSize: 12,
+    color: '#475569',
+    marginTop: 2,
+  },
+  switchTimestamp: {
+    fontSize: 12,
+    color: '#64748b',
+    marginTop: 4,
+  },
   badge: {
     paddingHorizontal: 12,
     paddingVertical: 4,
@@ -342,15 +525,51 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#f0f0f0',
   },
+  historyHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
   historyTransport: {
     fontSize: 14,
     color: '#333',
     fontWeight: '600',
-    marginBottom: 4,
+  },
+  historyTimestamp: {
+    fontSize: 12,
+    color: '#94a3b8',
   },
   historyReason: {
     fontSize: 12,
     color: '#666',
+  },
+  healthItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  healthChip: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  healthChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  healthStatsRow: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  healthStat: {
+    fontSize: 12,
+    color: '#475569',
+    marginBottom: 2,
   },
   neighborItem: {
     paddingVertical: 10,

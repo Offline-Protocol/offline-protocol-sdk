@@ -41,6 +41,39 @@ const OfflineProtocolNativeModule = NativeModules.OfflineProtocolModule
       }
     );
 
+type NativeRelayPriority = 'low' | 'medium' | 'high';
+
+interface InitialRuntimeConfig {
+  dors?: {
+    preferOnline: boolean;
+    switchHysteresis: number;
+    switchCooldownSecs: number;
+    bleToWifiRetryThreshold: number;
+    rssiSwitchThreshold: number;
+    congestionQueueThreshold: number;
+    stabilityWindowSecs: number;
+  };
+  relay?: {
+    allowRelay?: boolean;
+    minBatteryForRelay?: number;
+    relayThreshold?: number;
+    relayPriority?: string;
+  };
+}
+
+function sanitize<T extends object>(value: T | undefined | null): T | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const cleanedEntries = Object.entries(value as Record<string, unknown>).filter(
+    ([, entryValue]) => entryValue !== undefined && entryValue !== null
+  );
+  if (cleanedEntries.length === 0) {
+    return undefined;
+  }
+  return Object.fromEntries(cleanedEntries) as T;
+}
+
 /**
  * Main Offline Protocol class
  *
@@ -86,6 +119,8 @@ export class OfflineProtocol {
   private eventListeners: Map<EventType | 'all', Set<EventListener>> = new Map();
   private config: ProtocolConfig;
   private isCreated: boolean = false;
+  private initialRuntimeConfig: InitialRuntimeConfig | null = null;
+  private initialRuntimeConfigApplied: boolean = false;
 
   /**
    * Creates a new OfflineProtocol instance
@@ -102,18 +137,149 @@ export class OfflineProtocol {
    * Transforms the TypeScript config structure to the format expected by native modules
    */
   private transformConfigForNative(): any {
-    const nativeConfig = {
+    const dorsSource = this.config.dors;
+    const relaySource = this.config.relay;
+
+    const dorsConfig = dorsSource
+      ? sanitize({
+          preferOnline: dorsSource.preferOnline ?? false,
+          switchHysteresis: dorsSource.switchHysteresis ?? 15.0,
+          switchCooldownSecs: dorsSource.switchCooldownSecs ?? 20,
+          bleToWifiRetryThreshold: dorsSource.bleToWifiRetryThreshold ?? 2,
+          rssiSwitchThreshold: dorsSource.rssiSwitchThreshold ?? -85,
+          congestionQueueThreshold: dorsSource.congestionQueueThreshold ?? 50,
+          stabilityWindowSecs: dorsSource.stabilityWindowSecs ?? 8,
+        })
+      : undefined;
+
+    const relayConfig = relaySource
+      ? sanitize({
+          allowRelay: relaySource.allowRelay,
+          minBatteryForRelay: relaySource.minBatteryForRelay,
+          relayThreshold: relaySource.relayThreshold,
+          relayPriority: relaySource.relayPriority,
+        })
+      : undefined;
+
+    this.initialRuntimeConfig =
+      dorsConfig || relayConfig ? { dors: dorsConfig, relay: relayConfig } : null;
+    this.initialRuntimeConfigApplied = false;
+
+    const nativeConfig: Record<string, unknown> = {
       appId: this.config.appId,
       userId: this.config.userId,
       bleEnabled: this.config.transports?.ble?.enabled ?? true,
       wifiDirectEnabled: this.config.transports?.wifiDirect?.enabled ?? false,
       internetEnabled: this.config.transports?.internet?.enabled ?? false,
-      preferOnline: this.config.dors?.preferOnline ?? false,
+      preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
     };
-    
+
+    if (dorsConfig) {
+      nativeConfig.dors = dorsConfig;
+    }
+
+    if (relayConfig) {
+      nativeConfig.relay = relayConfig;
+    }
+
+    const transportsConfig = sanitize({
+      ble: this.config.transports?.ble,
+      internet: this.config.transports?.internet,
+      wifiDirect: this.config.transports?.wifiDirect,
+    });
+    if (transportsConfig) {
+      nativeConfig.transports = transportsConfig;
+    }
+
+    if (this.config.fileTransfer) {
+      const fileTransferConfig = sanitize({
+        chunkSize: this.config.fileTransfer.chunkSize,
+        maxFileSize: this.config.fileTransfer.maxFileSize,
+      });
+      if (fileTransferConfig) {
+        nativeConfig.fileTransfer = fileTransferConfig;
+      }
+    }
+
+    if (this.config.reliability) {
+      const reliabilityConfig = sanitize({
+        ack: sanitize(this.config.reliability.ack ?? {}),
+        retry: sanitize(this.config.reliability.retry ?? {}),
+        dedup: sanitize(this.config.reliability.dedup ?? {}),
+      });
+      if (reliabilityConfig) {
+        nativeConfig.reliability = reliabilityConfig;
+      }
+    }
+
+    if (this.config.path) {
+      const pathConfig = sanitize({
+        forwardToTopK: this.config.path.forwardToTopK,
+        maxCongestionLevel: this.config.path.maxCongestionLevel,
+      });
+      if (pathConfig) {
+        nativeConfig.path = pathConfig;
+      }
+    }
+
     console.log('[OfflineProtocol] Native config:', JSON.stringify(nativeConfig));
     return nativeConfig;
+  }
+
+  private normalizeRelayPriority(priority?: string | null): NativeRelayPriority | null {
+    if (!priority) {
+      return null;
+    }
+    const normalized = priority.toLowerCase();
+    switch (normalized) {
+      case 'low':
+      case 'medium':
+      case 'high':
+        return normalized as NativeRelayPriority;
+      case 'never':
+        return 'low';
+      case 'always':
+        return 'high';
+      case 'auto':
+        return 'medium';
+      default:
+        return null;
+    }
+  }
+
+  private async applyInitialRuntimeConfig(): Promise<void> {
+    if (this.initialRuntimeConfigApplied) {
+      return;
+    }
+
+    if (!this.initialRuntimeConfig) {
+      this.initialRuntimeConfigApplied = true;
+      return;
+    }
+
+    const { dors, relay } = this.initialRuntimeConfig;
+
+    if (dors) {
+      try {
+        await OfflineProtocolNativeModule.updateDorsConfig(JSON.stringify(dors));
+      } catch (error) {
+        console.warn('[OfflineProtocol] Failed to apply DORS configuration', error);
+      }
+    }
+
+    if (relay?.relayPriority) {
+      const normalizedPriority = this.normalizeRelayPriority(relay.relayPriority);
+      if (normalizedPriority) {
+        try {
+          await OfflineProtocolNativeModule.setRelayPriority(normalizedPriority);
+        } catch (error) {
+          console.warn('[OfflineProtocol] Failed to apply relay priority', error);
+        }
+      }
+    }
+
+    this.initialRuntimeConfigApplied = true;
   }
 
   /**
@@ -269,6 +435,7 @@ export class OfflineProtocol {
       const nativeConfig = this.transformConfigForNative();
       await OfflineProtocolNativeModule.create(JSON.stringify(nativeConfig));
       this.isCreated = true;
+      await this.applyInitialRuntimeConfig();
     }
 
     await OfflineProtocolNativeModule.start();
@@ -302,6 +469,7 @@ export class OfflineProtocol {
       const nativeConfig = this.transformConfigForNative();
       await OfflineProtocolNativeModule.create(JSON.stringify(nativeConfig));
       this.isCreated = true;
+      await this.applyInitialRuntimeConfig();
     }
     await OfflineProtocolNativeModule.emitTestEvent();
   }
@@ -618,6 +786,8 @@ export class OfflineProtocol {
       await OfflineProtocolNativeModule.destroy();
       this.isCreated = false;
     }
+
+    this.initialRuntimeConfigApplied = false;
   }
 }
 

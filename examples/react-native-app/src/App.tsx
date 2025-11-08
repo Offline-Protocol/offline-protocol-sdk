@@ -8,16 +8,18 @@ import {
   TextInput,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { MessagePriority } from '@offlineprotocol/react-native';
 import { useOfflineProtocol } from './hooks/useOfflineProtocol';
 import { StatusBar } from './components/StatusBar';
 import { EventLog } from './components/EventLog';
 import { MessagingScreen } from './screens/MessagingScreen';
+import { ChatScreen } from './screens/ChatScreen';
 import { NetworkScreen } from './screens/NetworkScreen';
 import { VisualizationScreen } from './screens/VisualizationScreen';
+import { ControlCenterScreen } from './screens/ControlCenterScreen';
 
-type Tab = 'messaging' | 'network' | 'visualization' | 'events';
+type Tab = 'messaging' | 'control' | 'network' | 'visualization' | 'events';
 
 /**
  * Offline Protocol Example App
@@ -35,16 +37,34 @@ type Tab = 'messaging' | 'network' | 'visualization' | 'events';
 export default function App() {
   const [userId, setUserId] = useState('user_' + Math.random().toString(36).substr(2, 9));
   const [activeTab, setActiveTab] = useState<Tab>('messaging');
+  const [currentChatPeer, setCurrentChatPeer] = useState<string | null>(null);
 
   const {
     protocol,
     isStarted,
     error,
     events,
+    insights,
     permissionsGranted,
+    activeTransports,
+    batteryLevel,
+    relayPriority,
+    dorsConfig,
+    forcedTransport,
+    fileTransfers,
     start,
     stop,
+    refreshRuntimeState,
+    enableTransport,
+    disableTransport,
+    forceTransport,
+    releaseTransportLock,
+    setBatteryLevel,
+    setRelayPriority,
+    updateDorsConfig,
     sendMessage,
+    sendFile,
+    cancelFileTransfer,
     clearEvents,
     requestPermissions,
   } = useOfflineProtocol({
@@ -132,6 +152,20 @@ export default function App() {
   };
 
   const renderContent = () => {
+    // If we're in a chat with a specific peer, show ChatScreen
+    if (currentChatPeer) {
+      return (
+        <ChatScreen
+          peerId={currentChatPeer}
+          currentUserId={userId}
+          events={events}
+          isStarted={isStarted}
+          onSendMessage={handleSendMessage}
+          onGoBack={() => setCurrentChatPeer(null)}
+        />
+      );
+    }
+
     switch (activeTab) {
       case 'messaging':
         return (
@@ -140,105 +174,156 @@ export default function App() {
             currentUserId={userId}
             onSendMessage={handleSendMessage}
             isStarted={isStarted}
+            fileTransfers={fileTransfers}
+            onOpenChat={(peerId) => setCurrentChatPeer(peerId)}
+          />
+        );
+      case 'control':
+        return (
+          <ControlCenterScreen
+            isStarted={isStarted}
+            activeTransports={activeTransports}
+            forcedTransport={forcedTransport}
+            relayPriority={relayPriority}
+            batteryLevel={batteryLevel}
+            dorsConfig={dorsConfig}
+            fileTransfers={fileTransfers}
+            onRefresh={refreshRuntimeState}
+            onEnableTransport={enableTransport}
+            onDisableTransport={disableTransport}
+            onForceTransport={forceTransport}
+            onReleaseTransport={releaseTransportLock}
+            onSetBatteryLevel={setBatteryLevel}
+            onSetRelayPriority={setRelayPriority}
+            onUpdateDors={updateDorsConfig}
+            onSendFile={sendFile}
+            onCancelFile={cancelFileTransfer}
           />
         );
       case 'network':
-        return <NetworkScreen events={events} />;
+        return <NetworkScreen events={events} insights={insights} />;
       case 'visualization':
-        return <VisualizationScreen protocol={protocol} isStarted={isStarted} />;
+        return (
+          <VisualizationScreen
+            protocol={protocol}
+            isStarted={isStarted}
+            insights={insights}
+          />
+        );
       case 'events':
         return <EventLog events={events} onClear={clearEvents} />;
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <RNStatusBar barStyle="dark-content" />
-      
-      <View style={styles.header}>
-        <View style={styles.headerRow}>
-          <Text style={styles.title}>Offline Protocol Example</Text>
-          <TouchableOpacity
-            style={[styles.powerButton, isStarted ? styles.powerButtonActive : styles.powerButtonInactive]}
-            onPress={handleStartStop}
-            accessibilityRole="button"
-            accessibilityLabel={isStarted ? 'Stop protocol' : 'Start protocol'}
-          >
-            <Text style={styles.powerButtonIcon}>⏻</Text>
-          </TouchableOpacity>
-        </View>
-        <View style={styles.userIdContainer}>
-          <Text style={styles.userIdLabel}>User ID:</Text>
-          <TextInput
-            style={styles.userIdInput}
-            value={userId}
-            onChangeText={setUserId}
-            editable={!isStarted}
-            placeholder="Enter user ID"
-          />
-        </View>
-      </View>
-
-      <View style={styles.content}>
-        <StatusBar isStarted={isStarted} error={error} />
-
-        {!permissionsGranted && (
-          <View style={styles.permissionWarning}>
-            <Text style={styles.permissionWarningText}>
-              ⚠️ Bluetooth permissions required for offline messaging
-            </Text>
-            <Text style={[styles.permissionWarningText, {fontSize: 12, marginTop: 4}]}>
-              BLE operations are managed automatically at the native level
-            </Text>
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container}>
+        <RNStatusBar barStyle="dark-content" />
+        
+        <View style={styles.header}>
+          <View style={styles.headerRow}>
+            <Text style={styles.title}>Offline Protocol Example</Text>
             <TouchableOpacity
-              style={styles.permissionButton}
-              onPress={handleRequestPermissions}
+              style={[styles.powerButton, isStarted ? styles.powerButtonActive : styles.powerButtonInactive]}
+              onPress={handleStartStop}
+              accessibilityRole="button"
+              accessibilityLabel={isStarted ? 'Stop protocol' : 'Start protocol'}
             >
-              <Text style={styles.permissionButtonText}>
-                Grant Permissions
-              </Text>
+              <Text style={styles.powerButtonIcon}>⏻</Text>
             </TouchableOpacity>
           </View>
-        )}
-
-        <View style={styles.tabs}>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'messaging' && styles.activeTab]}
-            onPress={() => setActiveTab('messaging')}
-          >
-            <Text style={[styles.tabText, activeTab === 'messaging' && styles.activeTabText]}>
-              💬 Messages
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'network' && styles.activeTab]}
-            onPress={() => setActiveTab('network')}
-          >
-            <Text style={[styles.tabText, activeTab === 'network' && styles.activeTabText]}>
-              🌐 Network
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'visualization' && styles.activeTab]}
-            onPress={() => setActiveTab('visualization')}
-          >
-            <Text style={[styles.tabText, activeTab === 'visualization' && styles.activeTabText]}>
-              📊 Analytics
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tab, activeTab === 'events' && styles.activeTab]}
-            onPress={() => setActiveTab('events')}
-          >
-            <Text style={[styles.tabText, activeTab === 'events' && styles.activeTabText]}>
-              📝 Events ({events.length})
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.userIdContainer}>
+            <Text style={styles.userIdLabel}>User ID:</Text>
+            <TextInput
+              style={styles.userIdInput}
+              value={userId}
+              onChangeText={setUserId}
+              editable={!isStarted}
+              placeholder="Enter user ID"
+            />
+          </View>
         </View>
 
-        <View style={styles.tabContent}>{renderContent()}</View>
-      </View>
-    </SafeAreaView>
+        <View style={styles.content}>
+          <StatusBar
+            isStarted={isStarted}
+            error={error}
+            currentTransport={insights.dorsMetrics.currentTransport}
+            pendingMessages={insights.messageMetrics.pending}
+            neighborCount={insights.neighborMetrics.total}
+            activeTransports={activeTransports}
+            relayPriority={relayPriority}
+            batteryLevel={batteryLevel}
+          />
+
+          {!permissionsGranted && (
+            <View style={styles.permissionWarning}>
+              <Text style={styles.permissionWarningText}>
+                ⚠️ Bluetooth permissions required for offline messaging
+              </Text>
+              <Text style={[styles.permissionWarningText, {fontSize: 12, marginTop: 4}]}>
+                BLE operations are managed automatically at the native level
+              </Text>
+              <TouchableOpacity
+                style={styles.permissionButton}
+                onPress={handleRequestPermissions}
+              >
+                <Text style={styles.permissionButtonText}>
+                  Grant Permissions
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {!currentChatPeer && (
+            <View style={styles.tabs}>
+              <TouchableOpacity
+                style={[styles.tab, activeTab === 'messaging' && styles.activeTab]}
+                onPress={() => setActiveTab('messaging')}
+              >
+                <Text style={[styles.tabText, activeTab === 'messaging' && styles.activeTabText]}>
+                  💬 Messages
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tab, activeTab === 'control' && styles.activeTab]}
+                onPress={() => setActiveTab('control')}
+              >
+                <Text style={[styles.tabText, activeTab === 'control' && styles.activeTabText]}>
+                  🛠 Control
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tab, activeTab === 'network' && styles.activeTab]}
+                onPress={() => setActiveTab('network')}
+              >
+                <Text style={[styles.tabText, activeTab === 'network' && styles.activeTabText]}>
+                  🌐 Network
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tab, activeTab === 'visualization' && styles.activeTab]}
+                onPress={() => setActiveTab('visualization')}
+              >
+                <Text style={[styles.tabText, activeTab === 'visualization' && styles.activeTabText]}>
+                  📊 Analytics
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tab, activeTab === 'events' && styles.activeTab]}
+                onPress={() => setActiveTab('events')}
+              >
+                <Text style={[styles.tabText, activeTab === 'events' && styles.activeTabText]}>
+                  📝 Events ({events.length})
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <View style={styles.tabContent}>{renderContent()}</View>
+        </View>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -366,7 +451,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#e3f2fd',
   },
   tabText: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '500',
     color: '#666',
     textAlign: 'center',

@@ -58,22 +58,112 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     // MARK: - Configuration Parsing
     
-    private func parseConfig(_ configJson: String) throws -> ProtocolConfig {
+    private func parseConfig(_ configJson: String) throws -> (config: ProtocolConfig, raw: [String: Any]) {
         guard let jsonData = configJson.data(using: .utf8),
-              let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+              let raw = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
             throw NSError(domain: "OfflineProtocol", code: -1, 
                          userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
         }
         
-        return ProtocolConfig(
-            appId: config["appId"] as? String ?? config["app_id"] as? String ?? "",
-            userId: config["userId"] as? String ?? config["user_id"] as? String ?? "",
-            bleEnabled: config["bleEnabled"] as? Bool ?? config["ble_enabled"] as? Bool ?? true,
-            wifiDirectEnabled: config["wifiDirectEnabled"] as? Bool ?? config["wifi_direct_enabled"] as? Bool ?? true,
-            internetEnabled: config["internetEnabled"] as? Bool ?? config["internet_enabled"] as? Bool ?? true,
-            preferOnline: config["preferOnline"] as? Bool ?? config["prefer_online"] as? Bool ?? false,
-            initialTtl: UInt8(config["initialTtl"] as? Int ?? config["initial_ttl"] as? Int ?? 8)
+        let config = ProtocolConfig(
+            appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
+            userId: raw["userId"] as? String ?? raw["user_id"] as? String ?? "",
+            bleEnabled: raw["bleEnabled"] as? Bool ?? raw["ble_enabled"] as? Bool ?? true,
+            wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,
+            internetEnabled: raw["internetEnabled"] as? Bool ?? raw["internet_enabled"] as? Bool ?? true,
+            preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
+            initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8)
         )
+
+        return (config, raw)
+    }
+
+    private func normalizeRelayPriority(_ priority: String?) -> RelayPriority? {
+        guard let value = priority?.lowercased(), !value.isEmpty else {
+            return nil
+        }
+        switch value {
+        case "low":
+            return .low
+        case "medium":
+            return .medium
+        case "high":
+            return .high
+        case "never":
+            return .low
+        case "always":
+            return .high
+        case "auto":
+            return .medium
+        default:
+            return nil
+        }
+    }
+
+    private func applyInitialRuntimeConfig(_ proto: OfflineProtocol, rawConfig: [String: Any]) {
+        if let dorsDict = rawConfig["dors"] as? [String: Any] {
+            let preferOnline = dorsDict["preferOnline"] as? Bool ?? dorsDict["prefer_online"] as? Bool ?? false
+            let switchHysteresis = Float((dorsDict["switchHysteresis"] as? NSNumber)?.doubleValue
+                                         ?? (dorsDict["switch_hysteresis"] as? NSNumber)?.doubleValue
+                                         ?? 15.0)
+            let switchCooldown = UInt64((dorsDict["switchCooldownSecs"] as? NSNumber)?.uint64Value
+                                        ?? (dorsDict["switch_cooldown_secs"] as? NSNumber)?.uint64Value
+                                        ?? 20)
+            let bleRetry = UInt32((dorsDict["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value
+                                  ?? (dorsDict["ble_to_wifi_retry_threshold"] as? NSNumber)?.uint32Value
+                                  ?? 2)
+            let rssiThreshold = Int16((dorsDict["rssiSwitchThreshold"] as? NSNumber)?.int16Value
+                                      ?? (dorsDict["rssi_switch_threshold"] as? NSNumber)?.int16Value
+                                      ?? -85)
+            let congestionThreshold = UInt64((dorsDict["congestionQueueThreshold"] as? NSNumber)?.uint64Value
+                                             ?? (dorsDict["congestion_queue_threshold"] as? NSNumber)?.uint64Value
+                                             ?? 50)
+            let stabilityWindow = UInt64((dorsDict["stabilityWindowSecs"] as? NSNumber)?.uint64Value
+                                         ?? (dorsDict["stability_window_secs"] as? NSNumber)?.uint64Value
+                                         ?? 8)
+
+            let dorsConfig = DorsConfig(
+                preferOnline: preferOnline,
+                switchHysteresis: switchHysteresis,
+                switchCooldownSecs: switchCooldown,
+                bleToWifiRetryThreshold: bleRetry,
+                rssiSwitchThreshold: rssiThreshold,
+                congestionQueueThreshold: congestionThreshold,
+                stabilityWindowSecs: stabilityWindow
+            )
+
+            do {
+                try proto.updateDorsConfig(config: dorsConfig)
+                emitDiagnostic(level: "info", message: "Applied initial DORS config")
+            } catch {
+                emitDiagnostic(level: "warning", message: "Failed to apply initial DORS config", context: [
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+
+        if let relayDict = rawConfig["relay"] as? [String: Any] {
+            let priorityRaw = (relayDict["relayPriority"] as? String) ?? (relayDict["relay_priority"] as? String)
+            if let priority = normalizeRelayPriority(priorityRaw) {
+                do {
+                    try proto.setRelayPriority(priority: priority)
+                    let priorityLabel: String
+                    switch priority {
+                    case .low: priorityLabel = "low"
+                    case .medium: priorityLabel = "medium"
+                    case .high: priorityLabel = "high"
+                    @unknown default: priorityLabel = "medium"
+                    }
+                    emitDiagnostic(level: "info", message: "Applied initial relay priority", context: [
+                        "priority": priorityRaw ?? priorityLabel
+                    ])
+                } catch {
+                    emitDiagnostic(level: "warning", message: "Failed to apply initial relay priority", context: [
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+        }
     }
     
     // MARK: - Exported Methods
@@ -82,7 +172,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                      resolver: @escaping RCTPromiseResolveBlock,
                      rejecter: @escaping RCTPromiseRejectBlock) {
         do {
-            let config = try parseConfig(configJson)
+            let parsed = try parseConfig(configJson)
+            let config = parsed.config
             let proto = try OfflineProtocol(config: config)
             currentConfig = config
             emitDiagnostic(level: "info", message: "Protocol core created", context: [
@@ -95,7 +186,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             
             // Set up event callback
             proto.setEventCallback(callback: EventCallbackImpl(emitter: self))
-            
+
+            applyInitialRuntimeConfig(proto, rawConfig: parsed.raw)
+
             protocolInstance = proto
             
             // Initialize BLE manager if BLE is enabled

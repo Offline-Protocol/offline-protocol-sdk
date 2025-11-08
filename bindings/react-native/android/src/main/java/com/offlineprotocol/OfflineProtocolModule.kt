@@ -52,10 +52,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     /**
      * Parse JSON config into ProtocolConfig
      */
-    private fun parseConfig(configJson: String): ProtocolConfig {
+    private data class ParsedConfig(
+        val coreConfig: ProtocolConfig,
+        val rawJson: JSONObject
+    )
+
+    private fun parseConfig(configJson: String): ParsedConfig {
         val json = JSONObject(configJson)
-        
-        return ProtocolConfig(
+
+        val config = ProtocolConfig(
             appId = json.optString("appId", json.optString("app_id", "")),
             userId = json.optString("userId", json.optString("user_id", "")),
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
@@ -64,12 +69,67 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             preferOnline = json.optBoolean("preferOnline", json.optBoolean("prefer_online", false)),
             initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", 8)).toUByte()
         )
+
+        return ParsedConfig(config, json)
+    }
+
+    private fun normalizeRelayPriority(priority: String?): RelayPriority? {
+        if (priority.isNullOrBlank()) {
+            return null
+        }
+        return when (priority.lowercase()) {
+            "low" -> RelayPriority.LOW
+            "medium" -> RelayPriority.MEDIUM
+            "high" -> RelayPriority.HIGH
+            "never" -> RelayPriority.LOW
+            "always" -> RelayPriority.HIGH
+            "auto" -> RelayPriority.MEDIUM
+            else -> null
+        }
+    }
+
+    private fun applyInitialRuntimeConfig(proto: OfflineProtocol, json: JSONObject) {
+        json.optJSONObject("dors")?.let { dorsJson ->
+            try {
+                val dorsConfig = DorsConfig(
+                    preferOnline = dorsJson.optBoolean("preferOnline", dorsJson.optBoolean("prefer_online", false)),
+                    switchHysteresis = dorsJson.optDouble("switchHysteresis", dorsJson.optDouble("switch_hysteresis", 15.0)).toFloat(),
+                    switchCooldownSecs = dorsJson.optLong("switchCooldownSecs", dorsJson.optLong("switch_cooldown_secs", 20L)).toULong(),
+                    bleToWifiRetryThreshold = dorsJson.optInt("bleToWifiRetryThreshold", dorsJson.optInt("ble_to_wifi_retry_threshold", 2)).toUInt(),
+                    rssiSwitchThreshold = dorsJson.optInt("rssiSwitchThreshold", dorsJson.optInt("rssi_switch_threshold", -85)).toShort(),
+                    congestionQueueThreshold = dorsJson.optLong("congestionQueueThreshold", dorsJson.optLong("congestion_queue_threshold", 50L)).toULong(),
+                    stabilityWindowSecs = dorsJson.optLong("stabilityWindowSecs", dorsJson.optLong("stability_window_secs", 8L)).toULong()
+                )
+                proto.updateDorsConfig(dorsConfig)
+                emitDiagnostic("info", "Applied initial DORS config")
+            } catch (e: Exception) {
+                emitDiagnostic("warning", "Failed to apply initial DORS config", mapOf(
+                    "message" to (e.message ?: "unknown")
+                ))
+            }
+        }
+
+        json.optJSONObject("relay")?.let { relayJson ->
+            val priorityRaw = relayJson.optString("relayPriority", relayJson.optString("relay_priority", ""))
+            val priority = normalizeRelayPriority(priorityRaw)
+            if (priority != null) {
+                try {
+                    proto.setRelayPriority(priority)
+                    emitDiagnostic("info", "Applied initial relay priority", mapOf("priority" to priority.name.lowercase()))
+                } catch (e: Exception) {
+                    emitDiagnostic("warning", "Failed to apply initial relay priority", mapOf(
+                        "message" to (e.message ?: "unknown")
+                    ))
+                }
+            }
+        }
     }
 
     @ReactMethod
     fun create(configJson: String, promise: Promise) {
         try {
-            val config = parseConfig(configJson)
+            val parsed = parseConfig(configJson)
+            val config = parsed.coreConfig
             val proto = OfflineProtocol(config)
             currentConfig = config
             emitDiagnostic("info", "Protocol core created", mapOf(
@@ -89,7 +149,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     sendEvent(EVENT_NAME, params)
                 }
             })
-            
+
+            applyInitialRuntimeConfig(proto, parsed.rawJson)
+
             protocol = proto
             
             // Initialize BLE manager if BLE is enabled

@@ -231,6 +231,12 @@ export interface SendFileParams {
  */
 interface BaseEvent {
   type: string;
+  /**
+   * Local timestamp (ms) when this event was observed by the JS bridge.
+   * Populated on the client so analytics can reason about event ordering even
+   * when native payloads omit timestamps.
+   */
+  seenAt?: number;
 }
 
 /**
