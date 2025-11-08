@@ -2552,6 +2552,10 @@ data class DorsConfig (
     var `congestionQueueThreshold`: kotlin.ULong
     , 
     var `stabilityWindowSecs`: kotlin.ULong
+    , 
+    var `poorSignalDurationSecs`: kotlin.ULong
+    , 
+    var `ttlEscalationThreshold`: kotlin.UByte
     
 ){
     
@@ -2573,6 +2577,8 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterShort.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUByte.read(buf),
         )
     }
 
@@ -2583,7 +2589,9 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterUInt.allocationSize(value.`bleToWifiRetryThreshold`) +
             FfiConverterShort.allocationSize(value.`rssiSwitchThreshold`) +
             FfiConverterULong.allocationSize(value.`congestionQueueThreshold`) +
-            FfiConverterULong.allocationSize(value.`stabilityWindowSecs`)
+            FfiConverterULong.allocationSize(value.`stabilityWindowSecs`) +
+            FfiConverterULong.allocationSize(value.`poorSignalDurationSecs`) +
+            FfiConverterUByte.allocationSize(value.`ttlEscalationThreshold`)
     )
 
     override fun write(value: DorsConfig, buf: ByteBuffer) {
@@ -2594,6 +2602,8 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterShort.write(value.`rssiSwitchThreshold`, buf)
             FfiConverterULong.write(value.`congestionQueueThreshold`, buf)
             FfiConverterULong.write(value.`stabilityWindowSecs`, buf)
+            FfiConverterULong.write(value.`poorSignalDurationSecs`, buf)
+            FfiConverterUByte.write(value.`ttlEscalationThreshold`, buf)
     }
 }
 

@@ -190,11 +190,11 @@ impl OfflineProtocol {
     }
 
     fn transport_from_label(label: &str) -> TransportType {
-        match label.to_lowercase().as_str() {
-            "internet" => TransportType::Internet,
-            "wifi_direct" | "wifidirect" => TransportType::WiFiDirect,
-            _ => TransportType::BLE,
-        }
+        TransportType::from_label(label)
+    }
+
+    fn transport_label(transport: TransportType) -> &'static str {
+        transport.label()
     }
 
     fn handle_ack_message(&mut self, message: &Message) {
@@ -230,11 +230,15 @@ impl OfflineProtocol {
         }
     }
 
-    fn send_delivery_ack(&mut self, message: &Message) -> Result<()> {
+    fn send_delivery_ack(
+        &mut self,
+        message: &Message,
+        inbound_transport: TransportType,
+    ) -> Result<()> {
         let sender = UserId::new(&self.config.user_id)?;
         let recipient = message.sender.clone();
         let app_id = AppId::new(&self.config.app_id)?;
-        let ttl = TTL::new(2).unwrap_or_else(|_| TTL::default());
+        let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
 
         let ack_message = Message::builder(sender, recipient, app_id)
             .content(String::new())
@@ -243,7 +247,7 @@ impl OfflineProtocol {
             .requires_ack(false)
             .metadata(ACK_FOR_KEY, message.id.as_str())
             .metadata(ACK_HOP_COUNT_KEY, message.hop_count.value().to_string())
-            .metadata(ACK_TRANSPORT_KEY, "ble")
+            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
             .build();
 
         self.transport_manager.send(&ack_message)?;
@@ -347,7 +351,7 @@ impl OfflineProtocol {
 
         loop {
             match self.transport_manager.receive() {
-                Ok(Some(message)) => {
+                Ok(Some((transport_used, message))) => {
                     if let Some(_) = message.metadata.get(ACK_FOR_KEY) {
                         self.handle_ack_message(&message);
                         continue;
@@ -360,7 +364,7 @@ impl OfflineProtocol {
                     self.deduplicator.mark_seen(message.id.clone());
 
                     if message.requires_ack {
-                        if let Err(err) = self.send_delivery_ack(&message) {
+                        if let Err(err) = self.send_delivery_ack(&message, transport_used) {
                             eprintln!("Failed to send delivery ACK: {}", err);
                         }
                     }
@@ -371,7 +375,7 @@ impl OfflineProtocol {
                         recipient: message.recipient.as_str().to_string(),
                         content: message.content.clone(),
                         hop_count: message.hop_count.value(),
-                        transport: "BLE".to_string(),
+                        transport: transport_used.to_string(),
                         timestamp: message.timestamp.as_millis(),
                     };
 

@@ -181,7 +181,7 @@ impl Event {
             message_id: message_id.as_str(),
             latency_ms,
             hop_count,
-            transport: format!("{:?}", transport),
+            transport: transport.to_string(),
         }
     }
 
@@ -201,8 +201,8 @@ impl Event {
         reason: String,
     ) -> Self {
         Self::TransportSwitched {
-            from: from.map(|t| format!("{:?}", t)),
-            to: format!("{:?}", to),
+            from: from.map(|t| t.to_string()),
+            to: to.to_string(),
             reason,
         }
     }
@@ -350,7 +350,7 @@ mod tests {
                 assert_eq!(message_id, msg_id.as_str());
                 assert_eq!(latency_ms, 100);
                 assert_eq!(hop_count, 3);
-                assert!(transport.contains("BLE"));
+                assert_eq!(transport, "ble");
             }
             _ => panic!("Wrong event type"),
         }
@@ -366,8 +366,8 @@ mod tests {
 
         match event {
             Event::TransportSwitched { from, to, reason } => {
-                assert!(from.is_some());
-                assert!(to.contains("WiFiDirect"));
+                assert_eq!(from.as_deref(), Some("ble"));
+                assert_eq!(to, "wifiDirect");
                 assert_eq!(reason, "Poor signal");
             }
             _ => panic!("Wrong event type"),

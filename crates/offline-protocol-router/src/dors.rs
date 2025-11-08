@@ -4,7 +4,7 @@
 //! that automatically chooses and switches between Internet, BLE Mesh, and Wi-Fi Direct
 //! based on real-time network conditions.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use offline_protocol_core::Message;
 use offline_protocol_transport::{TransportMetrics, TransportType};
 use std::collections::HashMap;
@@ -30,6 +30,12 @@ pub struct DorsConfig {
     /// Duration for checking stability before switching (seconds).
     pub stability_window_secs: u64,
 
+    /// Duration that RSSI must remain below the threshold before escalating (seconds).
+    pub poor_signal_duration_secs: u64,
+
+    /// TTL threshold that indicates messages are nearing exhaustion.
+    pub ttl_escalation_threshold: u8,
+
     /// Whether to prefer online/Internet transport first.
     pub prefer_online: bool,
 }
@@ -43,6 +49,8 @@ impl Default for DorsConfig {
             rssi_switch_threshold: -85,
             congestion_queue_threshold: 50,
             stability_window_secs: 8,
+            poor_signal_duration_secs: 10,
+            ttl_escalation_threshold: 2,
             prefer_online: false,
         }
     }
@@ -75,6 +83,10 @@ pub struct TransportSelector {
     last_switch_time: Option<DateTime<Utc>>,
     transport_scores_history: HashMap<TransportType, Vec<(DateTime<Utc>, f32)>>,
     retry_counts: HashMap<TransportType, u32>,
+    last_metrics: HashMap<TransportType, (TransportMetrics, DateTime<Utc>)>,
+    ble_poor_signal_since: Option<DateTime<Utc>>,
+    ble_high_congestion_since: Option<DateTime<Utc>>,
+    low_ttl_detected_at: Option<DateTime<Utc>>,
 }
 
 impl TransportSelector {
@@ -91,6 +103,10 @@ impl TransportSelector {
             last_switch_time: None,
             transport_scores_history: HashMap::new(),
             retry_counts: HashMap::new(),
+            last_metrics: HashMap::new(),
+            ble_poor_signal_since: None,
+            ble_high_congestion_since: None,
+            low_ttl_detected_at: None,
         }
     }
 
@@ -122,13 +138,18 @@ impl TransportSelector {
         }
 
         // Calculate scores for all available transports
-        let mut scored_transports: Vec<(TransportType, TransportScore)> = available_transports
-            .iter()
-            .map(|(transport_type, metrics)| {
-                let score = self.calculate_transport_score(message, *transport_type, metrics);
-                (*transport_type, score)
-            })
-            .collect();
+        let mut scored_transports: Vec<(TransportType, TransportScore)> = Vec::new();
+
+        for (transport_type, metrics) in available_transports.iter() {
+            self.record_metrics(*transport_type, metrics);
+
+            if *transport_type == TransportType::BLE {
+                self.update_ble_conditions(message, metrics);
+            }
+
+            let score = self.calculate_transport_score(message, *transport_type, metrics);
+            scored_transports.push((*transport_type, score));
+        }
 
         // Sort by total score (descending)
         scored_transports.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap());
@@ -314,6 +335,51 @@ impl TransportSelector {
         }
     }
 
+    /// Records the latest metrics for the transport.
+    fn record_metrics(&mut self, transport_type: TransportType, metrics: &TransportMetrics) {
+        self.last_metrics
+            .insert(transport_type, (metrics.clone(), Utc::now()));
+    }
+
+    /// Updates BLE-specific escalation signals.
+    fn update_ble_conditions(&mut self, message: &Message, metrics: &TransportMetrics) {
+        let now = Utc::now();
+
+        if let Some(rssi) = metrics.rssi {
+            if rssi <= self.config.rssi_switch_threshold {
+                if self.ble_poor_signal_since.is_none() {
+                    self.ble_poor_signal_since = Some(now);
+                }
+            } else {
+                self.ble_poor_signal_since = None;
+            }
+        }
+
+        if metrics.queue_depth >= self.config.congestion_queue_threshold {
+            if self.ble_high_congestion_since.is_none() {
+                self.ble_high_congestion_since = Some(now);
+            }
+        } else {
+            let recovery_threshold = if self.config.congestion_queue_threshold > 0 {
+                self.config.congestion_queue_threshold / 2
+            } else {
+                0
+            };
+
+            if metrics.queue_depth <= recovery_threshold {
+                // Clear the signal once congestion has meaningfully recovered.
+                self.ble_high_congestion_since = None;
+            }
+        }
+
+        if message.ttl.value() <= self.config.ttl_escalation_threshold {
+            self.low_ttl_detected_at = Some(now);
+        } else if message.ttl.value() > self.config.ttl_escalation_threshold.saturating_add(1) {
+            // Reset once we are comfortably above the threshold.
+            self.low_ttl_detected_at = None;
+        }
+    }
+
     /// Checks if the cooldown period has passed since last switch.
     fn is_past_cooldown(&self) -> bool {
         if let Some(last_switch) = self.last_switch_time {
@@ -397,10 +463,39 @@ impl TransportSelector {
 
     /// Checks if escalation from BLE to Wi-Fi Direct is needed.
     pub fn should_escalate_to_wifi(&self) -> bool {
-        self.retry_counts
+        let retry_failure = self
+            .retry_counts
             .get(&TransportType::BLE)
             .map(|count| *count >= self.config.ble_to_wifi_retry_threshold)
-            .unwrap_or(false)
+            .unwrap_or(false);
+
+        let now = Utc::now();
+
+        let poor_signal = self
+            .ble_poor_signal_since
+            .map(|since| {
+                now.signed_duration_since(since)
+                    >= Duration::seconds(self.config.poor_signal_duration_secs as i64)
+            })
+            .unwrap_or(false);
+
+        let high_congestion_active = self
+            .ble_high_congestion_since
+            .map(|since| {
+                now.signed_duration_since(since)
+                    <= Duration::seconds(self.config.switch_cooldown_secs as i64)
+            })
+            .unwrap_or(false);
+
+        let low_ttl_recent = self
+            .low_ttl_detected_at
+            .map(|since| {
+                now.signed_duration_since(since)
+                    <= Duration::seconds(self.config.switch_cooldown_secs as i64)
+            })
+            .unwrap_or(false);
+
+        retry_failure || poor_signal || high_congestion_active || low_ttl_recent
     }
 
     /// Gets the current transport.
@@ -515,6 +610,41 @@ mod tests {
 
         selector.reset_retry_count(TransportType::BLE);
         assert!(!selector.should_escalate_to_wifi());
+    }
+
+    #[test]
+    fn test_poor_signal_escalation() {
+        let config = DorsConfig {
+            rssi_switch_threshold: -80,
+            poor_signal_duration_secs: 0, // Immediate for test
+            ..Default::default()
+        };
+
+        let mut selector = TransportSelector::with_config(config);
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-90), 0.1, 5));
+
+        selector.select_transport(&message, &transports);
+        assert!(selector.should_escalate_to_wifi());
+    }
+
+    #[test]
+    fn test_congestion_escalation() {
+        let config = DorsConfig {
+            congestion_queue_threshold: 10,
+            ..Default::default()
+        };
+
+        let mut selector = TransportSelector::with_config(config);
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.9, 20));
+
+        selector.select_transport(&message, &transports);
+        assert!(selector.should_escalate_to_wifi());
     }
 
     #[test]

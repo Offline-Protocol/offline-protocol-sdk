@@ -26,6 +26,8 @@ export const DEFAULT_DORS_CONFIG: DorsRuntimeConfig = {
   rssiSwitchThreshold: -85,
   congestionQueueThreshold: 50,
   stabilityWindowSecs: 8,
+  poorSignalDurationSecs: 10,
+  ttlEscalationThreshold: 2,
 };
 
 export const normalizeRelayPriority = (priority: string): NativeRelayPriority | null => {

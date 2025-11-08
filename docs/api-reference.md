@@ -90,6 +90,8 @@ pub struct DorsConfig {
     pub rssi_switch_threshold: i16,    // RSSI for switching (default: -85 dBm)
     pub congestion_queue_threshold: usize, // Queue depth limit (default: 50)
     pub stability_window_secs: u64,    // Stability check window (default: 8)
+    pub poor_signal_duration_secs: u64, // Seconds RSSI must remain poor before escalating (default: 10)
+    pub ttl_escalation_threshold: u8,   // TTL value considered near exhaustion (default: 2)
     pub prefer_online: bool,           // Online-first mode (default: false)
 }
 ```

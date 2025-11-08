@@ -109,6 +109,8 @@ dictionary DorsConfig {
     i16 rssi_switch_threshold;
     u64 congestion_queue_threshold;
     u64 stability_window_secs;
+    u64 poor_signal_duration_secs;
+    u8 ttl_escalation_threshold;
 };
 
 // ACK configuration

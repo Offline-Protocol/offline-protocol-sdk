@@ -121,6 +121,12 @@ class OfflineProtocolModule: RCTEventEmitter {
             let stabilityWindow = UInt64((dorsDict["stabilityWindowSecs"] as? NSNumber)?.uint64Value
                                          ?? (dorsDict["stability_window_secs"] as? NSNumber)?.uint64Value
                                          ?? 8)
+            let poorSignalDuration = UInt64((dorsDict["poorSignalDurationSecs"] as? NSNumber)?.uint64Value
+                                            ?? (dorsDict["poor_signal_duration_secs"] as? NSNumber)?.uint64Value
+                                            ?? 10)
+            let ttlThreshold = UInt8((dorsDict["ttlEscalationThreshold"] as? NSNumber)?.uint8Value
+                                     ?? (dorsDict["ttl_escalation_threshold"] as? NSNumber)?.uint8Value
+                                     ?? 2)
 
             let dorsConfig = DorsConfig(
                 preferOnline: preferOnline,
@@ -129,7 +135,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                 bleToWifiRetryThreshold: bleRetry,
                 rssiSwitchThreshold: rssiThreshold,
                 congestionQueueThreshold: congestionThreshold,
-                stabilityWindowSecs: stabilityWindow
+                stabilityWindowSecs: stabilityWindow,
+                poorSignalDurationSecs: poorSignalDuration,
+                ttlEscalationThreshold: ttlThreshold
             )
 
             do {
@@ -856,6 +864,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                 throw NSError(domain: "OfflineProtocol", code: -1,
                             userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
             }
+
+            let poorSignalDuration = (config["poorSignalDurationSecs"] as? NSNumber)?.uint64Value ?? 10
+            let ttlThreshold = (config["ttlEscalationThreshold"] as? NSNumber)?.uint8Value ?? 2
             
             let dorsConfig = DorsConfig(
                 preferOnline: config["preferOnline"] as? Bool ?? false,
@@ -864,7 +875,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                 bleToWifiRetryThreshold: config["bleToWifiRetryThreshold"] as? UInt32 ?? 2,
                 rssiSwitchThreshold: config["rssiSwitchThreshold"] as? Int16 ?? -85,
                 congestionQueueThreshold: config["congestionQueueThreshold"] as? UInt64 ?? 50,
-                stabilityWindowSecs: config["stabilityWindowSecs"] as? UInt64 ?? 8
+                stabilityWindowSecs: config["stabilityWindowSecs"] as? UInt64 ?? 8,
+                poorSignalDurationSecs: poorSignalDuration,
+                ttlEscalationThreshold: ttlThreshold
             )
             
             try proto.updateDorsConfig(config: dorsConfig)
@@ -888,7 +901,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             "bleToWifiRetryThreshold": config.bleToWifiRetryThreshold,
             "rssiSwitchThreshold": config.rssiSwitchThreshold,
             "congestionQueueThreshold": config.congestionQueueThreshold,
-            "stabilityWindowSecs": config.stabilityWindowSecs
+            "stabilityWindowSecs": config.stabilityWindowSecs,
+            "poorSignalDurationSecs": config.poorSignalDurationSecs,
+            "ttlEscalationThreshold": config.ttlEscalationThreshold
         ]
         resolver(configDict)
     }

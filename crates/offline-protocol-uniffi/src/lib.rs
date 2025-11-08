@@ -180,6 +180,8 @@ pub struct DorsConfig {
     pub rssi_switch_threshold: i16,
     pub congestion_queue_threshold: u64,
     pub stability_window_secs: u64,
+    pub poor_signal_duration_secs: u64,
+    pub ttl_escalation_threshold: u8,
 }
 
 /// ACK configuration
@@ -1002,6 +1004,8 @@ impl OfflineProtocol {
             rssi_switch_threshold: -85,
             congestion_queue_threshold: 50,
             stability_window_secs: 8,
+            poor_signal_duration_secs: 10,
+            ttl_escalation_threshold: 2,
         }
     }
 }

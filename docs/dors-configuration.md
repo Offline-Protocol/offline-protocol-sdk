@@ -95,6 +95,8 @@ const config = {
     rssiSwitchThreshold: -85,
     congestionQueueThreshold: 50,
     stabilityWindowSecs: 8,
+    poorSignalDurationSecs: 10,
+    ttlEscalationThreshold: 2,
   },
 };
 ```
@@ -110,6 +112,8 @@ const config = {
 | `rssiSwitchThreshold` | number | `-85` | -100 to -40 | RSSI threshold (dBm) for BLE→WiFi escalation |
 | `congestionQueueThreshold` | number | `50` | 10-500 | Queue depth that indicates high congestion |
 | `stabilityWindowSecs` | number | `8` | 1-60 | Duration to verify new transport stability |
+| `poorSignalDurationSecs` | number | `10` | 1-60 | Seconds RSSI must remain below threshold before escalating |
+| `ttlEscalationThreshold` | number | `2` | 1-6 | TTL value considered near exhaustion for escalation logic |
 
 ## Use Case Examples
 
@@ -130,6 +134,8 @@ dors: {
   rssiSwitchThreshold: -75,       // Switch early on weak signal
   congestionQueueThreshold: 20,   // Low tolerance for congestion
   stabilityWindowSecs: 3,         // Fast verification
+  poorSignalDurationSecs: 5,      // Short window before escalating on poor signal
+  ttlEscalationThreshold: 3,      // Treat TTL <= 3 as near exhaustion
 }
 ```
 
@@ -156,6 +162,8 @@ dors: {
   rssiSwitchThreshold: -85,       // Standard signal threshold
   congestionQueueThreshold: 50,   // Standard congestion
   stabilityWindowSecs: 8,         // Standard stability
+  poorSignalDurationSecs: 10,     // Wait 10s before escalating on weak signal
+  ttlEscalationThreshold: 2,      // Treat TTL <=2 as low
 }
 ```
 
@@ -182,6 +190,8 @@ dors: {
   rssiSwitchThreshold: -90,       // Stay on BLE longer
   congestionQueueThreshold: 100,  // High tolerance
   stabilityWindowSecs: 20,        // Long verification
+  poorSignalDurationSecs: 20,     // Require sustained weak signal before switching
+  ttlEscalationThreshold: 1,      // Only escalate when TTL is almost exhausted
 }
 ```
 
@@ -208,6 +218,8 @@ dors: {
   rssiSwitchThreshold: -70,       // Aggressive signal threshold
   congestionQueueThreshold: 15,   // Very low congestion tolerance
   stabilityWindowSecs: 4,         // Quick verification
+  poorSignalDurationSecs: 4,      // Escalate quickly on weak signal
+  ttlEscalationThreshold: 3,      // Treat TTL <=3 as low
 }
 ```
 

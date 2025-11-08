@@ -98,7 +98,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     bleToWifiRetryThreshold = dorsJson.optInt("bleToWifiRetryThreshold", dorsJson.optInt("ble_to_wifi_retry_threshold", 2)).toUInt(),
                     rssiSwitchThreshold = dorsJson.optInt("rssiSwitchThreshold", dorsJson.optInt("rssi_switch_threshold", -85)).toShort(),
                     congestionQueueThreshold = dorsJson.optLong("congestionQueueThreshold", dorsJson.optLong("congestion_queue_threshold", 50L)).toULong(),
-                    stabilityWindowSecs = dorsJson.optLong("stabilityWindowSecs", dorsJson.optLong("stability_window_secs", 8L)).toULong()
+                    stabilityWindowSecs = dorsJson.optLong("stabilityWindowSecs", dorsJson.optLong("stability_window_secs", 8L)).toULong(),
+                    poorSignalDurationSecs = dorsJson.optLong("poorSignalDurationSecs", dorsJson.optLong("poor_signal_duration_secs", 10L)).toULong(),
+                    ttlEscalationThreshold = dorsJson.optInt("ttlEscalationThreshold", dorsJson.optInt("ttl_escalation_threshold", 2)).toUByte()
                 )
                 proto.updateDorsConfig(dorsConfig)
                 emitDiagnostic("info", "Applied initial DORS config")
@@ -772,7 +774,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", 2).toUInt(),
                 rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", -85).toShort(),
                 congestionQueueThreshold = json.optLong("congestionQueueThreshold", 50).toULong(),
-                stabilityWindowSecs = json.optLong("stabilityWindowSecs", 8).toULong()
+                stabilityWindowSecs = json.optLong("stabilityWindowSecs", 8).toULong(),
+                poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", 10).toULong(),
+                ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", 2).toUByte()
             )
             
             protocol?.updateDorsConfig(dorsConfig)
@@ -795,6 +799,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 map.putInt("rssiSwitchThreshold", config.rssiSwitchThreshold.toInt())
                 map.putInt("congestionQueueThreshold", config.congestionQueueThreshold.toInt())
                 map.putInt("stabilityWindowSecs", config.stabilityWindowSecs.toInt())
+                map.putInt("poorSignalDurationSecs", config.poorSignalDurationSecs.toInt())
+                map.putInt("ttlEscalationThreshold", config.ttlEscalationThreshold.toInt())
                 promise.resolve(map)
             } else {
                 promise.resolve(null)

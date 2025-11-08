@@ -103,6 +103,8 @@ interface ProtocolConfig {
     rssiSwitchThreshold?: number; // RSSI trigger for BLE→WiFi (default: -85 dBm)
     congestionQueueThreshold?: number; // Queue depth for congestion (default: 50)
     stabilityWindowSecs?: number; // Stability verification window (default: 8)
+    poorSignalDurationSecs?: number; // Seconds RSSI must remain poor before escalating (default: 10)
+    ttlEscalationThreshold?: number; // TTL value considered near exhaustion (default: 2)
   };
   relay?: {                     // Relay configuration
     allowRelay?: boolean;       // Allow device to act as relay (default: true)
@@ -219,7 +221,7 @@ await protocol.destroy();
   recipient: string;
   content: string;
   hop_count: number;
-  transport: string;        // 'BLE' | 'WiFiDirect' | 'Internet'
+  transport: string;        // 'ble' | 'wifiDirect' | 'internet'
   timestamp: number;
 }
 ```

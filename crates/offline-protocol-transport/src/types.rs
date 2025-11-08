@@ -1,6 +1,7 @@
 //! Transport types and data structures.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Types of transports available in the Offline Protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -11,9 +12,36 @@ pub enum TransportType {
     /// Bluetooth Low Energy mesh transport.
     BLE,
     /// Wi-Fi Direct transport (Android only).
+    #[serde(rename = "wifiDirect")]
     WiFiDirect,
 }
 
+impl TransportType {
+    /// Canonical lowercase label for this transport.
+    pub fn label(self) -> &'static str {
+        match self {
+            TransportType::Internet => "internet",
+            TransportType::BLE => "ble",
+            TransportType::WiFiDirect => "wifiDirect",
+        }
+    }
+
+    /// Creates a transport type from a string label.
+    pub fn from_label(label: &str) -> Self {
+        let normalized = label.to_ascii_lowercase();
+        match normalized.as_str() {
+            "internet" => TransportType::Internet,
+            "wifidirect" | "wifi_direct" | "wifi-direct" => TransportType::WiFiDirect,
+            _ => TransportType::BLE,
+        }
+    }
+}
+
+impl fmt::Display for TransportType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
 /// Transport metrics for monitoring and decision making.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportMetrics {

@@ -1302,10 +1302,12 @@ public struct DorsConfig: Equatable, Hashable {
     public var rssiSwitchThreshold: Int16
     public var congestionQueueThreshold: UInt64
     public var stabilityWindowSecs: UInt64
+    public var poorSignalDurationSecs: UInt64
+    public var ttlEscalationThreshold: UInt8
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64) {
+    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64, poorSignalDurationSecs: UInt64, ttlEscalationThreshold: UInt8) {
         self.preferOnline = preferOnline
         self.switchHysteresis = switchHysteresis
         self.switchCooldownSecs = switchCooldownSecs
@@ -1313,6 +1315,8 @@ public struct DorsConfig: Equatable, Hashable {
         self.rssiSwitchThreshold = rssiSwitchThreshold
         self.congestionQueueThreshold = congestionQueueThreshold
         self.stabilityWindowSecs = stabilityWindowSecs
+        self.poorSignalDurationSecs = poorSignalDurationSecs
+        self.ttlEscalationThreshold = ttlEscalationThreshold
     }
 
     
@@ -1335,7 +1339,9 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
                 bleToWifiRetryThreshold: FfiConverterUInt32.read(from: &buf), 
                 rssiSwitchThreshold: FfiConverterInt16.read(from: &buf), 
                 congestionQueueThreshold: FfiConverterUInt64.read(from: &buf), 
-                stabilityWindowSecs: FfiConverterUInt64.read(from: &buf)
+                stabilityWindowSecs: FfiConverterUInt64.read(from: &buf), 
+                poorSignalDurationSecs: FfiConverterUInt64.read(from: &buf), 
+                ttlEscalationThreshold: FfiConverterUInt8.read(from: &buf)
         )
     }
 
@@ -1347,6 +1353,8 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
         FfiConverterInt16.write(value.rssiSwitchThreshold, into: &buf)
         FfiConverterUInt64.write(value.congestionQueueThreshold, into: &buf)
         FfiConverterUInt64.write(value.stabilityWindowSecs, into: &buf)
+        FfiConverterUInt64.write(value.poorSignalDurationSecs, into: &buf)
+        FfiConverterUInt8.write(value.ttlEscalationThreshold, into: &buf)
     }
 }
 

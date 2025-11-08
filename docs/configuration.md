@@ -225,6 +225,8 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 | `rssiSwitchThreshold` | number | -85 | RSSI threshold (dBm) |
 | `congestionQueueThreshold` | number | 50 | Queue depth for congestion |
 | `stabilityWindowSecs` | number | 8 | Stability check window |
+| `poorSignalDurationSecs` | number | 10 | Seconds RSSI must remain poor before escalating |
+| `ttlEscalationThreshold` | number | 2 | TTL value considered near exhaustion |
 
 ### Relay Configuration
 

@@ -95,13 +95,13 @@ impl TransportManager {
     ///
     /// # Returns
     ///
-    /// Returns Ok(Some(Message)) if a message was received, Ok(None) if no message available.
-    pub fn receive(&self) -> Result<Option<Message>> {
+    /// Returns Ok(Some((TransportType, Message))) if a message was received, Ok(None) if no message available.
+    pub fn receive(&self) -> Result<Option<(TransportType, Message)>> {
         // Check all transports for messages
-        for transport in self.transports.values() {
+        for (transport_type, transport) in &self.transports {
             let transport_lock = transport.lock().unwrap();
             if let Ok(Some(message)) = transport_lock.receive() {
-                return Ok(Some(message));
+                return Ok(Some((*transport_type, message)));
             }
         }
         Ok(None)
@@ -204,7 +204,7 @@ mod tests {
     use super::*;
     use offline_protocol_core::{AppId, UserId};
     use offline_protocol_router::DorsConfig;
-    use offline_protocol_transport::mock::MockTransport;
+    use offline_protocol_transport::{mock::MockTransport, TransportType};
 
     fn create_test_message() -> Message {
         Message::new(
@@ -261,6 +261,6 @@ mod tests {
         manager.add_transport(TransportType::BLE, Box::new(transport));
 
         let received = manager.receive().unwrap();
-        assert!(received.is_some());
+        assert!(matches!(received, Some((TransportType::BLE, _))));
     }
 }

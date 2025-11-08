@@ -149,6 +149,8 @@ export class OfflineProtocol {
           rssiSwitchThreshold: dorsSource.rssiSwitchThreshold ?? -85,
           congestionQueueThreshold: dorsSource.congestionQueueThreshold ?? 50,
           stabilityWindowSecs: dorsSource.stabilityWindowSecs ?? 8,
+          poorSignalDurationSecs: dorsSource.poorSignalDurationSecs ?? 10,
+          ttlEscalationThreshold: dorsSource.ttlEscalationThreshold ?? 2,
         })
       : undefined;
 
@@ -747,6 +749,8 @@ export class OfflineProtocol {
     rssiSwitchThreshold?: number;
     congestionQueueThreshold?: number;
     stabilityWindowSecs?: number;
+    poorSignalDurationSecs?: number;
+    ttlEscalationThreshold?: number;
   }): Promise<void> {
     return await OfflineProtocolNativeModule.updateDorsConfig(JSON.stringify(config));
   }
@@ -764,6 +768,8 @@ export class OfflineProtocol {
     rssiSwitchThreshold: number;
     congestionQueueThreshold: number;
     stabilityWindowSecs: number;
+    poorSignalDurationSecs: number;
+    ttlEscalationThreshold: number;
   }> {
     return await OfflineProtocolNativeModule.getDorsConfig();
   }

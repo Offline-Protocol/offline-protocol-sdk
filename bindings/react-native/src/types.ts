@@ -186,6 +186,10 @@ export interface ProtocolConfig {
     congestionQueueThreshold?: number;
     /** Duration for checking stability before switching in seconds (default: 8) */
     stabilityWindowSecs?: number;
+    /** Duration that RSSI must remain below the threshold before escalating (default: 10) */
+    poorSignalDurationSecs?: number;
+    /** TTL threshold that signals impending exhaustion (default: 2) */
+    ttlEscalationThreshold?: number;
   };
   /** Relay configuration (optional) */
   relay?: RelayConfig;

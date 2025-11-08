@@ -93,6 +93,8 @@ export default function App() {
       rssiSwitchThreshold: -85, // RSSI threshold for switching (dBm)
       congestionQueueThreshold: 50, // Queue depth for congestion
       stabilityWindowSecs: 8, // Stability check window
+      poorSignalDurationSecs: 10, // Seconds RSSI must remain poor before escalating
+      ttlEscalationThreshold: 2, // TTL value considered near exhaustion
     },
     relay: {
       allowRelay: true,
