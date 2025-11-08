@@ -7,13 +7,15 @@
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
+    "start:fresh": "react-native start --reset-cache",
     "test": "jest"
   },
   "dependencies": {
     "@offlineprotocol/react-native": "file:../../bindings/react-native",
+    "@react-native/new-app-screen": "0.82.1",
     "react": "19.1.1",
     "react-native": "0.82.1",
-    "@react-native/new-app-screen": "0.82.1",
+    "react-native-linear-gradient": "^2.8.3",
     "react-native-safe-area-context": "^5.5.2"
   },
   "devDependencies": {
