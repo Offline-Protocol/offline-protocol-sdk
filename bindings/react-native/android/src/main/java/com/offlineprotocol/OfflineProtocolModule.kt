@@ -94,31 +94,60 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun applyInitialRuntimeConfig(proto: OfflineProtocol, json: JSONObject) {
         json.optJSONObject("dors")?.let { dorsJson ->
             try {
-                val historyWindowSize = dorsJson
-                    .optLong("historyWindowSize", dorsJson.optLong("history_window_size", 10L))
-                    .let { max(1L, min(100L, it)) }
-                    .toULong()
-                val queueRecoveryRatio = dorsJson
-                    .optDouble("queueRecoveryRatio", dorsJson.optDouble("queue_recovery_ratio", 0.5))
-                    .toFloat()
-                    .coerceIn(0f, 1f)
-
-                val dorsConfig = DorsConfig(
-                    preferOnline = dorsJson.optBoolean("preferOnline", dorsJson.optBoolean("prefer_online", false)),
-                    switchHysteresis = dorsJson.optDouble("switchHysteresis", dorsJson.optDouble("switch_hysteresis", 15.0)).toFloat().coerceAtLeast(0f),
-                    switchCooldownSecs = dorsJson.optLong("switchCooldownSecs", dorsJson.optLong("switch_cooldown_secs", 20L)).coerceAtLeast(0).toULong(),
-                    bleToWifiRetryThreshold = dorsJson.optInt("bleToWifiRetryThreshold", dorsJson.optInt("ble_to_wifi_retry_threshold", 2)).toUInt(),
-                    rssiSwitchThreshold = dorsJson.optInt("rssiSwitchThreshold", dorsJson.optInt("rssi_switch_threshold", -85)).toShort(),
-                    congestionQueueThreshold = dorsJson.optLong("congestionQueueThreshold", dorsJson.optLong("congestion_queue_threshold", 50L)).toULong(),
-                    stabilityWindowSecs = dorsJson.optLong("stabilityWindowSecs", dorsJson.optLong("stability_window_secs", 8L)).toULong(),
-                    poorSignalDurationSecs = dorsJson.optLong("poorSignalDurationSecs", dorsJson.optLong("poor_signal_duration_secs", 10L)).toULong(),
-                    ttlEscalationThreshold = dorsJson.optInt("ttlEscalationThreshold", dorsJson.optInt("ttl_escalation_threshold", 2)).toUByte(),
-                    congestionDurationSecs = dorsJson.optLong("congestionDurationSecs", dorsJson.optLong("congestion_duration_secs", 10L)).coerceAtLeast(0).toULong(),
-                    ttlEscalationHoldSecs = dorsJson.optLong("ttlEscalationHoldSecs", dorsJson.optLong("ttl_escalation_hold_secs", 20L)).coerceAtLeast(1).toULong(),
-                    historyWindowSize = historyWindowSize,
-                    queueRecoveryRatio = queueRecoveryRatio
+                val baseConfig = proto.getDorsConfig()
+                val updatedConfig = baseConfig.copy(
+                    preferOnline = dorsJson.optBooleanCompat("preferOnline", "prefer_online")
+                        ?: baseConfig.preferOnline,
+                    switchHysteresis = dorsJson.optDoubleCompat("switchHysteresis", "switch_hysteresis")
+                        ?.toFloat()
+                        ?.coerceAtLeast(0f)
+                        ?: baseConfig.switchHysteresis,
+                    switchCooldownSecs = dorsJson.optLongCompat("switchCooldownSecs", "switch_cooldown_secs")
+                        ?.coerceAtLeast(0)
+                        ?.toULong()
+                        ?: baseConfig.switchCooldownSecs,
+                    bleToWifiRetryThreshold = dorsJson.optIntCompat("bleToWifiRetryThreshold", "ble_to_wifi_retry_threshold")
+                        ?.coerceAtLeast(0)
+                        ?.toUInt()
+                        ?: baseConfig.bleToWifiRetryThreshold,
+                    rssiSwitchThreshold = dorsJson.optIntCompat("rssiSwitchThreshold", "rssi_switch_threshold")
+                        ?.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                        ?.toShort()
+                        ?: baseConfig.rssiSwitchThreshold,
+                    congestionQueueThreshold = dorsJson.optLongCompat("congestionQueueThreshold", "congestion_queue_threshold")
+                        ?.coerceAtLeast(0)
+                        ?.toULong()
+                        ?: baseConfig.congestionQueueThreshold,
+                    stabilityWindowSecs = dorsJson.optLongCompat("stabilityWindowSecs", "stability_window_secs")
+                        ?.coerceAtLeast(0)
+                        ?.toULong()
+                        ?: baseConfig.stabilityWindowSecs,
+                    poorSignalDurationSecs = dorsJson.optLongCompat("poorSignalDurationSecs", "poor_signal_duration_secs")
+                        ?.coerceAtLeast(0)
+                        ?.toULong()
+                        ?: baseConfig.poorSignalDurationSecs,
+                    ttlEscalationThreshold = dorsJson.optIntCompat("ttlEscalationThreshold", "ttl_escalation_threshold")
+                        ?.coerceIn(0, UByte.MAX_VALUE.toInt())
+                        ?.toUByte()
+                        ?: baseConfig.ttlEscalationThreshold,
+                    congestionDurationSecs = dorsJson.optLongCompat("congestionDurationSecs", "congestion_duration_secs")
+                        ?.coerceAtLeast(0)
+                        ?.toULong()
+                        ?: baseConfig.congestionDurationSecs,
+                    ttlEscalationHoldSecs = dorsJson.optLongCompat("ttlEscalationHoldSecs", "ttl_escalation_hold_secs")
+                        ?.coerceAtLeast(1)
+                        ?.toULong()
+                        ?: baseConfig.ttlEscalationHoldSecs,
+                    historyWindowSize = dorsJson.optLongCompat("historyWindowSize", "history_window_size")
+                        ?.let { max(1L, min(100L, it)) }
+                        ?.toULong()
+                        ?: baseConfig.historyWindowSize,
+                    queueRecoveryRatio = dorsJson.optDoubleCompat("queueRecoveryRatio", "queue_recovery_ratio")
+                        ?.toFloat()
+                        ?.coerceIn(0f, 1f)
+                        ?: baseConfig.queueRecoveryRatio
                 )
-                proto.updateDorsConfig(dorsConfig)
+                proto.updateDorsConfig(updatedConfig)
                 emitDiagnostic("info", "Applied initial DORS config")
             } catch (e: Exception) {
                 emitDiagnostic("warning", "Failed to apply initial DORS config", mapOf(
@@ -904,6 +933,44 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "exception" to e.javaClass.simpleName
             ))
         }
+    }
+
+    private fun JSONObject.optBooleanCompat(vararg keys: String): Boolean? {
+        keys.forEach { key ->
+            if (has(key) && !isNull(key)) {
+                return runCatching { getBoolean(key) }.getOrNull()
+            }
+        }
+        return null
+    }
+
+    private fun JSONObject.optIntCompat(vararg keys: String): Int? {
+        keys.forEach { key ->
+            if (has(key) && !isNull(key)) {
+                return runCatching { getInt(key) }
+                    .getOrElse { runCatching { getDouble(key).toInt() }.getOrNull() }
+            }
+        }
+        return null
+    }
+
+    private fun JSONObject.optLongCompat(vararg keys: String): Long? {
+        keys.forEach { key ->
+            if (has(key) && !isNull(key)) {
+                return runCatching { getLong(key) }
+                    .getOrElse { runCatching { getDouble(key).toLong() }.getOrNull() }
+            }
+        }
+        return null
+    }
+
+    private fun JSONObject.optDoubleCompat(vararg keys: String): Double? {
+        keys.forEach { key ->
+            if (has(key) && !isNull(key)) {
+                return runCatching { getDouble(key) }.getOrNull()
+            }
+        }
+        return null
     }
 
     private fun parseInternetConfig(config: ReadableMap?): Pair<String, Int> {
