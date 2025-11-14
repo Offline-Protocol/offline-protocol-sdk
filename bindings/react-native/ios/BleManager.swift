@@ -8,6 +8,7 @@
 
 import Foundation
 import CoreBluetooth
+import UIKit
 
 private final class LogThrottler {
     private var timestamps: [String: Date] = [:]
@@ -49,19 +50,19 @@ public class BleManager: NSObject, TransportManager {
     private let FRAGMENT_POLL_INTERVAL: TimeInterval = 0.1 // 100ms
     private let MAX_FRAGMENT_SIZE = 185
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
+    private let MAX_CONNECTIONS_PER_DEVICE = 3
     
     // MARK: - Properties
     
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
+    private let meshController: MeshController
     
     // Central (scanner/client) components
     private var centralManager: CBCentralManager?
+    private let connections = MeshConnectionRegistry()
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
-    private var connectedPeripherals: [UUID: CBPeripheral] = [:]
-    private var peripheralDeviceIds: [UUID: String] = [:]
     private var peripheralRSSI: [UUID: Int16] = [:]
-    private var centralDeviceIds: [UUID: String] = [:]
     
     // Peripheral (advertiser/server) components
     private var peripheralManager: CBPeripheralManager?
@@ -82,6 +83,9 @@ public class BleManager: NSObject, TransportManager {
     private var isAdvertising = false
     private var centralReady = false
     private var peripheralReady = false
+    private var leaderListenerToken: UUID?
+    private var subscribedCentrals: Set<UUID> = []
+    private var lastMeshAdvertisement: MeshAdvertisementData?
     
     // Metrics
     private var bytesSent: UInt64 = 0
@@ -117,7 +121,18 @@ public class BleManager: NSObject, TransportManager {
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
         self.protocolInstance = protocolInstance
         self.deviceId = deviceId
+        self.meshController = MeshController(selfId: deviceId)
         super.init()
+        meshController.markPeerActive(deviceId)
+        leaderListenerToken = meshController.addLeaderListener { [weak self] _ in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                if self.state == .running {
+                    self.refreshAdvertising(reason: "leader_change")
+                }
+            }
+        }
+        refreshSelfMetrics()
     }
     
     deinit {
@@ -180,16 +195,19 @@ public class BleManager: NSObject, TransportManager {
         stopAdvertising()
         
         // Disconnect all peripherals
-        for peripheral in connectedPeripherals.values {
+        for peripheral in connections.allPeripherals() {
             centralManager?.cancelPeripheralConnection(peripheral)
         }
-        connectedPeripherals.removeAll()
+        connections.reset()
         discoveredPeripherals.removeAll()
-        peripheralDeviceIds.removeAll()
         peripheralRSSI.removeAll()
-        centralDeviceIds.removeAll()
         pendingFragments.removeAll()
         pendingOutboundFragments.removeAll()
+        if let token = leaderListenerToken {
+            meshController.removeLeaderListener(token)
+            leaderListenerToken = nil
+        }
+        subscribedCentrals.removeAll()
         
         // Clean up managers
         centralManager = nil
@@ -222,7 +240,7 @@ public class BleManager: NSObject, TransportManager {
             "bytes_received": bytesReceived,
             "fragments_sent": fragmentsSent,
             "fragments_received": fragmentsReceived,
-            "connected_peers": connectedPeripherals.count,
+            "connected_peers": connections.connectedPeripheralCount(),
             "discovered_peers": discoveredPeripherals.count
         ]
     }
@@ -374,12 +392,12 @@ public class BleManager: NSObject, TransportManager {
             guard let self = self else { return }
             let now = Date()
             for peripheral in self.discoveredPeripherals.values {
-                if self.connectedPeripherals[peripheral.identifier] == nil {
+                if self.connections.connectedPeripheral(for: peripheral.identifier) == nil {
                     self.attemptConnection(to: peripheral, reason: "monitor")
                 }
             }
             for centralId in self.pendingFragments.keys {
-                if self.centralDeviceIds[centralId] == nil && self.peripheralDeviceIds[centralId] == nil {
+                if self.connections.centralDeviceId(for: centralId) == nil && self.connections.peripheralDeviceId(for: centralId) == nil {
                     // Ensure we periodically try to resolve device IDs for pending fragments
                     if let last = self.connectionAttemptTimestamps[centralId], now.timeIntervalSince(last) < self.MIN_RECONNECT_INTERVAL {
                         continue
@@ -398,10 +416,10 @@ public class BleManager: NSObject, TransportManager {
         connectionMonitor = nil
     }
     
-    private func attemptConnection(to peripheral: CBPeripheral, reason: String, rssi: Int16? = nil) {
+    private func attemptConnection(to peripheral: CBPeripheral, reason: String, rssi: Int16? = nil, desiredRole: MeshController.MeshRole? = nil) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            if self.connectedPeripherals[peripheral.identifier] != nil {
+            if self.connections.connectedPeripheral(for: peripheral.identifier) != nil {
                 return
             }
             let now = Date()
@@ -418,10 +436,21 @@ public class BleManager: NSObject, TransportManager {
                 }
                 return
             }
+            if self.currentConnectionCount() >= self.MAX_CONNECTIONS_PER_DEVICE {
+                if self.logThrottler.shouldLog(key: "mesh_conn_cap_ios", interval: 10) {
+                    print("[BleManager] Connection cap reached, not connecting to \(peripheral.identifier)")
+                }
+                return
+            }
             self.connectionAttemptTimestamps[peripheral.identifier] = now
+            if let desiredRole = desiredRole {
+                self.connections.setPendingRole(desiredRole, for: peripheral.identifier)
+            } else if self.connections.pendingRole(for: peripheral.identifier) == nil {
+                self.connections.setPendingRole(.member, for: peripheral.identifier)
+            }
             peripheral.delegate = self
             if peripheral.state == .connected {
-                self.connectedPeripherals[peripheral.identifier] = peripheral
+                self.connections.registerPeripheral(peripheral)
                 if let service = peripheral.services?.first(where: { $0.uuid == self.SERVICE_UUID }) {
                     peripheral.discoverCharacteristics([self.MESSAGE_CHAR_UUID, self.DEVICE_ID_CHAR_UUID], for: service)
                 } else {
@@ -448,7 +477,7 @@ public class BleManager: NSObject, TransportManager {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             // Check again with latest state
-            if self.centralDeviceIds[centralId] != nil || self.peripheralDeviceIds[centralId] != nil {
+            if self.connections.centralDeviceId(for: centralId) != nil || self.connections.peripheralDeviceId(for: centralId) != nil {
                 return
             }
             guard let centralManager = self.centralManager else { return }
@@ -469,23 +498,30 @@ public class BleManager: NSObject, TransportManager {
         }
     }
     
-    private func startAdvertising() {
-        guard let peripheral = peripheralManager, peripheral.state == .poweredOn, !isAdvertising else {
+    private func startAdvertising(reason: String = "manual") {
+        guard let peripheral = peripheralManager, peripheral.state == .poweredOn else {
+            return
+        }
+        if isAdvertising {
+            if logThrottler.shouldLog(key: "advert_already_running", interval: 10) {
+                print("[BleManager] Advertising already running (reason: \(reason))")
+            }
             return
         }
         
-        // Create GATT service
         setupGattServer()
         
-        // Start advertising
-        let advertisementData: [String: Any] = [
+        let meshData = meshController.advertisement()
+        lastMeshAdvertisement = meshData
+        var advertisementData: [String: Any] = [
             CBAdvertisementDataServiceUUIDsKey: [SERVICE_UUID],
-            CBAdvertisementDataLocalNameKey: "OfflineProtocol"
+            CBAdvertisementDataIncludeDeviceNameKey: false
         ]
+        advertisementData[CBAdvertisementDataServiceDataKey] = [SERVICE_UUID: meshData.encode()]
         
-        // Reduced logging
         peripheral.startAdvertising(advertisementData)
         isAdvertising = true
+        emitDiagnostic("info", "Started BLE advertising", context: ["reason": reason])
     }
     
     private func stopAdvertising() {
@@ -495,9 +531,23 @@ public class BleManager: NSObject, TransportManager {
         print("[BleManager] Stopped advertising")
         emitDiagnostic("info", "Stopped BLE advertising")
     }
+
+    private func refreshAdvertising(reason: String) {
+        guard let peripheral = peripheralManager, peripheral.state == .poweredOn else { return }
+        if !isAdvertising {
+            startAdvertising(reason: reason)
+            return
+        }
+        peripheral.stopAdvertising()
+        isAdvertising = false
+        startAdvertising(reason: reason)
+    }
     
     private func setupGattServer() {
         guard let peripheral = peripheralManager else { return }
+        if messageCharacteristic != nil && deviceIdCharacteristic != nil {
+            return
+        }
         
         // Create message characteristic (write without response + notify)
         messageCharacteristic = CBMutableCharacteristic(
@@ -619,6 +669,71 @@ public class BleManager: NSObject, TransportManager {
         queue.append(data)
         pendingOutboundFragments[recipientId] = queue
     }
+
+    private func currentConnectionCount() -> Int {
+        return connections.connectedPeripheralCount() + subscribedCentrals.count
+    }
+
+    private func refreshSelfMetrics() {
+        let rssiValues = peripheralRSSI.values.map { Int($0) }
+        let averageRssi = rssiValues.isEmpty ? nil : Int(Double(rssiValues.reduce(0, +)) / Double(rssiValues.count))
+        let signalQuality = averageRssi.map { rssi -> Int in
+            let clamped = max(-100, min(-20, rssi))
+            let normalized = Double(clamped + 100) / 80.0
+            let scaled = Int((normalized * 100.0).rounded())
+            return min(100, max(0, scaled))
+        }
+        let pendingCount = pendingFragments.values.reduce(0) { $0 + $1.count }
+        let stability = max(0.0, 1.0 - min(1.0, Double(pendingCount) / 10.0))
+        let metrics = MeshController.PeerMetrics(
+            rssi: averageRssi,
+            batteryPercent: currentBatteryPercent(),
+            signalQuality: signalQuality,
+            hopCount: 0,
+            stability: stability
+        )
+        meshController.updateSelfMetrics(metrics)
+        meshController.markPeerActive(deviceId)
+    }
+
+    private func currentBatteryPercent() -> Int? {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = UIDevice.current.batteryLevel
+        guard level >= 0 else { return nil }
+        return Int((level * 100).rounded())
+    }
+
+    private func evictPeer(_ deviceId: String, reason: String) {
+        guard let identifier = connections.peripheralIdentifier(for: deviceId) else {
+            if logThrottler.shouldLog(key: "mesh_evict_missing_\(deviceId)") {
+                print("[BleManager] Cannot evict \(deviceId): missing identifier")
+            }
+            return
+        }
+
+        if logThrottler.shouldLog(key: "mesh_evict_\(deviceId)", interval: 5) {
+            print("[BleManager] Evicting \(deviceId) to reclaim capacity (reason: \(reason))")
+        }
+
+        if let peripheral = connections.connectedPeripheral(for: identifier) {
+            centralManager?.cancelPeripheralConnection(peripheral)
+        }
+
+        _ = connections.removePeripheral(identifier)
+        connections.removePeripheralDeviceId(for: identifier)
+        connections.removeCentralDeviceId(for: identifier)
+        connections.removeConnectionRole(for: deviceId)
+        peripheralRSSI.removeValue(forKey: identifier)
+        pendingFragments.removeValue(forKey: identifier)
+        pendingOutboundFragments.removeValue(forKey: deviceId)
+        connectionAttemptTimestamps.removeValue(forKey: identifier)
+        meshController.registerDisconnection(peerId: deviceId)
+        refreshSelfMetrics()
+        try? protocolInstance.blePeerLost(peerId: deviceId)
+        DispatchQueue.main.async {
+            self.refreshAdvertising(reason: "evict_\(reason)")
+        }
+    }
     
     private func sendFragmentData(recipientId: String, data: Data) -> Bool {
         guard let peripheral = findPeripheral(for: recipientId) else {
@@ -650,16 +765,16 @@ public class BleManager: NSObject, TransportManager {
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
         bytesSent += UInt64(data.count)
         fragmentsSent += 1
+        meshController.markPeerActive(recipientId)
+        meshController.markPeerActive(deviceId)
         return true
     }
     
     private func findPeripheral(for recipientId: String) -> CBPeripheral? {
-        for (uuid, deviceId) in peripheralDeviceIds where deviceId == recipientId {
-            if let peripheral = connectedPeripherals[uuid] {
-                return peripheral
-            }
+        guard let identifier = connections.peripheralIdentifier(for: recipientId) else {
+            return nil
         }
-        return nil
+        return connections.connectedPeripheral(for: identifier)
     }
     
     private func findMessageCharacteristic(on peripheral: CBPeripheral) -> (CBService, CBCharacteristic)? {
@@ -693,7 +808,7 @@ public class BleManager: NSObject, TransportManager {
                 self.cleanupPendingFragments()
                 
                 // Try to read device ID if not already reading
-                if self.centralDeviceIds[centralId] == nil && self.peripheralDeviceIds[centralId] == nil {
+                if self.connections.centralDeviceId(for: centralId) == nil && self.connections.peripheralDeviceId(for: centralId) == nil {
                     self.ensureDeviceId(for: centralId)
                 }
                 return
@@ -711,6 +826,8 @@ public class BleManager: NSObject, TransportManager {
             }
 
             let bytes = [UInt8](data)
+            self.meshController.markPeerActive(senderId)
+            self.meshController.markPeerActive(self.deviceId)
 
             do {
                 print("[BleManager] 📥 RECEIVED FRAGMENT from \(senderId), size: \(data.count)")
@@ -751,6 +868,18 @@ public class BleManager: NSObject, TransportManager {
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
             guard let fragments = self.pendingFragments.removeValue(forKey: centralId) else { return }
+            let role = self.connections.consumePendingRole(for: centralId) ?? self.connections.connectionRole(for: deviceId) ?? .member
+            self.meshController.registerConnection(peerId: deviceId, role: role)
+            self.connections.setConnectionRole(role, for: deviceId)
+            self.meshController.markPeerActive(deviceId)
+            self.meshController.markPeerActive(self.deviceId)
+            self.refreshSelfMetrics()
+            if let rssi = self.peripheralRSSI[centralId] {
+                self.meshController.updatePeerMetrics(peerId: deviceId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
+            }
+            DispatchQueue.main.async {
+                self.refreshAdvertising(reason: "membership_change")
+            }
             
             for (data, _) in fragments {
                 let bytes = [UInt8](data)
@@ -758,6 +887,8 @@ public class BleManager: NSObject, TransportManager {
                     try self.protocolInstance.bleFragmentReceived(senderId: deviceId, fragment: bytes)
                     self.bytesReceived += UInt64(data.count)
                     self.fragmentsReceived += 1
+                    self.meshController.markPeerActive(deviceId)
+                    self.meshController.markPeerActive(self.deviceId)
                 } catch {
                     print("[BleManager] Error processing pending fragment: \(error)")
                 }
@@ -828,7 +959,6 @@ extension BleManager: CBCentralManagerDelegate {
         let rssiValue = RSSI.int16Value
         markDiscoveryEvent()
         
-        // Store discovered peripheral
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
         
@@ -848,15 +978,55 @@ extension BleManager: CBCentralManagerDelegate {
                 "connectable": isConnectable
             ])
         }
-        
-        attemptConnection(to: peripheral, reason: "discovery", rssi: rssiValue)
+
+        let serviceData = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]
+        let meshMetadata = MeshAdvertisementData.decode(serviceData)
+        meshController.observeAdvertisement(meshMetadata, rssi: Int(rssiValue))
+
+        let decision = meshController.shouldInitiateOutbound(metadata: meshMetadata, rssi: Int(rssiValue))
+        guard decision.intent != .rejected else {
+            if logThrottler.shouldLog(key: "mesh_skip_\(peripheral.identifier.uuidString)", interval: 15) {
+                print("[BleManager] Skipping \(peripheral.identifier) due to \(decision.reason)")
+            }
+            return
+        }
+
+        let desiredRole: MeshController.MeshRole = (decision.intent == .interCluster) ? .bridge : .member
+
+        if !meshController.connectionBudgetAvailable(), let evictPeer = decision.evictPeerId {
+            evictPeer(evictPeer, reason: decision.reason)
+        }
+
+        guard meshController.connectionBudgetAvailable() else {
+            if logThrottler.shouldLog(key: "mesh_budget_exhausted_ios", interval: 5) {
+                print("[BleManager] Connection budget exhausted, skipping \(peripheral.identifier)")
+            }
+            return
+        }
+
+        if decision.intent == .intraCluster && !meshController.clusterHasCapacity() {
+            if logThrottler.shouldLog(key: "mesh_cluster_full_ios", interval: 15) {
+                print("[BleManager] Cluster full, cannot add \(peripheral.identifier)")
+            }
+            return
+        }
+
+        guard currentConnectionCount() < MAX_CONNECTIONS_PER_DEVICE else {
+            if logThrottler.shouldLog(key: "mesh_conn_cap_ios", interval: 10) {
+                print("[BleManager] Max connections reached, skipping \(peripheral.identifier)")
+            }
+            return
+        }
+
+        connections.setPendingRole(desiredRole, for: peripheral.identifier)
+        attemptConnection(to: peripheral, reason: "discovery", rssi: rssiValue, desiredRole: desiredRole)
     }
     
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         print("[BleManager] Connected to peripheral: \(peripheral.identifier)")
         emitDiagnostic("info", "Connected to BLE peripheral", context: ["identifier": peripheral.identifier.uuidString])
         
-        connectedPeripherals[peripheral.identifier] = peripheral
+        connections.registerPeripheral(peripheral)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
         
         // Discover services
@@ -870,14 +1040,15 @@ extension BleManager: CBCentralManagerDelegate {
             "error": error?.localizedDescription ?? "unknown"
         ])
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+        _ = connections.consumePendingRole(for: peripheral.identifier)
         DispatchQueue.main.asyncAfter(deadline: .now() + MIN_RECONNECT_INTERVAL) { [weak self] in
             self?.attemptConnection(to: peripheral, reason: "retry_fail")
         }
     }
     
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        let wasConnected = connectedPeripherals[peripheral.identifier] != nil
-        connectedPeripherals.removeValue(forKey: peripheral.identifier)
+        let wasConnected = connections.connectedPeripheral(for: peripheral.identifier) != nil
+        _ = connections.removePeripheral(peripheral.identifier)
         if logThrottler.shouldLog(key: "disconnect_\(peripheral.identifier.uuidString)", interval: 10) {
             let errorDescription = (error as NSError?)?.localizedDescription ?? "none"
             print("[BleManager] Disconnected from \(peripheral.identifier) error=\(errorDescription)")
@@ -900,10 +1071,16 @@ extension BleManager: CBCentralManagerDelegate {
                 // Don't reconnect on permanent errors
                 if error.code == .connectionTimeout || error.code == .peerRemovedPairingInformation {
                     // Permanent error - notify peer lost
-                    if let deviceId = peripheralDeviceIds[peripheral.identifier] {
+                    if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
                         try? self.protocolInstance.blePeerLost(peerId: deviceId)
-                        peripheralDeviceIds.removeValue(forKey: peripheral.identifier)
-                        centralDeviceIds.removeValue(forKey: peripheral.identifier)
+                        meshController.registerDisconnection(peerId: deviceId)
+                        refreshSelfMetrics()
+                        connections.removeConnectionRole(for: deviceId)
+                        connections.removePeripheralDeviceId(for: peripheral.identifier)
+                        connections.removeCentralDeviceId(for: peripheral.identifier)
+                        DispatchQueue.main.async {
+                            self.refreshAdvertising(reason: "disconnect")
+                        }
                     }
                     return
                 }
@@ -918,10 +1095,17 @@ extension BleManager: CBCentralManagerDelegate {
             }
         } else {
             // Wasn't connected, just notify if we had device ID
-            if let deviceId = peripheralDeviceIds[peripheral.identifier] {
+            if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
                 try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                meshController.registerDisconnection(peerId: deviceId)
+                refreshSelfMetrics()
+                connections.removeConnectionRole(for: deviceId)
+                DispatchQueue.main.async {
+                    self.refreshAdvertising(reason: "disconnect")
+                }
             }
         }
+        _ = connections.consumePendingRole(for: peripheral.identifier)
     }
 }
 
@@ -978,19 +1162,29 @@ extension BleManager: CBPeripheralDelegate {
         if characteristic.uuid == DEVICE_ID_CHAR_UUID {
             // Store device ID
             if let deviceId = String(data: data, encoding: .utf8) {
-                peripheralDeviceIds[peripheral.identifier] = deviceId
-                centralDeviceIds[peripheral.identifier] = deviceId
+                connections.setPeripheralDeviceId(deviceId, for: peripheral.identifier)
+                connections.setCentralDeviceId(deviceId, for: peripheral.identifier)
                 connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
 
                 let rssi = peripheralRSSI[peripheral.identifier] ?? -60
                 try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
+                let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: deviceId) ?? .member
+                meshController.registerConnection(peerId: deviceId, role: role)
+                connections.setConnectionRole(role, for: deviceId)
+                meshController.markPeerActive(deviceId)
+                meshController.markPeerActive(self.deviceId)
+                refreshSelfMetrics()
+                meshController.updatePeerMetrics(peerId: deviceId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
+                DispatchQueue.main.async {
+                    self.refreshAdvertising(reason: "membership_change")
+                }
 
                 // Process any pending fragments for this device
                 processPendingFragments(for: peripheral.identifier, deviceId: deviceId)
             }
         } else if characteristic.uuid == MESSAGE_CHAR_UUID {
             // Handle received message fragment
-            handleReceivedData(data, senderId: peripheralDeviceIds[peripheral.identifier], centralId: peripheral.identifier)
+            handleReceivedData(data, senderId: connections.peripheralDeviceId(for: peripheral.identifier), centralId: peripheral.identifier)
         }
     }
     
@@ -1013,7 +1207,7 @@ extension BleManager: CBPeripheralManagerDelegate {
         switch peripheral.state {
         case .poweredOn:
             peripheralReady = true
-            startAdvertising()
+            startAdvertising(reason: "state_powered_on")
             emitDiagnostic("info", "Peripheral manager powered on")
             
             // If both central and peripheral are ready, mark as running
@@ -1059,7 +1253,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             
             if request.characteristic.uuid == MESSAGE_CHAR_UUID, let value = request.value {
                 print("[BleManager] 📥 MESSAGE CHARACTERISTIC WRITE from \(request.central.identifier), processing...")
-                let senderId = centralDeviceIds[request.central.identifier] ?? peripheralDeviceIds[request.central.identifier]
+                let senderId = connections.centralDeviceId(for: request.central.identifier) ?? connections.peripheralDeviceId(for: request.central.identifier)
                 if senderId == nil && logThrottler.shouldLog(key: "missing_sender_\(request.central.identifier.uuidString)", interval: 10) {
                     print("[BleManager] Received write without known sender for central \(request.central.identifier)")
                     emitDiagnostic("warning", "Received BLE fragment without sender ID", context: [
@@ -1083,10 +1277,10 @@ extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         // When central subscribes, try to get device ID if we don't have it
-        if centralDeviceIds[central.identifier] == nil && peripheralDeviceIds[central.identifier] == nil {
+        if connections.centralDeviceId(for: central.identifier) == nil && connections.peripheralDeviceId(for: central.identifier) == nil {
             ensureDeviceId(for: central.identifier)
-        } else if let deviceId = peripheralDeviceIds[central.identifier] {
-            centralDeviceIds[central.identifier] = deviceId
+        } else if let deviceId = connections.peripheralDeviceId(for: central.identifier) {
+            connections.setCentralDeviceId(deviceId, for: central.identifier)
             // Process any pending fragments
             processPendingFragments(for: central.identifier, deviceId: deviceId)
         }
@@ -1098,7 +1292,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             "central": central.identifier.uuidString,
             "characteristic": characteristic.uuid.uuidString
         ])
-        centralDeviceIds.removeValue(forKey: central.identifier)
+        connections.removeCentralDeviceId(for: central.identifier)
     }
 }
 
