@@ -21,6 +21,7 @@ import uniffi.offline_protocol.OfflineProtocol
 import android.bluetooth.BluetoothStatusCodes
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -71,7 +72,10 @@ class BleManager(
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 20000L
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
-        private const val MAX_CONNECTIONS_PER_DEVICE = 3
+        private const val MAX_CONNECTIONS_PER_DEVICE = 4
+        private const val ADVERTISE_RESTART_MIN_MS = 200L
+        private const val ADVERTISE_RESTART_MAX_MS = 1200L
+        private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
     }
     
     // MARK: - Properties
@@ -105,8 +109,11 @@ class BleManager(
     
     // Pending fragments waiting for device ID
     private data class PendingFragment(val data: ByteArray, val timestamp: Long)
+    private data class MeshObservation(val advertisement: MeshAdvertisementData, val rssi: Int?, val timestamp: Long)
     private val pendingFragments = ConcurrentHashMap<String, MutableList<PendingFragment>>()
     private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
+    private val LOAD_SATURATION_COUNT = 20
+    private val MESH_OBSERVATION_TTL_MS = 120_000L
     private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
 
     private val meshController = MeshController(deviceId)
@@ -122,18 +129,11 @@ class BleManager(
             }
         }
     }
-    private val meshLeaderListener: (String) -> Unit = { newLeader ->
-        if (logThrottler.shouldLog("mesh_leader_change", intervalMs = 15_000)) {
-            Log.i(TAG, "Mesh leader changed to $newLeader")
-        }
-        mainHandler.post {
-            if (state == TransportState.RUNNING) {
-                refreshAdvertising("leader_change")
-            }
-        }
-    }
-
     private val pendingOutboundFragments = mutableMapOf<String, MutableList<ByteArray>>()
+    private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
+    private var pendingAdvertiseRestart: Runnable? = null
+    private var lastAdvertiseRestartAt: Long = 0L
+    private var transportStartAt: Long = 0L
 
     private val scanWatchdogRunnable = object : Runnable {
         override fun run() {
@@ -215,7 +215,7 @@ class BleManager(
             // Setup GATT server
             setupGattServer()
 
-            meshController.addOnLeaderChanged(meshLeaderListener)
+            transportStartAt = System.currentTimeMillis()
             meshController.markPeerActive(deviceId)
             refreshSelfMetrics()
             
@@ -298,7 +298,9 @@ class BleManager(
         connections.clear()
         lastSeenRssi.clear()
         pendingFragments.clear()
-        meshController.removeOnLeaderChanged(meshLeaderListener)
+        pendingOutboundFragments.clear()
+        lastSeenMeshAdvertisements.clear()
+        transportStartAt = 0L
         
         // Close GATT server
         gattServer?.close()
@@ -499,6 +501,7 @@ class BleManager(
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
                     Log.i(TAG, "Advertising started successfully (reason=$reason)")
                     isAdvertising = true
+                    lastAdvertiseRestartAt = System.currentTimeMillis()
                     emitDiagnostic("info", "BLE advertising started")
                 }
                 
@@ -526,6 +529,10 @@ class BleManager(
             advertiseCallback?.let { bluetoothLeAdvertiser?.stopAdvertising(it) }
             advertiseCallback = null
             isAdvertising = false
+            pendingAdvertiseRestart?.let {
+                mainHandler.removeCallbacks(it)
+                pendingAdvertiseRestart = null
+            }
             Log.i(TAG, "Stopped advertising")
             emitDiagnostic("info", "Stopped BLE advertising")
         } catch (e: SecurityException) {
@@ -535,12 +542,23 @@ class BleManager(
     }
 
     private fun refreshAdvertising(reason: String) {
-        if (!isAdvertising) {
-            startAdvertising(reason)
-            return
-        }
         stopAdvertising()
-        startAdvertising(reason)
+        scheduleAdvertisingRestart(reason)
+    }
+
+    private fun scheduleAdvertisingRestart(reason: String) {
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastAdvertiseRestartAt
+        val cooldownDelay = if (elapsed < MIN_ADVERTISE_INTERVAL_MS) MIN_ADVERTISE_INTERVAL_MS - elapsed else 0L
+        val jitter = ThreadLocalRandom.current().nextLong(ADVERTISE_RESTART_MIN_MS, ADVERTISE_RESTART_MAX_MS + 1)
+        val delay = cooldownDelay + jitter
+        pendingAdvertiseRestart?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable {
+            pendingAdvertiseRestart = null
+            startAdvertising(reason)
+        }
+        pendingAdvertiseRestart = runnable
+        mainHandler.postDelayed(runnable, delay)
     }
 
     private fun buildAdvertiseData(): AdvertiseData {
@@ -584,7 +602,11 @@ class BleManager(
         val scanRecord = result.scanRecord
         val serviceData = scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
         val meshMetadata = MeshAdvertisementData.decode(serviceData)
+        meshMetadata?.let {
+            lastSeenMeshAdvertisements[address] = MeshObservation(it, rssi, now)
+        }
         meshController.observeAdvertisement(meshMetadata, rssi)
+        pruneMeshObservations(now)
 
         val decision = meshController.shouldInitiateOutbound(meshMetadata, rssi)
         if (decision.intent == ConnectionIntent.REJECTED) {
@@ -611,13 +633,6 @@ class BleManager(
             return
         }
 
-        if (decision.intent == ConnectionIntent.INTRA_CLUSTER && !meshController.clusterHasCapacity()) {
-            if (logThrottler.shouldLog("mesh_cluster_full", intervalMs = 15000)) {
-                Log.d(TAG, "Cluster full, cannot add $address")
-            }
-            return
-        }
-
         if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
             if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
                 Log.d(TAG, "Reached max simultaneous connections, skipping $address")
@@ -631,6 +646,8 @@ class BleManager(
         } else if (logThrottler.shouldLog("discovery_existing_$address", intervalMs = 30000)) {
             Log.v(TAG, "Device $address already connected/connecting")
         }
+
+        maybeHandleRebalance("scan")
     }
     
     private fun connectToDevice(device: BluetoothDevice) {
@@ -663,19 +680,25 @@ class BleManager(
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
         val pendingCount = pendingFragments.values.sumOf { it.size }
+        val outboundPending = pendingOutboundFragments.values.sumOf { it.size }
+        val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
         val batteryPercent = currentBatteryPercent()
+        val loadPercent = ((totalPending.coerceAtMost(LOAD_SATURATION_COUNT) * 100) / LOAD_SATURATION_COUNT).coerceIn(0, 100)
+        val uptimeSeconds = if (transportStartAt == 0L) null else ((System.currentTimeMillis() - transportStartAt) / 1000).coerceAtLeast(0)
 
-        meshController.noteSelfMetrics(
+        meshController.updateSelfMetrics(
             MeshController.PeerMetrics(
                 rssi = averageRssi,
                 batteryPercent = batteryPercent,
                 signalQuality = signalQuality,
-                hopCount = 0,
-                stability = stability
+                stability = stability,
+                uptimeSeconds = uptimeSeconds?.toLong(),
+                loadPercent = loadPercent
             )
         )
         meshController.markPeerActive(deviceId)
+        maybeHandleRebalance("self_metrics")
     }
 
     private fun currentBatteryPercent(): Int? {
@@ -727,6 +750,7 @@ class BleManager(
         }
 
         refreshAdvertising("evict_$reason")
+        maybeHandleRebalance("evict")
     }
     
     private fun pollAndSendFragments() {
@@ -814,21 +838,13 @@ class BleManager(
         if (recipientId == deviceId) {
             return null
         }
-        val direct = connections.addressForDevice(recipientId)
-        if (direct != null) {
-            return direct
-        }
-        val leaderId = meshController.currentLeaderId()
-        if (!meshController.isSelfLeader()) {
-            connections.addressForDevice(leaderId)?.let { return it }
-        }
+        connections.addressForDevice(recipientId)?.let { return it }
         connections.connectionRoleEntries()
-            .firstOrNull { it.value == MeshRole.BRIDGE }
+            .sortedBy { entry -> if (entry.value == MeshRole.BRIDGE) 0 else 1 }
+            .firstOrNull()
             ?.key
-            ?.let { bridgeId ->
-                connections.addressForDevice(bridgeId)?.let { return it }
-            }
-        return direct
+            ?.let { return connections.addressForDevice(it) }
+        return null
     }
 
     private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
@@ -1032,6 +1048,61 @@ class BleManager(
         }
         addressesToRemove.forEach { pendingFragments.remove(it) }
     }
+
+    private fun pruneMeshObservations(now: Long) {
+        val iterator = lastSeenMeshAdvertisements.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (now - entry.value.timestamp > MESH_OBSERVATION_TTL_MS) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun addressForNodeHash(nodeHash: Long): String? {
+        return lastSeenMeshAdvertisements.entries.firstOrNull {
+            it.value.advertisement.nodeIdHash == nodeHash
+        }?.key
+    }
+
+    private fun maybeHandleRebalance(trigger: String) {
+        val directive = meshController.evaluateRebalance() ?: return
+        val decision = directive.decision
+        val candidateHash = directive.candidate.nodeIdHash
+        val candidateAddress = addressForNodeHash(candidateHash)
+        if (candidateAddress == null) {
+            if (logThrottler.shouldLog("rebalance_missing_candidate", intervalMs = 10_000)) {
+                Log.v(TAG, "No address found for rebalance candidate hash=${candidateHash.toString(16)}")
+            }
+            return
+        }
+
+        if (decision.evictPeerId != null) {
+            evictPeer(decision.evictPeerId, "rebalance_${trigger}")
+        }
+
+        if (!meshController.connectionBudgetAvailable() && decision.evictPeerId == null) {
+            return
+        }
+
+        if (connections.getGatt(candidateAddress) != null) {
+            return
+        }
+
+        val device = try {
+            bluetoothAdapter?.getRemoteDevice(candidateAddress)
+        } catch (e: IllegalArgumentException) {
+            null
+        } ?: return
+
+        val desiredRole = when (decision.intent) {
+            ConnectionIntent.INTER_CLUSTER -> MeshRole.BRIDGE
+            ConnectionIntent.INTRA_CLUSTER, ConnectionIntent.REJECTED -> MeshRole.MEMBER
+        }
+
+        connections.setPendingRole(candidateAddress, desiredRole)
+        connectToDevice(device)
+    }
     
     // MARK: - GATT Server Callback
     
@@ -1039,12 +1110,15 @@ class BleManager(
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
-                        Log.w(TAG, "Rejecting inbound connection from ${device.address}: capacity full")
-                        gattServer?.cancelConnection(device)
-                        return
+                    val observation = lastSeenMeshAdvertisements[device.address]
+                    val decision = meshController.shouldAcceptInboundConnection(
+                        connections.deviceIdForAddress(device.address),
+                        observation?.advertisement,
+                        observation?.rssi
+                    )
+                    if (decision.evictPeerId != null) {
+                        evictPeer(decision.evictPeerId, "inbound_swap")
                     }
-                    val decision = meshController.shouldAcceptInboundConnection(null)
                     if (decision.intent == ConnectionIntent.REJECTED) {
                         Log.w(TAG, "Rejecting inbound connection from ${device.address}: ${decision.reason}")
                         gattServer?.cancelConnection(device)
@@ -1084,6 +1158,7 @@ class BleManager(
                                     refreshAdvertising("membership_change")
                                 }
                             }
+                            maybeHandleRebalance("disconnect")
                         }
                     }
                 }
@@ -1200,7 +1275,7 @@ class BleManager(
                                 emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                             }
                             meshController.registerDisconnection(deviceId)
-                        refreshSelfMetrics()
+                            refreshSelfMetrics()
                             connections.removeIdentifiersForAddress(address)
                             deviceIdResolutionAttempts.remove(address)
                             connections.removeConnectionRole(deviceId)
@@ -1209,6 +1284,7 @@ class BleManager(
                                     refreshAdvertising("membership_change")
                                 }
                             }
+                            maybeHandleRebalance("disconnect")
                         }
                     }
                 }
