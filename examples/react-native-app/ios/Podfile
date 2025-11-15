@@ -37,6 +37,16 @@ target 'OfflineProtocolExample' do
     installer.pods_project.targets.each do |target|
       target.build_configurations.each do |build_config|
         build_config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+        other_cflags = build_config.build_settings['OTHER_CFLAGS'] || '$(inherited)'
+        other_cxxflags = build_config.build_settings['OTHER_CPLUSPLUSFLAGS'] || '$(inherited)'
+        warning_flag = '-Wno-error=return-type'
+        unless other_cflags.include?(warning_flag)
+          build_config.build_settings['OTHER_CFLAGS'] = "#{other_cflags} #{warning_flag}"
+        end
+        unless other_cxxflags.include?(warning_flag)
+          build_config.build_settings['OTHER_CPLUSPLUSFLAGS'] = "#{other_cxxflags} #{warning_flag}"
+        end
+        build_config.build_settings['SWIFT_STRICT_CONCURRENCY'] ||= 'minimal'
       end
     end
   end

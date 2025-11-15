@@ -17,6 +17,11 @@ import { useProtocol } from '../hooks/useProtocol';
 
 const { width } = Dimensions.get('window');
 
+interface AnalyticsScreenProps {
+  onOpenVisualization?: () => void;
+  onOpenNetwork?: () => void;
+}
+
 interface MetricCardProps {
   title: string;
   value: string | number;
@@ -297,7 +302,10 @@ function RecentActivity({ events, theme }: EventLogProps) {
   );
 }
 
-export function AnalyticsScreen() {
+export function AnalyticsScreen({
+  onOpenVisualization = () => {},
+  onOpenNetwork = () => {},
+}: AnalyticsScreenProps) {
   const { theme } = useTheme();
   const { 
     chats, 
@@ -394,6 +402,40 @@ export function AnalyticsScreen() {
         contentContainerStyle={styles.scrollContent}
       >
         {/* Metrics Grid */}
+        <View style={styles.quickActions}>
+          <TouchableOpacity
+            style={[styles.quickActionButton, { backgroundColor: theme.colors.surface }]}
+            activeOpacity={0.8}
+            onPress={onOpenVisualization}
+          >
+            <View style={styles.quickActionIcon}>
+              <Icon name='planet' size={22} color={theme.colors.primary} />
+            </View>
+            <Text style={[styles.quickActionTitle, { color: theme.colors.text }]}>
+              Topology
+            </Text>
+            <Text style={[styles.quickActionSubtitle, { color: theme.colors.textSecondary }]}>
+              Visual network graph
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.quickActionButton, { backgroundColor: theme.colors.surface }]}
+            activeOpacity={0.8}
+            onPress={onOpenNetwork}
+          >
+            <View style={styles.quickActionIcon}>
+              <Icon name='pulse' size={22} color={theme.colors.success} />
+            </View>
+            <Text style={[styles.quickActionTitle, { color: theme.colors.text }]}>
+              Network
+            </Text>
+            <Text style={[styles.quickActionSubtitle, { color: theme.colors.textSecondary }]}>
+              Live transport status
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         <View style={styles.metricsGrid}>
           {metrics.map((metric, index) => (
             <MetricCard
@@ -462,6 +504,43 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: 20,
     paddingBottom: 40,
+  },
+  quickActions: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 16,
+  },
+  quickActionButton: {
+    flex: 1,
+    borderRadius: 16,
+    padding: 16,
+    justifyContent: 'flex-start',
+    alignItems: 'flex-start',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.08,
+        shadowRadius: 4,
+      },
+      android: {
+        elevation: 2,
+      },
+    }),
+  },
+  quickActionIcon: {
+    padding: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    marginBottom: 12,
+  },
+  quickActionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  quickActionSubtitle: {
+    fontSize: 12,
+    fontWeight: '500',
   },
   metricsGrid: {
     flexDirection: 'row',

@@ -1,8 +1,23 @@
 import React, { createContext, useContext, useCallback, useState, useEffect, useRef } from 'react';
 import { Alert, Platform } from 'react-native';
-import { MessagePriority, type ProtocolEvent } from '@offlineprotocol/react-native';
+import {
+  MessagePriority,
+  type ProtocolEvent,
+  type OfflineProtocol,
+  type TransportType,
+  type SendFileParams,
+  type InternetTransportConfig,
+  type WifiDirectTransportConfig,
+} from '@offlineprotocol/react-native';
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
 import { generateUserId } from '../utils/user';
+import type {
+  DorsRuntimeConfig,
+  FileTransferState,
+  NativeRelayPriority,
+  RelayPriorityInput,
+  TransportMetricsSnapshot,
+} from '../types/runtime';
 
 export interface Contact {
   id: string;
@@ -60,6 +75,12 @@ interface ProtocolContextType {
   events: ProtocolEvent[];
   insights: any;
   batteryLevel: number | null;
+  protocol: OfflineProtocol | null;
+  activeTransports: TransportType[];
+  forcedTransport: TransportType | null;
+  relayPriority: NativeRelayPriority;
+  dorsConfig: DorsRuntimeConfig;
+  fileTransfers: FileTransferState[];
   
   // Actions
   initialize: () => Promise<void>;
@@ -69,6 +90,22 @@ interface ProtocolContextType {
   markAsRead: (chatId: string) => void;
   updateUserName: (name: string) => void;
   
+  // Runtime controls
+  refreshRuntimeState: () => Promise<void>;
+  enableTransport: (
+    type: TransportType,
+    config?: InternetTransportConfig | WifiDirectTransportConfig
+  ) => Promise<boolean>;
+  disableTransport: (type: TransportType) => Promise<boolean>;
+  forceTransport: (type: TransportType) => Promise<boolean>;
+  releaseTransportLock: () => Promise<void>;
+  setBatteryLevel: (level: number) => Promise<boolean>;
+  setRelayPriority: (priority: RelayPriorityInput) => Promise<boolean>;
+  updateDorsConfig: (partial: Partial<DorsRuntimeConfig>) => Promise<boolean>;
+  getTransportMetrics: (type: TransportType) => Promise<TransportMetricsSnapshot | null>;
+  sendFile: (params: SendFileParams) => Promise<string | null>;
+  cancelFileTransfer: (fileId: string) => Promise<boolean>;
+
   // Analytics
   getAnalytics: () => {
     totalMessages: number;
@@ -105,6 +142,22 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     stop: protocolStop,
     sendMessage: protocolSendMessage,
     requestPermissions,
+    activeTransports,
+    forcedTransport,
+    relayPriority,
+    dorsConfig,
+    fileTransfers,
+    refreshRuntimeState,
+    enableTransport,
+    disableTransport,
+    forceTransport,
+    releaseTransportLock,
+    setBatteryLevel: setBatteryLevelRuntime,
+    setRelayPriority: setRelayPriorityRuntime,
+    updateDorsConfig: updateDorsConfigRuntime,
+    getTransportMetrics,
+    sendFile: protocolSendFile,
+    cancelFileTransfer: protocolCancelFile,
   } = useOfflineProtocol({
     appId: 'offline-messenger',
     userId: currentUserId,
@@ -720,12 +773,29 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     events,
     insights,
     batteryLevel,
+    protocol,
+    activeTransports,
+    forcedTransport,
+    relayPriority,
+    dorsConfig,
+    fileTransfers,
     initialize,
     start,
     stop,
     sendMessage,
     markAsRead,
     updateUserName,
+    refreshRuntimeState,
+    enableTransport,
+    disableTransport,
+    forceTransport,
+    releaseTransportLock,
+    setBatteryLevel: setBatteryLevelRuntime,
+    setRelayPriority: setRelayPriorityRuntime,
+    updateDorsConfig: updateDorsConfigRuntime,
+    getTransportMetrics,
+    sendFile: protocolSendFile,
+    cancelFileTransfer: protocolCancelFile,
     getAnalytics,
   };
 

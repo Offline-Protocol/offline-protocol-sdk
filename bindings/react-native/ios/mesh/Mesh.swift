@@ -148,7 +148,7 @@ struct MeshAdvertisementData {
 
 // MARK: - Mesh Controller
 
-final class MeshController {
+final class MeshController: @unchecked Sendable {
     struct MeshConfig {
         let minConnections: Int
         let maxConnections: Int
@@ -276,7 +276,7 @@ final class MeshController {
         let candidate: MeshAdvertisementData
     }
 
-    private final class PeerState {
+    private final class PeerState: @unchecked Sendable {
         var deviceId: String
         var nodeHash: UInt64?
         var role: MeshRole
@@ -636,7 +636,6 @@ final class MeshController {
                 return nil
             }
 
-            let candidateScore = computeCandidateScore(metadata: bestCandidate.metadata, rssi: bestCandidate.rssi)
             let worstScore = computePeerScore(peer: worstPeer)
 
             guard let reason = evaluateSwapCandidate(

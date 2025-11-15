@@ -7,7 +7,7 @@ import Foundation
 import CoreBluetooth
 
 /// Thread-safe registry tracking active BLE connections, device identifiers, and role assignments.
-final class MeshConnectionRegistry {
+final class MeshConnectionRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var connectedPeripherals: [UUID: CBPeripheral] = [:]
     private var peripheralDeviceIds: [UUID: String] = [:]

@@ -17,6 +17,9 @@ import { AnalyticsScreen } from './AnalyticsScreen';
 import { SettingsScreen } from './SettingsScreen';
 import { ChatDetailScreen } from './ChatDetailScreen';
 import { ProfileScreen } from './ProfileScreen';
+import { ControlCenterScreen } from './ControlCenterScreen';
+import { VisualizationScreen } from './VisualizationScreen';
+import { NetworkScreen } from './NetworkScreen';
 
 // Components
 import { Icon } from '../components/Icon';
@@ -26,7 +29,7 @@ import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 
 type Tab = 'chats' | 'contacts' | 'analytics' | 'settings';
-type Screen = 'main' | 'chatDetail' | 'profile';
+type Screen = 'main' | 'chatDetail' | 'profile' | 'controlCenter' | 'visualization' | 'network';
 
 interface ChatDetailParams {
   peerId: string;
@@ -39,7 +42,30 @@ interface ProfileParams {
 
 export function MainAppScreen() {
   const { theme } = useTheme();
-  const { connectedPeersCount, chats } = useProtocol();
+  const {
+    connectedPeersCount,
+    chats,
+    isOnline,
+    events,
+    insights,
+    protocol,
+    activeTransports,
+    forcedTransport,
+    relayPriority,
+    batteryLevel,
+    dorsConfig,
+    fileTransfers,
+    refreshRuntimeState,
+    enableTransport,
+    disableTransport,
+    forceTransport,
+    releaseTransportLock,
+    setBatteryLevel,
+    setRelayPriority,
+    updateDorsConfig,
+    sendFile,
+    cancelFileTransfer,
+  } = useProtocol();
   
   const [activeTab, setActiveTab] = useState<Tab>('chats');
   const [currentScreen, setCurrentScreen] = useState<Screen>('main');
@@ -58,6 +84,18 @@ export function MainAppScreen() {
   const navigateToProfile = (userId?: string) => {
     setProfileParams({ userId });
     setCurrentScreen('profile');
+  };
+
+  const navigateToControlCenter = () => {
+    setCurrentScreen('controlCenter');
+  };
+
+  const navigateToVisualization = () => {
+    setCurrentScreen('visualization');
+  };
+
+  const navigateToNetwork = () => {
+    setCurrentScreen('network');
   };
 
   const navigateBack = () => {
@@ -167,6 +205,44 @@ export function MainAppScreen() {
       );
     }
 
+    if (currentScreen === 'controlCenter') {
+      return (
+        <ControlCenterScreen
+          isStarted={isOnline}
+          activeTransports={activeTransports}
+          forcedTransport={forcedTransport}
+          relayPriority={relayPriority}
+          batteryLevel={batteryLevel}
+          dorsConfig={dorsConfig}
+          fileTransfers={fileTransfers}
+          onRefresh={refreshRuntimeState}
+          onEnableTransport={enableTransport}
+          onDisableTransport={disableTransport}
+          onForceTransport={forceTransport}
+          onReleaseTransport={releaseTransportLock}
+          onSetBatteryLevel={setBatteryLevel}
+          onSetRelayPriority={setRelayPriority}
+          onUpdateDors={updateDorsConfig}
+          onSendFile={sendFile}
+          onCancelFile={cancelFileTransfer}
+        />
+      );
+    }
+
+    if (currentScreen === 'visualization') {
+      return (
+        <VisualizationScreen
+          protocol={protocol}
+          isStarted={isOnline}
+          insights={insights}
+        />
+      );
+    }
+
+    if (currentScreen === 'network') {
+      return <NetworkScreen events={events} insights={insights} />;
+    }
+
     // Main tabs
     switch (activeTab) {
       case 'chats':
@@ -179,9 +255,20 @@ export function MainAppScreen() {
           />
         );
       case 'analytics':
-        return <AnalyticsScreen />;
+        return (
+          <AnalyticsScreen
+            onOpenVisualization={navigateToVisualization}
+            onOpenNetwork={navigateToNetwork}
+          />
+        );
       case 'settings':
-        return <SettingsScreen />;
+        return (
+          <SettingsScreen
+            onOpenControlCenter={navigateToControlCenter}
+            onOpenNetwork={navigateToNetwork}
+            onOpenVisualization={navigateToVisualization}
+          />
+        );
       default:
         return <ChatsScreen onNavigateToChatDetail={navigateToChatDetail} />;
     }

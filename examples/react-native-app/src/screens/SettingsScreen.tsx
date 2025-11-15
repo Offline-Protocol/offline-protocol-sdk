@@ -98,7 +98,17 @@ function SettingSection({ title, children }: SettingSectionProps) {
   );
 }
 
-export function SettingsScreen() {
+interface SettingsScreenProps {
+  onOpenControlCenter?: () => void;
+  onOpenNetwork?: () => void;
+  onOpenVisualization?: () => void;
+}
+
+export function SettingsScreen({
+  onOpenControlCenter = () => {},
+  onOpenNetwork = () => {},
+  onOpenVisualization = () => {},
+}: SettingsScreenProps) {
   const { theme, isDark, toggleTheme, setTheme } = useTheme();
   const { 
     isOnline, 
@@ -366,6 +376,36 @@ export function SettingsScreen() {
             onPress={handleHelp}
             showChevron
             index={7}
+          />
+        </SettingSection>
+
+        {/* Advanced Section */}
+        <SettingSection title="ADVANCED">
+          <SettingItem
+            title="Runtime Control Center"
+            subtitle="Tune transports, relays, and DORS heuristics"
+            icon="options"
+            onPress={onOpenControlCenter}
+            showChevron
+            index={8}
+          />
+
+          <SettingItem
+            title="Network Diagnostics"
+            subtitle="Inspect mesh neighbors and transport history"
+            icon="pulse"
+            onPress={onOpenNetwork}
+            showChevron
+            index={9}
+          />
+
+          <SettingItem
+            title="Topology Visualization"
+            subtitle="View live network graph and message stats"
+            icon="planet"
+            onPress={onOpenVisualization}
+            showChevron
+            index={10}
           />
         </SettingSection>
       </ScrollView>

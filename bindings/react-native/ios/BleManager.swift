@@ -521,8 +521,7 @@ public class BleManager: NSObject, TransportManager {
         let meshData = meshController.advertisement()
         lastMeshAdvertisement = meshData
         var advertisementData: [String: Any] = [
-            CBAdvertisementDataServiceUUIDsKey: [SERVICE_UUID],
-            CBAdvertisementDataIncludeDeviceNameKey: false
+            CBAdvertisementDataServiceUUIDsKey: [SERVICE_UUID]
         ]
         advertisementData[CBAdvertisementDataServiceDataKey] = [SERVICE_UUID: meshData.encode()]
         
@@ -950,8 +949,8 @@ public class BleManager: NSObject, TransportManager {
         pruneMeshObservations()
         guard let directive = meshController.evaluateRebalance() else { return }
 
-        if let evictPeer = directive.decision.evictPeerId {
-            evictPeer(evictPeer, reason: "rebalance_\(reason)")
+        if let evictPeerId = directive.decision.evictPeerId {
+            self.evictPeer(evictPeerId, reason: "rebalance_\(reason)")
         }
 
         guard meshController.connectionBudgetAvailable() || directive.decision.evictPeerId != nil else { return }
@@ -1056,8 +1055,8 @@ extension BleManager: CBCentralManagerDelegate {
 
         let desiredRole: MeshController.MeshRole = (decision.intent == .interCluster) ? .bridge : .member
 
-        if !meshController.connectionBudgetAvailable(), let evictPeer = decision.evictPeerId {
-            evictPeer(evictPeer, reason: decision.reason)
+        if !meshController.connectionBudgetAvailable(), let evictPeerId = decision.evictPeerId {
+            self.evictPeer(evictPeerId, reason: decision.reason)
         }
 
         guard meshController.connectionBudgetAvailable() else {
@@ -1342,19 +1341,26 @@ extension BleManager: CBPeripheralManagerDelegate {
             metadata: observation?.advertisement,
             rssi: observation?.rssi
         )
-        if let evictPeer = decision.evictPeerId {
-            evictPeer(evictPeer, reason: "inbound_swap")
+        if let evictPeerId = decision.evictPeerId {
+            self.evictPeer(evictPeerId, reason: "inbound_swap")
         }
         guard decision.intent != .rejected else {
-            peripheralManager?.cancelPeripheralConnection(central)
+            emitDiagnostic("info", "Rejecting inbound subscription", context: [
+                "central": central.identifier.uuidString,
+                "reason": decision.reason
+            ])
             return
         }
         guard meshController.connectionBudgetAvailable() || decision.evictPeerId != nil else {
-            peripheralManager?.cancelPeripheralConnection(central)
+            emitDiagnostic("info", "Inbound rejected due to budget", context: [
+                "central": central.identifier.uuidString
+            ])
             return
         }
         guard currentConnectionCount() < MAX_CONNECTIONS_PER_DEVICE else {
-            peripheralManager?.cancelPeripheralConnection(central)
+            emitDiagnostic("info", "Inbound rejected due to device connection cap", context: [
+                "central": central.identifier.uuidString
+            ])
             return
         }
 
@@ -1377,4 +1383,6 @@ extension BleManager: CBPeripheralManagerDelegate {
         connections.removeCentralDeviceId(for: central.identifier)
     }
 }
+
+extension BleManager: @unchecked Sendable {}
 
