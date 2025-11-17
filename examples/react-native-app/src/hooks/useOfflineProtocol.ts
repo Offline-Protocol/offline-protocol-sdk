@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { Platform } from 'react-native';
 import {
   OfflineProtocol,
   ProtocolConfig,
@@ -120,8 +121,13 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
     console.log('Initializing protocol with config:', JSON.stringify(config, null, 2));
     
     try {
+      // First check if the native module is available
+      console.log('Checking if OfflineProtocol class is available...');
+      console.log('OfflineProtocol constructor:', typeof OfflineProtocol);
+      
+      console.log('Creating OfflineProtocol instance...');
       const instance = new OfflineProtocol(config);
-      console.log('Protocol instance created successfully');
+      console.log('Protocol instance created successfully:', instance);
       protocolRef.current = instance;
       setProtocol(instance);
       setError(null);
@@ -238,8 +244,20 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
 
   const requestPermissions = useCallback(async (): Promise<boolean> => {
     console.log('Requesting Bluetooth permissions...');
+
+    if (permissionsGranted) {
+      console.log('Permissions already granted, skipping request');
+      return true;
+    }
+
+    if (Platform.OS === 'ios') {
+      // iOS prompts automatically when Bluetooth managers are initialized.
+      setPermissionsGranted(true);
+      setError(null);
+      return true;
+    }
     
-    // Show rationale before requesting permissions
+    // Show rationale before requesting permissions (Android only)
     const shouldRequest = await showPermissionRationale();
     if (!shouldRequest) {
       setError('Permissions are required to use offline messaging');
@@ -261,7 +279,7 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
     console.log('All permissions granted');
     setError(null);
     return true;
-  }, []);
+  }, [permissionsGranted]);
 
   const start = useCallback(async () => {
     console.log('start() called');

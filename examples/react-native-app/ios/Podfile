@@ -18,7 +18,8 @@ target 'OfflineProtocolExample' do
   config = use_native_modules!
 
   # Manually add the local OfflineProtocol SDK
-  pod 'OfflineProtocol', :path => '../../../bindings/react-native/ios'
+  # Use frameworks for this pod to support custom module maps
+  pod 'OfflineProtocol', :path => '../../../bindings/react-native/ios', :modular_headers => true
 
   use_react_native!(
     :path => config[:reactNativePath],
@@ -47,6 +48,16 @@ target 'OfflineProtocolExample' do
           build_config.build_settings['OTHER_CPLUSPLUSFLAGS'] = "#{other_cxxflags} #{warning_flag}"
         end
         build_config.build_settings['SWIFT_STRICT_CONCURRENCY'] ||= 'minimal'
+      end
+      
+      # Configure module map for OfflineProtocol pod
+      if target.name == 'OfflineProtocol'
+        target.build_configurations.each do |build_config|
+          # Use CocoaPods generated module map
+          build_config.build_settings['DEFINES_MODULE'] = 'YES'
+          # Ensure module map is properly referenced
+          build_config.build_settings['MODULEMAP_FILE'] = '$(PODS_TARGET_SRCROOT)/../Target Support Files/OfflineProtocol/OfflineProtocol.modulemap'
+        end
       end
     end
   end

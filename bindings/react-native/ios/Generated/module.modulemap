@@ -1,5 +1,0 @@
-module offline_protocolFFI {
-    header "offline_protocolFFI.h"
-    export *
-}
-

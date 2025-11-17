@@ -6,11 +6,16 @@
 //
 
 import Foundation
+import CoreBluetooth
 import React
 
 // Import generated UniFFI bindings
 // The generated file is in ios/Generated/offline_protocol.swift
 // We need to ensure it's included in the Xcode project
+
+// Import the UniFFI generated code
+// This should be available since offline_protocol.swift is included in the project
+// If this import fails, it means the UniFFI bindings aren't properly included
 
 @objc(OfflineProtocolModule)
 class OfflineProtocolModule: RCTEventEmitter {
@@ -22,7 +27,9 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var currentConfig: ProtocolConfig?
     
     override init() {
+        print("[OfflineProtocolModule] init() called")
         super.init()
+        print("[OfflineProtocolModule] init() completed successfully")
     }
     
     deinit {
@@ -197,10 +204,15 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func create(_ configJson: String,
                      resolver: @escaping RCTPromiseResolveBlock,
                      rejecter: @escaping RCTPromiseRejectBlock) {
+        print("[OfflineProtocolModule] create() called with config: \(configJson)")
         do {
+            print("[OfflineProtocolModule] Parsing config...")
             let parsed = try parseConfig(configJson)
             let config = parsed.config
+            print("[OfflineProtocolModule] Config parsed successfully: \(config)")
+            print("[OfflineProtocolModule] Creating OfflineProtocol instance...")
             let proto = try OfflineProtocol(config: config)
+            print("[OfflineProtocolModule] OfflineProtocol instance created successfully")
             currentConfig = config
             emitDiagnostic(level: "info", message: "Protocol core created", context: [
                 "appId": config.appId,
@@ -254,17 +266,114 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     fileprivate func emitDiagnostic(level: String, message: String, context: [String: Any]? = nil) {
         guard hasListeners else { return }
+
         var payload: [String: Any] = [
             "type": "diagnostic",
             "level": level,
             "message": message
         ]
+
         if let context = context {
-            payload["context"] = context
+            payload["context"] = sanitizeJSONObject(context)
         }
-        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+
+        let sanitizedPayload = sanitizeJSONObject(payload)
+
+        if let payloadDict = sanitizedPayload as? [String: Any],
+           JSONSerialization.isValidJSONObject(payloadDict),
+           let data = try? JSONSerialization.data(withJSONObject: payloadDict, options: []),
            let jsonString = String(data: data, encoding: .utf8) {
             sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
+        } else {
+            let fallback: [String: Any] = [
+                "type": "diagnostic",
+                "level": level,
+                "message": message,
+                "context": String(describing: context ?? [:])
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: fallback, options: []),
+               let jsonString = String(data: data, encoding: .utf8) {
+                sendEventToJS(Events.onEvent, body: ["eventJson": jsonString])
+            }
+        }
+    }
+
+    private static let iso8601Formatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private func sanitizeJSONObject(_ value: Any) -> Any {
+        switch value {
+        case let dict as [String: Any]:
+            var sanitized: [String: Any] = [:]
+            for (key, nestedValue) in dict {
+                sanitized[key] = sanitizeJSONObject(nestedValue)
+            }
+            return sanitized
+        case let dict as [AnyHashable: Any]:
+            var sanitized: [String: Any] = [:]
+            for (key, nestedValue) in dict {
+                sanitized[String(describing: key)] = sanitizeJSONObject(nestedValue)
+            }
+            return sanitized
+        case let dict as NSDictionary:
+            var sanitized: [String: Any] = [:]
+            dict.forEach { key, value in
+                sanitized[String(describing: key)] = sanitizeJSONObject(value)
+            }
+            return sanitized
+        case let array as [Any]:
+            return array.map { sanitizeJSONObject($0) }
+        case let array as NSArray:
+            return array.map { sanitizeJSONObject($0) }
+        case let string as String:
+            return string
+        case let bool as Bool:
+            return bool
+        case let number as NSNumber:
+            if CFNumberIsFloatType(number) {
+                let doubleValue = number.doubleValue
+                if !doubleValue.isFinite {
+                    return String(describing: doubleValue)
+                }
+            }
+            return number
+        case let double as Double:
+            return double.isFinite ? double : String(describing: double)
+        case let float as Float:
+            return float.isFinite ? float : String(describing: float)
+        case let int as Int:
+            return int
+        case let int32 as Int32:
+            return int32
+        case let int64 as Int64:
+            return int64
+        case let uint as UInt:
+            return uint
+        case let uuid as UUID:
+            return uuid.uuidString
+        case let cbUuid as CBUUID:
+            return cbUuid.uuidString
+        case let date as Date:
+            return OfflineProtocolModule.iso8601Formatter.string(from: date)
+        case let data as Data:
+            return data.base64EncodedString()
+        case let dateComponents as DateComponents:
+            return String(describing: dateComponents)
+        case let url as URL:
+            return url.absoluteString
+        case let error as NSError:
+            return [
+                "domain": error.domain,
+                "code": error.code,
+                "userInfo": sanitizeJSONObject(error.userInfo)
+            ]
+        case is NSNull:
+            return NSNull()
+        default:
+            return String(describing: value)
         }
     }
     
@@ -1168,7 +1277,7 @@ extension OfflineProtocolModule: TransportManagerDelegate {
 
 // MARK: - EventCallback Implementation
 
-class EventCallbackImpl: EventCallback {
+class EventCallbackImpl: EventCallback, @unchecked Sendable {
     weak var emitter: OfflineProtocolModule?
     
     init(emitter: OfflineProtocolModule) {

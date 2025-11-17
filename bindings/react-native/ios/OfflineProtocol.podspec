@@ -20,17 +20,24 @@ Pod::Spec.new do |s|
     "BleManager.swift",
     "ble/**/*.swift",
     "mesh/**/*.swift",
-    "Generated/offline_protocol.swift"  # UniFFI generated Swift file
+    "Generated/offline_protocol.swift",  # UniFFI generated Swift file
+    "Generated/*.h"  # Include headers (but not module maps)
   ]
-
-  # Preserve the C header files
-  s.preserve_paths = [
-    "Generated/*.h",
-    "Generated/*.modulemap"
-  ]
+  
+  # Let CocoaPods generate the module map automatically
 
   # Native library - use vendored_libraries with specific per-platform linking
   s.vendored_libraries = "libs/*.a"
+
+  # Public headers
+  s.public_header_files = [
+    "Generated/offline_protocolFFI.h"
+  ]
+  
+  # Private headers that need to be accessible
+  s.private_header_files = [
+    "OfflineProtocolModule.h"
+  ]
 
   # Configure library search paths and linking
   s.pod_target_xcconfig = {

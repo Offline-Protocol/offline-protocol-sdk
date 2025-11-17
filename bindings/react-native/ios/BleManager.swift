@@ -124,9 +124,94 @@ public class BleManager: NSObject, TransportManager {
     private let CENTRAL_RESET_BACKOFF: TimeInterval = 45.0
     private let MINIMUM_RSSI_TO_CONNECT: Int16 = -90
 
+    // MARK: - Thread helpers
+    @inline(__always)
+    private func performOnMain<T>(_ work: () throws -> T) rethrows -> T {
+        if Thread.isMainThread {
+            return try work()
+        }
+        return try DispatchQueue.main.sync(execute: work)
+    }
+
     // MARK: - Diagnostics
+    private static let diagnosticDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    
+    private func sanitizeDiagnosticValue(_ value: Any) -> Any {
+        switch value {
+        case let dict as [String: Any]:
+            var sanitized: [String: Any] = [:]
+            for (key, nested) in dict {
+                sanitized[key] = sanitizeDiagnosticValue(nested)
+            }
+            return sanitized
+        case let dict as [AnyHashable: Any]:
+            var sanitized: [String: Any] = [:]
+            for (key, nested) in dict {
+                sanitized[String(describing: key)] = sanitizeDiagnosticValue(nested)
+            }
+            return sanitized
+        case let dict as NSDictionary:
+            var sanitized: [String: Any] = [:]
+            dict.forEach { key, nested in
+                sanitized[String(describing: key)] = sanitizeDiagnosticValue(nested)
+            }
+            return sanitized
+        case let array as [Any]:
+            return array.map { sanitizeDiagnosticValue($0) }
+        case let array as NSArray:
+            return array.map { sanitizeDiagnosticValue($0) }
+        case let number as NSNumber:
+            if CFNumberIsFloatType(number) {
+                let doubleValue = number.doubleValue
+                if !doubleValue.isFinite {
+                    return String(describing: doubleValue)
+                }
+            }
+            return number
+        case let double as Double:
+            return double.isFinite ? double : String(describing: double)
+        case let float as Float:
+            return float.isFinite ? float : String(describing: float)
+        case let int as Int:
+            return int
+        case let int32 as Int32:
+            return int32
+        case let int64 as Int64:
+            return int64
+        case let uint as UInt:
+            return uint
+        case let string as String:
+            return string
+        case let bool as Bool:
+            return bool
+        case let uuid as UUID:
+            return uuid.uuidString
+        case let cbUuid as CBUUID:
+            return cbUuid.uuidString
+        case let date as Date:
+            return BleManager.diagnosticDateFormatter.string(from: date)
+        case let data as Data:
+            return data.base64EncodedString()
+        case let error as NSError:
+            return [
+                "domain": error.domain,
+                "code": error.code,
+                "userInfo": sanitizeDiagnosticValue(error.userInfo)
+            ]
+        case is NSNull:
+            return NSNull()
+        default:
+            return String(describing: value)
+        }
+    }
+    
     private func emitDiagnostic(_ level: String, _ message: String, context: [String: Any] = [:]) {
-        delegate?.transportManager(self, didEmitDiagnostic: level, message: message, context: context)
+        let sanitizedContext = sanitizeDiagnosticValue(context) as? [String: Any] ?? [:]
+        delegate?.transportManager(self, didEmitDiagnostic: level, message: message, context: sanitizedContext)
     }
     
     // MARK: - Initialization
@@ -152,6 +237,12 @@ public class BleManager: NSObject, TransportManager {
     }
     
     public func start() throws {
+        try performOnMain {
+            try self.startUnsafe()
+        }
+    }
+    
+    private func startUnsafe() throws {
         guard state != .running else {
             throw TransportError.alreadyRunning
         }
@@ -185,6 +276,12 @@ public class BleManager: NSObject, TransportManager {
     }
     
     public func stop() {
+        performOnMain {
+            self.stopUnsafe()
+        }
+    }
+    
+    private func stopUnsafe() {
         guard state == .running || state == .starting else {
             return
         }
@@ -228,12 +325,24 @@ public class BleManager: NSObject, TransportManager {
     }
     
     public func pause() {
+        performOnMain {
+            self.pauseUnsafe()
+        }
+    }
+    
+    private func pauseUnsafe() {
         // For iOS background mode
         stopScanning(reason: "pause")
         stopFragmentPolling()
     }
     
     public func resume() {
+        performOnMain {
+            self.resumeUnsafe()
+        }
+    }
+    
+    private func resumeUnsafe() {
         // Resume from background
         if state == .running {
             startScanning(reason: "resume")
@@ -523,7 +632,19 @@ public class BleManager: NSObject, TransportManager {
         var advertisementData: [String: Any] = [
             CBAdvertisementDataServiceUUIDsKey: [SERVICE_UUID]
         ]
-        advertisementData[CBAdvertisementDataServiceDataKey] = [SERVICE_UUID: meshData.encode()]
+        
+        // Note: iOS has strict limitations on advertisement data:
+        // - Service data (CBAdvertisementDataServiceDataKey) is not allowed when advertising as a peripheral
+        // - Only service UUIDs are reliably advertised
+        // - Mesh metadata must be exchanged after connection via GATT characteristics
+        // Attempting to include service data causes a crash when CoreBluetooth internally
+        // tries to serialize the CBUUID dictionary key
+        
+        // iOS limitation: We cannot advertise service data, only service UUIDs
+        // The mesh advertisement data will need to be read via GATT characteristic after connection
+        if logThrottler.shouldLog(key: "advert_no_service_data_ios", interval: 60) {
+            print("[BleManager] iOS does not support service data in peripheral advertisements, advertising UUID only")
+        }
         
         peripheral.startAdvertising(advertisementData)
         isAdvertising = true
@@ -1125,7 +1246,11 @@ extension BleManager: CBCentralManagerDelegate {
         if wasConnected {
             if let error = error as? CBError {
                 // Don't reconnect on permanent errors
-                if error.code == .connectionTimeout || error.code == .peerRemovedPairingInformation {
+                var isPermanentError = error.code == .connectionTimeout
+                if #available(iOS 13.4, *) {
+                    isPermanentError = isPermanentError || error.code == .peerRemovedPairingInformation
+                }
+                if isPermanentError {
                     // Permanent error - notify peer lost
                     if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
                         try? self.protocolInstance.blePeerLost(peerId: deviceId)

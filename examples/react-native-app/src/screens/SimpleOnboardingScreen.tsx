@@ -21,7 +21,7 @@ interface SimpleOnboardingScreenProps {
 
 export function SimpleOnboardingScreen({ onComplete }: SimpleOnboardingScreenProps) {
   const { theme } = useTheme();
-  const { updateUserName, initialize, start } = useProtocol();
+  const { updateUserName, initialize, start, isInitialized } = useProtocol();
   const [userName, setUserName] = useState(generateUserName());
   const [isLoading, setIsLoading] = useState(false);
 
@@ -33,15 +33,47 @@ export function SimpleOnboardingScreen({ onComplete }: SimpleOnboardingScreenPro
 
     setIsLoading(true);
     try {
+      console.log('🔄 Starting onboarding completion...');
       updateUserName(userName.trim());
-      await initialize();
+      
+      let initSucceeded = true;
+      if (!isInitialized) {
+        console.log('🔄 Initializing protocol...');
+        initSucceeded = await initialize();
+        console.log('✅ Initialize result:', initSucceeded);
+      }
+
+      if (!initSucceeded) {
+        console.log('❌ Initialization failed');
+        return;
+      }
+
+      console.log('🔄 Starting protocol...');
       await start();
+      console.log('✅ Protocol started successfully');
       onComplete();
     } catch (error) {
-      console.error('Onboarding completion failed:', error);
+      console.error('❌ Onboarding completion failed:', error);
+      
+      // Show more detailed error information
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const stackTrace = error instanceof Error ? error.stack : '';
+      
       Alert.alert(
         'Setup Failed',
-        'Failed to initialize the app. Please check your permissions and try again.'
+        `Error: ${errorMessage}\n\nPlease check the console for more details and try again.`,
+        [
+          {
+            text: 'Show Details',
+            onPress: () => {
+              Alert.alert('Error Details', `${errorMessage}\n\nStack: ${stackTrace}`);
+            }
+          },
+          {
+            text: 'OK',
+            style: 'default'
+          }
+        ]
       );
     } finally {
       setIsLoading(false);

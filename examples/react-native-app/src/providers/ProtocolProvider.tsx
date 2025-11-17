@@ -83,7 +83,7 @@ interface ProtocolContextType {
   fileTransfers: FileTransferState[];
   
   // Actions
-  initialize: () => Promise<void>;
+  initialize: () => Promise<boolean>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   sendMessage: (recipientId: string, content: string, priority?: MessagePriority) => Promise<void>;
@@ -137,6 +137,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     error,
     events,
     insights,
+    permissionsGranted,
     batteryLevel,
     start: protocolStart,
     stop: protocolStop,
@@ -249,15 +250,34 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   );
 
   // Initialize protocol
-  const initialize = useCallback(async () => {
+  const initialize = useCallback(async (): Promise<boolean> => {
+    if (isInitialized && permissionsGranted) {
+      return true;
+    }
+
     try {
-      await requestPermissions();
+      const granted = await requestPermissions();
+      if (!granted) {
+        Alert.alert(
+          'Permissions Required',
+          'Bluetooth and location permissions are needed to communicate with nearby devices.'
+        );
+        setIsInitialized(false);
+        return false;
+      }
+
       setIsInitialized(true);
+      return true;
     } catch (err) {
       console.error('Failed to initialize protocol:', err);
-      Alert.alert('Initialization Error', 'Failed to initialize the messaging protocol. Please check permissions.');
+      Alert.alert(
+        'Initialization Error',
+        'Failed to initialize the messaging protocol. Please check permissions.'
+      );
+      setIsInitialized(false);
+      return false;
     }
-  }, [requestPermissions]);
+  }, [isInitialized, permissionsGranted, requestPermissions]);
 
   // Start protocol
   const start = useCallback(async () => {

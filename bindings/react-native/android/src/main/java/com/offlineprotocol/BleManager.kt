@@ -21,6 +21,7 @@ import uniffi.offline_protocol.OfflineProtocol
 import android.bluetooth.BluetoothStatusCodes
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -121,6 +122,32 @@ class BleManager(
     
     // Fragment polling
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private fun <T> runOnMainSync(action: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return action()
+        }
+
+        val latch = CountDownLatch(1)
+        var outcome: Result<T>? = null
+        mainHandler.post {
+            outcome = try {
+                Result.success(action())
+            } catch (t: Throwable) {
+                Result.failure(t)
+            }
+            latch.countDown()
+        }
+
+        try {
+            latch.await()
+        } catch (ie: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw RuntimeException("Interrupted while executing on main thread", ie)
+        }
+
+        return outcome!!.getOrThrow()
+    }
     private val fragmentPollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendFragments()
@@ -183,6 +210,12 @@ class BleManager(
     }
     
     override fun start() {
+        runOnMainSync {
+            startUnsafe()
+        }
+    }
+
+    private fun startUnsafe() {
         if (state == TransportState.RUNNING) {
             throw TransportException.AlreadyRunning()
         }
@@ -271,6 +304,12 @@ class BleManager(
     }
     
     override fun stop() {
+        runOnMainSync {
+            stopUnsafe()
+        }
+    }
+
+    private fun stopUnsafe() {
         if (state != TransportState.RUNNING && state != TransportState.STARTING) {
             return
         }
@@ -314,12 +353,24 @@ class BleManager(
     }
     
     override fun pause() {
+        runOnMainSync {
+            pauseUnsafe()
+        }
+    }
+    
+    private fun pauseUnsafe() {
         // For Android background mode
         stopScanning("pause")
         mainHandler.removeCallbacks(fragmentPollingRunnable)
     }
     
     override fun resume() {
+        runOnMainSync {
+            resumeUnsafe()
+        }
+    }
+    
+    private fun resumeUnsafe() {
         // Resume from background
         if (state == TransportState.RUNNING) {
             startScanning("resume")
@@ -1342,11 +1393,11 @@ class BleManager(
                             refreshAdvertising("membership_change")
                         }
                     }
-                    val rssi = lastSeenRssi[gatt.device.address]?.toInt()
-                    if (rssi != null) {
+                    val rssiInt = lastSeenRssi[gatt.device.address]?.toInt()
+                    if (rssiInt != null) {
                         meshController.updatePeerMetrics(
                             deviceIdValue,
-                            MeshController.PeerMetrics(rssi = rssi)
+                            MeshController.PeerMetrics(rssi = rssiInt)
                         )
                     }
                     
