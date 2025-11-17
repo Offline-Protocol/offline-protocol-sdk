@@ -251,12 +251,52 @@ public class BleManager: NSObject, TransportManager {
             throw TransportError.notAvailable("BLE not available on this device")
         }
         
-        print("[BleManager] Starting BLE transport for device: \(deviceId)")
+        // Check authorization status on iOS 13.1+
+        if #available(iOS 13.1, *) {
+            let centralAuth = CBCentralManager.authorization
+            let peripheralAuth = CBPeripheralManager.authorization
+            
+            print("[BleManager] 🔐 Checking Bluetooth permissions:")
+            print("[BleManager]   Central authorization: \(centralAuth.rawValue)")
+            print("[BleManager]   Peripheral authorization: \(peripheralAuth.rawValue)")
+            
+            emitDiagnostic("info", "Checking Bluetooth permissions", context: [
+                "centralAuth": centralAuth.rawValue,
+                "peripheralAuth": peripheralAuth.rawValue
+            ])
+            
+            // If already denied, inform the user immediately
+            if centralAuth == .denied || peripheralAuth == .denied {
+                let msg = "Bluetooth permission was denied. Please enable Bluetooth access in Settings > \(Bundle.main.displayName ?? "App") > Bluetooth"
+                print("[BleManager] ❌ \(msg)")
+                emitDiagnostic("error", msg, context: [
+                    "centralAuth": centralAuth.rawValue,
+                    "peripheralAuth": peripheralAuth.rawValue
+                ])
+            } else if centralAuth == .restricted || peripheralAuth == .restricted {
+                let msg = "Bluetooth permission is restricted by device management or parental controls"
+                print("[BleManager] ⚠️ \(msg)")
+                emitDiagnostic("error", msg, context: [
+                    "centralAuth": centralAuth.rawValue,
+                    "peripheralAuth": peripheralAuth.rawValue
+                ])
+            } else if centralAuth == .notDetermined || peripheralAuth == .notDetermined {
+                print("[BleManager] 🔔 Bluetooth permission will be requested")
+                emitDiagnostic("info", "Bluetooth permission will be requested")
+            } else {
+                print("[BleManager] ✅ Bluetooth permissions already granted")
+                emitDiagnostic("info", "Bluetooth permissions already granted")
+            }
+        }
+        
+        print("[BleManager] 🚀 Starting BLE transport for device: \(deviceId)")
         emitDiagnostic("info", "Starting BLE transport", context: ["deviceId": deviceId])
         updateState(.starting)
         transportStartAt = Date()
         
         // Initialize Central Manager (for scanning)
+        // This will trigger permission prompt if not yet determined
+        print("[BleManager] 📱 Initializing Central Manager...")
         centralManager = CBCentralManager(
             delegate: self,
             queue: nil,
@@ -264,14 +304,16 @@ public class BleManager: NSObject, TransportManager {
         )
         
         // Initialize Peripheral Manager (for advertising)
+        // This will trigger permission prompt if not yet determined
+        print("[BleManager] 📡 Initializing Peripheral Manager...")
         peripheralManager = CBPeripheralManager(
             delegate: self,
             queue: nil,
             options: [CBPeripheralManagerOptionShowPowerAlertKey: true]
         )
         
-        print("[BleManager] Waiting for Bluetooth to power on...")
-        emitDiagnostic("info", "Waiting for Bluetooth to power on")
+        print("[BleManager] ⏳ Waiting for Bluetooth to power on and permissions to be granted...")
+        emitDiagnostic("info", "Waiting for Bluetooth to power on and permissions")
         // Note: Actual start happens in delegate callbacks when ready
     }
     
@@ -1102,35 +1144,130 @@ public class BleManager: NSObject, TransportManager {
 extension BleManager: CBCentralManagerDelegate {
     
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        print("[BleManager] Central state: \(central.state.rawValue)")
-        emitDiagnostic("info", "Central manager state changed", context: ["state": central.state.rawValue])
+        let stateString: String
+        var authStatus = "unknown"
+        
+        if #available(iOS 13.1, *) {
+            let authorization = CBCentralManager.authorization
+            switch authorization {
+            case .notDetermined:
+                authStatus = "notDetermined"
+            case .restricted:
+                authStatus = "restricted"
+            case .denied:
+                authStatus = "denied"
+            case .allowedAlways:
+                authStatus = "allowedAlways"
+            @unknown default:
+                authStatus = "unknown"
+            }
+        }
+        
+        switch central.state {
+        case .unknown:
+            stateString = "unknown"
+        case .resetting:
+            stateString = "resetting"
+        case .unsupported:
+            stateString = "unsupported"
+        case .unauthorized:
+            stateString = "unauthorized"
+        case .poweredOff:
+            stateString = "poweredOff"
+        case .poweredOn:
+            stateString = "poweredOn"
+        @unknown default:
+            stateString = "unknown"
+        }
+        
+        print("[BleManager] Central state: \(stateString), authorization: \(authStatus)")
+        emitDiagnostic("info", "Central manager state changed", context: [
+            "state": stateString,
+            "stateRaw": central.state.rawValue,
+            "authorization": authStatus
+        ])
         
         switch central.state {
         case .poweredOn:
+            // Check authorization status on iOS 13.1+
+            if #available(iOS 13.1, *) {
+                let authorization = CBCentralManager.authorization
+                switch authorization {
+                case .denied, .restricted:
+                    print("[BleManager] ⚠️ Bluetooth permission denied or restricted")
+                    emitDiagnostic("error", "Bluetooth permission denied", context: ["authorization": authStatus])
+                    centralReady = false
+                    updateState(.unavailable)
+                    try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+                    return
+                    
+                case .notDetermined:
+                    print("[BleManager] 🔔 Bluetooth permission not determined yet, waiting for user response...")
+                    emitDiagnostic("info", "Waiting for Bluetooth permission", context: ["authorization": authStatus])
+                    // Permission prompt should be showing now
+                    // Will get called again when user responds
+                    return
+                    
+                case .allowedAlways:
+                    print("[BleManager] ✅ Bluetooth permission granted")
+                    emitDiagnostic("info", "Bluetooth permission granted", context: ["authorization": authStatus])
+                    
+                @unknown default:
+                    print("[BleManager] ⚠️ Unknown authorization state")
+                    emitDiagnostic("warning", "Unknown authorization state", context: ["authorization": authStatus])
+                }
+            }
+            
             centralReady = true
             startScanning(reason: "central_powered_on")
             startFragmentPolling()
-            emitDiagnostic("info", "Central manager powered on")
+            emitDiagnostic("info", "Central manager powered on and ready")
             
             // If both central and peripheral are ready, mark as running
             if peripheralReady && state == .starting {
                 updateState(.running)
-                print("[BleManager] BLE Manager ready - calling bleStatusChanged(true)")
+                print("[BleManager] ✅ BLE Manager ready - calling bleStatusChanged(true)")
                 emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
                 try? self.protocolInstance.bleStatusChanged(isAvailable: true)
-                print("[BleManager] Called protocol.bleStatusChanged(true)")
+                print("[BleManager] ✅ Called protocol.bleStatusChanged(true)")
                 emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
             }
             
-        case .poweredOff, .unauthorized, .unsupported:
+        case .poweredOff:
+            print("[BleManager] ⚠️ Bluetooth is powered off")
             centralReady = false
-            stopScanning(reason: "central_state_\(central.state.rawValue)")
+            stopScanning(reason: "central_powered_off")
             updateState(.unavailable)
             try? self.protocolInstance.bleStatusChanged(isAvailable: false)
-            emitDiagnostic("warning", "Central manager unavailable", context: ["state": central.state.rawValue])
+            emitDiagnostic("warning", "Bluetooth is powered off", context: ["state": stateString])
             
-        default:
-            break
+        case .unauthorized:
+            print("[BleManager] ⚠️ Bluetooth is unauthorized")
+            centralReady = false
+            stopScanning(reason: "central_unauthorized")
+            updateState(.unavailable)
+            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            emitDiagnostic("error", "Bluetooth is unauthorized", context: ["state": stateString, "authorization": authStatus])
+            
+        case .unsupported:
+            print("[BleManager] ⚠️ Bluetooth is not supported on this device")
+            centralReady = false
+            stopScanning(reason: "central_unsupported")
+            updateState(.unavailable)
+            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            emitDiagnostic("error", "Bluetooth is not supported", context: ["state": stateString])
+            
+        case .resetting:
+            print("[BleManager] 🔄 Bluetooth is resetting...")
+            emitDiagnostic("info", "Bluetooth is resetting", context: ["state": stateString])
+            
+        case .unknown:
+            print("[BleManager] ❓ Bluetooth state is unknown")
+            emitDiagnostic("info", "Bluetooth state is unknown", context: ["state": stateString])
+            
+        @unknown default:
+            print("[BleManager] ❓ Bluetooth state is unknown (default)")
+            emitDiagnostic("warning", "Unknown Bluetooth state", context: ["state": stateString])
         }
     }
     
@@ -1384,34 +1521,129 @@ extension BleManager: CBPeripheralDelegate {
 extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-        print("[BleManager] Peripheral state: \(peripheral.state.rawValue)")
-        emitDiagnostic("info", "Peripheral manager state changed", context: ["state": peripheral.state.rawValue])
+        let stateString: String
+        var authStatus = "unknown"
+        
+        if #available(iOS 13.1, *) {
+            let authorization = CBPeripheralManager.authorization
+            switch authorization {
+            case .notDetermined:
+                authStatus = "notDetermined"
+            case .restricted:
+                authStatus = "restricted"
+            case .denied:
+                authStatus = "denied"
+            case .allowedAlways:
+                authStatus = "allowedAlways"
+            @unknown default:
+                authStatus = "unknown"
+            }
+        }
+        
+        switch peripheral.state {
+        case .unknown:
+            stateString = "unknown"
+        case .resetting:
+            stateString = "resetting"
+        case .unsupported:
+            stateString = "unsupported"
+        case .unauthorized:
+            stateString = "unauthorized"
+        case .poweredOff:
+            stateString = "poweredOff"
+        case .poweredOn:
+            stateString = "poweredOn"
+        @unknown default:
+            stateString = "unknown"
+        }
+        
+        print("[BleManager] Peripheral state: \(stateString), authorization: \(authStatus)")
+        emitDiagnostic("info", "Peripheral manager state changed", context: [
+            "state": stateString,
+            "stateRaw": peripheral.state.rawValue,
+            "authorization": authStatus
+        ])
         
         switch peripheral.state {
         case .poweredOn:
+            // Check authorization status on iOS 13.1+
+            if #available(iOS 13.1, *) {
+                let authorization = CBPeripheralManager.authorization
+                switch authorization {
+                case .denied, .restricted:
+                    print("[BleManager] ⚠️ Bluetooth peripheral permission denied or restricted")
+                    emitDiagnostic("error", "Bluetooth peripheral permission denied", context: ["authorization": authStatus])
+                    peripheralReady = false
+                    updateState(.unavailable)
+                    try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+                    return
+                    
+                case .notDetermined:
+                    print("[BleManager] 🔔 Bluetooth peripheral permission not determined yet, waiting for user response...")
+                    emitDiagnostic("info", "Waiting for Bluetooth peripheral permission", context: ["authorization": authStatus])
+                    // Permission prompt should be showing now
+                    // Will get called again when user responds
+                    return
+                    
+                case .allowedAlways:
+                    print("[BleManager] ✅ Bluetooth peripheral permission granted")
+                    emitDiagnostic("info", "Bluetooth peripheral permission granted", context: ["authorization": authStatus])
+                    
+                @unknown default:
+                    print("[BleManager] ⚠️ Unknown peripheral authorization state")
+                    emitDiagnostic("warning", "Unknown peripheral authorization state", context: ["authorization": authStatus])
+                }
+            }
+            
             peripheralReady = true
             startAdvertising(reason: "state_powered_on")
-            emitDiagnostic("info", "Peripheral manager powered on")
+            emitDiagnostic("info", "Peripheral manager powered on and ready")
             
             // If both central and peripheral are ready, mark as running
             if centralReady && state == .starting {
                 updateState(.running)
-                print("[BleManager] BLE Manager ready (peripheral) - calling bleStatusChanged(true)")
+                print("[BleManager] ✅ BLE Manager ready (peripheral) - calling bleStatusChanged(true)")
                 emitDiagnostic("info", "About to call protocol.bleStatusChanged(true) from peripheral")
                 try? self.protocolInstance.bleStatusChanged(isAvailable: true)
-                print("[BleManager] Called protocol.bleStatusChanged(true) from peripheral")
+                print("[BleManager] ✅ Called protocol.bleStatusChanged(true) from peripheral")
                 emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true) from peripheral")
             }
             
-        case .poweredOff, .unauthorized, .unsupported:
+        case .poweredOff:
+            print("[BleManager] ⚠️ Bluetooth peripheral is powered off")
             peripheralReady = false
             stopAdvertising()
             updateState(.unavailable)
             try? self.protocolInstance.bleStatusChanged(isAvailable: false)
-            emitDiagnostic("warning", "Peripheral manager unavailable", context: ["state": peripheral.state.rawValue])
+            emitDiagnostic("warning", "Bluetooth peripheral is powered off", context: ["state": stateString])
             
-        default:
-            break
+        case .unauthorized:
+            print("[BleManager] ⚠️ Bluetooth peripheral is unauthorized")
+            peripheralReady = false
+            stopAdvertising()
+            updateState(.unavailable)
+            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            emitDiagnostic("error", "Bluetooth peripheral is unauthorized", context: ["state": stateString, "authorization": authStatus])
+            
+        case .unsupported:
+            print("[BleManager] ⚠️ Bluetooth peripheral is not supported on this device")
+            peripheralReady = false
+            stopAdvertising()
+            updateState(.unavailable)
+            try? self.protocolInstance.bleStatusChanged(isAvailable: false)
+            emitDiagnostic("error", "Bluetooth peripheral is not supported", context: ["state": stateString])
+            
+        case .resetting:
+            print("[BleManager] 🔄 Bluetooth peripheral is resetting...")
+            emitDiagnostic("info", "Bluetooth peripheral is resetting", context: ["state": stateString])
+            
+        case .unknown:
+            print("[BleManager] ❓ Bluetooth peripheral state is unknown")
+            emitDiagnostic("info", "Bluetooth peripheral state is unknown", context: ["state": stateString])
+            
+        @unknown default:
+            print("[BleManager] ❓ Bluetooth peripheral state is unknown (default)")
+            emitDiagnostic("warning", "Unknown Bluetooth peripheral state", context: ["state": stateString])
         }
     }
     
@@ -1510,4 +1742,12 @@ extension BleManager: CBPeripheralManagerDelegate {
 }
 
 extension BleManager: @unchecked Sendable {}
+
+// MARK: - Bundle Extension for Display Name
+extension Bundle {
+    var displayName: String? {
+        return object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? object(forInfoDictionaryKey: "CFBundleName") as? String
+    }
+}
 

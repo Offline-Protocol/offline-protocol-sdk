@@ -306,8 +306,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // Start BLE manager if available
             bleManager?.let { manager ->
                 try {
+                    android.util.Log.i(NAME, "About to call BLE manager.start()...")
                     manager.start()
-                    android.util.Log.i(NAME, "BLE Manager started")
+                    android.util.Log.i(NAME, "BLE Manager started successfully")
                     emitDiagnostic("info", "BLE manager started")
                     
                     // CRITICAL FIX: Backup bleStatusChanged(true) call in case timing is off
@@ -318,17 +319,24 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                             protocol?.bleStatusChanged(true)
                             emitDiagnostic("info", "Backup bleStatusChanged(true) completed")
                         } catch (e: Exception) {
-                            android.util.Log.w(NAME, "Backup bleStatusChanged failed: ${e.message}")
+                            android.util.Log.w(NAME, "Backup bleStatusChanged failed: ${e.message}", e)
                         }
                     }, 1000) // 1 second delay
                 } catch (e: Exception) {
-                    android.util.Log.w(NAME, "Warning: Failed to start BLE Manager: ${e.message}")
+                    android.util.Log.e(NAME, "❌ FAILED to start BLE Manager!", e)
+                    android.util.Log.e(NAME, "Error type: ${e.javaClass.simpleName}")
+                    android.util.Log.e(NAME, "Error message: ${e.message}")
+                    android.util.Log.e(NAME, "Stack trace: ", e)
                     emitDiagnostic("error", "Failed to start BLE manager", mapOf(
                         "message" to (e.message ?: "unknown"),
-                        "exception" to e.javaClass.simpleName
+                        "exception" to e.javaClass.simpleName,
+                        "stackTrace" to e.stackTraceToString()
                     ))
                     // Don't fail the entire start if BLE fails
                 }
+            } ?: run {
+                android.util.Log.w(NAME, "⚠️ BLE manager is null, cannot start")
+                emitDiagnostic("warning", "BLE manager is null")
             }
             
             promise.resolve(null)

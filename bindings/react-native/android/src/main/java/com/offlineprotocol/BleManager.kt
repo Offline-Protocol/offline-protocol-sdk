@@ -224,28 +224,51 @@ class BleManager(
             throw TransportException.NotAvailable("BLE not available on this device")
         }
         
+        // Check permissions with detailed logging
+        Log.i(TAG, "🔐 Checking Bluetooth permissions (Android ${Build.VERSION.SDK_INT})...")
+        emitDiagnostic("info", "Checking Bluetooth permissions", mapOf("androidVersion" to Build.VERSION.SDK_INT))
+        
         if (!checkPermissions()) {
-            Log.w(TAG, "Bluetooth permissions not granted")
-            throw TransportException.PermissionDenied("Bluetooth permissions not granted")
+            val errorMsg = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                "Missing required Bluetooth permissions (BLUETOOTH_SCAN, BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT). " +
+                "Please grant permissions in Settings > Apps > ${context.applicationInfo.loadLabel(context.packageManager)} > Permissions"
+            } else {
+                "Missing required Bluetooth permissions (BLUETOOTH, BLUETOOTH_ADMIN, ACCESS_FINE_LOCATION). " +
+                "Please grant permissions in app settings."
+            }
+            Log.w(TAG, "❌ $errorMsg")
+            emitDiagnostic("error", errorMsg)
+            throw TransportException.PermissionDenied(errorMsg)
         }
         
         if (bluetoothAdapter?.isEnabled != true) {
-            Log.w(TAG, "Bluetooth is not enabled")
-            throw TransportException.InvalidState("Bluetooth is not enabled")
+            val errorMsg = "Bluetooth is not enabled. Please enable Bluetooth in Settings."
+            Log.w(TAG, "⚠️ $errorMsg")
+            emitDiagnostic("error", errorMsg)
+            throw TransportException.InvalidState(errorMsg)
         }
         
-        Log.i(TAG, "Starting BLE transport for device: $deviceId")
+        Log.i(TAG, "🚀 Starting BLE transport for device: $deviceId")
         emitDiagnostic("info", "Starting BLE transport", mapOf("deviceId" to deviceId))
         updateState(TransportState.STARTING)
         
         try {
             // Initialize scanner
+            Log.i(TAG, "📱 Initializing BLE scanner...")
             bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
+            if (bluetoothLeScanner == null) {
+                throw TransportException.InvalidState("BLE scanner is not available")
+            }
             
             // Initialize advertiser
+            Log.i(TAG, "📡 Initializing BLE advertiser...")
             bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
+            if (bluetoothLeAdvertiser == null) {
+                throw TransportException.InvalidState("BLE advertiser is not available")
+            }
             
             // Setup GATT server
+            Log.i(TAG, "🔧 Setting up GATT server...")
             setupGattServer()
 
             transportStartAt = System.currentTimeMillis()
@@ -253,32 +276,33 @@ class BleManager(
             refreshSelfMetrics()
             
             // Start advertising
+            Log.i(TAG, "📢 Starting BLE advertising...")
             startAdvertising("start")
             
             // Start scanning
+            Log.i(TAG, "🔍 Starting BLE scanning...")
             startScanning("start")
             
             // Start fragment polling
             mainHandler.post(fragmentPollingRunnable)
             
             updateState(TransportState.RUNNING)
-            Log.i(TAG, "BLE Manager started successfully - calling bleStatusChanged(true)")
-            Log.i(TAG, "About to call protocol.bleStatusChanged(true)")
+            Log.i(TAG, "✅ BLE Manager started successfully - calling bleStatusChanged(true)")
             emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
             
             try {
                 protocol.bleStatusChanged(true)
-                Log.i(TAG, "Successfully called protocol.bleStatusChanged(true)")
+                Log.i(TAG, "✅ Successfully called protocol.bleStatusChanged(true)")
                 emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to call protocol.bleStatusChanged(true): ${e.message}", e)
+                Log.e(TAG, "❌ Failed to call protocol.bleStatusChanged(true): ${e.message}", e)
                 emitDiagnostic("error", "Failed to call protocol.bleStatusChanged(true)", mapOf(
                     "error" to (e.message ?: "unknown"),
                     "exception" to e.javaClass.simpleName
                 ))
             }
             
-            Log.i(TAG, "BLE Manager started successfully - scanning and advertising active")
+            Log.i(TAG, "✅ BLE transport ready - scanning and advertising active")
             emitDiagnostic(
                 "info",
                 "BLE manager running",
@@ -397,17 +421,43 @@ class BleManager(
     }
     
     private fun checkPermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Android 12+ requires new permissions
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        val missingPermissions = mutableListOf<String>()
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Android 12+ (API 31+) requires new Bluetooth permissions
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add("BLUETOOTH_SCAN")
+            }
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add("BLUETOOTH_ADVERTISE")
+            }
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add("BLUETOOTH_CONNECT")
+            }
         } else {
-            // Pre-Android 12
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADMIN) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            // Pre-Android 12 (API <31)
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add("BLUETOOTH")
+            }
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADMIN) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add("BLUETOOTH_ADMIN")
+            }
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                missingPermissions.add("ACCESS_FINE_LOCATION")
+            }
         }
+        
+        if (missingPermissions.isNotEmpty()) {
+            Log.w(TAG, "⚠️ Missing Bluetooth permissions: ${missingPermissions.joinToString(", ")}")
+            emitDiagnostic("error", "Missing Bluetooth permissions", mapOf(
+                "missingPermissions" to missingPermissions,
+                "androidVersion" to Build.VERSION.SDK_INT
+            ))
+            return false
+        }
+        
+        Log.d(TAG, "✅ All Bluetooth permissions granted (Android ${Build.VERSION.SDK_INT})")
+        return true
     }
     
     private fun setupGattServer() {
@@ -480,9 +530,19 @@ class BleManager(
                 }
                 
                 override fun onScanFailed(errorCode: Int) {
-                    Log.e(TAG, "Scan failed with error code: $errorCode")
+                    val errorMsg = when(errorCode) {
+                        SCAN_FAILED_ALREADY_STARTED -> "Scan already started"
+                        SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "Application registration failed"
+                        SCAN_FAILED_INTERNAL_ERROR -> "Internal error"
+                        SCAN_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
+                        else -> "Unknown error $errorCode"
+                    }
+                    Log.e(TAG, "❌ BLE scan failed: $errorMsg (code=$errorCode)")
                     isScanning = false
-                    emitDiagnostic("error", "BLE scan failed", mapOf("errorCode" to errorCode))
+                    emitDiagnostic("error", "BLE scan failed", mapOf(
+                        "errorCode" to errorCode,
+                        "errorMessage" to errorMsg
+                    ))
                 }
             }
             
@@ -491,8 +551,8 @@ class BleManager(
             lastDiscoveryAt = System.currentTimeMillis()
             scheduleScanWatchdog()
             if (logThrottler.shouldLog("scan_started")) {
-                Log.i(TAG, "Started BLE scanning (reason: $reason)")
-                emitDiagnostic("info", "Started BLE scanning", mapOf("reason" to reason))
+                Log.i(TAG, "✅ BLE scanning started successfully (reason: $reason)")
+                emitDiagnostic("info", "BLE scanning started", mapOf("reason" to reason))
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while starting scan", e)
@@ -550,16 +610,27 @@ class BleManager(
             
             advertiseCallback = object : AdvertiseCallback() {
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                    Log.i(TAG, "Advertising started successfully (reason=$reason)")
+                    Log.i(TAG, "✅ BLE advertising started successfully (reason=$reason)")
                     isAdvertising = true
                     lastAdvertiseRestartAt = System.currentTimeMillis()
-                    emitDiagnostic("info", "BLE advertising started")
+                    emitDiagnostic("info", "BLE advertising started", mapOf("reason" to reason))
                 }
                 
                 override fun onStartFailure(errorCode: Int) {
-                    Log.e(TAG, "Advertising failed with error code: $errorCode")
+                    val errorMsg = when(errorCode) {
+                        ADVERTISE_FAILED_DATA_TOO_LARGE -> "Data too large"
+                        ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Too many advertisers"
+                        ADVERTISE_FAILED_ALREADY_STARTED -> "Already started"
+                        ADVERTISE_FAILED_INTERNAL_ERROR -> "Internal error"
+                        ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
+                        else -> "Unknown error $errorCode"
+                    }
+                    Log.e(TAG, "❌ BLE advertising failed: $errorMsg (code=$errorCode)")
                     isAdvertising = false
-                    emitDiagnostic("error", "BLE advertising failed", mapOf("errorCode" to errorCode))
+                    emitDiagnostic("error", "BLE advertising failed", mapOf(
+                        "errorCode" to errorCode,
+                        "errorMessage" to errorMsg
+                    ))
                 }
             }
             
@@ -615,11 +686,15 @@ class BleManager(
     private fun buildAdvertiseData(): AdvertiseData {
         val meshData = meshController.toAdvertisement()
         lastMeshAdvertisement = meshData
-        val encoded = meshData.encode()
+        
+        // Android has strict 31-byte advertisement limit
+        // Include only service UUID, mesh metadata will be exchanged via GATT after connection
+        // This matches iOS behavior which also cannot include service data
         return AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(ParcelUuid(SERVICE_UUID))
-            .addServiceData(ParcelUuid(SERVICE_UUID), encoded)
+            // Don't include service data - it often exceeds Android's 31-byte limit
+            // Mesh metadata will be read via GATT characteristics after connection
             .build()
     }
     
@@ -659,7 +734,19 @@ class BleManager(
         meshController.observeAdvertisement(meshMetadata, rssi)
         pruneMeshObservations(now)
 
-        val decision = meshController.shouldInitiateOutbound(meshMetadata, rssi)
+        // When there's no metadata (iOS/Android advertising without service data),
+        // still try to connect - metadata will be exchanged via GATT after connection
+        val decision = if (meshMetadata == null) {
+            // No metadata in advertisement - allow basic connection to exchange info via GATT
+            MeshController.MeshDecision(
+                intent = ConnectionIntent.INTRA_CLUSTER,
+                reason = "no_metadata_in_advert",
+                evictPeerId = null
+            )
+        } else {
+            meshController.shouldInitiateOutbound(meshMetadata, rssi)
+        }
+        
         if (decision.intent == ConnectionIntent.REJECTED) {
             if (logThrottler.shouldLog("mesh_skip_$address", intervalMs = 15000)) {
                 Log.v(TAG, "Skipping connection to $address due to ${decision.reason}")
@@ -1284,10 +1371,19 @@ class BleManager(
                     Log.i(TAG, "GATT client: Connected to ${gatt.device.address}")
                     emitDiagnostic("info", "Connected to BLE device", mapOf("address" to gatt.device.address))
                     try {
-                        gatt.discoverServices()
+                        Log.d(TAG, "🔎 Starting service discovery for ${gatt.device.address}")
+                        val discoveryStarted = gatt.discoverServices()
+                        Log.d(TAG, "🔎 Service discovery ${if (discoveryStarted) "started" else "FAILED"} for ${gatt.device.address}")
+                        emitDiagnostic("debug", "Service discovery initiated", mapOf(
+                            "address" to gatt.device.address,
+                            "started" to discoveryStarted
+                        ))
                     } catch (e: SecurityException) {
-                        Log.e(TAG, "Permission denied discovering services", e)
+                        Log.e(TAG, "❌ Permission denied discovering services", e)
                         emitDiagnostic("error", "Permission denied discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error discovering services", e)
+                        emitDiagnostic("error", "Error discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -1343,43 +1439,66 @@ class BleManager(
         }
         
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            Log.i(TAG, "🔎 onServicesDiscovered callback: ${gatt.device.address}, status=$status (${if (status == BluetoothGatt.GATT_SUCCESS) "SUCCESS" else "FAILED"})")
+            
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val service = gatt.getService(SERVICE_UUID)
                 if (service != null) {
+                    Log.i(TAG, "✅ Found offline protocol service on ${gatt.device.address}")
                     emitDiagnostic("info", "GATT services discovered", mapOf("address" to gatt.device.address))
+                    
                     // Read device ID characteristic
                     val deviceIdChar = service.getCharacteristic(DEVICE_ID_CHAR_UUID)
                     if (deviceIdChar != null) {
+                        Log.d(TAG, "📖 Reading device ID characteristic from ${gatt.device.address}")
                         try {
-                            gatt.readCharacteristic(deviceIdChar)
+                            val readStarted = gatt.readCharacteristic(deviceIdChar)
+                            Log.d(TAG, "📖 Read request ${if (readStarted) "sent" else "FAILED"} for ${gatt.device.address}")
                         } catch (e: SecurityException) {
-                            Log.e(TAG, "Permission denied reading characteristic", e)
+                            Log.e(TAG, "❌ Permission denied reading characteristic", e)
                             emitDiagnostic("error", "Permission denied reading device ID characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                         }
+                    } else {
+                        Log.w(TAG, "⚠️ Device ID characteristic NOT FOUND on ${gatt.device.address}")
                     }
                     
                     // Enable notifications for message characteristic
                     val messageChar = service.getCharacteristic(MESSAGE_CHAR_UUID)
                     if (messageChar != null) {
+                        Log.d(TAG, "🔔 Enabling notifications for message characteristic on ${gatt.device.address}")
                         try {
-                            gatt.setCharacteristicNotification(messageChar, true)
-                            Log.d(TAG, "Enabled notifications for message characteristic")
+                            val notifyEnabled = gatt.setCharacteristicNotification(messageChar, true)
+                            Log.d(TAG, "🔔 Notifications ${if (notifyEnabled) "enabled" else "FAILED"} for ${gatt.device.address}")
                             emitDiagnostic("info", "Enabled notifications for message characteristic", mapOf("address" to gatt.device.address))
                         } catch (e: SecurityException) {
-                            Log.e(TAG, "Permission denied setting notification", e)
+                            Log.e(TAG, "❌ Permission denied setting notification", e)
                             emitDiagnostic("error", "Permission denied enabling notifications", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                         }
+                    } else {
+                        Log.w(TAG, "⚠️ Message characteristic NOT FOUND on ${gatt.device.address}")
                     }
+                } else {
+                    Log.w(TAG, "⚠️ Service UUID not found on ${gatt.device.address}. Available services: ${gatt.services.map { it.uuid }}")
+                    emitDiagnostic("warning", "Offline protocol service not found", mapOf(
+                        "address" to gatt.device.address,
+                        "serviceCount" to gatt.services.size
+                    ))
                 }
             } else {
+                Log.e(TAG, "❌ Service discovery FAILED for ${gatt.device.address}, status=$status")
                 emitDiagnostic("error", "Service discovery failed", mapOf("address" to gatt.device.address, "status" to status))
             }
         }
         
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            Log.i(TAG, "📖 onCharacteristicRead: ${gatt.device.address}, char=${characteristic.uuid}, status=$status")
+            
             if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == DEVICE_ID_CHAR_UUID) {
                 val deviceIdValue = characteristic.value?.toString(Charsets.UTF_8)
+                Log.i(TAG, "✅ Read device ID from ${gatt.device.address}: $deviceIdValue")
+                
                 if (deviceIdValue != null) {
+                    Log.i(TAG, "📝 Mapping ${gatt.device.address} -> $deviceIdValue")
                     connections.setDeviceIdentifier(gatt.device.address, deviceIdValue)
                     
                     val role = connections.consumePendingRole(gatt.device.address) ?: MeshRole.MEMBER
