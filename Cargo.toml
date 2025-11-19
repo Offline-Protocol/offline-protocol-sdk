@@ -35,6 +35,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Async runtime (for future use)
 tokio = { version = "1.35", features = ["full"] }
 
+# Logging
+tracing = "0.1"
+
 # FFI
 cbindgen = "0.26"
 

@@ -19,6 +19,11 @@ import type {
   WifiDirectTransportConfig,
   FileProgress,
   ProtocolState,
+  MessageReceivedEvent,
+  BleTransportConfig,
+  AckConfig,
+  RetryConfig,
+  DedupConfig,
 } from './types';
 import { MessagePriority } from './types';
 
@@ -58,6 +63,59 @@ interface InitialRuntimeConfig {
     minBatteryForRelay?: number;
     relayThreshold?: number;
     relayPriority?: string;
+  };
+}
+
+/**
+ * Native configuration object structure expected by native modules.
+ * This is the transformed version of ProtocolConfig optimized for native consumption.
+ */
+interface NativeConfig {
+  appId: string;
+  userId: string;
+  bleEnabled: boolean;
+  wifiDirectEnabled: boolean;
+  internetEnabled: boolean;
+  preferOnline: boolean;
+  initialTtl: number;
+  dors?: {
+    preferOnline: boolean;
+    switchHysteresis: number;
+    switchCooldownSecs: number;
+    bleToWifiRetryThreshold: number;
+    rssiSwitchThreshold: number;
+    congestionQueueThreshold: number;
+    stabilityWindowSecs: number;
+    poorSignalDurationSecs?: number;
+    ttlEscalationThreshold?: number;
+    congestionDurationSecs?: number;
+    ttlEscalationHoldSecs?: number;
+    historyWindowSize?: number;
+    queueRecoveryRatio?: number;
+  };
+  relay?: {
+    allowRelay?: boolean;
+    minBatteryForRelay?: number;
+    relayThreshold?: number;
+    relayPriority?: string;
+  };
+  transports?: {
+    ble?: BleTransportConfig;
+    internet?: InternetTransportConfig;
+    wifiDirect?: WifiDirectTransportConfig;
+  };
+  fileTransfer?: {
+    chunkSize?: number;
+    maxFileSize?: number;
+  };
+  reliability?: {
+    ack?: AckConfig;
+    retry?: RetryConfig;
+    dedup?: DedupConfig;
+  };
+  path?: {
+    forwardToTopK?: number;
+    maxCongestionLevel?: number;
   };
 }
 
@@ -136,7 +194,7 @@ export class OfflineProtocol {
   /**
    * Transforms the TypeScript config structure to the format expected by native modules
    */
-  private transformConfigForNative(): any {
+  private transformConfigForNative(): NativeConfig {
     const dorsSource = this.config.dors;
     const relaySource = this.config.relay;
 
@@ -174,7 +232,7 @@ export class OfflineProtocol {
       dorsConfig || relayConfig ? { dors: dorsConfig, relay: relayConfig } : null;
     this.initialRuntimeConfigApplied = false;
 
-    const nativeConfig: Record<string, unknown> = {
+    const nativeConfig: NativeConfig = {
       appId: this.config.appId,
       userId: this.config.userId,
       bleEnabled: this.config.transports?.ble?.enabled ?? true,
@@ -630,8 +688,13 @@ export class OfflineProtocol {
    * @returns Message object if available, null otherwise
    * @throws Error if polling fails
    */
-  async receiveMessage(): Promise<any | null> {
-    return await OfflineProtocolNativeModule.receiveMessage();
+  async receiveMessage(): Promise<MessageReceivedEvent | null> {
+    const result = await OfflineProtocolNativeModule.receiveMessage();
+    if (result === null) {
+      return null;
+    }
+    // Type assertion is safe here because we know the native module returns MessageReceivedEvent structure
+    return result as MessageReceivedEvent;
   }
 
   /**

@@ -11,6 +11,7 @@ use offline_protocol_transport::{Transport, TransportMetrics, TransportStatus, T
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tracing::{debug, warn};
 
 /// Manages multiple transports and handles transport selection.
 pub struct TransportManager {
@@ -27,6 +28,15 @@ pub struct TransportManager {
     observations: HashMap<TransportType, ObservedStats>,
 }
 
+/// Threshold for compacting observed stats to prevent unbounded growth.
+const OBSERVED_STATS_COMPACT_THRESHOLD: u32 = 10_000;
+
+/// EMA (Exponential Moving Average) alpha for latency tracking.
+const LATENCY_EMA_ALPHA: f32 = 0.3;
+
+/// EMA alpha for hop count tracking.
+const HOP_COUNT_EMA_ALPHA: f32 = 0.2;
+
 #[derive(Debug, Default, Clone)]
 struct ObservedStats {
     success_count: u32,
@@ -39,8 +49,8 @@ struct ObservedStats {
 impl ObservedStats {
     fn record_success(&mut self, latency_ms: u32, hop_count: u8) {
         self.success_count = self.success_count.saturating_add(1);
-        self.latency_ema = Some(update_ema(self.latency_ema, latency_ms as f32, 0.3));
-        self.hop_ema = Some(update_ema(self.hop_ema, hop_count as f32, 0.2));
+        self.latency_ema = Some(update_ema(self.latency_ema, latency_ms as f32, LATENCY_EMA_ALPHA));
+        self.hop_ema = Some(update_ema(self.hop_ema, hop_count as f32, HOP_COUNT_EMA_ALPHA));
         self.last_success_at = Some(Instant::now());
         self.compact();
     }
@@ -52,7 +62,7 @@ impl ObservedStats {
 
     fn compact(&mut self) {
         let total = self.success_count.saturating_add(self.failure_count);
-        if total > 10_000 {
+        if total > OBSERVED_STATS_COMPACT_THRESHOLD {
             self.success_count /= 2;
             self.failure_count /= 2;
         }
@@ -159,7 +169,9 @@ impl TransportManager {
             .get(&transport_type)
             .ok_or_else(|| Error::Other("Transport not found".to_string()))?;
 
-        let transport_lock = transport.lock().unwrap();
+        let transport_lock = transport.lock().map_err(|_| {
+            Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
+        })?;
         transport_lock
             .send(message)
             .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
@@ -175,14 +187,19 @@ impl TransportManager {
     pub fn receive(&self) -> Result<Option<(TransportType, Message)>> {
         // Check all transports for messages
         for (transport_type, transport) in &self.transports {
-            let transport_lock = transport.lock().unwrap();
+            let transport_lock = match transport.lock() {
+                Ok(lock) => lock,
+                Err(_) => {
+                    warn!(transport = ?transport_type, "Transport mutex poisoned, skipping");
+                    continue;
+                }
+            };
             match transport_lock.receive() {
                 Ok(Some(message)) => {
-                    tracing::debug!(
-                        transport_type = ?transport_type,
-                        sender = message.sender.as_str(),
-                        recipient = message.recipient.as_str(),
-                        content = %message.content,
+                    debug!(
+                        transport = ?transport_type,
+                        sender = %message.sender,
+                        recipient = %message.recipient,
                         "TransportManager found message"
                     );
                     return Ok(Some((*transport_type, message)));
@@ -191,7 +208,11 @@ impl TransportManager {
                     // No message from this transport, continue checking others
                 }
                 Err(e) => {
-                    tracing::error!(transport_type = ?transport_type, error = %e, "Transport receive error");
+                    warn!(
+                        transport = ?transport_type,
+                        error = %e,
+                        "Transport receive error"
+                    );
                 }
             }
         }
@@ -208,7 +229,13 @@ impl TransportManager {
 
         for (transport_type, transport) in &self.transports {
             let maybe_metrics = {
-                let transport_lock = transport.lock().unwrap();
+                let transport_lock = match transport.lock() {
+                    Ok(lock) => lock,
+                    Err(_) => {
+                        warn!(transport = ?transport_type, "Transport mutex poisoned, skipping metrics");
+                        continue;
+                    }
+                };
                 if transport_lock.status() == TransportStatus::Available {
                     Some(transport_lock.metrics())
                 } else {
@@ -234,22 +261,26 @@ impl TransportManager {
 
     /// Starts all transports.
     pub fn start(&mut self) -> Result<()> {
-        for transport in self.transports.values() {
-            let mut transport_lock = transport.lock().unwrap();
+        for (transport_type, transport) in &self.transports {
+            let mut transport_lock = transport.lock().map_err(|_| {
+                Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
+            })?;
             transport_lock
                 .start()
-                .map_err(|e| Error::Other(format!("Failed to start transport: {}", e)))?;
+                .map_err(|e| Error::Other(format!("Failed to start transport {:?}: {}", transport_type, e)))?;
         }
         Ok(())
     }
 
     /// Stops all transports.
     pub fn stop(&mut self) -> Result<()> {
-        for transport in self.transports.values() {
-            let mut transport_lock = transport.lock().unwrap();
+        for (transport_type, transport) in &self.transports {
+            let mut transport_lock = transport.lock().map_err(|_| {
+                Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
+            })?;
             transport_lock
                 .stop()
-                .map_err(|e| Error::Other(format!("Failed to stop transport: {}", e)))?;
+                .map_err(|e| Error::Other(format!("Failed to stop transport {:?}: {}", transport_type, e)))?;
         }
         Ok(())
     }

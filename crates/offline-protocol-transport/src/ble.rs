@@ -7,10 +7,6 @@
 //! - Message transmission over BLE characteristics
 //! - Message fragmentation for large payloads
 
-use crate::constants::{
-    ATT_OVERHEAD_BYTES, EMA_WEIGHT_EXISTING_LATENCY, EMA_WEIGHT_NEW_LATENCY,
-    HEURISTIC_SEND_CAPACITY,
-};
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
@@ -18,13 +14,26 @@ use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, SystemTime};
 
+/// UUID for the Offline Protocol GATT service
 pub const SERVICE_UUID: &str = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+
+/// UUID for the message characteristic (write/notify)
 pub const MESSAGE_CHAR_UUID: &str = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
+
+/// UUID for the device ID characteristic (read)
 pub const DEVICE_ID_CHAR_UUID: &str = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 
+/// Maximum BLE payload size (MTU - overhead)
+/// Typical BLE MTU ranges from 23-251 bytes, we use conservative 185 bytes per fragment
 pub const MAX_FRAGMENT_SIZE: usize = 185;
+
+/// Fragment timeout - if fragments aren't all received within 30s, discard
 pub const FRAGMENT_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum number of concurrent fragment assemblies we buffer before evicting the oldest.
 pub const MAX_FRAGMENT_ASSEMBLIES: usize = 64;
+
+/// Maximum allowed fragments for a single BLE message to avoid memory blow-up.
 pub const MAX_FRAGMENT_COUNT: usize = 512;
 
 /// Peer device information
@@ -111,7 +120,7 @@ impl BleTransport {
 
     /// Sets the negotiated MTU size (called by platform after BLE MTU negotiation).
     pub fn set_mtu(&self, mtu: usize) {
-        *self.mtu_size.lock().unwrap() = mtu.saturating_sub(ATT_OVERHEAD_BYTES);
+        *self.mtu_size.lock().unwrap() = mtu.saturating_sub(3); // Reserve 3 bytes for ATT overhead
     }
 
     /// Gets the current MTU size.
@@ -181,8 +190,8 @@ impl BleTransport {
         let fragment_len = self.pending_fragments.lock().unwrap().len();
         let mut metrics = self.metrics.lock().unwrap();
         metrics.queue_depth = send_len + fragment_len;
-        metrics.congestion =
-            ((metrics.queue_depth as f32) / HEURISTIC_SEND_CAPACITY).clamp(0.0, 1.0);
+        let heuristic_capacity = 50_f32;
+        metrics.congestion = ((metrics.queue_depth as f32) / heuristic_capacity).clamp(0.0, 1.0);
     }
 
     /// Records a successful send for metrics tracking.
@@ -214,8 +223,7 @@ impl BleTransport {
         let mut metrics = self.metrics.lock().unwrap();
         metrics.latency_ms = Some(match metrics.latency_ms {
             Some(existing) => {
-                let ema = (existing as f32 * EMA_WEIGHT_EXISTING_LATENCY)
-                    + (value as f32 * EMA_WEIGHT_NEW_LATENCY);
+                let ema = (existing as f32 * 0.7) + (value as f32 * 0.3);
                 ema as u32
             }
             None => value,
@@ -223,38 +231,26 @@ impl BleTransport {
     }
 
     fn cleanup_fragment_buffers(&self) {
-        let expired = self.find_expired_fragments();
-        self.remove_expired_fragments(expired);
-    }
-
-    fn find_expired_fragments(&self) -> Vec<String> {
-        let buffers = self.fragment_buffers.lock().unwrap();
+        let mut buffers = self.fragment_buffers.lock().unwrap();
         let now = SystemTime::now();
-        let timeout = StdDuration::from_secs(FRAGMENT_TIMEOUT_SECS);
+        let mut expired = Vec::new();
 
-        buffers
-            .iter()
-            .filter(|(_, assembly)| {
-                now.duration_since(assembly.started_at)
-                    .unwrap_or_else(|_| StdDuration::from_secs(0))
-                    > timeout
-            })
-            .map(|(message_id, _)| message_id.clone())
-            .collect()
-    }
-
-    fn remove_expired_fragments(&self, expired: Vec<String>) {
-        if expired.is_empty() {
-            return;
+        for (message_id, assembly) in buffers.iter() {
+            if now
+                .duration_since(assembly.started_at)
+                .unwrap_or_else(|_| StdDuration::from_secs(0))
+                > StdDuration::from_secs(FRAGMENT_TIMEOUT_SECS)
+            {
+                expired.push(message_id.clone());
+            }
         }
 
-        let mut buffers = self.fragment_buffers.lock().unwrap();
         for message_id in expired {
             buffers.remove(&message_id);
             self.record_send_failure();
-            tracing::warn!(
+            tracing::debug!(
                 message_id = %message_id,
-                "Dropped expired BLE fragment assembly for message"
+                "Dropped expired BLE fragment assembly"
             );
         }
     }
@@ -355,118 +351,93 @@ impl BleTransport {
     pub fn process_fragment(&self, fragment_data: &[u8]) -> Result<Option<Message>> {
         self.cleanup_fragment_buffers();
 
+        // Decode fragment from binary format
         let fragment = decode_fragment(fragment_data)?;
 
         if fragment.total_fragments == 1 {
             return Ok(Some(self.deserialize_message(&fragment.data)?));
         }
 
-        self.process_multi_fragment(fragment)
-    }
+        let mut completed_payload: Option<Vec<u8>> = None;
+        let mut assembly_started_at: Option<SystemTime> = None;
+        let mut evicted = false;
 
-    fn process_multi_fragment(&self, fragment: DecodedFragment) -> Result<Option<Message>> {
-        let (completed_payload, assembly_started_at, evicted) =
-            self.add_fragment_to_assembly(fragment)?;
+        {
+            // Multi-fragment message - add to reassembly buffer
+            let mut buffers = self.fragment_buffers.lock().unwrap();
+            let now = SystemTime::now();
+
+            if !buffers.contains_key(&fragment.message_id)
+                && buffers.len() >= MAX_FRAGMENT_ASSEMBLIES
+            {
+                if let Some(oldest_id) = buffers
+                    .iter()
+                    .min_by_key(|(_, assembly)| assembly.started_at)
+                    .map(|(id, _)| id.clone())
+                {
+                    buffers.remove(&oldest_id);
+                    evicted = true;
+                }
+            }
+
+            // Get or create assembly buffer
+            let assembly = buffers
+                .entry(fragment.message_id.clone())
+                .or_insert_with(|| FragmentAssembly {
+                    total_fragments: fragment.total_fragments,
+                    fragments: HashMap::new(),
+                    started_at: now,
+                });
+
+            // Validate fragment
+            if assembly.total_fragments != fragment.total_fragments {
+                return Err(crate::Error::Other(format!(
+                    "Fragment count mismatch: expected {}, got {}",
+                    assembly.total_fragments, fragment.total_fragments
+                )));
+            }
+
+            assembly
+                .fragments
+                .insert(fragment.fragment_index, fragment.data);
+
+            // Check if complete
+            if assembly.fragments.len() == assembly.total_fragments as usize {
+                // Reassemble message
+                let mut complete_data = Vec::new();
+                for i in 0..assembly.total_fragments {
+                    if let Some(data) = assembly.fragments.get(&i) {
+                        complete_data.extend_from_slice(data);
+                    } else {
+                        return Err(crate::Error::Other(format!("Missing fragment {}", i)));
+                    }
+                }
+
+                assembly_started_at = Some(assembly.started_at);
+                buffers.remove(&fragment.message_id);
+                completed_payload = Some(complete_data);
+            }
+        }
 
         if evicted {
             self.record_send_failure();
         }
 
         if let Some(payload) = completed_payload {
-            self.finalize_reassembly(payload, assembly_started_at)
-        } else {
-            Ok(None)
-        }
-    }
+            let start = assembly_started_at.unwrap_or_else(SystemTime::now);
+            let latency = SystemTime::now()
+                .duration_since(start)
+                .unwrap_or_else(|_| StdDuration::from_millis(0))
+                .as_millis();
+            self.record_latency(latency);
 
-    fn add_fragment_to_assembly(
-        &self,
-        fragment: DecodedFragment,
-    ) -> Result<(Option<Vec<u8>>, Option<SystemTime>, bool)> {
-        let mut buffers = self.fragment_buffers.lock().unwrap();
-        let now = SystemTime::now();
-        let mut evicted = false;
-
-        if !buffers.contains_key(&fragment.message_id)
-            && buffers.len() >= MAX_FRAGMENT_ASSEMBLIES
-        {
-            self.evict_oldest_assembly(&mut buffers);
-            evicted = true;
+            // Deserialize complete message
+            let message = self.deserialize_message(&payload)?;
+            return Ok(Some(message));
         }
 
-        let assembly = buffers
-            .entry(fragment.message_id.clone())
-            .or_insert_with(|| FragmentAssembly {
-                total_fragments: fragment.total_fragments,
-                fragments: HashMap::new(),
-                started_at: now,
-            });
-
-        self.validate_fragment_count(assembly, &fragment)?;
-        assembly
-            .fragments
-            .insert(fragment.fragment_index, fragment.data);
-
-        if assembly.fragments.len() == assembly.total_fragments as usize {
-            let complete_data = self.reassemble_fragments(assembly)?;
-            let started_at = assembly.started_at;
-            buffers.remove(&fragment.message_id);
-            Ok((Some(complete_data), Some(started_at), evicted))
-        } else {
-            Ok((None, None, evicted))
-        }
-    }
-
-    fn evict_oldest_assembly(&self, buffers: &mut HashMap<String, FragmentAssembly>) {
-        if let Some(oldest_id) = buffers
-            .iter()
-            .min_by_key(|(_, assembly)| assembly.started_at)
-            .map(|(id, _)| id.clone())
-        {
-            buffers.remove(&oldest_id);
-        }
-    }
-
-    fn validate_fragment_count(
-        &self,
-        assembly: &FragmentAssembly,
-        fragment: &DecodedFragment,
-    ) -> Result<()> {
-        if assembly.total_fragments != fragment.total_fragments {
-            return Err(crate::Error::Other(format!(
-                "Fragment count mismatch: expected {}, got {}",
-                assembly.total_fragments, fragment.total_fragments
-            )));
-        }
-        Ok(())
-    }
-
-    fn reassemble_fragments(&self, assembly: &FragmentAssembly) -> Result<Vec<u8>> {
-        let mut complete_data = Vec::new();
-        for i in 0..assembly.total_fragments {
-            if let Some(data) = assembly.fragments.get(&i) {
-                complete_data.extend_from_slice(data);
-            } else {
-                return Err(crate::Error::Other(format!("Missing fragment {}", i)));
-            }
-        }
-        Ok(complete_data)
-    }
-
-    fn finalize_reassembly(
-        &self,
-        payload: Vec<u8>,
-        assembly_started_at: Option<SystemTime>,
-    ) -> Result<Option<Message>> {
-        let start = assembly_started_at.unwrap_or_else(SystemTime::now);
-        let latency = SystemTime::now()
-            .duration_since(start)
-            .unwrap_or_else(|_| StdDuration::from_millis(0))
-            .as_millis();
-        self.record_latency(latency);
-
-        let message = self.deserialize_message(&payload)?;
-        Ok(Some(message))
+        // More fragments needed
+        Ok(None)
     }
 
     /// Called when raw fragment data is received from BLE (platform callback).
@@ -478,12 +449,11 @@ impl BleTransport {
                 // Message complete - queue it
                 let mut queue = self.receive_queue.lock().unwrap();
                 queue.push_back(message.clone());
-                tracing::info!(
-                    message_id = message.id.as_str(),
-                    sender = message.sender.as_str(),
-                    recipient = message.recipient.as_str(),
-                    content = %message.content,
-                    "Complete message assembled"
+                tracing::debug!(
+                    message_id = %message.id,
+                    sender = %message.sender,
+                    recipient = %message.recipient,
+                    "Complete message assembled from fragments"
                 );
                 Ok(())
             }
@@ -494,7 +464,7 @@ impl BleTransport {
             }
             Err(e) => {
                 // Log error but don't fail - just drop bad fragment
-                tracing::error!(error = %e, "Error processing fragment");
+                tracing::warn!(error = %e, "Error processing fragment, dropping bad fragment");
                 Ok(())
             }
         }

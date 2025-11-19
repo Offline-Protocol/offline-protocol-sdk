@@ -1,16 +1,14 @@
 //! Main protocol engine.
 
-use crate::constants::MAX_OUTBOX_ENTRIES;
-use crate::{Event, EventCallback, ProtocolConfig, Result, TransportManager};
+use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
-use offline_protocol_reliability::ack_manager::PendingAck;
-use offline_protocol_reliability::retry_queue::RetryEntry;
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
 use offline_protocol_transport::TransportType;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tracing::{error, warn};
 
 /// Protocol state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +49,13 @@ impl SharedState {
     }
 }
 
+/// Helper function to lock a mutex and convert poison errors to protocol errors.
+fn lock_shared_state(
+    state: &Arc<Mutex<SharedState>>,
+) -> std::result::Result<std::sync::MutexGuard<'_, SharedState>, Error> {
+    state.lock().map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
+}
+
 #[derive(Clone)]
 struct OutboxEntry {
     message: Message,
@@ -60,9 +65,18 @@ struct OutboxEntry {
     last_transport: Option<TransportType>,
 }
 
+/// Metadata key for ACK messages indicating which message ID the ACK is for.
 const ACK_FOR_KEY: &str = "ack_for";
+
+/// Metadata key for ACK messages indicating the hop count.
 const ACK_HOP_COUNT_KEY: &str = "ack_hop_count";
+
+/// Metadata key for ACK messages indicating the transport used.
 const ACK_TRANSPORT_KEY: &str = "ack_transport";
+
+/// Maximum number of entries in the outbox before evicting oldest entries.
+/// This prevents unbounded memory growth when messages cannot be delivered.
+const MAX_OUTBOX_ENTRIES: usize = 500;
 
 /// Main entry point for the Offline Protocol SDK.
 ///
@@ -142,16 +156,16 @@ impl OfflineProtocol {
     ///
     /// Returns `Ok(())` if started successfully, `Err` if already started.
     pub fn start(&mut self) -> Result<()> {
-        let state = self.shared_state.lock().unwrap();
+        let state = lock_shared_state(&self.shared_state)?;
 
         if state.state != ProtocolState::Stopped {
-            return Err(crate::Error::AlreadyStarted);
+            return Err(Error::AlreadyStarted);
         }
 
         // Start all transports
         drop(state);
         self.transport_manager.start()?;
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = lock_shared_state(&self.shared_state)?;
 
         state.state = ProtocolState::Running;
 
@@ -164,7 +178,7 @@ impl OfflineProtocol {
     ///
     /// Returns `Ok(())` if stopped successfully, `Err` if not started.
     pub fn stop(&mut self) -> Result<()> {
-        let state = self.shared_state.lock().unwrap();
+        let state = lock_shared_state(&self.shared_state)?;
 
         if state.state == ProtocolState::Stopped {
             return Ok(()); // Already stopped
@@ -173,7 +187,7 @@ impl OfflineProtocol {
         // Stop all transports
         drop(state);
         self.transport_manager.stop()?;
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = lock_shared_state(&self.shared_state)?;
 
         state.state = ProtocolState::Stopped;
 
@@ -182,10 +196,10 @@ impl OfflineProtocol {
 
     /// Pauses the protocol (for background mode).
     pub fn pause(&mut self) -> Result<()> {
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = lock_shared_state(&self.shared_state)?;
 
         if state.state != ProtocolState::Running {
-            return Err(crate::Error::NotStarted);
+            return Err(Error::NotStarted);
         }
 
         state.state = ProtocolState::Paused;
@@ -194,10 +208,10 @@ impl OfflineProtocol {
 
     /// Resumes the protocol from pause.
     pub fn resume(&mut self) -> Result<()> {
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = lock_shared_state(&self.shared_state)?;
 
         if state.state != ProtocolState::Paused {
-            return Err(crate::Error::InvalidConfiguration(
+            return Err(Error::InvalidConfiguration(
                 "Protocol is not paused".to_string(),
             ));
         }
@@ -215,73 +229,49 @@ impl OfflineProtocol {
     }
 
     fn handle_ack_message(&mut self, message: &Message) {
-        let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) else {
-            return;
-        };
+        if let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) {
+            if let Ok(message_id) = MessageId::from_str(ack_for) {
+                if let Some(pending) = self.ack_manager.remove_ack(&message_id) {
+                    let latency = Utc::now()
+                        .signed_duration_since(pending.sent_at)
+                        .num_milliseconds()
+                        .max(0) as u64;
 
-        let Ok(message_id) = MessageId::from_str(ack_for) else {
-            return;
-        };
+                    let hop_count = message
+                        .metadata
+                        .get(ACK_HOP_COUNT_KEY)
+                        .and_then(|v| v.parse::<u8>().ok())
+                        .unwrap_or(0);
 
-        let Some(pending) = self.ack_manager.remove_ack(&message_id) else {
-            return;
-        };
+                    let transport = message
+                        .metadata
+                        .get(ACK_TRANSPORT_KEY)
+                        .map(|label| Self::transport_from_label(label))
+                        .unwrap_or(TransportType::BLE);
 
-        let latency = self.calculate_latency(&pending.sent_at);
-        let hop_count = self.extract_hop_count(message);
-        let transport = self.extract_transport(message);
+                    // Emit event if we can lock the state, but don't fail if we can't
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::message_delivered(
+                            message_id.clone(),
+                            latency,
+                            hop_count,
+                            transport,
+                        ));
+                        drop(state);
+                    } else {
+                        error!("Failed to lock shared state for ACK event, skipping event emission");
+                    }
 
-        self.emit_delivery_event(&message_id, latency, hop_count, transport);
-        self.record_successful_delivery(transport, latency, hop_count);
-        self.remove_outbox_entry(&message_id);
-    }
-
-    fn calculate_latency(&self, sent_at: &DateTime<Utc>) -> u64 {
-        Utc::now()
-            .signed_duration_since(*sent_at)
-            .num_milliseconds()
-            .max(0) as u64
-    }
-
-    fn extract_hop_count(&self, message: &Message) -> u8 {
-        message
-            .metadata
-            .get(ACK_HOP_COUNT_KEY)
-            .and_then(|v| v.parse::<u8>().ok())
-            .unwrap_or(0)
-    }
-
-    fn extract_transport(&self, message: &Message) -> TransportType {
-        message
-            .metadata
-            .get(ACK_TRANSPORT_KEY)
-            .map(|label| Self::transport_from_label(label))
-            .unwrap_or(TransportType::BLE)
-    }
-
-    fn emit_delivery_event(
-        &self,
-        message_id: &MessageId,
-        latency: u64,
-        hop_count: u8,
-        transport: TransportType,
-    ) {
-        let state = self.shared_state.lock().unwrap();
-        state.emit_event(Event::message_delivered(
-            message_id.clone(),
-            latency,
-            hop_count,
-            transport,
-        ));
-    }
-
-    fn record_successful_delivery(&mut self, transport: TransportType, latency: u64, hop_count: u8) {
-        self.transport_manager.reset_retry_count(transport);
-        self.transport_manager.record_delivery_success(
-            transport,
-            latency.min(u32::MAX as u64) as u32,
-            hop_count,
-        );
+                    self.transport_manager.reset_retry_count(transport);
+                    self.transport_manager.record_delivery_success(
+                        transport,
+                        latency.min(u32::MAX as u64) as u32,
+                        hop_count,
+                    );
+                    self.remove_outbox_entry(&message_id);
+                }
+            }
+        }
     }
 
     fn send_delivery_ack(
@@ -326,118 +316,95 @@ impl OfflineProtocol {
         content: impl Into<String>,
         priority: Option<MessagePriority>,
     ) -> Result<MessageId> {
-        self.ensure_protocol_running()?;
-
-        let message = self.build_message(recipient, content, priority)?;
-        let message_id = message.id.clone();
-
-        self.check_duplicate(&message_id)?;
-        self.deduplicator.mark_seen(message_id.clone());
-
-        let previous_transport = self.transport_manager.current_transport();
-        self.attempt_send(&message, previous_transport)?;
-        
-        let current_transport = self.transport_manager.current_transport();
-        self.emit_transport_switch_if_needed(previous_transport, current_transport);
-        self.emit_message_sent_event(&message);
-
-        Ok(message_id)
-    }
-
-    fn ensure_protocol_running(&self) -> Result<()> {
-        let state = self.shared_state.lock().unwrap();
-        if state.state != ProtocolState::Running {
-            return Err(crate::Error::NotStarted);
+        // Check if protocol is running
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
         }
-        Ok(())
-    }
 
-    fn build_message(
-        &self,
-        recipient: impl Into<String>,
-        content: impl Into<String>,
-        priority: Option<MessagePriority>,
-    ) -> Result<Message> {
+        // Create message
         let sender = UserId::new(&self.config.user_id)?;
         let recipient = UserId::new(recipient)?;
         let app_id = AppId::new(&self.config.app_id)?;
 
-        Ok(Message::builder(sender, recipient, app_id)
+        let message = Message::builder(sender, recipient, app_id)
             .content(content)
             .priority(priority.unwrap_or(MessagePriority::Medium))
             .ttl(TTL::new(self.config.initial_ttl)?)
-            .build())
-    }
+            .build();
 
-    fn check_duplicate(&self, message_id: &MessageId) -> Result<()> {
-        if self.deduplicator.is_duplicate(message_id) {
+        let message_id = message.id.clone();
+
+        // Check for duplicates
+        if self.deduplicator.is_duplicate(&message_id) {
             return Err(crate::Error::Other("Duplicate message".to_string()));
         }
-        Ok(())
-    }
 
-    fn attempt_send(
-        &mut self,
-        message: &Message,
-        previous_transport: Option<TransportType>,
-    ) -> Result<()> {
-        let send_result = self.transport_manager.send(message);
+        // Mark as seen
+        self.deduplicator.mark_seen(message_id.clone());
+
+        // Track previous transport before sending
+        let previous_transport = self.transport_manager.current_transport();
+
+        // Attempt to send via transport manager (DORS will select best transport)
+        let send_result = self.transport_manager.send(&message);
         let current_transport = self.transport_manager.current_transport();
 
         match send_result {
             Ok(()) => {
-                self.mark_message_sent(message, current_transport, Some(1));
-                self.ensure_ack_registration(message)?;
+                self.mark_message_sent(&message, current_transport, Some(1));
+                self.ensure_ack_registration(&message)?;
             }
             Err(err) => {
-                self.handle_send_failure(message, current_transport, previous_transport, &err)?;
+                // Persist message to outbox and schedule retry
+                self.ensure_outbox_entry(&message);
+                if let Err(enqueue_err) = self.retry_queue.enqueue(message.clone(), 0) {
+                    return Err(enqueue_err.into());
+                }
+
+                if let Some(transport) = current_transport.or(previous_transport) {
+                    self.transport_manager.record_retry_failure(transport);
+                }
+
+                warn!(
+                    message_id = %message.id,
+                    error = %err,
+                    "Deferred message due to send error"
+                );
             }
         }
-        Ok(())
-    }
 
-    fn handle_send_failure(
-        &mut self,
-        message: &Message,
-        current_transport: Option<TransportType>,
-        previous_transport: Option<TransportType>,
-        err: &crate::Error,
-    ) -> Result<()> {
-        self.ensure_outbox_entry(message);
-        self.retry_queue.enqueue(message.clone(), 0)?;
-
-        if let Some(transport) = current_transport.or(previous_transport) {
-            self.transport_manager.record_retry_failure(transport);
-        }
-
-        tracing::warn!(
-            message_id = message.id.as_str(),
-            error = %err,
-            "Deferred message due to send error"
-        );
-        Ok(())
-    }
-
-    fn emit_transport_switch_if_needed(
-        &self,
-        previous_transport: Option<TransportType>,
-        current_transport: Option<TransportType>,
-    ) {
+        // Check if transport switched
         if current_transport != previous_transport {
             if let Some(new_transport) = current_transport {
-                let state = self.shared_state.lock().unwrap();
+                let state = lock_shared_state(&self.shared_state)
+                    .map_err(|e| {
+                        error!("Failed to lock shared state for transport switch event: {}", e);
+                        e
+                    })?;
                 state.emit_event(Event::transport_switched(
                     previous_transport,
                     new_transport,
                     "DORS selected better transport".to_string(),
                 ));
+                drop(state);
             }
         }
-    }
 
-    fn emit_message_sent_event(&self, message: &Message) {
-        let state = self.shared_state.lock().unwrap();
-        state.emit_event(Event::message_sent(message));
+        // Emit MessageSent event
+        {
+            let state = lock_shared_state(&self.shared_state)
+                .map_err(|e| {
+                    error!("Failed to lock shared state for message sent event: {}", e);
+                    e
+                })?;
+            state.emit_event(Event::message_sent(&message));
+            drop(state);
+        }
+
+        Ok(message_id)
     }
 
     /// Receives the next available message.
@@ -446,7 +413,13 @@ impl OfflineProtocol {
     ///
     /// Returns `Some(Message)` if a message is available, `None` otherwise.
     pub fn receive_message(&mut self) -> Option<Message> {
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = match lock_shared_state(&self.shared_state) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to lock shared state in receive_message: {}", e);
+                return None;
+            }
+        };
 
         if !state.received_messages.is_empty() {
             return Some(state.received_messages.remove(0));
@@ -469,9 +442,13 @@ impl OfflineProtocol {
                     self.deduplicator.mark_seen(message.id.clone());
 
                     if message.requires_ack {
-        if let Err(err) = self.send_delivery_ack(&message, transport_used) {
-            tracing::error!(error = %err, "Failed to send delivery ACK");
-        }
+                        if let Err(err) = self.send_delivery_ack(&message, transport_used) {
+                            error!(
+                                message_id = %message.id,
+                                error = %err,
+                                "Failed to send delivery ACK"
+                            );
+                        }
                     }
 
                     let event = Event::MessageReceived {
@@ -484,7 +461,12 @@ impl OfflineProtocol {
                         timestamp: message.timestamp.as_millis(),
                     };
 
-                    let state = self.shared_state.lock().unwrap();
+                    let state = lock_shared_state(&self.shared_state)
+                        .map_err(|e| {
+                            error!("Failed to lock shared state for message received event: {}", e);
+                            e
+                        })
+                        .ok()?;
                     state.emit_event(event);
                     drop(state);
 
@@ -492,7 +474,7 @@ impl OfflineProtocol {
                 }
                 Ok(None) => return None,
                 Err(err) => {
-                    tracing::error!(error = %err, "Transport receive error");
+                    error!(error = %err, "Transport receive error");
                     return None;
                 }
             }
@@ -508,7 +490,13 @@ impl OfflineProtocol {
     where
         F: Fn(Event) + Send + Sync + 'static,
     {
-        let mut state = self.shared_state.lock().unwrap();
+        let mut state = match lock_shared_state(&self.shared_state) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to lock shared state in on_event: {}", e);
+                return;
+            }
+        };
         state.event_handlers.push(Arc::new(handler));
     }
 
@@ -516,176 +504,215 @@ impl OfflineProtocol {
     ///
     /// This should be called periodically to handle background tasks.
     pub fn process(&mut self) -> Result<()> {
-        if !self.is_running() {
-            return Ok(());
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Ok(()); // Don't process if not running
+            }
         }
 
-        self.process_retry_queue();
+        self.process_retry_queue()?;
         self.process_timed_out_acks()?;
-        self.cleanup_expired_data();
-        self.check_wifi_escalation();
+        self.cleanup_expired_entries();
+        self.check_dors_escalation()?;
 
         Ok(())
     }
 
-    fn is_running(&self) -> bool {
-        let state = self.shared_state.lock().unwrap();
-        state.state == ProtocolState::Running
-    }
-
-    fn process_retry_queue(&mut self) {
+    /// Processes messages ready for retry from the retry queue.
+    fn process_retry_queue(&mut self) -> Result<()> {
         while let Some(entry) = self.retry_queue.dequeue_ready() {
             let previous_transport = self.transport_manager.current_transport();
             self.ensure_outbox_entry(&entry.message);
 
             if self.transport_manager.send(&entry.message).is_err() {
-                self.handle_retry_send_failure(&entry, previous_transport);
+                // Re-enqueue with incremented retry count
+                let _ = self
+                    .retry_queue
+                    .enqueue(entry.message.clone(), entry.retry_count + 1);
+
+                if let Some(transport) = previous_transport {
+                    self.transport_manager.record_retry_failure(transport);
+                }
             } else {
-                self.handle_retry_send_success(&entry);
+                let current_transport = self.transport_manager.current_transport();
+                let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
+
+                if !ack_registered_now {
+                    self.ack_manager.increment_retry_count(&entry.message.id);
+                }
+                self.mark_message_sent(
+                    &entry.message,
+                    current_transport,
+                    Some(entry.retry_count.saturating_add(1)),
+                );
+
+                if let Some(transport) = current_transport {
+                    self.transport_manager.reset_retry_count(transport);
+                }
             }
         }
-    }
-
-    fn handle_retry_send_failure(
-        &mut self,
-        entry: &RetryEntry,
-        previous_transport: Option<TransportType>,
-    ) {
-        let _ = self
-            .retry_queue
-            .enqueue(entry.message.clone(), entry.retry_count + 1);
-
-        if let Some(transport) = previous_transport {
-            self.transport_manager.record_retry_failure(transport);
-        }
-    }
-
-    fn handle_retry_send_success(&mut self, entry: &RetryEntry) {
-        let current_transport = self.transport_manager.current_transport();
-        
-        if let Ok(ack_registered_now) = self.ensure_ack_registration(&entry.message) {
-            if !ack_registered_now {
-                self.ack_manager.increment_retry_count(&entry.message.id);
-            }
-        }
-        
-        self.mark_message_sent(
-            &entry.message,
-            current_transport,
-            Some(entry.retry_count.saturating_add(1)),
-        );
-
-        if let Some(transport) = current_transport {
-            self.transport_manager.reset_retry_count(transport);
-        }
-    }
-
-    fn process_timed_out_acks(&mut self) -> Result<()> {
-        let timed_out = self.ack_manager.drain_timed_out();
-        
-        for pending in timed_out {
-            if self.has_exceeded_max_retries(&pending) {
-                self.handle_max_retries_exceeded(&pending);
-                continue;
-            }
-
-            self.handle_timed_out_ack(&pending);
-        }
-
         Ok(())
     }
 
-    fn has_exceeded_max_retries(&self, pending: &PendingAck) -> bool {
-        pending.retry_count >= self.config.reliability.retry.max_retries
+    /// Processes timed out ACKs and handles retry or failure.
+    fn process_timed_out_acks(&mut self) -> Result<()> {
+        let timed_out = self.ack_manager.drain_timed_out();
+        for pending in timed_out {
+            let message_id = pending.message_id.clone();
+
+            if pending.retry_count >= self.config.reliability.retry.max_retries {
+                self.handle_max_retries_exceeded(&message_id, pending.retry_count)?;
+                continue;
+            }
+
+            self.handle_ack_timeout_retry(&message_id, pending.retry_count)?;
+        }
+        Ok(())
     }
 
-    fn handle_max_retries_exceeded(&mut self, pending: &PendingAck) {
-        let message_id = &pending.message_id;
-        
-        self.emit_failure_event(message_id, "Max retries exceeded", pending.retry_count);
+    /// Handles a message that has exceeded maximum retries.
+    fn handle_max_retries_exceeded(
+        &mut self,
+        message_id: &MessageId,
+        retry_count: u32,
+    ) -> Result<()> {
+        let state = lock_shared_state(&self.shared_state)
+            .map_err(|e| {
+                error!("Failed to lock shared state for message failed event: {}", e);
+                e
+            })?;
+        state.emit_event(Event::message_failed(
+            message_id.clone(),
+            "Max retries exceeded".to_string(),
+            retry_count,
+        ));
+        drop(state);
+
         self.ack_manager.remove_ack(message_id);
-        
         if let Some(entry) = self.remove_outbox_entry(message_id) {
             if let Some(transport) = entry.last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
         }
+        Ok(())
     }
 
-    fn handle_timed_out_ack(&mut self, pending: &PendingAck) {
-        let message_id = &pending.message_id;
-
+    /// Handles retry logic for a timed out ACK.
+    fn handle_ack_timeout_retry(
+        &mut self,
+        message_id: &MessageId,
+        retry_count: u32,
+    ) -> Result<()> {
         if let Some(entry) = self.outbox.get(message_id) {
             let message_clone = entry.message.clone();
             let last_transport = entry.last_transport;
 
-            match self.retry_queue.enqueue(message_clone, pending.retry_count) {
+            match self.retry_queue.enqueue(message_clone, retry_count) {
                 Ok(()) => {
                     if let Some(transport) = last_transport {
                         self.transport_manager.record_retry_failure(transport);
                     }
                 }
                 Err(_) => {
-                    self.handle_retry_enqueue_failure(message_id, pending.retry_count);
+                    self.handle_retry_queue_unavailable(message_id, retry_count)?;
                 }
             }
         } else {
-            self.emit_failure_event(
-                message_id,
-                "Message missing from outbox (cannot retry)",
-                pending.retry_count,
-            );
-            self.ack_manager.remove_ack(message_id);
+            self.handle_missing_outbox_entry(message_id, retry_count)?;
         }
+        Ok(())
     }
 
-    fn handle_retry_enqueue_failure(&mut self, message_id: &MessageId, retry_count: u32) {
-        self.emit_failure_event(message_id, "Retry queue unavailable", retry_count);
+    /// Handles the case when retry queue is unavailable.
+    fn handle_retry_queue_unavailable(
+        &mut self,
+        message_id: &MessageId,
+        retry_count: u32,
+    ) -> Result<()> {
+        let state = lock_shared_state(&self.shared_state)
+            .map_err(|e| {
+                error!("Failed to lock shared state for retry queue error event: {}", e);
+                e
+            })?;
+        state.emit_event(Event::message_failed(
+            message_id.clone(),
+            "Retry queue unavailable".to_string(),
+            retry_count,
+        ));
+        drop(state);
+
         self.ack_manager.remove_ack(message_id);
-        
         if let Some(entry) = self.remove_outbox_entry(message_id) {
             if let Some(transport) = entry.last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
         }
+        Ok(())
     }
 
-    fn emit_failure_event(&self, message_id: &MessageId, reason: &str, retry_count: u32) {
-        let state = self.shared_state.lock().unwrap();
+    /// Handles the case when outbox entry is missing.
+    fn handle_missing_outbox_entry(
+        &mut self,
+        message_id: &MessageId,
+        retry_count: u32,
+    ) -> Result<()> {
+        let state = lock_shared_state(&self.shared_state)
+            .map_err(|e| {
+                error!("Failed to lock shared state for missing outbox entry event: {}", e);
+                e
+            })?;
         state.emit_event(Event::message_failed(
             message_id.clone(),
-            reason.to_string(),
+            "Message missing from outbox (cannot retry)".to_string(),
             retry_count,
         ));
+        drop(state);
+
+        self.ack_manager.remove_ack(message_id);
+        Ok(())
     }
 
-    fn cleanup_expired_data(&mut self) {
+    /// Cleans up expired entries from deduplicator, retry queue, and outbox.
+    fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
     }
 
-    fn check_wifi_escalation(&self) {
+    /// Checks for DORS escalation signals and emits events if needed.
+    fn check_dors_escalation(&mut self) -> Result<()> {
         if !self.transport_manager.should_escalate_to_wifi() {
-            return;
+            return Ok(());
         }
 
+        use offline_protocol_transport::TransportType;
         let active_transports = self.transport_manager.get_active_transports();
-        
+
         if !active_transports.contains(&TransportType::WiFiDirect) {
-            let state = self.shared_state.lock().unwrap();
+            let state = lock_shared_state(&self.shared_state)
+                .map_err(|e| {
+                    error!("Failed to lock shared state for WiFi escalation event: {}", e);
+                    e
+                })?;
             state.emit_event(Event::transport_switched(
                 Some(TransportType::BLE),
                 TransportType::WiFiDirect,
                 "DORS suggests escalating to WiFi Direct due to BLE failures".to_string(),
             ));
+            drop(state);
         }
+        Ok(())
     }
 
     /// Gets the current protocol state.
     pub fn state(&self) -> ProtocolState {
-        let state = self.shared_state.lock().unwrap();
-        state.state
+        lock_shared_state(&self.shared_state)
+            .map(|s| s.state)
+            .unwrap_or_else(|e| {
+                error!("Failed to lock shared state in state(): {}", e);
+                ProtocolState::Stopped
+            })
     }
 
     /// Gets the configuration.

@@ -3,14 +3,16 @@
 //! This module provides high-bandwidth peer-to-peer connectivity via Wi-Fi Direct.
 //! This is primarily for Android devices and offers faster data transfer than BLE.
 
-use crate::constants::{DEFAULT_DEVICE_NAME, DEFAULT_GROUP_OWNER_INTENT};
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+/// Maximum Wi-Fi Direct payload size (can handle large messages)
 pub const MAX_PAYLOAD_SIZE: usize = 65535;
+
+/// Connection timeout in seconds
 pub const CONNECTION_TIMEOUT_SECS: u64 = 30;
 
 /// Peer device information for Wi-Fi Direct
@@ -42,9 +44,9 @@ pub struct WifiDirectConfig {
 impl Default for WifiDirectConfig {
     fn default() -> Self {
         Self {
-            device_name: DEFAULT_DEVICE_NAME.to_string(),
+            device_name: "OfflineProtocolDevice".to_string(),
             auto_accept: false,
-            group_owner_intent: DEFAULT_GROUP_OWNER_INTENT,
+            group_owner_intent: 7,
         }
     }
 }
@@ -175,7 +177,7 @@ impl WifiDirectTransport {
                 Ok(())
             }
             Err(e) => {
-                tracing::error!(error = %e, "Error deserializing message");
+                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
                 Ok(()) // Don't fail - just drop bad data
             }
         }
