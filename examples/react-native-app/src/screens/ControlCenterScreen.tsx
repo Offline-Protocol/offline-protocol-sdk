@@ -52,7 +52,7 @@ const TRANSPORT_LABELS: Record<TransportType, string> = {
 
 const AVAILABLE_RELAYS: RelayPriorityInput[] = ['auto', 'low', 'medium', 'high'];
 
-const STEP_CONFIG = {
+const DORS_STEP_CONFIG = {
   hysteresis: 1,
   cooldown: 5,
   retryThreshold: 1,
@@ -338,7 +338,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             label="Switch hysteresis"
             value={dorsConfig.switchHysteresis}
             onChange={(delta) =>
-              handleDorsStep('switchHysteresis', delta * STEP_CONFIG.hysteresis, {
+              handleDorsStep('switchHysteresis', delta * DORS_STEP_CONFIG.hysteresis, {
                 min: 0,
                 max: 100,
               })
@@ -350,7 +350,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             label="Switch cooldown"
             value={dorsConfig.switchCooldownSecs}
             onChange={(delta) =>
-              handleDorsStep('switchCooldownSecs', delta * STEP_CONFIG.cooldown, {
+              handleDorsStep('switchCooldownSecs', delta * DORS_STEP_CONFIG.cooldown, {
                 min: 0,
                 max: 120,
               })
@@ -362,7 +362,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             label="BLE ➜ Wi-Fi retries"
             value={dorsConfig.bleToWifiRetryThreshold}
             onChange={(delta) =>
-              handleDorsStep('bleToWifiRetryThreshold', delta * STEP_CONFIG.retryThreshold, {
+              handleDorsStep('bleToWifiRetryThreshold', delta * DORS_STEP_CONFIG.retryThreshold, {
                 min: 0,
                 max: 5,
               })
@@ -373,7 +373,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             label="Congestion duration"
             value={dorsConfig.congestionDurationSecs}
             onChange={(delta) =>
-              handleDorsStep('congestionDurationSecs', delta * STEP_CONFIG.congestionDuration, {
+              handleDorsStep('congestionDurationSecs', delta * DORS_STEP_CONFIG.congestionDuration, {
                 min: 0,
                 max: 120,
               })
@@ -385,7 +385,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             label="TTL hold window"
             value={dorsConfig.ttlEscalationHoldSecs}
             onChange={(delta) =>
-              handleDorsStep('ttlEscalationHoldSecs', delta * STEP_CONFIG.ttlHold, {
+              handleDorsStep('ttlEscalationHoldSecs', delta * DORS_STEP_CONFIG.ttlHold, {
                 min: 1,
                 max: 180,
               })
@@ -397,7 +397,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             label="History window"
             value={dorsConfig.historyWindowSize}
             onChange={(delta) =>
-              handleDorsStep('historyWindowSize', delta * STEP_CONFIG.historyWindow, {
+              handleDorsStep('historyWindowSize', delta * DORS_STEP_CONFIG.historyWindow, {
                 min: 1,
                 max: 100,
               })
@@ -411,7 +411,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             onChange={(delta) =>
               handleDorsStep(
                 'queueRecoveryRatio',
-                delta * STEP_CONFIG.queueRatio,
+                delta * DORS_STEP_CONFIG.queueRatio,
                 { min: 0, max: 1, precision: 2 }
               )
             }

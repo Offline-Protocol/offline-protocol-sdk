@@ -1,10 +1,8 @@
 //! File transfer with chunking and reassembly.
 
+use crate::constants::DEFAULT_CHUNK_SIZE;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-/// Default chunk size for file transfers (32 KB).
-pub const DEFAULT_CHUNK_SIZE: usize = 32 * 1024;
 
 /// File transfer configuration.
 #[derive(Debug, Clone)]

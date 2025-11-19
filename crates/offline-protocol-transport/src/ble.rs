@@ -12,29 +12,12 @@ use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
+use crate::constants::{
+    BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES,
+    BLE_MAX_FRAGMENT_COUNT, BLE_MAX_FRAGMENT_SIZE,
+    FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC, FRAGMENT_VERSION,
+};
 use std::time::{Duration as StdDuration, SystemTime};
-
-/// UUID for the Offline Protocol GATT service
-pub const SERVICE_UUID: &str = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
-
-/// UUID for the message characteristic (write/notify)
-pub const MESSAGE_CHAR_UUID: &str = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
-
-/// UUID for the device ID characteristic (read)
-pub const DEVICE_ID_CHAR_UUID: &str = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
-
-/// Maximum BLE payload size (MTU - overhead)
-/// Typical BLE MTU ranges from 23-251 bytes, we use conservative 185 bytes per fragment
-pub const MAX_FRAGMENT_SIZE: usize = 185;
-
-/// Fragment timeout - if fragments aren't all received within 30s, discard
-pub const FRAGMENT_TIMEOUT_SECS: u64 = 30;
-
-/// Maximum number of concurrent fragment assemblies we buffer before evicting the oldest.
-pub const MAX_FRAGMENT_ASSEMBLIES: usize = 64;
-
-/// Maximum allowed fragments for a single BLE message to avoid memory blow-up.
-pub const MAX_FRAGMENT_COUNT: usize = 512;
 
 /// Peer device information
 #[derive(Debug, Clone)]
@@ -51,9 +34,6 @@ pub struct PeerDevice {
     pub connected: bool,
 }
 
-const FRAGMENT_MAGIC: [u8; 2] = *b"OP"; // Offline Protocol
-const FRAGMENT_VERSION: u8 = 1;
-const FRAGMENT_HEADER_FIXED: usize = 2 /*magic*/ + 1 /*version*/ + 1 /*id_len*/ + 2 /*index*/ + 2 /*total*/ + 2 /*data_len*/;
 
 #[derive(Debug, Clone)]
 struct DecodedFragment {
@@ -90,6 +70,7 @@ pub struct BleTransport {
     /// Send queue
     send_queue: Arc<Mutex<VecDeque<(String, Message)>>>,
     /// Pending serialized fragments waiting to be delivered
+    #[allow(clippy::type_complexity)]
     pending_fragments: Arc<Mutex<VecDeque<(String, Vec<u8>)>>>,
     /// Transport metrics
     metrics: Arc<Mutex<TransportMetrics>>,
@@ -114,7 +95,7 @@ impl BleTransport {
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             platform_handle: Arc::new(Mutex::new(None)),
             fragment_buffers: Arc::new(Mutex::new(HashMap::new())),
-            mtu_size: Arc::new(Mutex::new(MAX_FRAGMENT_SIZE)),
+            mtu_size: Arc::new(Mutex::new(BLE_MAX_FRAGMENT_SIZE)),
         }
     }
 
@@ -239,7 +220,7 @@ impl BleTransport {
             if now
                 .duration_since(assembly.started_at)
                 .unwrap_or_else(|_| StdDuration::from_secs(0))
-                > StdDuration::from_secs(FRAGMENT_TIMEOUT_SECS)
+                > StdDuration::from_secs(BLE_FRAGMENT_TIMEOUT_SECS)
             {
                 expired.push(message_id.clone());
             }
@@ -323,7 +304,7 @@ impl BleTransport {
         if total_fragments == 0 {
             return Err(crate::Error::Other("Empty message".to_string()));
         }
-        if total_fragments > MAX_FRAGMENT_COUNT {
+        if total_fragments > BLE_MAX_FRAGMENT_COUNT {
             return Err(crate::Error::Other(
                 "Message would require too many BLE fragments".to_string(),
             ));
@@ -368,7 +349,7 @@ impl BleTransport {
             let now = SystemTime::now();
 
             if !buffers.contains_key(&fragment.message_id)
-                && buffers.len() >= MAX_FRAGMENT_ASSEMBLIES
+                && buffers.len() >= BLE_MAX_FRAGMENT_ASSEMBLIES
             {
                 if let Some(oldest_id) = buffers
                     .iter()
@@ -560,7 +541,7 @@ fn decode_fragment(fragment_data: &[u8]) -> Result<DecodedFragment> {
         return Err(crate::Error::Other("Fragment too short".to_string()));
     }
 
-    if &fragment_data[0..2] != FRAGMENT_MAGIC {
+    if fragment_data[0..2] != FRAGMENT_MAGIC {
         return Err(crate::Error::Other("Invalid fragment magic".to_string()));
     }
 
@@ -770,7 +751,7 @@ mod tests {
         let fragments = transport.fragment_message(&message).unwrap();
         assert!(fragments.len() > 1); // should fragment
         for fragment in &fragments {
-            assert!(fragment.len() <= MAX_FRAGMENT_SIZE);
+            assert!(fragment.len() <= BLE_MAX_FRAGMENT_SIZE);
         }
 
         let mut reconstructed = None;

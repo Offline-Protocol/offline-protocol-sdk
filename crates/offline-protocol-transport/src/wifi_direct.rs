@@ -3,17 +3,12 @@
 //! This module provides high-bandwidth peer-to-peer connectivity via Wi-Fi Direct.
 //! This is primarily for Android devices and offers faster data transfer than BLE.
 
+// Constants are defined but not used in Rust code (used in native Android code)
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-
-/// Maximum Wi-Fi Direct payload size (can handle large messages)
-pub const MAX_PAYLOAD_SIZE: usize = 65535;
-
-/// Connection timeout in seconds
-pub const CONNECTION_TIMEOUT_SECS: u64 = 30;
 
 /// Peer device information for Wi-Fi Direct
 #[derive(Debug, Clone)]

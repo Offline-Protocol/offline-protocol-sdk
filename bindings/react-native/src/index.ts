@@ -4,7 +4,7 @@
  * @packageDocumentation
  */
 
-import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription } from 'react-native';
+import { NativeModules, NativeEventEmitter, EmitterSubscription } from 'react-native';
 import type {
   ProtocolConfig,
   SendMessageParams,
@@ -26,14 +26,10 @@ import type {
   DedupConfig,
 } from './types';
 import { MessagePriority } from './types';
+import { LINKING_ERROR } from './constants';
 
 export * from './types';
-
-const LINKING_ERROR =
-  `The package '@offlineprotocol/react-native' doesn't seem to be linked. Make sure: \n\n` +
-  Platform.select({ ios: "- You have run 'pod install'\n", default: '' }) +
-  '- You rebuilt the app after installing the package\n' +
-  '- You are not using Expo Go\n';
+export * from './constants';
 
 const OfflineProtocolNativeModule = NativeModules.OfflineProtocolModule
   ? NativeModules.OfflineProtocolModule

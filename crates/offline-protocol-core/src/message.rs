@@ -17,6 +17,7 @@ impl MessageId {
     }
 
     /// Creates a message ID from a string representation.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(id: &str) -> crate::Result<Self> {
         let uuid = Uuid::parse_str(id)
             .map_err(|e| crate::Error::InvalidMessage(format!("Invalid message id: {}", e)))?;

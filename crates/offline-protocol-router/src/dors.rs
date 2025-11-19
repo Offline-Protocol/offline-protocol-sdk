@@ -640,7 +640,7 @@ impl TransportSelector {
         let history = self
             .transport_history
             .entry(transport_type)
-            .or_insert_with(TransportHistory::default);
+            .or_default();
 
         history.push_queue_depth(metrics.queue_depth, window);
         history.push_congestion(metrics.congestion.clamp(0.0, 1.0), window);

@@ -1,5 +1,8 @@
 //! Main protocol engine.
 
+use crate::constants::{
+    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES,
+};
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
@@ -65,18 +68,6 @@ struct OutboxEntry {
     last_transport: Option<TransportType>,
 }
 
-/// Metadata key for ACK messages indicating which message ID the ACK is for.
-const ACK_FOR_KEY: &str = "ack_for";
-
-/// Metadata key for ACK messages indicating the hop count.
-const ACK_HOP_COUNT_KEY: &str = "ack_hop_count";
-
-/// Metadata key for ACK messages indicating the transport used.
-const ACK_TRANSPORT_KEY: &str = "ack_transport";
-
-/// Maximum number of entries in the outbox before evicting oldest entries.
-/// This prevents unbounded memory growth when messages cannot be delivered.
-const MAX_OUTBOX_ENTRIES: usize = 500;
 
 /// Main entry point for the Offline Protocol SDK.
 ///
@@ -299,6 +290,91 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// Creates a new message from the given parameters.
+    fn create_message(
+        &self,
+        recipient: impl Into<String>,
+        content: impl Into<String>,
+        priority: Option<MessagePriority>,
+    ) -> Result<Message> {
+        let sender = UserId::new(&self.config.user_id)?;
+        let recipient = UserId::new(recipient)?;
+        let app_id = AppId::new(&self.config.app_id)?;
+
+        Ok(Message::builder(sender, recipient, app_id)
+            .content(content)
+            .priority(priority.unwrap_or(MessagePriority::Medium))
+            .ttl(TTL::new(self.config.initial_ttl)?)
+            .build())
+    }
+
+    /// Handles successful message send.
+    fn handle_send_success(
+        &mut self,
+        message: &Message,
+        transport: Option<TransportType>,
+    ) -> Result<()> {
+        self.mark_message_sent(message, transport, Some(1));
+        self.ensure_ack_registration(message)?;
+        Ok(())
+    }
+
+    /// Handles failed message send by persisting to outbox and scheduling retry.
+    fn handle_send_failure(
+        &mut self,
+        message: &Message,
+        transport: Option<TransportType>,
+    ) -> Result<()> {
+        self.ensure_outbox_entry(message);
+        self.retry_queue.enqueue(message.clone(), 0)?;
+
+        if let Some(transport) = transport {
+            self.transport_manager.record_retry_failure(transport);
+        }
+
+        warn!(
+            message_id = %message.id,
+            "Deferred message due to send error"
+        );
+        Ok(())
+    }
+
+    /// Emits a transport switched event if the transport changed.
+    fn emit_transport_switch_event(
+        &self,
+        previous_transport: Option<TransportType>,
+        current_transport: Option<TransportType>,
+    ) -> Result<()> {
+        if current_transport != previous_transport {
+            if let Some(new_transport) = current_transport {
+                let state = lock_shared_state(&self.shared_state)
+                    .map_err(|e| {
+                        error!("Failed to lock shared state for transport switch event: {}", e);
+                        e
+                    })?;
+                state.emit_event(Event::transport_switched(
+                    previous_transport,
+                    new_transport,
+                    "DORS selected better transport".to_string(),
+                ));
+                drop(state);
+            }
+        }
+        Ok(())
+    }
+
+    /// Emits a message sent event.
+    fn emit_message_sent_event(&self, message: &Message) -> Result<()> {
+        let state = lock_shared_state(&self.shared_state)
+            .map_err(|e| {
+                error!("Failed to lock shared state for message sent event: {}", e);
+                e
+            })?;
+        state.emit_event(Event::message_sent(message));
+        drop(state);
+        Ok(())
+    }
+
     /// Sends a message.
     ///
     /// # Arguments
@@ -325,16 +401,7 @@ impl OfflineProtocol {
         }
 
         // Create message
-        let sender = UserId::new(&self.config.user_id)?;
-        let recipient = UserId::new(recipient)?;
-        let app_id = AppId::new(&self.config.app_id)?;
-
-        let message = Message::builder(sender, recipient, app_id)
-            .content(content)
-            .priority(priority.unwrap_or(MessagePriority::Medium))
-            .ttl(TTL::new(self.config.initial_ttl)?)
-            .build();
-
+        let message = self.create_message(recipient, content, priority)?;
         let message_id = message.id.clone();
 
         // Check for duplicates
@@ -352,57 +419,24 @@ impl OfflineProtocol {
         let send_result = self.transport_manager.send(&message);
         let current_transport = self.transport_manager.current_transport();
 
+        // Handle send result
         match send_result {
             Ok(()) => {
-                self.mark_message_sent(&message, current_transport, Some(1));
-                self.ensure_ack_registration(&message)?;
+                self.handle_send_success(&message, current_transport)?;
             }
             Err(err) => {
-                // Persist message to outbox and schedule retry
-                self.ensure_outbox_entry(&message);
-                if let Err(enqueue_err) = self.retry_queue.enqueue(message.clone(), 0) {
-                    return Err(enqueue_err.into());
-                }
-
-                if let Some(transport) = current_transport.or(previous_transport) {
-                    self.transport_manager.record_retry_failure(transport);
-                }
-
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
                 warn!(
                     message_id = %message.id,
                     error = %err,
-                    "Deferred message due to send error"
+                    "Send failed, message deferred"
                 );
             }
         }
 
-        // Check if transport switched
-        if current_transport != previous_transport {
-            if let Some(new_transport) = current_transport {
-                let state = lock_shared_state(&self.shared_state)
-                    .map_err(|e| {
-                        error!("Failed to lock shared state for transport switch event: {}", e);
-                        e
-                    })?;
-                state.emit_event(Event::transport_switched(
-                    previous_transport,
-                    new_transport,
-                    "DORS selected better transport".to_string(),
-                ));
-                drop(state);
-            }
-        }
-
-        // Emit MessageSent event
-        {
-            let state = lock_shared_state(&self.shared_state)
-                .map_err(|e| {
-                    error!("Failed to lock shared state for message sent event: {}", e);
-                    e
-                })?;
-            state.emit_event(Event::message_sent(&message));
-            drop(state);
-        }
+        // Emit events
+        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        self.emit_message_sent_event(&message)?;
 
         Ok(message_id)
     }
@@ -413,12 +447,9 @@ impl OfflineProtocol {
     ///
     /// Returns `Some(Message)` if a message is available, `None` otherwise.
     pub fn receive_message(&mut self) -> Option<Message> {
-        let mut state = match lock_shared_state(&self.shared_state) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to lock shared state in receive_message: {}", e);
-                return None;
-            }
+        let Ok(mut state) = lock_shared_state(&self.shared_state) else {
+            error!("Failed to lock shared state in receive_message");
+            return None;
         };
 
         if !state.received_messages.is_empty() {
@@ -430,7 +461,7 @@ impl OfflineProtocol {
         loop {
             match self.transport_manager.receive() {
                 Ok(Some((transport_used, message))) => {
-                    if let Some(_) = message.metadata.get(ACK_FOR_KEY) {
+                    if message.metadata.contains_key(ACK_FOR_KEY) {
                         self.handle_ack_message(&message);
                         continue;
                     }
@@ -461,12 +492,10 @@ impl OfflineProtocol {
                         timestamp: message.timestamp.as_millis(),
                     };
 
-                    let state = lock_shared_state(&self.shared_state)
-                        .map_err(|e| {
-                            error!("Failed to lock shared state for message received event: {}", e);
-                            e
-                        })
-                        .ok()?;
+                    let Ok(state) = lock_shared_state(&self.shared_state) else {
+                        error!("Failed to lock shared state for message received event");
+                        return None;
+                    };
                     state.emit_event(event);
                     drop(state);
 
@@ -490,12 +519,9 @@ impl OfflineProtocol {
     where
         F: Fn(Event) + Send + Sync + 'static,
     {
-        let mut state = match lock_shared_state(&self.shared_state) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to lock shared state in on_event: {}", e);
-                return;
-            }
+        let Ok(mut state) = lock_shared_state(&self.shared_state) else {
+            error!("Failed to lock shared state in on_event");
+            return;
         };
         state.event_handlers.push(Arc::new(handler));
     }
@@ -707,12 +733,11 @@ impl OfflineProtocol {
 
     /// Gets the current protocol state.
     pub fn state(&self) -> ProtocolState {
-        lock_shared_state(&self.shared_state)
-            .map(|s| s.state)
-            .unwrap_or_else(|e| {
-                error!("Failed to lock shared state in state(): {}", e);
-                ProtocolState::Stopped
-            })
+        let Ok(state) = lock_shared_state(&self.shared_state) else {
+            error!("Failed to lock shared state in state()");
+            return ProtocolState::Stopped;
+        };
+        state.state
     }
 
     /// Gets the configuration.

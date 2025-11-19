@@ -11,6 +11,11 @@ import {
 } from '@offlineprotocol/react-native';
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
 import { generateUserId } from '../utils/user';
+import {
+  PRESENCE_MESSAGE_PREFIX,
+  PRESENCE_REBROADCAST_INTERVAL_MS,
+  PROCESSED_MESSAGE_RETENTION_MS,
+} from '../constants';
 import type {
   DorsRuntimeConfig,
   FileTransferState,
@@ -54,10 +59,6 @@ interface PeerProfile {
   name: string;
   updatedAt: number;
 }
-
-const PRESENCE_MESSAGE_PREFIX = '__presence__::';
-const PRESENCE_REBROADCAST_INTERVAL_MS = 60 * 1000;
-const PROCESSED_MESSAGE_RETENTION_MS = 10 * 60 * 1000;
 
 interface ProtocolContextType {
   // Core state

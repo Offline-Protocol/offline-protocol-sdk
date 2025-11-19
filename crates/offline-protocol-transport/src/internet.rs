@@ -3,20 +3,15 @@
 //! This module provides connectivity via standard internet protocols.
 //! It supports both direct TCP connections and WebSocket for web compatibility.
 
+use crate::constants::{
+    INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
+    INTERNET_HEARTBEAT_INTERVAL_SECS,
+};
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-/// Default server address
-pub const DEFAULT_SERVER_ADDRESS: &str = "ws://localhost:8080";
-
-/// Connection timeout in seconds
-pub const CONNECTION_TIMEOUT_SECS: u64 = 30;
-
-/// Heartbeat interval in seconds
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 /// Internet transport configuration
 #[derive(Debug, Clone)]
@@ -36,8 +31,8 @@ pub struct InternetConfig {
 impl Default for InternetConfig {
     fn default() -> Self {
         Self {
-            server_address: DEFAULT_SERVER_ADDRESS.to_string(),
-            connection_timeout: Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+            server_address: INTERNET_DEFAULT_SERVER_ADDRESS.to_string(),
+            connection_timeout: Duration::from_secs(INTERNET_CONNECTION_TIMEOUT_SECS),
             auto_reconnect: true,
             reconnect_delay: Duration::from_secs(5),
             max_reconnect_attempts: 0,
@@ -199,7 +194,7 @@ impl InternetTransport {
     pub fn needs_heartbeat(&self) -> bool {
         let last = *self.last_heartbeat.lock().unwrap();
         match last {
-            Some(instant) => instant.elapsed() >= Duration::from_secs(HEARTBEAT_INTERVAL_SECS),
+            Some(instant) => instant.elapsed() >= Duration::from_secs(INTERNET_HEARTBEAT_INTERVAL_SECS),
             None => true,
         }
     }

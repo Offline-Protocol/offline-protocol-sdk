@@ -4,6 +4,9 @@
 //! and uses DORS (Dynamic Offline Relay Switch) to select the optimal transport
 //! for each message.
 
+use crate::constants::{
+    HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD,
+};
 use crate::{Error, Result};
 use offline_protocol_core::Message;
 use offline_protocol_router::TransportSelector;
@@ -28,14 +31,6 @@ pub struct TransportManager {
     observations: HashMap<TransportType, ObservedStats>,
 }
 
-/// Threshold for compacting observed stats to prevent unbounded growth.
-const OBSERVED_STATS_COMPACT_THRESHOLD: u32 = 10_000;
-
-/// EMA (Exponential Moving Average) alpha for latency tracking.
-const LATENCY_EMA_ALPHA: f32 = 0.3;
-
-/// EMA alpha for hop count tracking.
-const HOP_COUNT_EMA_ALPHA: f32 = 0.2;
 
 #[derive(Debug, Default, Clone)]
 struct ObservedStats {

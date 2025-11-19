@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Platform } from 'react-native';
 import {
   OfflineProtocol,
@@ -6,25 +6,17 @@ import {
   ProtocolEvent,
   MessagePriority,
   DiagnosticEvent,
-  TransportType,
-  InternetTransportConfig,
-  WifiDirectTransportConfig,
   FileProgressEvent,
   FileReceivedEvent,
-  SendFileParams,
+  MAX_EVENT_HISTORY,
+  PROTOCOL_START_DELAY_MS,
 } from '@offlineprotocol/react-native';
 import { requestBluetoothPermissions, showPermissionRationale, getPermissionDeniedMessage } from '../utils/permissions';
 import { ensureBluetoothEnabled } from '../utils/bluetooth';
 import { deriveInsights, type DerivedInsights } from '../utils/deriveInsights';
-import {
-  DEFAULT_DORS_CONFIG,
-  DorsRuntimeConfig,
-  FileTransferState,
-  NativeRelayPriority,
-  RelayPriorityInput,
-  TransportMetricsSnapshot,
-  normalizeRelayPriority,
-} from '../types/runtime';
+import { useTransportManagement } from './useTransportManagement';
+import { useFileTransfer } from './useFileTransfer';
+import { useRuntimeState } from './useRuntimeState';
 
 interface UseOfflineProtocolReturn {
   protocol: OfflineProtocol | null;
@@ -38,23 +30,26 @@ interface UseOfflineProtocolReturn {
   sendMessage: (recipient: string, content: string, priority: MessagePriority) => Promise<string | null>;
   clearEvents: () => void;
   requestPermissions: () => Promise<boolean>;
-  activeTransports: TransportType[];
-  batteryLevel: number | null;
-  relayPriority: NativeRelayPriority;
-  dorsConfig: DorsRuntimeConfig;
-  forcedTransport: TransportType | null;
-  fileTransfers: FileTransferState[];
-  refreshRuntimeState: () => Promise<void>;
-  enableTransport: (type: TransportType, config?: InternetTransportConfig | WifiDirectTransportConfig) => Promise<boolean>;
-  disableTransport: (type: TransportType) => Promise<boolean>;
-  forceTransport: (type: TransportType) => Promise<boolean>;
-  releaseTransportLock: () => Promise<void>;
-  setBatteryLevel: (level: number) => Promise<boolean>;
-  setRelayPriority: (priority: RelayPriorityInput) => Promise<boolean>;
-  updateDorsConfig: (partial: Partial<DorsRuntimeConfig>) => Promise<boolean>;
-  getTransportMetrics: (type: TransportType) => Promise<TransportMetricsSnapshot | null>;
-  sendFile: (params: SendFileParams) => Promise<string | null>;
-  cancelFileTransfer: (fileId: string) => Promise<boolean>;
+  // Re-export from useTransportManagement
+  activeTransports: ReturnType<typeof useTransportManagement>['activeTransports'];
+  forcedTransport: ReturnType<typeof useTransportManagement>['forcedTransport'];
+  enableTransport: ReturnType<typeof useTransportManagement>['enableTransport'];
+  disableTransport: ReturnType<typeof useTransportManagement>['disableTransport'];
+  forceTransport: ReturnType<typeof useTransportManagement>['forceTransport'];
+  releaseTransportLock: ReturnType<typeof useTransportManagement>['releaseTransportLock'];
+  // Re-export from useRuntimeState
+  batteryLevel: ReturnType<typeof useRuntimeState>['batteryLevel'];
+  relayPriority: ReturnType<typeof useRuntimeState>['relayPriority'];
+  dorsConfig: ReturnType<typeof useRuntimeState>['dorsConfig'];
+  setBatteryLevel: ReturnType<typeof useRuntimeState>['setBatteryLevel'];
+  setRelayPriority: ReturnType<typeof useRuntimeState>['setRelayPriority'];
+  updateDorsConfig: ReturnType<typeof useRuntimeState>['updateDorsConfig'];
+  getTransportMetrics: ReturnType<typeof useRuntimeState>['getTransportMetrics'];
+  refreshRuntimeState: ReturnType<typeof useRuntimeState>['refreshRuntimeState'];
+  // Re-export from useFileTransfer
+  fileTransfers: ReturnType<typeof useFileTransfer>['fileTransfers'];
+  sendFile: ReturnType<typeof useFileTransfer>['sendFile'];
+  cancelFileTransfer: ReturnType<typeof useFileTransfer>['cancelFileTransfer'];
 }
 
 export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolReturn {
@@ -64,52 +59,20 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
   const [events, setEvents] = useState<ProtocolEvent[]>([]);
   const [insights, setInsights] = useState<DerivedInsights>(() => deriveInsights([]));
   const [permissionsGranted, setPermissionsGranted] = useState(false);
-  const [activeTransports, setActiveTransports] = useState<TransportType[]>([]);
-  const [batteryLevel, setBatteryLevelState] = useState<number | null>(null);
-  const [relayPriority, setRelayPriorityState] = useState<NativeRelayPriority>('medium');
-  const [dorsConfigState, setDorsConfigState] = useState<DorsRuntimeConfig>(DEFAULT_DORS_CONFIG);
-  const [forcedTransport, setForcedTransport] = useState<TransportType | null>(null);
-  const [fileTransfers, setFileTransfers] = useState<Record<string, FileTransferState>>({});
   const protocolRef = useRef<OfflineProtocol | null>(null);
 
+  // Use extracted hooks for specific concerns
+  const transportManagement = useTransportManagement(protocol);
+  const runtimeState = useRuntimeState(protocol);
+  const fileTransfer = useFileTransfer(protocol, isStarted);
+
+  // Combined refresh function that refreshes all runtime state
   const refreshRuntimeState = useCallback(async () => {
-    const instance = protocolRef.current;
-    if (!instance) {
-      console.warn('refreshRuntimeState: Protocol instance not available');
-      return;
-    }
-
-    try {
-      const transports = await instance.getActiveTransports();
-      setActiveTransports(transports);
-    } catch (err) {
-      console.warn('Failed to get active transports', err);
-    }
-
-    try {
-      const level = await instance.getBatteryLevel();
-      setBatteryLevelState(level ?? null);
-    } catch (err) {
-      console.warn('Failed to get battery level', err);
-    }
-
-    try {
-      const priority = await instance.getRelayPriority();
-      const normalized = normalizeRelayPriority(priority);
-      if (normalized) {
-        setRelayPriorityState(normalized);
-      }
-    } catch (err) {
-      console.warn('Failed to get relay priority', err);
-    }
-
-    try {
-      const dors = await instance.getDorsConfig();
-      setDorsConfigState(dors);
-    } catch (err) {
-      console.warn('Failed to get DORS config', err);
-    }
-  }, []);
+    await Promise.all([
+      transportManagement.refreshTransports(),
+      runtimeState.refreshRuntimeState(),
+    ]);
+  }, [transportManagement, runtimeState]);
 
   // Initialize protocol instance - delayed until permissions are checked
   const initializeProtocol = useCallback(() => {
@@ -174,52 +137,23 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
         }
 
         if (annotatedEvent.type === 'file_progress') {
-          const progressEvent = annotatedEvent as FileProgressEvent;
-          setFileTransfers((prev) => {
-            const existing = prev[progressEvent.file_id];
-            const nextState: FileTransferState = {
-              fileId: progressEvent.file_id,
-              fileName: existing?.fileName ?? progressEvent.file_id,
-              direction: existing?.direction ?? 'outbound',
-              percentage: progressEvent.percentage,
-              chunksCompleted: progressEvent.chunks_sent,
-              totalChunks: progressEvent.total_chunks,
-              status: progressEvent.percentage >= 100 ? 'completed' : 'pending',
-              recipient: existing?.recipient,
-              sender: existing?.sender,
-              lastUpdated: Date.now(),
-            };
-            return {
-              ...prev,
-              [progressEvent.file_id]: nextState,
-            };
-          });
+          fileTransfer.handleFileProgress(annotatedEvent as FileProgressEvent);
         } else if (annotatedEvent.type === 'file_received') {
-          const receivedEvent = annotatedEvent as FileReceivedEvent;
-          setFileTransfers((prev) => ({
-            ...prev,
-            [receivedEvent.file_id]: {
-              fileId: receivedEvent.file_id,
-              fileName: receivedEvent.file_name,
-              direction: 'inbound',
-              percentage: 100,
-              chunksCompleted: prev[receivedEvent.file_id]?.chunksCompleted ?? 0,
-              totalChunks: prev[receivedEvent.file_id]?.totalChunks ?? 0,
-              status: 'completed',
-              sender: receivedEvent.sender,
-              lastUpdated: Date.now(),
-            },
-          }));
+          fileTransfer.handleFileReceived(annotatedEvent as FileReceivedEvent);
         }
 
         setEvents((prev) => {
-          const nextEvents = [annotatedEvent, ...prev].slice(0, 200);
+          const nextEvents = [annotatedEvent, ...prev].slice(0, MAX_EVENT_HISTORY);
           setInsights(deriveInsights(nextEvents));
           return nextEvents;
         });
       });
 
-      refreshRuntimeState().catch((err) => {
+      // Refresh runtime state after initialization
+      transportManagement.refreshTransports().catch((err) => {
+        console.warn('Failed to refresh transports after initialization', err);
+      });
+      runtimeState.refreshRuntimeState().catch((err) => {
         console.warn('Failed to refresh runtime state after initialization', err);
       });
     } catch (err) {
@@ -325,9 +259,7 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       // Give the protocol a moment to fully initialize before refreshing state
       setTimeout(async () => {
         await refreshRuntimeState();
-      }, 500);
-      
-      setForcedTransport(null);
+      }, PROTOCOL_START_DELAY_MS);
       console.log('Protocol started successfully');
       setIsStarted(true);
       setError(null);
@@ -349,246 +281,13 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       await protocolRef.current.stop();
       setIsStarted(false);
       setError(null);
-      setActiveTransports([]);
-      setForcedTransport(null);
+      await transportManagement.refreshTransports();
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to stop protocol';
       setError(errorMessage);
     }
   }, []);
 
-  const enableTransport = useCallback(
-    async (type: TransportType, config?: InternetTransportConfig | WifiDirectTransportConfig): Promise<boolean> => {
-      if (!protocolRef.current) {
-        setError('Protocol not initialized');
-        return false;
-      }
-      try {
-        await protocolRef.current.enableTransport(type, config);
-        await refreshRuntimeState();
-        return true;
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error ? err.message : `Failed to enable ${type} transport`;
-        setError(errorMessage);
-        return false;
-      }
-    },
-    [refreshRuntimeState]
-  );
-
-  const disableTransport = useCallback(
-    async (type: TransportType): Promise<boolean> => {
-      if (!protocolRef.current) {
-        setError('Protocol not initialized');
-        return false;
-      }
-      try {
-        await protocolRef.current.disableTransport(type);
-        await refreshRuntimeState();
-        return true;
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error ? err.message : `Failed to disable ${type} transport`;
-        setError(errorMessage);
-        return false;
-      }
-    },
-    [refreshRuntimeState]
-  );
-
-  const forceTransport = useCallback(async (type: TransportType): Promise<boolean> => {
-    if (!protocolRef.current) {
-      setError('Protocol not initialized');
-      return false;
-    }
-    try {
-      await protocolRef.current.forceTransport(type);
-      setForcedTransport(type);
-      return true;
-    } catch (err) {
-      const errorMessage =
-        err instanceof Error ? err.message : `Failed to force ${type} transport`;
-      setError(errorMessage);
-      return false;
-    }
-  }, []);
-
-  const releaseTransportLock = useCallback(async (): Promise<void> => {
-    if (!protocolRef.current) {
-      setError('Protocol not initialized');
-      return;
-    }
-    try {
-      await protocolRef.current.releaseTransportLock();
-      setForcedTransport(null);
-    } catch (err) {
-      const errorMessage =
-        err instanceof Error ? err.message : 'Failed to release transport lock';
-      setError(errorMessage);
-    }
-  }, []);
-
-  const setBatteryLevel = useCallback(async (level: number): Promise<boolean> => {
-    const clamped = Math.max(0, Math.min(100, Math.round(level)));
-    if (!protocolRef.current) {
-      setError('Protocol not initialized');
-      return false;
-    }
-    try {
-      await protocolRef.current.setBatteryLevel(clamped);
-      setBatteryLevelState(clamped);
-      return true;
-    } catch (err) {
-      const errorMessage =
-        err instanceof Error ? err.message : 'Failed to set battery level';
-      setError(errorMessage);
-      return false;
-    }
-  }, []);
-
-  const setRelayPriority = useCallback(
-    async (priority: RelayPriorityInput): Promise<boolean> => {
-      if (!protocolRef.current) {
-        setError('Protocol not initialized');
-        return false;
-      }
-      const normalized = normalizeRelayPriority(priority);
-      if (!normalized) {
-        setError('Invalid relay priority');
-        return false;
-      }
-      try {
-        await protocolRef.current.setRelayPriority(normalized);
-        setRelayPriorityState(normalized);
-        return true;
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error ? err.message : 'Failed to set relay priority';
-        setError(errorMessage);
-        return false;
-      }
-    },
-    []
-  );
-
-  const updateDorsConfig = useCallback(
-    async (partial: Partial<DorsRuntimeConfig>): Promise<boolean> => {
-      if (!protocolRef.current) {
-        setError('Protocol not initialized');
-        return false;
-      }
-      const nextConfig = { ...dorsConfigState, ...partial };
-      try {
-        await protocolRef.current.updateDorsConfig(nextConfig);
-        setDorsConfigState(nextConfig);
-        return true;
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error ? err.message : 'Failed to update DORS configuration';
-        setError(errorMessage);
-        return false;
-      }
-    },
-    [dorsConfigState]
-  );
-
-  const getTransportMetrics = useCallback(
-    async (type: TransportType): Promise<TransportMetricsSnapshot | null> => {
-      if (!protocolRef.current) {
-        setError('Protocol not initialized');
-        return null;
-      }
-      try {
-        return await protocolRef.current.getTransportMetrics(type);
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error ? err.message : 'Failed to get transport metrics';
-        setError(errorMessage);
-        return null;
-      }
-    },
-    []
-  );
-
-  const sendFile = useCallback(
-    async (params: SendFileParams): Promise<string | null> => {
-      if (!protocolRef.current) {
-        setError('Protocol not initialized');
-        return null;
-      }
-      if (!isStarted) {
-        setError('Protocol not started');
-        return null;
-      }
-      try {
-        const fileId = await protocolRef.current.sendFile(params);
-        const fileName =
-          params.fileName ?? params.filePath.split(/[\\/]/).pop() ?? params.filePath;
-        setFileTransfers((prev) => ({
-          ...prev,
-          [fileId]: {
-            fileId,
-            fileName,
-            direction: 'outbound',
-            percentage: 0,
-            chunksCompleted: 0,
-            totalChunks: 0,
-            status: 'pending',
-            recipient: params.recipient,
-            lastUpdated: Date.now(),
-          },
-        }));
-        setError(null);
-        return fileId;
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error ? err.message : 'Failed to send file';
-        setError(errorMessage);
-        return null;
-      }
-    },
-    [isStarted]
-  );
-
-  const cancelFileTransfer = useCallback(
-    async (fileId: string): Promise<boolean> => {
-      if (!protocolRef.current) {
-        setError('Protocol not initialized');
-        return false;
-      }
-      try {
-        const result = await protocolRef.current.cancelFileTransfer(fileId);
-        if (result) {
-          setFileTransfers((prev) => {
-            const existing = prev[fileId];
-            if (!existing) {
-              return prev;
-            }
-            return {
-              ...prev,
-              [fileId]: {
-                ...existing,
-                status: 'cancelled',
-                lastUpdated: Date.now(),
-              },
-            };
-          });
-        }
-        return result;
-      } catch (err) {
-        const errorMessage =
-          err instanceof Error ? err.message : 'Failed to cancel file transfer';
-        setError(errorMessage);
-        return false;
-      }
-    },
-    []
-  );
-
-  const fileTransferList = useMemo(() => {
-    return Object.values(fileTransfers).sort((a, b) => b.lastUpdated - a.lastUpdated);
-  }, [fileTransfers]);
   const sendMessage = useCallback(
     async (recipient: string, content: string, priority: MessagePriority): Promise<string | null> => {
       if (!protocolRef.current) {
@@ -630,28 +329,29 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
     events,
     insights,
     permissionsGranted,
-    activeTransports,
-    batteryLevel,
-    relayPriority,
-    dorsConfig: dorsConfigState,
-    forcedTransport,
-    fileTransfers: fileTransferList,
-    refreshRuntimeState,
     start,
     stop,
-    enableTransport,
-    disableTransport,
-    forceTransport,
-    releaseTransportLock,
-    setBatteryLevel,
-    setRelayPriority,
-    updateDorsConfig,
-    getTransportMetrics,
     sendMessage,
-    sendFile,
-    cancelFileTransfer,
     clearEvents,
     requestPermissions,
+    // Re-export from extracted hooks
+    activeTransports: transportManagement.activeTransports,
+    forcedTransport: transportManagement.forcedTransport,
+    enableTransport: transportManagement.enableTransport,
+    disableTransport: transportManagement.disableTransport,
+    forceTransport: transportManagement.forceTransport,
+    releaseTransportLock: transportManagement.releaseTransportLock,
+    batteryLevel: runtimeState.batteryLevel,
+    relayPriority: runtimeState.relayPriority,
+    dorsConfig: runtimeState.dorsConfig,
+    setBatteryLevel: runtimeState.setBatteryLevel,
+    setRelayPriority: runtimeState.setRelayPriority,
+    updateDorsConfig: runtimeState.updateDorsConfig,
+    getTransportMetrics: runtimeState.getTransportMetrics,
+    refreshRuntimeState,
+    fileTransfers: fileTransfer.fileTransfers,
+    sendFile: fileTransfer.sendFile,
+    cancelFileTransfer: fileTransfer.cancelFileTransfer,
   };
 }
 

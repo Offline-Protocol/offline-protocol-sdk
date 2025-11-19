@@ -3,6 +3,7 @@
 //! This module provides tools for visualizing the mesh network topology
 //! and exporting metrics for debugging and monitoring.
 
+use crate::constants::{HISTORY_CLEANUP_BATCH_SIZE, MAX_MESSAGE_HISTORY};
 use crate::{Error, Result};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
@@ -149,9 +150,8 @@ impl NetworkVisualizer {
     pub fn record_message(&mut self, stats: MessageStats) {
         self.message_history.push(stats);
 
-        // Keep only last 1000 messages
-        if self.message_history.len() > 1000 {
-            self.message_history.drain(0..100);
+        if self.message_history.len() > MAX_MESSAGE_HISTORY {
+            self.message_history.drain(0..HISTORY_CLEANUP_BATCH_SIZE);
         }
     }
 
@@ -216,8 +216,8 @@ impl NetworkVisualizer {
         let mut dist = vec![vec![u8::MAX; n]; n];
 
         // Set diagonal to 0
-        for i in 0..n {
-            dist[i][i] = 0;
+        for (i, row) in dist.iter_mut().enumerate() {
+            row[i] = 0;
         }
 
         // Set direct connections to 1
