@@ -38,6 +38,11 @@ ios/**/*.xcworkspace
 ios/**/*.xcodeproj
 !ios/**/*.xcodeproj/project.pbxproj
 !ios/**/*.xcodeproj/xcshareddata
+ios/Generated/
+android/src/main/java/com/offlineprotocol/Generated/
+
+
+package-lock.json
 
 # Optional: If using git-lfs for binaries, don't ignore them
 # If not using git-lfs and binaries are large, you can ignore them:
