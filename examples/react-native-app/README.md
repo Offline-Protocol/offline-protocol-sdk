@@ -4,31 +4,31 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 
 ## Features
 
-### 🚀 Modern User Experience
+###  Modern User Experience
 - **Beautiful UI**: Modern, responsive design with smooth animations
 - **User-Friendly Onboarding**: Guided setup process for new users
 - **Dark/Light Theme**: Automatic theme switching with system preferences
 - **Responsive Design**: Optimized for phones and tablets
 
-### 💬 Messaging
+### Messaging
 - **Real-time Chat**: Send and receive messages instantly
 - **Message Priorities**: High, medium, and low priority messaging
 - **Chat Management**: Organized conversations with unread indicators
 - **Message Status**: Delivery confirmations and status tracking
 
-### 👥 Contacts & Discovery
+### Contacts & Discovery
 - **Automatic Discovery**: Find nearby devices automatically
 - **Contact Management**: View online status and signal strength
 - **Distance Indicators**: Visual representation of peer proximity
 - **Profile Views**: Detailed contact information and chat statistics
 
-### 📊 Analytics Dashboard
+### Analytics Dashboard
 - **Network Health**: Real-time network performance monitoring
 - **Usage Statistics**: Message counts, response times, and activity tracking
 - **Recent Activity**: Timeline of network events and messages
 - **Performance Metrics**: Comprehensive analytics with visual indicators
 
-### ⚙️ Settings & Customization
+### Settings & Customization
 - **Profile Management**: Customizable user names and preferences
 - **Theme Selection**: Light, dark, or system theme options
 - **Notification Controls**: Granular notification preferences
