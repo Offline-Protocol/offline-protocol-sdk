@@ -252,9 +252,9 @@ impl BleTransport {
         for message_id in expired {
             buffers.remove(&message_id);
             self.record_send_failure();
-            eprintln!(
-                "⏱️ Dropped expired BLE fragment assembly for message {}",
-                message_id
+            tracing::warn!(
+                message_id = %message_id,
+                "Dropped expired BLE fragment assembly for message"
             );
         }
     }
@@ -478,23 +478,23 @@ impl BleTransport {
                 // Message complete - queue it
                 let mut queue = self.receive_queue.lock().unwrap();
                 queue.push_back(message.clone());
-                eprintln!(
-                    "🎉 COMPLETE MESSAGE ASSEMBLED: {} from {} to {}",
-                    message.id.as_str(),
-                    message.sender.as_str(),
-                    message.recipient.as_str()
+                tracing::info!(
+                    message_id = message.id.as_str(),
+                    sender = message.sender.as_str(),
+                    recipient = message.recipient.as_str(),
+                    content = %message.content,
+                    "Complete message assembled"
                 );
-                eprintln!("📬 Message content: {}", message.content);
                 Ok(())
             }
             Ok(None) => {
                 // More fragments needed
-                eprintln!("📦 Fragment received, more needed for complete message");
+                tracing::debug!("Fragment received, more needed for complete message");
                 Ok(())
             }
             Err(e) => {
                 // Log error but don't fail - just drop bad fragment
-                eprintln!("❌ Error processing fragment: {}", e);
+                tracing::error!(error = %e, "Error processing fragment");
                 Ok(())
             }
         }

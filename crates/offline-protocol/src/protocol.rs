@@ -410,10 +410,10 @@ impl OfflineProtocol {
             self.transport_manager.record_retry_failure(transport);
         }
 
-        eprintln!(
-            "⚠️ Deferred message {} due to send error: {}",
-            message.id.as_str(),
-            err
+        tracing::warn!(
+            message_id = message.id.as_str(),
+            error = %err,
+            "Deferred message due to send error"
         );
         Ok(())
     }
@@ -469,9 +469,9 @@ impl OfflineProtocol {
                     self.deduplicator.mark_seen(message.id.clone());
 
                     if message.requires_ack {
-                        if let Err(err) = self.send_delivery_ack(&message, transport_used) {
-                            eprintln!("Failed to send delivery ACK: {}", err);
-                        }
+        if let Err(err) = self.send_delivery_ack(&message, transport_used) {
+            tracing::error!(error = %err, "Failed to send delivery ACK");
+        }
                     }
 
                     let event = Event::MessageReceived {
@@ -492,7 +492,7 @@ impl OfflineProtocol {
                 }
                 Ok(None) => return None,
                 Err(err) => {
-                    eprintln!("Transport receive error: {}", err);
+                    tracing::error!(error = %err, "Transport receive error");
                     return None;
                 }
             }

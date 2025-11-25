@@ -178,20 +178,20 @@ impl TransportManager {
             let transport_lock = transport.lock().unwrap();
             match transport_lock.receive() {
                 Ok(Some(message)) => {
-                    eprintln!(
-                        "📨 TransportManager found message from {:?}: {} -> {}",
-                        transport_type,
-                        message.sender.as_str(),
-                        message.recipient.as_str()
+                    tracing::debug!(
+                        transport_type = ?transport_type,
+                        sender = message.sender.as_str(),
+                        recipient = message.recipient.as_str(),
+                        content = %message.content,
+                        "TransportManager found message"
                     );
-                    eprintln!("📬 Message content: {}", message.content);
                     return Ok(Some((*transport_type, message)));
                 }
                 Ok(None) => {
                     // No message from this transport, continue checking others
                 }
                 Err(e) => {
-                    eprintln!("❌ Transport {:?} receive error: {}", transport_type, e);
+                    tracing::error!(transport_type = ?transport_type, error = %e, "Transport receive error");
                 }
             }
         }

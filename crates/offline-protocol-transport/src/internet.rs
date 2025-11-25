@@ -152,7 +152,7 @@ impl InternetTransport {
                 Ok(())
             }
             Err(e) => {
-                eprintln!("Error deserializing message: {}", e);
+                tracing::error!(error = %e, "Error deserializing message");
                 Ok(()) // Don't fail - just drop bad data
             }
         }
