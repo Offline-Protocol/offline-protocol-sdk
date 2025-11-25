@@ -1,5 +1,6 @@
 //! ACK (acknowledgment) management for tracking pending acknowledgments.
 
+use crate::constants::{DEFAULT_ACK_TIMEOUT_MS, DEFAULT_MAX_PENDING_ACKS};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::MessageId;
 use std::collections::HashMap;
@@ -60,8 +61,8 @@ pub struct AckConfig {
 impl Default for AckConfig {
     fn default() -> Self {
         Self {
-            default_timeout_ms: 5000, // 5 seconds
-            max_pending_acks: 1000,
+            default_timeout_ms: DEFAULT_ACK_TIMEOUT_MS,
+            max_pending_acks: DEFAULT_MAX_PENDING_ACKS,
         }
     }
 }

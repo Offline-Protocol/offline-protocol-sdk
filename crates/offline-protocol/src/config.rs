@@ -1,5 +1,6 @@
 //! Protocol configuration.
 
+use crate::constants::DEFAULT_INITIAL_TTL;
 use offline_protocol_reliability::{AckConfig, DeduplicatorConfig, RetryConfig};
 use offline_protocol_router::{DorsConfig, PathConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
@@ -84,7 +85,7 @@ impl ProtocolConfig {
             relay: RelayConfig::default(),
             path: PathConfig::default(),
             reliability: ReliabilityConfig::default(),
-            initial_ttl: 8, // Default from spec
+            initial_ttl: DEFAULT_INITIAL_TTL,
         }
     }
 

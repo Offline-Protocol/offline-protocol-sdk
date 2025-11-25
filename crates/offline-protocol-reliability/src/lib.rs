@@ -9,6 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod ack_manager;
+pub mod constants;
 pub mod deduplicator;
 pub mod error;
 pub mod retry_queue;

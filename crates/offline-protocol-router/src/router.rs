@@ -1,5 +1,6 @@
 //! Path selection and routing for optimal message delivery.
 
+use crate::constants::*;
 use crate::relay::{RelayInfo, RelayManager};
 use offline_protocol_core::Message;
 
@@ -35,8 +36,8 @@ pub struct PathConfig {
 impl Default for PathConfig {
     fn default() -> Self {
         Self {
-            forward_to_top_k: 3,
-            max_congestion_level: 0.7,
+            forward_to_top_k: DEFAULT_FORWARD_TO_TOP_K,
+            max_congestion_level: DEFAULT_MAX_CONGESTION_LEVEL,
         }
     }
 }
@@ -132,11 +133,10 @@ impl PathSelector {
         let capacity_score = self.calculate_capacity_score(neighbor);
         let energy_score = self.calculate_energy_score(neighbor);
 
-        // Weighted combination (from DORS spec)
-        let total = (signal_score * 0.3)
-            + (proximity_score * 0.2)
-            + (capacity_score * 0.3)
-            + (energy_score * 0.2);
+        let total = (signal_score * SIGNAL_WEIGHT)
+            + (proximity_score * PROXIMITY_WEIGHT)
+            + (capacity_score * CAPACITY_WEIGHT)
+            + (energy_score * ENERGY_WEIGHT);
 
         PathScore {
             signal: signal_score,
@@ -151,15 +151,20 @@ impl PathSelector {
     fn calculate_signal_score(&self, neighbor: &NeighborInfo) -> f32 {
         let rssi = neighbor.rssi;
 
-        // Convert RSSI to 0-100 score
-        if rssi >= -50 {
-            100.0
-        } else if rssi >= -70 {
-            70.0 + ((rssi + 70) as f32 * 30.0 / 20.0)
-        } else if rssi >= -85 {
-            40.0 + ((rssi + 85) as f32 * 30.0 / 15.0)
+        if rssi >= EXCELLENT_RSSI_THRESHOLD {
+            EXCELLENT_SIGNAL_SCORE
+        } else if rssi >= GOOD_RSSI_THRESHOLD {
+            GOOD_SIGNAL_BASE
+                + ((rssi - GOOD_RSSI_THRESHOLD) as f32 * 30.0
+                    / (EXCELLENT_RSSI_THRESHOLD - GOOD_RSSI_THRESHOLD) as f32)
+        } else if rssi >= FAIR_RSSI_THRESHOLD {
+            FAIR_SIGNAL_BASE
+                + ((rssi - FAIR_RSSI_THRESHOLD) as f32 * 30.0
+                    / (GOOD_RSSI_THRESHOLD - FAIR_RSSI_THRESHOLD) as f32)
         } else {
-            ((rssi + 100).max(0) as f32 * 40.0 / 15.0).max(0.0)
+            ((rssi - POOR_RSSI_MAX).max(0) as f32 * FAIR_SIGNAL_BASE
+                / (FAIR_RSSI_THRESHOLD - POOR_RSSI_MAX) as f32)
+                .max(0.0)
         }
     }
 
@@ -192,29 +197,22 @@ impl PathSelector {
     fn calculate_capacity_score(&self, neighbor: &NeighborInfo) -> f32 {
         if let Some(relay_info) = &neighbor.relay_info {
             let relay_score = self.relay_manager.calculate_relay_score(relay_info);
-
-            // Normalize relay score (typically 0-100) to 0-100 scale
-            relay_score.min(100.0)
+            relay_score.min(EXCELLENT_SIGNAL_SCORE)
         } else {
-            // Not a relay, assume basic capacity
-            50.0
+            NON_RELAY_BASIC_CAPACITY
         }
     }
 
     /// Calculates energy score based on battery level.
     fn calculate_energy_score(&self, neighbor: &NeighborInfo) -> f32 {
         if let Some(relay_info) = &neighbor.relay_info {
-            let mut score = relay_info.battery_level as f32;
-
-            // Bonus for charging devices
             if relay_info.is_charging {
-                score = 100.0;
+                CHARGING_BATTERY_SCORE
+            } else {
+                relay_info.battery_level as f32
             }
-
-            score
         } else {
-            // Assume good battery for non-relay devices
-            70.0
+            NON_RELAY_ASSUMED_BATTERY
         }
     }
 

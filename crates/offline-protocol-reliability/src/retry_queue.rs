@@ -1,5 +1,9 @@
 //! Retry queue with exponential backoff for message retries.
 
+use crate::constants::{
+    DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_INITIAL_DELAY_MS, DEFAULT_MAX_DELAY_MS,
+    DEFAULT_MAX_RETRIES, DEFAULT_OUTBOX_LIFETIME_MS,
+};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{Message, MessagePriority};
 use std::cmp::Ordering;
@@ -27,11 +31,11 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
-            initial_delay_ms: 1000,          // 1 second
-            max_delay_ms: 30000,             // 30 seconds
-            backoff_multiplier: 2.0,         // Double each time
-            outbox_max_lifetime_ms: 3600000, // 1 hour
+            max_retries: DEFAULT_MAX_RETRIES,
+            initial_delay_ms: DEFAULT_INITIAL_DELAY_MS,
+            max_delay_ms: DEFAULT_MAX_DELAY_MS,
+            backoff_multiplier: DEFAULT_BACKOFF_MULTIPLIER,
+            outbox_max_lifetime_ms: DEFAULT_OUTBOX_LIFETIME_MS,
         }
     }
 }

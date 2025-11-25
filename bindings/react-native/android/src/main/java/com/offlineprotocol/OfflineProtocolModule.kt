@@ -31,6 +31,25 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         const val NAME = "OfflineProtocolModule"
         const val EVENT_NAME = "OfflineProtocol_Event"
     }
+    
+    private object Constants {
+        const val DEFAULT_INITIAL_TTL = 8
+        const val MIN_BATTERY_LEVEL = 0
+        const val MAX_BATTERY_LEVEL = 100
+        const val MIN_HISTORY_WINDOW = 1L
+        const val MAX_HISTORY_WINDOW = 100L
+        const val BLE_RESTART_DELAY_MS = 1000L
+        const val PROCESS_INTERVAL_MS = 100L
+        const val LOG_INTERVAL_MS = 5000L
+        const val LOG_INTERVAL_THRESHOLD_MS = 100L
+        const val DEFAULT_RSSI_THRESHOLD: Short = -85
+        const val DEFAULT_CONGESTION_QUEUE = 50L
+        const val DEFAULT_STABILITY_WINDOW = 8L
+        const val DEFAULT_QUEUE_RECOVERY_RATIO = 0.5f
+        const val HTTPS_PORT = 443
+        const val HTTP_PORT = 80
+        const val MILLISECONDS_PER_SECOND = 1000L
+    }
 
     override fun getName(): String = NAME
 
@@ -70,7 +89,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
             preferOnline = json.optBoolean("preferOnline", json.optBoolean("prefer_online", false)),
-            initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", 8)).toUByte()
+            initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte()
         )
 
         return ParsedConfig(config, json)
@@ -139,7 +158,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         ?.toULong()
                         ?: baseConfig.ttlEscalationHoldSecs,
                     historyWindowSize = dorsJson.optLongCompat("historyWindowSize", "history_window_size")
-                        ?.let { max(1L, min(100L, it)) }
+                        ?.let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }
                         ?.toULong()
                         ?: baseConfig.historyWindowSize,
                     queueRecoveryRatio = dorsJson.optDoubleCompat("queueRecoveryRatio", "queue_recovery_ratio")
@@ -321,7 +340,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         } catch (e: Exception) {
                             android.util.Log.w(NAME, "Backup bleStatusChanged failed: ${e.message}", e)
                         }
-                    }, 1000) // 1 second delay
+                    }, Constants.BLE_RESTART_DELAY_MS)
                 } catch (e: Exception) {
                     android.util.Log.e(NAME, "❌ FAILED to start BLE Manager!", e)
                     android.util.Log.e(NAME, "Error type: ${e.javaClass.simpleName}")
@@ -716,7 +735,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun setBatteryLevel(level: Int, promise: Promise) {
         try {
-            protocol?.setBatteryLevel(level.coerceIn(0, 100).toUByte())
+            protocol?.setBatteryLevel(level.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL).toUByte())
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("ERROR_BATTERY", "Failed to set battery level: ${e.message}", e)
@@ -837,15 +856,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 switchHysteresis = json.optDouble("switchHysteresis", 15.0).toFloat().coerceAtLeast(0f),
                 switchCooldownSecs = json.optLong("switchCooldownSecs", 20).coerceAtLeast(0).toULong(),
                 bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", 2).toUInt(),
-                rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", -85).toShort(),
-                congestionQueueThreshold = json.optLong("congestionQueueThreshold", 50).toULong(),
-                stabilityWindowSecs = json.optLong("stabilityWindowSecs", 8).toULong(),
+                rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", Constants.DEFAULT_RSSI_THRESHOLD.toInt()).toShort(),
+                congestionQueueThreshold = json.optLong("congestionQueueThreshold", Constants.DEFAULT_CONGESTION_QUEUE).toULong(),
+                stabilityWindowSecs = json.optLong("stabilityWindowSecs", Constants.DEFAULT_STABILITY_WINDOW).toULong(),
                 poorSignalDurationSecs = json.optLong("poorSignalDurationSecs", 10).toULong(),
                 ttlEscalationThreshold = json.optInt("ttlEscalationThreshold", 2).toUByte(),
                 congestionDurationSecs = json.optLong("congestionDurationSecs", 10).coerceAtLeast(0).toULong(),
                 ttlEscalationHoldSecs = json.optLong("ttlEscalationHoldSecs", 20).coerceAtLeast(1).toULong(),
-                historyWindowSize = json.optLong("historyWindowSize", 10).let { max(1L, min(100L, it)) }.toULong(),
-                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", 0.5).toFloat().coerceIn(0f, 1f)
+                historyWindowSize = json.optLong("historyWindowSize", 10).let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }.toULong(),
+                queueRecoveryRatio = json.optDouble("queueRecoveryRatio", Constants.DEFAULT_QUEUE_RECOVERY_RATIO.toDouble()).toFloat().coerceIn(0f, 1f)
             )
             
             protocol?.updateDorsConfig(dorsConfig)
@@ -892,7 +911,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         processScheduler = Executors.newSingleThreadScheduledExecutor().apply {
             scheduleAtFixedRate({
                 processProtocol()
-            }, 0, 100, TimeUnit.MILLISECONDS)
+            }, 0, Constants.PROCESS_INTERVAL_MS, TimeUnit.MILLISECONDS)
         }
     }
 
@@ -911,8 +930,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val instance = protocol ?: return
             
-            // Add debug logging to verify process is being called
-            if (System.currentTimeMillis() % 5000 < 100) { // Log every ~5 seconds
+            if (System.currentTimeMillis() % Constants.LOG_INTERVAL_MS < Constants.LOG_INTERVAL_THRESHOLD_MS) {
                 android.util.Log.d(NAME, "🔄 Processing protocol...")
             }
             
@@ -1020,9 +1038,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
         if (port == null) {
             port = when (uri?.scheme?.lowercase()) {
-                "wss", "https" -> 443
-                "ws", "http" -> 80
-                else -> 443
+                "wss", "https" -> Constants.HTTPS_PORT
+                "ws", "http" -> Constants.HTTP_PORT
+                else -> Constants.HTTPS_PORT
             }
         }
 
@@ -1072,7 +1090,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 put("role", node.role.lowercase())
                 put("connection_count", connectionCounts[node.nodeId] ?: 0)
                 put("battery_level", JSONObject.NULL)
-                put("last_seen", node.lastSeenMs.toLong() / 1000)
+                put("last_seen", node.lastSeenMs.toLong() / Constants.MILLISECONDS_PER_SECOND)
                 put("transports", transportsArray)
             }
             nodesArray.put(nodeObj)
@@ -1093,7 +1111,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         val root = JSONObject().apply {
-            put("timestamp", System.currentTimeMillis() / 1000)
+            put("timestamp", System.currentTimeMillis() / Constants.MILLISECONDS_PER_SECOND)
             put("local_user_id", currentConfig?.userId ?: "")
             put("nodes", nodesArray)
             put("links", linksArray)
