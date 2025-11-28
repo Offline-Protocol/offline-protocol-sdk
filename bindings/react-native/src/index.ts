@@ -803,6 +803,15 @@ export class OfflineProtocol {
   async isRelay(): Promise<boolean> {
     return await OfflineProtocolNativeModule.isRelay();
   }
+
+  /**
+   * Gets the current number of discovered BLE peers
+   *
+   * @returns Number of BLE peers currently tracked
+   */
+  async getBLePeerCount(): Promise<number> {
+    return await OfflineProtocolNativeModule.bleGetPeerCount();
+  }
   
   /**
    * Gets detailed metrics for a specific transport
