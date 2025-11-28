@@ -251,6 +251,17 @@ interface OfflineProtocol {
     
     u32 ble_get_peer_count();
     
+    // Internet transport operations
+    [Throws=ProtocolError]
+    void internet_status_changed(boolean is_connected);
+    
+    [Throws=ProtocolError]
+    void internet_message_received(string sender_id, sequence<u8> data);
+    
+    InternetMessage? internet_get_next_message();
+    
+    void internet_return_message();
+    
     // Transport management
     [Throws=ProtocolError]
     void add_internet_transport(string server_url, u16 port);
@@ -327,6 +338,12 @@ interface OfflineProtocol {
 
 // BLE fragment for outgoing data
 dictionary BleFragment {
+    string recipient_id;
+    sequence<u8> data;
+};
+
+// Internet message for outgoing data
+dictionary InternetMessage {
     string recipient_id;
     sequence<u8> data;
 };

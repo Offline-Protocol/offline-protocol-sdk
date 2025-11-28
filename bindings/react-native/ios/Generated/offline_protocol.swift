@@ -638,6 +638,14 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
     
+    func internetGetNextMessage()  -> InternetMessage?
+    
+    func internetMessageReceived(senderId: String, data: [UInt8]) throws 
+    
+    func internetReturnMessage() 
+    
+    func internetStatusChanged(isConnected: Bool) throws 
+    
     func isRelay()  -> Bool
     
     func pause() throws 
@@ -933,6 +941,38 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
         FfiConverterTypeTransportType_lower(transportType),$0
     )
 })
+}
+    
+open func internetGetNextMessage() -> InternetMessage?  {
+    return try!  FfiConverterOptionTypeInternetMessage.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func internetMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(senderId),
+        FfiConverterSequenceUInt8.lower(data),$0
+    )
+}
+}
+    
+open func internetReturnMessage()  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_return_message(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+open func internetStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_status_changed(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(isConnected),$0
+    )
+}
 }
     
 open func isRelay() -> Bool  {
@@ -1447,6 +1487,58 @@ public func FfiConverterTypeFileProgress_lift(_ buf: RustBuffer) throws -> FileP
 #endif
 public func FfiConverterTypeFileProgress_lower(_ value: FileProgress) -> RustBuffer {
     return FfiConverterTypeFileProgress.lower(value)
+}
+
+
+public struct InternetMessage: Equatable, Hashable {
+    public var recipientId: String
+    public var data: [UInt8]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recipientId: String, data: [UInt8]) {
+        self.recipientId = recipientId
+        self.data = data
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension InternetMessage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeInternetMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InternetMessage {
+        return
+            try InternetMessage(
+                recipientId: FfiConverterString.read(from: &buf), 
+                data: FfiConverterSequenceUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: InternetMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.recipientId, into: &buf)
+        FfiConverterSequenceUInt8.write(value.data, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInternetMessage_lift(_ buf: RustBuffer) throws -> InternetMessage {
+    return try FfiConverterTypeInternetMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeInternetMessage_lower(_ value: InternetMessage) -> RustBuffer {
+    return FfiConverterTypeInternetMessage.lower(value)
 }
 
 
@@ -2941,6 +3033,30 @@ fileprivate struct FfiConverterOptionTypeFileProgress: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeInternetMessage: FfiConverterRustBuffer {
+    typealias SwiftType = InternetMessage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeInternetMessage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeInternetMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTransportMetrics: FfiConverterRustBuffer {
     typealias SwiftType = TransportMetrics?
 
@@ -3175,6 +3291,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_return_message() != 33628) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892) {

@@ -21,6 +21,7 @@ import React
 class OfflineProtocolModule: RCTEventEmitter {
     private var protocolInstance: OfflineProtocol?
     private var bleManager: BleManager?
+    private var internetManager: InternetManager?
     private var hasListeners = false
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
@@ -36,6 +37,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         stopProcessTimer()
         bleManager?.stop()
         bleManager = nil
+        internetManager?.stop()
+        internetManager = nil
         protocolInstance = nil
     }
     
@@ -243,6 +246,20 @@ class OfflineProtocolModule: RCTEventEmitter {
                 ])
             }
             
+            // Initialize Internet manager if internet is enabled
+            if config.internetEnabled {
+                internetManager = InternetManager(protocol: proto, deviceId: config.userId)
+                internetManager?.delegate = self
+                print("[OfflineProtocolModule] Internet Manager initialized for user: \(config.userId)")
+                emitDiagnostic(level: "info", message: "Internet manager initialized", context: [
+                    "userId": config.userId
+                ])
+            } else {
+                emitDiagnostic(level: "info", message: "Internet disabled in configuration", context: [
+                    "userId": config.userId
+                ])
+            }
+            
             // Start process timer
             startProcessTimer()
             emitDiagnostic(level: "info", message: "Protocol process timer started")
@@ -431,6 +448,11 @@ class OfflineProtocolModule: RCTEventEmitter {
         print("[OfflineProtocolModule] BLE Manager stopped")
         emitDiagnostic(level: "info", message: "BLE manager stopped")
         
+        // Stop Internet manager
+        internetManager?.stop()
+        print("[OfflineProtocolModule] Internet Manager stopped")
+        emitDiagnostic(level: "info", message: "Internet manager stopped")
+        
         do {
             try protocolInstance?.stop()
             emitDiagnostic(level: "info", message: "Protocol stopped")
@@ -535,8 +557,17 @@ class OfflineProtocolModule: RCTEventEmitter {
         do {
             switch type.lowercased() {
             case "internet":
-                let (host, port) = try parseInternetConfig(config)
-                try proto.addInternetTransport(serverUrl: host, port: port)
+                // Configure and start Internet transport via InternetManager
+                guard let manager = internetManager else {
+                    // Create manager if not already created
+                    let newManager = InternetManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    newManager.delegate = self
+                    internetManager = newManager
+                    emitDiagnostic(level: "info", message: "Internet manager created on demand")
+                    try configureAndStartInternet(manager: newManager, config: config)
+                    break
+                }
+                try configureAndStartInternet(manager: manager, config: config)
             case "wifidirect", "wifi_direct":
                 try proto.addWifiDirectTransport()
             case "ble":
@@ -550,6 +581,38 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
+    private func configureAndStartInternet(manager: InternetManager, config: NSDictionary?) throws {
+        let serverAddress = ((config?["serverAddress"] as? String) ?? (config?["server_url"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let address = serverAddress, !address.isEmpty else {
+            throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Internet transport requires a serverAddress"])
+        }
+        
+        // Build WebSocket URL
+        var wsUrl = address
+        if !wsUrl.hasPrefix("ws://") && !wsUrl.hasPrefix("wss://") {
+            // Default to wss:// for secure connection
+            wsUrl = "wss://\(wsUrl)"
+        }
+        
+        // Append port if specified
+        if let portNumber = config?["port"] as? NSNumber ?? config?["serverPort"] as? NSNumber {
+            if let url = URL(string: wsUrl), url.port == nil {
+                wsUrl = "\(wsUrl):\(portNumber.intValue)"
+            }
+        }
+        
+        let autoReconnect = (config?["autoReconnect"] as? Bool) ?? true
+        let maxRetries = (config?["maxReconnectAttempts"] as? Int) ?? 0
+        
+        try manager.configure(serverUrl: wsUrl, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries)
+        try manager.start()
+        
+        emitDiagnostic(level: "info", message: "Internet transport enabled", context: [
+            "serverUrl": wsUrl,
+            "autoReconnect": autoReconnect
+        ])
+    }
+    
     @objc func disableTransport(_ type: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
@@ -559,6 +622,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         do {
             let transport = try transportType(from: type)
+            
+            // Stop corresponding transport manager
+            if type.lowercased() == "internet" {
+                internetManager?.stop()
+                emitDiagnostic(level: "info", message: "Internet manager stopped via disableTransport")
+            }
+            
             try proto.removeTransport(transportType: transport)
             resolver(nil)
         } catch {
@@ -1255,23 +1325,31 @@ class OfflineProtocolModule: RCTEventEmitter {
 
 extension OfflineProtocolModule: TransportManagerDelegate {
     func transportManager(_ manager: TransportManager, didChangeState state: TransportState) {
-        emitDiagnostic(level: "info", message: "BLE transport state changed", context: [
+        let transportName = manager.transportName
+        emitDiagnostic(level: "info", message: "\(transportName) state changed", context: [
+            "transport": manager.transportId,
             "state": String(describing: state)
         ])
     }
     
     func transportManager(_ manager: TransportManager, didEncounterError error: Error) {
-        emitDiagnostic(level: "error", message: "BLE transport error", context: [
+        let transportName = manager.transportName
+        emitDiagnostic(level: "error", message: "\(transportName) error", context: [
+            "transport": manager.transportId,
             "error": error.localizedDescription
         ])
     }
     
     func transportManager(_ manager: TransportManager, didUpdateMetrics metrics: [String : Any]) {
-        emitDiagnostic(level: "info", message: "BLE transport metrics", context: metrics)
+        var context = metrics
+        context["transport"] = manager.transportId
+        emitDiagnostic(level: "info", message: "\(manager.transportName) metrics", context: context)
     }
     
     func transportManager(_ manager: TransportManager, didEmitDiagnostic level: String, message: String, context: [String : Any]) {
-        emitDiagnostic(level: level, message: message, context: context)
+        var enrichedContext = context
+        enrichedContext["transport"] = manager.transportId
+        emitDiagnostic(level: level, message: message, context: enrichedContext)
     }
 }
 

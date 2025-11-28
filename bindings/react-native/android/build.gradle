@@ -77,6 +77,9 @@ dependencies {
     // JNA required for UniFFI-generated Kotlin bindings
     implementation 'net.java.dev.jna:jna:5.13.0@aar'
     
+    // OkHttp for WebSocket support in InternetManager
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    
     if (reactNativeExists) {
         implementation 'com.facebook.react:react-native:+'
     } else {

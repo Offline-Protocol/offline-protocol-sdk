@@ -295,11 +295,29 @@ pub struct BleFragment {
     pub data: Vec<u8>,
 }
 
+/// Internet message for outgoing data
+#[derive(Debug, Clone)]
+pub struct InternetMessage {
+    pub recipient_id: String,
+    pub data: Vec<u8>,
+}
+
 /// Internal state for BLE operations
 struct BleState {
     fragments: VecDeque<(String, Vec<u8>)>,
     peer_count: u32,
     peers: HashMap<String, PeerDevice>,
+}
+
+/// Internal state for Internet transport operations
+struct InternetState {
+    /// Outgoing messages queue
+    outgoing_messages: VecDeque<(String, Vec<u8>)>,
+    /// Whether internet transport is connected
+    is_connected: bool,
+    /// Server URL (used when configuring internet transport)
+    #[allow(dead_code)]
+    server_url: Option<String>,
 }
 
 /// Main protocol wrapper for UniFFI - COMPLETE IMPLEMENTATION
@@ -309,6 +327,7 @@ pub struct OfflineProtocol {
     event_callback: Arc<RwLock<Option<Arc<dyn EventCallback>>>>,
     event_queue: Arc<Mutex<VecDeque<String>>>,
     ble_state: Mutex<BleState>,
+    internet_state: Mutex<InternetState>,
     file_manager: Mutex<FileTransferManager>,
     visualizer: Mutex<NetworkVisualizer>,
     battery_level: RwLock<Option<u8>>,
@@ -374,6 +393,11 @@ impl OfflineProtocol {
                 fragments: VecDeque::new(),
                 peer_count: 0,
                 peers: HashMap::new(),
+            }),
+            internet_state: Mutex::new(InternetState {
+                outgoing_messages: VecDeque::new(),
+                is_connected: false,
+                server_url: None,
             }),
             file_manager: Mutex::new(FileTransferManager::new()),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
@@ -724,6 +748,152 @@ impl OfflineProtocol {
     pub fn ble_get_peer_count(&self) -> u32 {
         let ble_state = self.ble_state.lock().unwrap();
         ble_state.peer_count
+    }
+
+    // ========================================================================
+    // INTERNET TRANSPORT OPERATIONS
+    // ========================================================================
+
+    /// Internet: Status changed (connected/disconnected to relay server)
+    pub fn internet_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
+        // Update internal state
+        {
+            let mut internet_state = self.internet_state.lock().unwrap();
+            internet_state.is_connected = is_connected;
+        }
+
+        // Update the Internet transport status in the transport manager
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Internet)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(internet_transport) = transport
+                .as_any()
+                .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            {
+                let new_status = if is_connected {
+                    offline_protocol_transport::TransportStatus::Available
+                } else {
+                    offline_protocol_transport::TransportStatus::Disconnected
+                };
+                internet_transport.on_status_changed(new_status);
+            }
+        }
+
+        // Emit connection event
+        let event = if is_connected {
+            CoreEvent::TransportSwitched {
+                from: None,
+                to: "Internet".to_string(),
+                reason: "Connected to relay server".to_string(),
+            }
+        } else {
+            CoreEvent::TransportSwitched {
+                from: Some("Internet".to_string()),
+                to: "None".to_string(),
+                reason: "Disconnected from relay server".to_string(),
+            }
+        };
+        self.emit_event(event);
+
+        Ok(())
+    }
+
+    /// Internet: Message received from relay server
+    pub fn internet_message_received(
+        &self,
+        sender_id: String,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        // Try to deserialize and process the message through the transport
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Internet)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(internet_transport) = transport
+                .as_any()
+                .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            {
+                // Pass raw data to the transport for processing
+                if let Err(e) = internet_transport.on_data_received(data.clone()) {
+                    return Err(ProtocolError::Other(format!(
+                        "Failed to process internet message: {}",
+                        e
+                    )));
+                }
+            }
+        }
+        drop(protocol);
+
+        // Emit message received event
+        let event = CoreEvent::NeighborDiscovered {
+            peer_id: sender_id.clone(),
+            transport: "Internet".to_string(),
+            rssi: None,
+        };
+        self.emit_event(event);
+
+        // Process any completed messages
+        let mut protocol = self.inner.lock().unwrap();
+        while protocol.receive_message().is_some() {
+            // Messages are processed and events emitted automatically
+        }
+
+        Ok(())
+    }
+
+    /// Internet: Get next message to send via WebSocket
+    pub fn internet_get_next_message(&self) -> Option<InternetMessage> {
+        // Check if connected
+        {
+            let internet_state = self.internet_state.lock().unwrap();
+            if !internet_state.is_connected {
+                return None;
+            }
+        }
+
+        // Try to get message from the Internet transport
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Internet)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(internet_transport) = transport
+                .as_any()
+                .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            {
+                if let Ok(Some(data)) = internet_transport.get_next_message() {
+                    // Deserialize to get recipient
+                    if let Ok(message) = internet_transport.deserialize_message(&data) {
+                        return Some(InternetMessage {
+                            recipient_id: message.recipient.as_str().to_string(),
+                            data,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Fallback to local queue
+        let mut internet_state = self.internet_state.lock().unwrap();
+        if let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
+            return Some(InternetMessage {
+                recipient_id: recipient,
+                data,
+            });
+        }
+
+        None
+    }
+
+    /// Internet: Return message (marks last message as sent)
+    pub fn internet_return_message(&self) {
+        // No-op for now - message sending confirmation is handled by WebSocket
     }
 
     // ========================================================================

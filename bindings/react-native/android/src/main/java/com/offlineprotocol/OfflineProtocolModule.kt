@@ -22,6 +22,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var protocol: OfflineProtocol? = null
     private var bleManager: BleManager? = null
+    private var internetManager: InternetManager? = null
     private var processScheduler: ScheduledExecutorService? = null
     private var listenerCount: Int = 0
     private var currentConfig: ProtocolConfig? = null
@@ -58,6 +59,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         stopProcessScheduler()
         bleManager?.stop()
         bleManager = null
+        internetManager?.stop()
+        internetManager = null
         protocol = null
     }
 
@@ -263,6 +266,55 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 ))
             }
             
+            // Initialize Internet manager if internet is enabled
+            if (config.internetEnabled) {
+                internetManager = InternetManager(reactApplicationContext, proto, config.userId) { level, message, context ->
+                    emitDiagnostic(level, message, context)
+                }.also { manager ->
+                    manager.listener = object : TransportManagerListener {
+                        override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
+                            emitDiagnostic("info", "Internet transport state changed", mapOf(
+                                "transport" to manager.transportId,
+                                "state" to state.name.lowercase()
+                            ))
+                        }
+
+                        override fun onTransportError(manager: TransportManager, error: Throwable) {
+                            emitDiagnostic("error", "Internet transport error", mapOf(
+                                "transport" to manager.transportId,
+                                "message" to (error.message ?: "unknown"),
+                                "exception" to error.javaClass.simpleName
+                            ))
+                        }
+
+                        override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
+                            val enrichedMetrics = metrics.toMutableMap()
+                            enrichedMetrics["transport"] = manager.transportId
+                            emitDiagnostic("info", "Internet transport metrics", enrichedMetrics)
+                        }
+
+                        override fun onTransportDiagnostic(
+                            manager: TransportManager,
+                            level: String,
+                            message: String,
+                            context: Map<String, Any?>
+                        ) {
+                            val enrichedContext = context.toMutableMap()
+                            enrichedContext["transport"] = manager.transportId
+                            emitDiagnostic(level, message, enrichedContext)
+                        }
+                    }
+                }
+                android.util.Log.i(NAME, "Internet Manager initialized for user: ${config.userId}")
+                emitDiagnostic("info", "Internet manager initialized", mapOf(
+                    "userId" to config.userId
+                ))
+            } else {
+                emitDiagnostic("info", "Internet disabled in configuration", mapOf(
+                    "userId" to config.userId
+                ))
+            }
+            
             // Start process scheduler
             startProcessScheduler()
             emitDiagnostic("info", "Protocol process scheduler started")
@@ -387,6 +439,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         android.util.Log.i(NAME, "BLE Manager stopped")
         emitDiagnostic("info", "BLE manager stopped")
         
+        // Stop Internet manager
+        internetManager?.stop()
+        android.util.Log.i(NAME, "Internet Manager stopped")
+        emitDiagnostic("info", "Internet manager stopped")
+        
         try {
             protocol?.stop()
             emitDiagnostic("info", "Protocol stopped")
@@ -484,8 +541,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             when (type.lowercase()) {
                 "internet" -> {
-                    val (host, port) = parseInternetConfig(config)
-                    proto.addInternetTransport(host, port.toUShort())
+                    // Configure and start Internet transport via InternetManager
+                    var manager = internetManager
+                    if (manager == null) {
+                        // Create manager if not already created
+                        manager = InternetManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                            emitDiagnostic(level, message, context)
+                        }
+                        internetManager = manager
+                        emitDiagnostic("info", "Internet manager created on demand")
+                    }
+                    configureAndStartInternet(manager, config)
                 }
                 "wifidirect", "wifi_direct" -> {
                     proto.addWifiDirectTransport()
@@ -502,11 +568,53 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_TRANSPORT_ENABLE", "Failed to enable transport: ${e.message}", e)
         }
     }
+    
+    private fun configureAndStartInternet(manager: InternetManager, config: ReadableMap?) {
+        val serverAddress = config?.getString("serverAddress")
+            ?: config?.getString("server_url")
+            ?: throw IllegalArgumentException("Internet transport requires a serverAddress")
+        
+        // Build WebSocket URL
+        var wsUrl = serverAddress.trim()
+        if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) {
+            // Default to wss:// for secure connection
+            wsUrl = "wss://$wsUrl"
+        }
+        
+        // Append port if specified
+        val port = config?.getDouble("port")?.toInt()
+            ?: config?.getDouble("serverPort")?.toInt()
+        if (port != null && port > 0) {
+            // Check if URL already has a port
+            val url = java.net.URI(wsUrl)
+            if (url.port == -1) {
+                wsUrl = "$wsUrl:$port"
+            }
+        }
+        
+        val autoReconnect = config?.getBoolean("autoReconnect") ?: true
+        val maxRetries = config?.getDouble("maxReconnectAttempts")?.toInt() ?: 0
+        
+        manager.configure(wsUrl, autoReconnect, maxRetries)
+        manager.start()
+        
+        emitDiagnostic("info", "Internet transport enabled", mapOf(
+            "serverUrl" to wsUrl,
+            "autoReconnect" to autoReconnect
+        ))
+    }
 
     @ReactMethod
     fun disableTransport(type: String, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            
+            // Stop corresponding transport manager
+            if (type.lowercase() == "internet") {
+                internetManager?.stop()
+                emitDiagnostic("info", "Internet manager stopped via disableTransport")
+            }
+            
             val transportType = mapTransportType(type)
             proto.removeTransport(transportType)
             promise.resolve(null)
