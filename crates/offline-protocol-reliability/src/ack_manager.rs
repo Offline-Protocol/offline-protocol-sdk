@@ -145,7 +145,15 @@ impl AckManager {
         }
     }
 
-    /// Drains all ACKs that have timed out and marks them as timed out.
+    /// Returns all ACKs that have timed out and marks them as `TimedOut`.
+    ///
+    /// Note: This does NOT remove entries from the map. Entries are kept so that:
+    /// - `increment_retry_count()` can reset them when the message is retried
+    /// - Late ACKs can still be matched via `record_ack_received()`
+    ///
+    /// Entries are eventually removed by:
+    /// - `remove_ack()` when ACK is received or max retries exceeded
+    /// - `prune_old_timeouts()` for stale entries
     pub fn drain_timed_out(&mut self) -> Vec<PendingAck> {
         let mut timed_out = Vec::new();
         for pending in self.pending_acks.values_mut() {

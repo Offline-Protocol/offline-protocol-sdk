@@ -699,11 +699,14 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Cleans up expired entries from deduplicator, retry queue, and outbox.
+    /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
     fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
+        // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
+        self.ack_manager
+            .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes
     }
 
     /// Checks for DORS escalation signals and emits events if needed.
