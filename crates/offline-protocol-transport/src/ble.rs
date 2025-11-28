@@ -54,6 +54,33 @@ struct FragmentAssembly {
     started_at: SystemTime,
 }
 
+impl FragmentAssembly {
+    /// Returns the completion ratio (0.0 to 1.0) of this assembly.
+    fn completion_ratio(&self) -> f32 {
+        if self.total_fragments == 0 {
+            return 0.0;
+        }
+        self.fragments.len() as f32 / self.total_fragments as f32
+    }
+
+    /// Returns a priority score for eviction (lower = more likely to be evicted).
+    /// Prioritizes keeping near-complete assemblies.
+    fn eviction_priority(&self, now: SystemTime) -> f32 {
+        let completion = self.completion_ratio();
+        
+        // Age factor: older assemblies are slightly less valuable
+        let age_secs = now
+            .duration_since(self.started_at)
+            .unwrap_or(StdDuration::from_secs(0))
+            .as_secs_f32();
+        let age_penalty = (age_secs / 60.0).min(1.0) * 0.2; // Max 20% penalty for age
+        
+        // Priority = completion ratio (0-1) minus age penalty
+        // Higher value = more valuable = less likely to evict
+        completion - age_penalty
+    }
+}
+
 /// BLE transport implementation.
 ///
 /// This is a platform-agnostic abstraction. The actual BLE operations
@@ -351,12 +378,22 @@ impl BleTransport {
             if !buffers.contains_key(&fragment.message_id)
                 && buffers.len() >= BLE_MAX_FRAGMENT_ASSEMBLIES
             {
-                if let Some(oldest_id) = buffers
+                // Priority-based eviction: prefer evicting assemblies with less progress
+                // rather than just the oldest. This preserves near-complete assemblies.
+                if let Some(evict_id) = buffers
                     .iter()
-                    .min_by_key(|(_, assembly)| assembly.started_at)
+                    .min_by(|(_, a), (_, b)| {
+                        let priority_a = a.eviction_priority(now);
+                        let priority_b = b.eviction_priority(now);
+                        priority_a.partial_cmp(&priority_b).unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .map(|(id, _)| id.clone())
                 {
-                    buffers.remove(&oldest_id);
+                    tracing::debug!(
+                        message_id = %evict_id,
+                        "Evicting fragment assembly to make room (priority-based)"
+                    );
+                    buffers.remove(&evict_id);
                     evicted = true;
                 }
             }

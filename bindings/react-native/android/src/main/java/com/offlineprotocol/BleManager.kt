@@ -77,6 +77,20 @@ class BleManager(
         private const val ADVERTISE_RESTART_MIN_MS = 200L
         private const val ADVERTISE_RESTART_MAX_MS = 1200L
         private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
+        
+        // Adaptive Scan Configuration
+        /** Minimum RSSI to consider for connection (filter weak signals early) */
+        private const val ADAPTIVE_MIN_RSSI = -85
+        /** Peer count threshold below which we process all advertisements */
+        private const val ADAPTIVE_LOW_DENSITY_THRESHOLD = 10
+        /** Peer count threshold above which we apply maximum throttling */
+        private const val ADAPTIVE_HIGH_DENSITY_THRESHOLD = 50
+        /** Maximum connection attempts per minute in dense networks */
+        private const val ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE = 6
+        /** Minimum interval between connection attempts to the same device (ms) */
+        private const val ADAPTIVE_COOLDOWN_PER_DEVICE_MS = 30_000L
+        /** Interval for updating visible peer count estimate (ms) */
+        private const val ADAPTIVE_PEER_COUNT_WINDOW_MS = 5_000L
     }
     
     // MARK: - Properties
@@ -118,6 +132,18 @@ class BleManager(
     private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
 
     private val meshController = MeshController(deviceId)
+    
+    // Adaptive scan state
+    /** Timestamps of recent peripheral discoveries for density estimation */
+    private val recentDiscoveryTimestamps = Collections.synchronizedList(mutableListOf<Long>())
+    /** Last connection attempt timestamps per device for rate limiting */
+    private val deviceConnectionAttempts = ConcurrentHashMap<String, Long>()
+    /** Global connection attempts in the last minute for rate limiting */
+    private val globalConnectionAttempts = Collections.synchronizedList(mutableListOf<Long>())
+    /** Current estimated visible peer count */
+    @Volatile private var estimatedVisiblePeerCount: Int = 0
+    /** Last time we updated the peer count estimate */
+    @Volatile private var lastPeerCountUpdate: Long = 0L
     @Volatile private var lastMeshAdvertisement: MeshAdvertisementData? = null
     
     // Fragment polling
@@ -704,6 +730,23 @@ class BleManager(
         val address = device.address
         val now = System.currentTimeMillis()
         lastDiscoveryAt = now
+        
+        // Adaptive scanning: track discoveries for density estimation
+        recordDiscoveryForDensity(now)
+        
+        // Adaptive scanning: early RSSI filtering in dense networks
+        if (shouldFilterByRssi(rssi)) {
+            if (logThrottler.shouldLog("adaptive_rssi_filter", intervalMs = 10000)) {
+                Log.d(TAG, "Adaptive: filtering weak signal (${rssi}dBm) in dense network ($estimatedVisiblePeerCount peers)")
+            }
+            return
+        }
+        
+        // Adaptive scanning: probabilistic filtering in very dense networks
+        if (shouldProbabilisticallySkip(address)) {
+            return // Silently skip to reduce log spam in dense networks
+        }
+        
         val lastLog = discoveryLogTimestamps[address]
         val isConnectable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             result.isConnectable
@@ -712,14 +755,15 @@ class BleManager(
         }
         if (lastLog == null || now - lastLog > 30000) {
             discoveryLogTimestamps[address] = now
-            Log.d(TAG, "Discovered device $address RSSI=$rssi")
+            Log.d(TAG, "Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount)")
             emitDiagnostic(
                 "info",
                 "Discovered BLE device",
                 mapOf(
                     "address" to address,
                     "rssi" to rssi,
-                    "connectable" to (isConnectable ?: true)
+                    "connectable" to (isConnectable ?: true),
+                    "visiblePeers" to estimatedVisiblePeerCount
                 )
             )
         }
@@ -753,6 +797,14 @@ class BleManager(
             }
             return
         }
+        
+        // Adaptive scanning: rate limit connection attempts
+        if (shouldThrottleConnection(address, now)) {
+            if (logThrottler.shouldLog("adaptive_throttle_$address", intervalMs = 30000)) {
+                Log.d(TAG, "Adaptive: throttling connection to $address")
+            }
+            return
+        }
 
         if (!meshController.connectionBudgetAvailable() && decision.evictPeerId != null) {
             evictPeer(decision.evictPeerId, decision.reason)
@@ -770,6 +822,9 @@ class BleManager(
             }
             return
         }
+        
+        // Record the connection attempt for rate limiting
+        recordConnectionAttempt(address, now)
 
         if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
             if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
@@ -1195,6 +1250,100 @@ class BleManager(
                 iterator.remove()
             }
         }
+    }
+    
+    // MARK: - Adaptive Scan Methods
+    
+    /** Updates the estimated visible peer count based on recent discoveries. */
+    private fun updateVisiblePeerCount(now: Long) {
+        // Only update periodically to avoid overhead
+        if (now - lastPeerCountUpdate < 1000L) {
+            return
+        }
+        lastPeerCountUpdate = now
+        
+        // Clean up old timestamps
+        val windowStart = now - ADAPTIVE_PEER_COUNT_WINDOW_MS
+        synchronized(recentDiscoveryTimestamps) {
+            recentDiscoveryTimestamps.removeAll { it < windowStart }
+        }
+        
+        // Estimate peer count from unique discoveries in window
+        val recentCount = recentDiscoveryTimestamps.size
+        val cachedCount = lastSeenMeshAdvertisements.size
+        estimatedVisiblePeerCount = maxOf(recentCount, cachedCount)
+    }
+    
+    /** Records a device discovery for density estimation. */
+    private fun recordDiscoveryForDensity(now: Long) {
+        recentDiscoveryTimestamps.add(now)
+        updateVisiblePeerCount(now)
+    }
+    
+    /** Checks if we should skip this device based on RSSI filtering. */
+    private fun shouldFilterByRssi(rssi: Int): Boolean {
+        // In dense networks, apply stricter RSSI filtering
+        val threshold = when {
+            estimatedVisiblePeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD -> -70
+            estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD -> ADAPTIVE_MIN_RSSI
+            else -> return false // Sparse network - accept all signals
+        }
+        return rssi < threshold
+    }
+    
+    /** Checks if we should throttle connection attempts based on rate limits. */
+    private fun shouldThrottleConnection(address: String, now: Long): Boolean {
+        // Prune old entries
+        val oneMinuteAgo = now - 60_000L
+        synchronized(globalConnectionAttempts) {
+            globalConnectionAttempts.removeAll { it < oneMinuteAgo }
+        }
+        deviceConnectionAttempts.entries.removeIf { 
+            now - it.value >= ADAPTIVE_COOLDOWN_PER_DEVICE_MS 
+        }
+        
+        // Check per-device cooldown
+        val lastAttempt = deviceConnectionAttempts[address]
+        if (lastAttempt != null && now - lastAttempt < ADAPTIVE_COOLDOWN_PER_DEVICE_MS) {
+            return true
+        }
+        
+        // In dense networks, apply global rate limiting
+        if (estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD) {
+            val currentAttempts = globalConnectionAttempts.size
+            if (currentAttempts >= ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE) {
+                if (logThrottler.shouldLog("adaptive_rate_limit", intervalMs = 5000)) {
+                    Log.d(TAG, "Adaptive: rate limiting connections ($currentAttempts/$ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE in last minute)")
+                }
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /** Records a connection attempt for rate limiting. */
+    private fun recordConnectionAttempt(address: String, now: Long) {
+        deviceConnectionAttempts[address] = now
+        globalConnectionAttempts.add(now)
+    }
+    
+    /** Returns true if we should apply probabilistic filtering based on network density. */
+    private fun shouldProbabilisticallySkip(address: String): Boolean {
+        if (estimatedVisiblePeerCount <= ADAPTIVE_LOW_DENSITY_THRESHOLD) {
+            return false
+        }
+        
+        // Calculate skip probability based on density
+        val density = (estimatedVisiblePeerCount - ADAPTIVE_LOW_DENSITY_THRESHOLD).toDouble()
+        val range = (ADAPTIVE_HIGH_DENSITY_THRESHOLD - ADAPTIVE_LOW_DENSITY_THRESHOLD).toDouble()
+        val skipProbability = minOf(0.8, density / range * 0.8)
+        
+        // Use address hash for deterministic selection
+        val hash = address.hashCode()
+        val normalizedHash = (kotlin.math.abs(hash) % 1000) / 1000.0
+        
+        return normalizedHash < skipProbability
     }
 
     private fun addressForNodeHash(nodeHash: Long): String? {

@@ -2,7 +2,7 @@
 
 use crate::constants::{DEFAULT_ACK_TIMEOUT_MS, DEFAULT_MAX_PENDING_ACKS};
 use chrono::{DateTime, Utc};
-use offline_protocol_core::MessageId;
+use offline_protocol_core::{MessageId, MessagePriority};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -34,6 +34,9 @@ pub struct PendingAck {
 
     /// Number of times the message has been retried.
     pub retry_count: u32,
+
+    /// Priority of the message (for eviction decisions).
+    pub priority: MessagePriority,
 }
 
 impl PendingAck {
@@ -102,16 +105,39 @@ impl AckManager {
         message_id: MessageId,
         timeout_ms: Option<u64>,
     ) -> crate::Result<()> {
+        self.register_pending_ack_with_priority(message_id, timeout_ms, MessagePriority::Medium)
+    }
+
+    /// Registers a message as waiting for ACK with specified priority.
+    ///
+    /// # Arguments
+    ///
+    /// * `message_id` - ID of the message waiting for ACK
+    /// * `timeout_ms` - Optional custom timeout (uses default if None)
+    /// * `priority` - Message priority for eviction decisions
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if registered successfully.
+    /// If at capacity, attempts priority-based eviction before returning error.
+    pub fn register_pending_ack_with_priority(
+        &mut self,
+        message_id: MessageId,
+        timeout_ms: Option<u64>,
+        priority: MessagePriority,
+    ) -> crate::Result<()> {
         // Check if we've hit the limit
         if self.pending_acks.len() >= self.config.max_pending_acks {
             // Clean up timed out ACKs first
             self.cleanup_timed_out();
 
-            // If still at limit, return error
+            // If still at limit, try priority-based eviction
             if self.pending_acks.len() >= self.config.max_pending_acks {
-                return Err(crate::Error::Other(
-                    "Maximum pending ACKs limit reached".to_string(),
-                ));
+                if !self.evict_lowest_priority(priority) {
+                    return Err(crate::Error::Other(
+                        "Maximum pending ACKs limit reached (no lower priority ACKs to evict)".to_string(),
+                    ));
+                }
             }
         }
 
@@ -121,10 +147,51 @@ impl AckManager {
             timeout_ms: timeout_ms.unwrap_or(self.config.default_timeout_ms),
             status: AckStatus::Pending,
             retry_count: 0,
+            priority,
         };
 
         self.pending_acks.insert(message_id, pending);
         Ok(())
+    }
+
+    /// Attempts to evict the lowest priority ACK to make room for a higher priority one.
+    /// Returns true if an ACK was evicted, false if no lower priority ACK exists.
+    fn evict_lowest_priority(&mut self, new_priority: MessagePriority) -> bool {
+        // Find the lowest priority pending ACK
+        let evict_candidate = self
+            .pending_acks
+            .iter()
+            .filter(|(_, ack)| ack.status == AckStatus::Pending)
+            .min_by(|(_, a), (_, b)| {
+                // Compare by priority first (lower priority = evict first)
+                let priority_cmp = Self::priority_rank(a.priority).cmp(&Self::priority_rank(b.priority));
+                if priority_cmp != std::cmp::Ordering::Equal {
+                    return priority_cmp;
+                }
+                // Within same priority, evict oldest first
+                a.sent_at.cmp(&b.sent_at)
+            })
+            .map(|(id, ack)| (id.clone(), ack.priority));
+
+        if let Some((evict_id, evict_priority)) = evict_candidate {
+            // Only evict if the candidate's priority is strictly lower
+            if Self::priority_rank(evict_priority) < Self::priority_rank(new_priority) {
+                self.pending_acks.remove(&evict_id);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Returns a numeric rank for priority (higher = more important).
+    fn priority_rank(priority: MessagePriority) -> u8 {
+        match priority {
+            MessagePriority::Low => 0,
+            MessagePriority::Medium => 1,
+            MessagePriority::High => 2,
+            MessagePriority::Critical => 3,
+        }
     }
 
     /// Records that an ACK was received for a message.
@@ -324,9 +391,67 @@ mod tests {
             .register_pending_ack(MessageId::new(), None)
             .unwrap();
 
-        // Fourth should fail
+        // Fourth should fail (same priority can't evict)
         let result = manager.register_pending_ack(MessageId::new(), None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_priority_based_eviction() {
+        let config = AckConfig {
+            default_timeout_ms: 5000,
+            max_pending_acks: 2,
+        };
+        let mut manager = AckManager::with_config(config);
+
+        let low_id = MessageId::new();
+        let medium_id = MessageId::new();
+
+        // Register low priority ACK
+        manager
+            .register_pending_ack_with_priority(low_id.clone(), None, MessagePriority::Low)
+            .unwrap();
+        // Register medium priority ACK
+        manager
+            .register_pending_ack_with_priority(medium_id.clone(), None, MessagePriority::Medium)
+            .unwrap();
+
+        assert_eq!(manager.pending_count(), 2);
+
+        // High priority should evict low priority
+        let high_id = MessageId::new();
+        manager
+            .register_pending_ack_with_priority(high_id.clone(), None, MessagePriority::High)
+            .unwrap();
+
+        assert_eq!(manager.pending_count(), 2);
+        assert!(!manager.is_waiting_for_ack(&low_id)); // Low was evicted
+        assert!(manager.is_waiting_for_ack(&medium_id)); // Medium still present
+        assert!(manager.is_waiting_for_ack(&high_id)); // High was added
+    }
+
+    #[test]
+    fn test_critical_priority_evicts_all() {
+        let config = AckConfig {
+            default_timeout_ms: 5000,
+            max_pending_acks: 1,
+        };
+        let mut manager = AckManager::with_config(config);
+
+        let medium_id = MessageId::new();
+        manager
+            .register_pending_ack_with_priority(medium_id.clone(), None, MessagePriority::Medium)
+            .unwrap();
+
+        // Critical should evict medium
+        let critical_id = MessageId::new();
+        manager
+            .register_pending_ack_with_priority(critical_id.clone(), None, MessagePriority::Critical)
+            .unwrap();
+
+        assert_eq!(manager.pending_count(), 1);
+        assert!(!manager.is_waiting_for_ack(&medium_id));
+        assert!(manager.is_waiting_for_ack(&critical_id));
     }
 
     #[test]

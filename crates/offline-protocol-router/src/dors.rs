@@ -379,6 +379,11 @@ impl TransportSelector {
             return false;
         }
 
+        // Emergency bypass: if current transport has critical degradation, switch immediately
+        if self.is_emergency_switch_needed(current_transport) {
+            return candidate_score > 10.0; // Any reasonably scored candidate is acceptable
+        }
+
         if candidate_score <= current_score {
             return false;
         }
@@ -398,6 +403,47 @@ impl TransportSelector {
             self.config.stability_window_secs,
             self.config.switch_hysteresis / 2.0,
         )
+    }
+
+    /// Checks if the current transport has critical degradation requiring emergency switch.
+    /// This bypasses normal hysteresis and cooldown for:
+    /// - Transport unavailable (status != Available)
+    /// - Success rate below 30%
+    /// - Consecutive failures exceeding threshold
+    fn is_emergency_switch_needed(&self, transport: TransportType) -> bool {
+        // Check retry failure count
+        let retry_failures = self.retry_counts.get(&transport).copied().unwrap_or(0);
+        if retry_failures >= self.config.ble_to_wifi_retry_threshold {
+            return true;
+        }
+
+        // Check historical success rate
+        if let Some(history) = self.transport_history.get(&transport) {
+            if let Some(success_rate) = history.average_success_ratio() {
+                if success_rate < 0.30 {
+                    return true;
+                }
+            }
+        }
+
+        // Check for prolonged poor signal (for wireless transports)
+        if matches!(transport, TransportType::BLE | TransportType::WiFiDirect) {
+            if let Some((metrics, _)) = self.last_metrics.get(&transport) {
+                if let Some(rssi) = metrics.rssi {
+                    // Very poor signal for extended period
+                    if rssi < -90 {
+                        let poor_duration = self.ble_poor_signal_since.map(|since| {
+                            Utc::now().signed_duration_since(since).num_seconds()
+                        });
+                        if poor_duration.unwrap_or(0) >= self.config.poor_signal_duration_secs as i64 * 2 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Calculates signal strength score from RSSI.
@@ -802,8 +848,10 @@ impl TransportSelector {
     }
 
     /// Records a retry failure for a transport.
+    /// Uses saturating addition to prevent overflow.
     pub fn record_retry_failure(&mut self, transport_type: TransportType) {
-        *self.retry_counts.entry(transport_type).or_insert(0) += 1;
+        let count = self.retry_counts.entry(transport_type).or_insert(0);
+        *count = count.saturating_add(1);
     }
 
     /// Resets retry count for a transport (e.g., after successful delivery).
@@ -872,6 +920,95 @@ impl TransportSelector {
             return false;
         }
 
+        retry_failure || poor_signal || high_congestion || low_ttl_recent
+    }
+
+    /// Checks if WiFi escalation is appropriate for a message with given priority.
+    /// 
+    /// For Critical priority messages, battery constraints are bypassed since
+    /// message delivery is more important than battery preservation.
+    ///
+    /// # Arguments
+    ///
+    /// * `priority` - The message priority
+    ///
+    /// # Returns
+    ///
+    /// `true` if WiFi escalation is appropriate for this priority level
+    pub fn should_escalate_to_wifi_for_priority(
+        &self,
+        priority: offline_protocol_core::MessagePriority,
+    ) -> bool {
+        use offline_protocol_core::MessagePriority;
+
+        // For critical priority, bypass battery check
+        if matches!(priority, MessagePriority::Critical) {
+            return self.should_escalate_to_wifi_ignoring_battery();
+        }
+
+        // For high priority, still escalate but respect battery constraints
+        if matches!(priority, MessagePriority::High) {
+            return self.should_escalate_to_wifi();
+        }
+
+        // For normal/low priority, only escalate under severe conditions
+        let retry_failure = self
+            .retry_counts
+            .get(&TransportType::BLE)
+            .map(|count| *count >= self.config.ble_to_wifi_retry_threshold * 2)
+            .unwrap_or(false);
+
+        retry_failure && self.should_escalate_to_wifi()
+    }
+
+    /// Internal: checks escalation conditions without battery constraint.
+    fn should_escalate_to_wifi_ignoring_battery(&self) -> bool {
+        let retry_failure = self
+            .retry_counts
+            .get(&TransportType::BLE)
+            .map(|count| *count >= self.config.ble_to_wifi_retry_threshold)
+            .unwrap_or(false);
+
+        let now = Utc::now();
+
+        let poor_signal = self
+            .ble_poor_signal_since
+            .map(|since| {
+                now.signed_duration_since(since)
+                    >= Duration::seconds(self.config.poor_signal_duration_secs as i64)
+            })
+            .unwrap_or(false);
+
+        let high_congestion_active = self
+            .ble_high_congestion_since
+            .map(|since| {
+                now.signed_duration_since(since)
+                    >= Duration::seconds(self.config.congestion_duration_secs as i64)
+            })
+            .unwrap_or(false);
+
+        let load_exceeded = self
+            .transport_history
+            .get(&TransportType::BLE)
+            .and_then(|history| history.average_queue_depth())
+            .map(|avg| {
+                let threshold = self.config.congestion_queue_threshold.max(1) as f32;
+                avg >= threshold
+            })
+            .unwrap_or(false);
+
+        let high_congestion = high_congestion_active && load_exceeded;
+
+        let low_ttl_recent = self
+            .low_ttl_detected_at
+            .map(|since| {
+                now.signed_duration_since(since)
+                    <= Duration::seconds(self.config.ttl_escalation_hold_secs as i64)
+            })
+            .unwrap_or(false);
+
+        // For critical messages, we escalate if any single condition is met
+        // (not requiring battery check)
         retry_failure || poor_signal || high_congestion || low_ttl_recent
     }
 

@@ -160,6 +160,12 @@ final class MeshController: @unchecked Sendable {
         let scoreHysteresis: Double
         let bridgeFavor: Double
         let scoreEquivalenceEpsilon: Double
+        /// Maximum number of peer states to keep in memory (LRU eviction).
+        let maxPeerCacheSize: Int
+        /// Maximum number of candidates to keep in memory (LRU eviction).
+        let maxCandidateCacheSize: Int
+        /// Interval for automatic cache pruning (seconds).
+        let cachePruneInterval: TimeInterval
 
         init(
             minConnections: Int = 1,
@@ -171,7 +177,10 @@ final class MeshController: @unchecked Sendable {
             uptimeSaturation: TimeInterval = 3600.0,
             scoreHysteresis: Double = 0.05,
             bridgeFavor: Double = 0.1,
-            scoreEquivalenceEpsilon: Double = 0.02
+            scoreEquivalenceEpsilon: Double = 0.02,
+            maxPeerCacheSize: Int = 200,
+            maxCandidateCacheSize: Int = 100,
+            cachePruneInterval: TimeInterval = 30.0
         ) {
             self.minConnections = minConnections
             self.maxConnections = maxConnections
@@ -183,6 +192,9 @@ final class MeshController: @unchecked Sendable {
             self.scoreHysteresis = scoreHysteresis
             self.bridgeFavor = bridgeFavor
             self.scoreEquivalenceEpsilon = scoreEquivalenceEpsilon
+            self.maxPeerCacheSize = maxPeerCacheSize
+            self.maxCandidateCacheSize = maxCandidateCacheSize
+            self.cachePruneInterval = cachePruneInterval
         }
     }
 
@@ -335,7 +347,12 @@ final class MeshController: @unchecked Sendable {
     private var activeConnections: [String: MeshRole] = [:]
     private var candidatesByHash: [UInt64: RemoteCandidate] = [:]
     private var lastRebalanceAt: Date
+    private var lastCachePruneAt: Date
     private var selfMetrics = PeerMetrics()
+    /// Current cluster signature computed from connected peer hashes
+    private var clusterSignature: UInt64 = 0
+    /// Known cluster signatures observed from candidates (nodeHash -> their cluster signature)
+    private var observedClusterSignatures: [UInt64: UInt64] = [:]
 
     private static let defaultRemoteScore: Double = 0.55
 
@@ -350,6 +367,7 @@ final class MeshController: @unchecked Sendable {
         self.startTimestamp = timeProvider()
         self.weights = config.scoreWeights.normalized()
         self.lastRebalanceAt = startTimestamp
+        self.lastCachePruneAt = startTimestamp
 
         let initialState = PeerState(
             deviceId: selfId,
@@ -460,7 +478,7 @@ final class MeshController: @unchecked Sendable {
                 self.peersById[state.deviceId] = state
             }
             self.candidatesByHash[nodeHash] = RemoteCandidate(metadata: data, observedAt: now, rssi: rssi)
-            self.pruneExpiredCandidates(now: now)
+            self.prunePeerCaches(now: now)
         }
     }
 
@@ -551,6 +569,7 @@ final class MeshController: @unchecked Sendable {
             state.lastActivity = now
             self.peersById[peerId] = state
             self.activeConnections[peerId] = role
+            self.updateClusterSignature()
         }
     }
 
@@ -576,6 +595,7 @@ final class MeshController: @unchecked Sendable {
         queue.async(flags: .barrier) {
             self.activeConnections.removeValue(forKey: peerId)
             self.peersById[peerId]?.lastActivity = self.timeProvider()
+            self.updateClusterSignature()
         }
     }
 
@@ -728,6 +748,16 @@ final class MeshController: @unchecked Sendable {
         if candidateUnderserved && selfHasSurplus && proximityAdvantage {
             return "swap_bridge_capacity"
         }
+        
+        // Cluster bridge detection: prioritize connections that bridge clusters
+        let clusterDifference = estimateClusterDifference(candidateHash: candidate.nodeIdHash)
+        if clusterDifference > 0.5 && selfHasSurplus {
+            // This candidate appears to be in a different cluster - prioritize bridging
+            // Even if scores are similar, prefer the inter-cluster connection
+            if candidateScore + config.bridgeFavor * 2 >= worstScore {
+                return "swap_inter_cluster_bridge"
+            }
+        }
 
         if abs(candidateScore - worstScore) <= config.scoreEquivalenceEpsilon && selfHasSurplus {
             return "swap_equivalent_peer"
@@ -813,6 +843,165 @@ final class MeshController: @unchecked Sendable {
 
     private func pruneExpiredCandidates(now: Date) {
         candidatesByHash = candidatesByHash.filter { now.timeIntervalSince($0.value.observedAt) <= config.metadataTTL }
+    }
+    
+    // MARK: - Cluster Bridge Detection
+    
+    /// Computes a cluster signature from the set of connected peer hashes.
+    /// The signature is a XOR of all connected peer node hashes, providing a
+    /// cheap way to detect if two nodes are in different "neighborhoods".
+    private func computeClusterSignature() -> UInt64 {
+        var signature: UInt64 = 0
+        for (_, state) in peersById where activeConnections[state.deviceId] != nil {
+            if let hash = state.nodeHash {
+                signature ^= hash
+            }
+        }
+        // Include self hash
+        if let selfHash = peersById[selfId]?.nodeHash {
+            signature ^= selfHash
+        }
+        return signature
+    }
+    
+    /// Updates our cluster signature after connection changes.
+    private func updateClusterSignature() {
+        clusterSignature = computeClusterSignature()
+    }
+    
+    /// Estimates if a candidate is in a different cluster based on their advertised neighbors.
+    /// Returns a value from 0.0 (same cluster) to 1.0 (completely different cluster).
+    private func estimateClusterDifference(candidateHash: UInt64) -> Double {
+        // If we have no connections, any candidate is equally valid
+        guard activeConnections.count > 0 else { return 0.5 }
+        
+        // Check if candidate's hash overlaps with any of our connected peers
+        let candidateSeenBefore = peersByHash[candidateHash] != nil
+        
+        // If we've seen this node as a peer of one of our connected nodes, they're likely same cluster
+        if candidateSeenBefore {
+            return 0.2
+        }
+        
+        // Check if we have stored cluster signature for this candidate
+        if let theirSignature = observedClusterSignatures[candidateHash] {
+            // XOR the signatures - more bits different = more different clusters
+            let diff = clusterSignature ^ theirSignature
+            let bitCount = diff.nonzeroBitCount
+            // Normalize to 0-1 (max 64 bits different)
+            return Double(bitCount) / 64.0
+        }
+        
+        // Unknown candidate - assume moderate difference
+        return 0.5
+    }
+    
+    /// Checks if accepting this candidate would improve network bridging.
+    /// Returns true if this candidate appears to be in a different cluster.
+    private func isBridgeCandidate(_ metadata: MeshAdvertisementData) -> Bool {
+        let difference = estimateClusterDifference(candidateHash: metadata.nodeIdHash)
+        // Consider it a bridge candidate if cluster difference > 30%
+        return difference > 0.3
+    }
+
+    /// Prunes peer caches using LRU eviction to prevent memory exhaustion.
+    /// Called periodically and when caches exceed their limits.
+    private func prunePeerCaches(now: Date) {
+        // Check if we need to prune based on interval
+        guard now.timeIntervalSince(lastCachePruneAt) >= config.cachePruneInterval else {
+            // Still check for hard limits even if interval not passed
+            if peersById.count <= config.maxPeerCacheSize && candidatesByHash.count <= config.maxCandidateCacheSize {
+                return
+            }
+        }
+
+        lastCachePruneAt = now
+
+        // Prune candidates first (less important)
+        pruneCandidateCache(now: now)
+
+        // Prune peer cache
+        prunePeerCache(now: now)
+    }
+
+    /// Prunes candidate cache to maxCandidateCacheSize using LRU + expiration.
+    private func pruneCandidateCache(now: Date) {
+        // First remove expired entries
+        pruneExpiredCandidates(now: now)
+
+        // If still over limit, evict oldest by observedAt
+        if candidatesByHash.count > config.maxCandidateCacheSize {
+            let sorted = candidatesByHash.sorted { $0.value.observedAt < $1.value.observedAt }
+            let toRemove = candidatesByHash.count - config.maxCandidateCacheSize
+            for (key, _) in sorted.prefix(toRemove) {
+                candidatesByHash.removeValue(forKey: key)
+            }
+        }
+    }
+
+    /// Prunes peer cache to maxPeerCacheSize using tiered LRU eviction.
+    /// Eviction priority: 1) Expired (not seen recently), 2) Inactive (not connected), 3) Lowest activity
+    private func prunePeerCache(now: Date) {
+        // Don't prune if under limit
+        guard peersById.count > config.maxPeerCacheSize else { return }
+
+        let toRemove = peersById.count - config.maxPeerCacheSize
+
+        // Categorize peers into tiers
+        var coldPeers: [(String, PeerState)] = [] // Not connected, not recently seen
+        var warmPeers: [(String, PeerState)] = [] // Not connected, recently seen
+        // Hot peers (actively connected) are never evicted
+
+        for (id, state) in peersById {
+            // Never evict self
+            if id == selfId { continue }
+
+            // Never evict actively connected peers
+            if activeConnections[id] != nil { continue }
+
+            let timeSinceActivity = now.timeIntervalSince(state.lastActivity)
+
+            if timeSinceActivity > config.metadataTTL {
+                // Cold: not seen in a while
+                coldPeers.append((id, state))
+            } else {
+                // Warm: recently seen but not connected
+                warmPeers.append((id, state))
+            }
+        }
+
+        // Sort by lastActivity (oldest first for eviction)
+        coldPeers.sort { $0.1.lastActivity < $1.1.lastActivity }
+        warmPeers.sort { $0.1.lastActivity < $1.1.lastActivity }
+
+        var removed = 0
+
+        // First evict cold peers (expired)
+        for (id, state) in coldPeers {
+            guard removed < toRemove else { break }
+            peersById.removeValue(forKey: id)
+            if let hash = state.nodeHash {
+                peersByHash.removeValue(forKey: hash)
+            }
+            removed += 1
+        }
+
+        // If still need to remove, evict warm peers (LRU by activity)
+        for (id, state) in warmPeers {
+            guard removed < toRemove else { break }
+            peersById.removeValue(forKey: id)
+            if let hash = state.nodeHash {
+                peersByHash.removeValue(forKey: hash)
+            }
+            removed += 1
+        }
+    }
+
+    /// Returns current cache statistics for monitoring.
+    func cacheStats() -> (peerCount: Int, candidateCount: Int, activeCount: Int) {
+        queue.sync {
+            (peersById.count, candidatesByHash.count, activeConnections.count)
+        }
     }
 
     static func hash64(_ input: String) -> UInt64 {

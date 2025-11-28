@@ -145,6 +145,47 @@ pub enum Event {
         /// Sender's user ID.
         sender: String,
     },
+
+    /// A message was deferred due to network conditions.
+    /// The message will be retried automatically.
+    MessageDeferred {
+        /// ID of the deferred message.
+        message_id: String,
+        /// Reason for deferral.
+        reason: String,
+        /// Current retry count.
+        retry_count: u32,
+        /// Next retry scheduled time (Unix timestamp ms).
+        next_retry_at: Option<i64>,
+    },
+
+    /// A pending ACK was evicted due to capacity constraints.
+    AckEvicted {
+        /// ID of the message whose ACK was evicted.
+        message_id: String,
+        /// Priority of the evicted message.
+        priority: String,
+        /// Reason for eviction.
+        reason: String,
+    },
+
+    /// A fragment assembly was evicted to make room for new fragments.
+    FragmentAssemblyEvicted {
+        /// ID of the message whose fragments were evicted.
+        message_id: String,
+        /// Completion percentage when evicted.
+        completion_percent: u8,
+        /// Reason for eviction.
+        reason: String,
+    },
+
+    /// Relay role was demoted due to battery constraints.
+    RelayDemotedBattery {
+        /// Battery level at time of demotion.
+        battery_level: u8,
+        /// Minimum required battery level.
+        min_required: u8,
+    },
 }
 
 impl Event {
@@ -281,6 +322,51 @@ impl Event {
             file_name,
             file_size,
             sender,
+        }
+    }
+
+    /// Creates a MessageDeferred event.
+    pub fn message_deferred(
+        message_id: MessageId,
+        reason: String,
+        retry_count: u32,
+        next_retry_at: Option<i64>,
+    ) -> Self {
+        Self::MessageDeferred {
+            message_id: message_id.as_str(),
+            reason,
+            retry_count,
+            next_retry_at,
+        }
+    }
+
+    /// Creates an AckEvicted event.
+    pub fn ack_evicted(message_id: MessageId, priority: &str, reason: String) -> Self {
+        Self::AckEvicted {
+            message_id: message_id.as_str(),
+            priority: priority.to_string(),
+            reason,
+        }
+    }
+
+    /// Creates a FragmentAssemblyEvicted event.
+    pub fn fragment_assembly_evicted(
+        message_id: String,
+        completion_percent: u8,
+        reason: String,
+    ) -> Self {
+        Self::FragmentAssemblyEvicted {
+            message_id,
+            completion_percent,
+            reason,
+        }
+    }
+
+    /// Creates a RelayDemotedBattery event.
+    pub fn relay_demoted_battery(battery_level: u8, min_required: u8) -> Self {
+        Self::RelayDemotedBattery {
+            battery_level,
+            min_required,
         }
     }
 

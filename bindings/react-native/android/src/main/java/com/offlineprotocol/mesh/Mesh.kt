@@ -142,7 +142,13 @@ class MeshController(
         val uptimeSaturationSeconds: Long = 3_600,
         val scoreHysteresis: Double = 0.05,
         val scoreEquivalenceEpsilon: Double = 0.02,
-        val bridgeFavor: Double = 0.1
+        val bridgeFavor: Double = 0.1,
+        /** Maximum number of peer states to keep in memory (LRU eviction). */
+        val maxPeerCacheSize: Int = 200,
+        /** Maximum number of candidates to keep in memory (LRU eviction). */
+        val maxCandidateCacheSize: Int = 100,
+        /** Interval for automatic cache pruning (milliseconds). */
+        val cachePruneIntervalMs: Long = 30_000
     )
 
     data class ScoreWeights(
@@ -230,12 +236,18 @@ class MeshController(
     private val candidatesByHash = ConcurrentHashMap<Long, RemoteCandidate>()
     private val recentEvictions = mutableMapOf<String, Long>()
     private var lastRebalanceAt: Long = 0
+    private var lastCachePruneAt: Long = 0
     private val startTimestamp = timeProvider()
     private var selfMetrics: PeerMetrics = PeerMetrics()
     private val normalizedWeights = config.scoreWeights.normalized()
+    /** Current cluster signature computed from connected peer hashes */
+    private var clusterSignature: Long = 0
+    /** Known cluster signatures observed from candidates */
+    private val observedClusterSignatures = mutableMapOf<Long, Long>()
 
     init {
         val now = startTimestamp
+        lastCachePruneAt = now
         val selfState = PeerState(
             deviceId = selfId,
             nodeHash = hash64(selfId),
@@ -322,8 +334,8 @@ class MeshController(
             state.lastUpdated = now
             state.lastActivityAt = now
             candidatesByHash[nodeHash] = RemoteCandidate(nodeHash, data, now, rssi)
+            prunePeerCaches(now)
         }
-        pruneExpiredCandidates(now)
     }
 
     fun shouldAcceptInboundConnection(
@@ -428,6 +440,7 @@ class MeshController(
             state.lastActivityAt = now
             activeConnections[peerId] = role
             state.nodeHash?.let { peersByHash[it] = state }
+            updateClusterSignature()
         }
     }
 
@@ -457,6 +470,7 @@ class MeshController(
             peersById[peerId]?.let { state ->
                 state.lastActivityAt = now
             }
+            updateClusterSignature()
         }
     }
 
@@ -597,6 +611,15 @@ class MeshController(
         if (candidateUnderserved && selfHasSurplus && proximityAdvantage) {
             return "swap_bridge_capacity"
         }
+        
+        // Cluster bridge detection: prioritize connections that bridge clusters
+        val clusterDifference = estimateClusterDifference(candidate.nodeIdHash)
+        if (clusterDifference > 0.5 && selfHasSurplus) {
+            // This candidate appears to be in a different cluster - prioritize bridging
+            if (candidateScore + config.bridgeFavor * 2 >= worstScore) {
+                return "swap_inter_cluster_bridge"
+            }
+        }
 
         val equivalentScore = abs(candidateScore - worstScore) <= config.scoreEquivalenceEpsilon
         if (equivalentScore && selfHasSurplus) {
@@ -653,6 +676,155 @@ class MeshController(
                 iterator.remove()
             }
         }
+    }
+
+    /**
+     * Prunes peer caches using LRU eviction to prevent memory exhaustion.
+     * Called periodically and when caches exceed their limits.
+     */
+    private fun prunePeerCaches(now: Long) {
+        // Check if we need to prune based on interval
+        if (now - lastCachePruneAt < config.cachePruneIntervalMs) {
+            // Still check for hard limits even if interval not passed
+            if (peersById.size <= config.maxPeerCacheSize && 
+                candidatesByHash.size <= config.maxCandidateCacheSize) {
+                return
+            }
+        }
+
+        lastCachePruneAt = now
+
+        // Prune candidates first (less important)
+        pruneCandidateCache(now)
+
+        // Prune peer cache
+        prunePeerCache(now)
+    }
+
+    /**
+     * Prunes candidate cache to maxCandidateCacheSize using LRU + expiration.
+     */
+    private fun pruneCandidateCache(now: Long) {
+        // First remove expired entries
+        pruneExpiredCandidates(now)
+
+        // If still over limit, evict oldest by observedAt
+        if (candidatesByHash.size > config.maxCandidateCacheSize) {
+            val sorted = candidatesByHash.entries.sortedBy { it.value.observedAt }
+            val toRemove = candidatesByHash.size - config.maxCandidateCacheSize
+            for (entry in sorted.take(toRemove)) {
+                candidatesByHash.remove(entry.key)
+            }
+        }
+    }
+
+    /**
+     * Prunes peer cache to maxPeerCacheSize using tiered LRU eviction.
+     * Eviction priority: 1) Expired (not seen recently), 2) Inactive (not connected), 3) Lowest activity
+     */
+    private fun prunePeerCache(now: Long) {
+        // Don't prune if under limit
+        if (peersById.size <= config.maxPeerCacheSize) return
+
+        val toRemove = peersById.size - config.maxPeerCacheSize
+
+        // Categorize peers into tiers
+        val coldPeers = mutableListOf<PeerState>() // Not connected, not recently seen
+        val warmPeers = mutableListOf<PeerState>() // Not connected, recently seen
+        // Hot peers (actively connected) are never evicted
+
+        for ((id, state) in peersById) {
+            // Never evict self
+            if (id == selfId) continue
+
+            // Never evict actively connected peers
+            if (activeConnections.containsKey(id)) continue
+
+            val timeSinceActivity = now - state.lastActivityAt
+
+            if (timeSinceActivity > config.metadataTtlMs) {
+                // Cold: not seen in a while
+                coldPeers.add(state)
+            } else {
+                // Warm: recently seen but not connected
+                warmPeers.add(state)
+            }
+        }
+
+        // Sort by lastActivityAt (oldest first for eviction)
+        coldPeers.sortBy { it.lastActivityAt }
+        warmPeers.sortBy { it.lastActivityAt }
+
+        var removed = 0
+
+        // First evict cold peers (expired)
+        for (state in coldPeers) {
+            if (removed >= toRemove) break
+            peersById.remove(state.deviceId)
+            state.nodeHash?.let { peersByHash.remove(it) }
+            removed++
+        }
+
+        // If still need to remove, evict warm peers (LRU by activity)
+        for (state in warmPeers) {
+            if (removed >= toRemove) break
+            peersById.remove(state.deviceId)
+            state.nodeHash?.let { peersByHash.remove(it) }
+            removed++
+        }
+    }
+
+    /**
+     * Returns current cache statistics for monitoring.
+     */
+    fun cacheStats(): Triple<Int, Int, Int> = synchronized(lock) {
+        Triple(peersById.size, candidatesByHash.size, activeConnections.size)
+    }
+    
+    // MARK: - Cluster Bridge Detection
+    
+    /**
+     * Computes a cluster signature from the set of connected peer hashes.
+     * The signature is a XOR of all connected peer node hashes.
+     */
+    private fun computeClusterSignature(): Long {
+        var signature = 0L
+        for ((_, state) in peersById) {
+            if (activeConnections.containsKey(state.deviceId)) {
+                state.nodeHash?.let { signature = signature xor it }
+            }
+        }
+        // Include self hash
+        peersById[selfId]?.nodeHash?.let { signature = signature xor it }
+        return signature
+    }
+    
+    /** Updates our cluster signature after connection changes. */
+    private fun updateClusterSignature() {
+        clusterSignature = computeClusterSignature()
+    }
+    
+    /**
+     * Estimates if a candidate is in a different cluster.
+     * Returns a value from 0.0 (same cluster) to 1.0 (completely different cluster).
+     */
+    private fun estimateClusterDifference(candidateHash: Long): Double {
+        if (activeConnections.isEmpty()) return 0.5
+        
+        // Check if candidate's hash overlaps with any of our connected peers
+        if (peersByHash.containsKey(candidateHash)) {
+            return 0.2
+        }
+        
+        // Check if we have stored cluster signature for this candidate
+        val theirSignature = observedClusterSignatures[candidateHash]
+        if (theirSignature != null) {
+            val diff = clusterSignature xor theirSignature
+            val bitCount = java.lang.Long.bitCount(diff)
+            return bitCount / 64.0
+        }
+        
+        return 0.5
     }
 
     private fun peerRssiScore(peer: PeerState): Double {

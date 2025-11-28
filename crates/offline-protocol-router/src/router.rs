@@ -1,8 +1,16 @@
 //! Path selection and routing for optimal message delivery.
+//!
+//! This module implements gossip-based probabilistic forwarding to prevent
+//! broadcast storms in large networks. The forwarding probability adapts
+//! based on the number of visible peers to maintain constant message overhead.
 
 use crate::constants::*;
 use crate::relay::{RelayInfo, RelayManager};
 use offline_protocol_core::Message;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 /// Information about a neighboring device.
 #[derive(Debug, Clone)]
@@ -23,6 +31,267 @@ pub struct NeighborInfo {
     pub relay_info: Option<RelayInfo>,
 }
 
+/// Gossip forwarding configuration for probabilistic message propagation.
+#[derive(Debug, Clone)]
+pub struct GossipConfig {
+    /// Enable probabilistic (gossip) forwarding to prevent broadcast storms.
+    pub enabled: bool,
+
+    /// Target number of peers to forward to in large networks.
+    /// The actual forwarding probability is computed as: min(1.0, target_fanout / visible_peers)
+    pub target_fanout: usize,
+
+    /// Minimum forwarding probability (0.0-1.0). Ensures messages still propagate
+    /// even in very dense networks.
+    pub min_probability: f32,
+
+    /// Peer count threshold below which we always forward (no probabilistic dropping).
+    /// Below this threshold, the network is small enough to handle full flooding.
+    pub small_network_threshold: usize,
+
+    /// High-priority messages bypass probabilistic dropping.
+    pub priority_bypass: bool,
+}
+
+impl Default for GossipConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_fanout: 4,
+            min_probability: 0.15,
+            small_network_threshold: 10,
+            priority_bypass: true,
+        }
+    }
+}
+
+/// Configuration for gradient routing.
+#[derive(Debug, Clone)]
+pub struct GradientRoutingConfig {
+    /// Enable gradient routing for directed message delivery.
+    pub enabled: bool,
+    /// Maximum entries in the routing table per destination.
+    pub max_routes_per_destination: usize,
+    /// Time to live for routing entries (seconds).
+    pub route_ttl_secs: u64,
+    /// Maximum total routing table entries.
+    pub max_routing_table_size: usize,
+}
+
+impl Default for GradientRoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_routes_per_destination: 3,
+            route_ttl_secs: 300, // 5 minutes
+            max_routing_table_size: 1000,
+        }
+    }
+}
+
+/// A routing entry tracking how to reach a destination.
+#[derive(Debug, Clone)]
+pub struct RouteEntry {
+    /// The next-hop neighbor to reach this destination.
+    pub next_hop: String,
+    /// Hop count to destination through this route.
+    pub hop_count: u8,
+    /// When this route was last confirmed.
+    pub last_seen: Instant,
+    /// Quality score of this route (higher is better).
+    pub quality: f32,
+}
+
+/// Gradient routing table for directed message delivery.
+/// Learns routes from incoming messages and uses them for replies.
+#[derive(Debug)]
+pub struct GradientRoutingTable {
+    config: GradientRoutingConfig,
+    /// Routes indexed by destination user ID.
+    routes: HashMap<String, Vec<RouteEntry>>,
+    /// Reverse mapping: which destinations can be reached through which neighbor.
+    neighbor_destinations: HashMap<String, Vec<String>>,
+}
+
+impl GradientRoutingTable {
+    /// Creates a new gradient routing table.
+    pub fn new() -> Self {
+        Self::with_config(GradientRoutingConfig::default())
+    }
+
+    /// Creates a new gradient routing table with custom configuration.
+    pub fn with_config(config: GradientRoutingConfig) -> Self {
+        Self {
+            config,
+            routes: HashMap::new(),
+            neighbor_destinations: HashMap::new(),
+        }
+    }
+
+    /// Records a route learned from an incoming message.
+    /// Called when we receive a message from a neighbor - we now know
+    /// that neighbor can reach the message's sender.
+    pub fn learn_route(&mut self, destination: &str, next_hop: &str, hop_count: u8, quality: f32) {
+        if !self.config.enabled {
+            return;
+        }
+
+        let now = Instant::now();
+
+        // Get or create route list for this destination
+        let routes = self.routes.entry(destination.to_string()).or_default();
+
+        // Check if we already have a route through this neighbor
+        if let Some(existing) = routes.iter_mut().find(|r| r.next_hop == next_hop) {
+            // Update existing route
+            existing.hop_count = hop_count;
+            existing.last_seen = now;
+            existing.quality = quality;
+        } else {
+            // Add new route
+            if routes.len() >= self.config.max_routes_per_destination {
+                // Remove worst route
+                routes.sort_by(|a, b| b.quality.partial_cmp(&a.quality).unwrap());
+                routes.pop();
+            }
+
+            routes.push(RouteEntry {
+                next_hop: next_hop.to_string(),
+                hop_count,
+                last_seen: now,
+                quality,
+            });
+
+            // Update reverse mapping
+            self.neighbor_destinations
+                .entry(next_hop.to_string())
+                .or_default()
+                .push(destination.to_string());
+        }
+
+        // Enforce table size limit
+        self.enforce_size_limit();
+    }
+
+    /// Gets the best route to a destination, if known.
+    pub fn get_route(&self, destination: &str) -> Option<&RouteEntry> {
+        if !self.config.enabled {
+            return None;
+        }
+
+        let routes = self.routes.get(destination)?;
+        let ttl = Duration::from_secs(self.config.route_ttl_secs);
+        let now = Instant::now();
+
+        // Find best non-expired route
+        routes
+            .iter()
+            .filter(|r| now.duration_since(r.last_seen) < ttl)
+            .max_by(|a, b| a.quality.partial_cmp(&b.quality).unwrap())
+    }
+
+    /// Gets all valid routes to a destination.
+    pub fn get_routes(&self, destination: &str) -> Vec<&RouteEntry> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+
+        let Some(routes) = self.routes.get(destination) else {
+            return Vec::new();
+        };
+
+        let ttl = Duration::from_secs(self.config.route_ttl_secs);
+        let now = Instant::now();
+
+        routes
+            .iter()
+            .filter(|r| now.duration_since(r.last_seen) < ttl)
+            .collect()
+    }
+
+    /// Checks if we have a known route to a destination.
+    pub fn has_route(&self, destination: &str) -> bool {
+        self.get_route(destination).is_some()
+    }
+
+    /// Removes a neighbor from the routing table (e.g., on disconnect).
+    pub fn remove_neighbor(&mut self, neighbor: &str) {
+        // Remove all routes through this neighbor
+        for routes in self.routes.values_mut() {
+            routes.retain(|r| r.next_hop != neighbor);
+        }
+
+        // Remove empty entries
+        self.routes.retain(|_, v| !v.is_empty());
+
+        // Update reverse mapping
+        self.neighbor_destinations.remove(neighbor);
+    }
+
+    /// Cleans up expired routes.
+    pub fn cleanup_expired(&mut self) {
+        let ttl = Duration::from_secs(self.config.route_ttl_secs);
+        let now = Instant::now();
+
+        for routes in self.routes.values_mut() {
+            routes.retain(|r| now.duration_since(r.last_seen) < ttl);
+        }
+
+        self.routes.retain(|_, v| !v.is_empty());
+
+        // Rebuild reverse mapping
+        self.neighbor_destinations.clear();
+        for (dest, routes) in &self.routes {
+            for route in routes {
+                self.neighbor_destinations
+                    .entry(route.next_hop.clone())
+                    .or_default()
+                    .push(dest.clone());
+            }
+        }
+    }
+
+    /// Returns the number of known destinations.
+    pub fn destination_count(&self) -> usize {
+        self.routes.len()
+    }
+
+    /// Returns the total number of routes.
+    pub fn route_count(&self) -> usize {
+        self.routes.values().map(|v| v.len()).sum()
+    }
+
+    /// Enforces the maximum routing table size.
+    fn enforce_size_limit(&mut self) {
+        while self.route_count() > self.config.max_routing_table_size {
+            // Find and remove oldest route
+            let oldest = self
+                .routes
+                .iter()
+                .flat_map(|(dest, routes)| routes.iter().map(move |r| (dest.clone(), r)))
+                .min_by_key(|(_, r)| r.last_seen);
+
+            if let Some((dest, route)) = oldest {
+                let next_hop = route.next_hop.clone();
+                if let Some(routes) = self.routes.get_mut(&dest) {
+                    routes.retain(|r| r.next_hop != next_hop);
+                    if routes.is_empty() {
+                        self.routes.remove(&dest);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+impl Default for GradientRoutingTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Path selection configuration.
 #[derive(Debug, Clone)]
 pub struct PathConfig {
@@ -31,6 +300,12 @@ pub struct PathConfig {
 
     /// Maximum acceptable congestion level (0.0-1.0).
     pub max_congestion_level: f32,
+
+    /// Gossip forwarding configuration for scalable message propagation.
+    pub gossip: GossipConfig,
+
+    /// Gradient routing configuration for directed message delivery.
+    pub gradient_routing: GradientRoutingConfig,
 }
 
 impl Default for PathConfig {
@@ -38,6 +313,8 @@ impl Default for PathConfig {
         Self {
             forward_to_top_k: DEFAULT_FORWARD_TO_TOP_K,
             max_congestion_level: DEFAULT_MAX_CONGESTION_LEVEL,
+            gossip: GossipConfig::default(),
+            gradient_routing: GradientRoutingConfig::default(),
         }
     }
 }
@@ -61,10 +338,27 @@ pub struct PathScore {
     pub total: f32,
 }
 
+/// Forwarding decision result with reasoning.
+#[derive(Debug, Clone)]
+pub struct ForwardingDecision {
+    /// Peers to forward the message to.
+    pub peers: Vec<String>,
+    /// Whether gossip probabilistic forwarding was applied.
+    pub gossip_applied: bool,
+    /// The computed forwarding probability (1.0 if gossip not applied).
+    pub probability: f32,
+    /// Number of peers that were probabilistically dropped.
+    pub dropped_count: usize,
+}
+
 /// Path selector for optimal relay selection.
 pub struct PathSelector {
     config: PathConfig,
     relay_manager: RelayManager,
+    /// Local device ID for deterministic randomness.
+    local_device_id: String,
+    /// Gradient routing table for directed message delivery.
+    routing_table: GradientRoutingTable,
 }
 
 impl PathSelector {
@@ -75,9 +369,160 @@ impl PathSelector {
 
     /// Creates a new path selector with custom configuration.
     pub fn with_config(config: PathConfig, relay_manager: RelayManager) -> Self {
+        let routing_table = GradientRoutingTable::with_config(config.gradient_routing.clone());
         Self {
             config,
             relay_manager,
+            local_device_id: String::new(),
+            routing_table,
+        }
+    }
+
+    /// Sets the local device ID for deterministic gossip decisions.
+    pub fn set_local_device_id(&mut self, device_id: impl Into<String>) {
+        self.local_device_id = device_id.into();
+    }
+
+    /// Computes the forwarding probability based on visible peer count.
+    ///
+    /// Uses the formula: min(1.0, max(min_probability, target_fanout / peer_count))
+    /// This ensures constant expected message overhead regardless of network size.
+    pub fn compute_forwarding_probability(&self, visible_peer_count: usize) -> f32 {
+        let gossip = &self.config.gossip;
+
+        if !gossip.enabled || visible_peer_count <= gossip.small_network_threshold {
+            return 1.0;
+        }
+
+        let raw_probability = gossip.target_fanout as f32 / visible_peer_count as f32;
+        raw_probability.max(gossip.min_probability).min(1.0)
+    }
+
+    /// Determines if a message should be forwarded to a specific peer using
+    /// deterministic pseudo-random selection based on message ID and peer ID.
+    ///
+    /// This ensures that the same message-peer pair always produces the same
+    /// decision across all nodes, preventing duplicate forwarding.
+    fn should_forward_to_peer(
+        &self,
+        message_id: &str,
+        peer_id: &str,
+        probability: f32,
+    ) -> bool {
+        if probability >= 1.0 {
+            return true;
+        }
+        if probability <= 0.0 {
+            return false;
+        }
+
+        // Create deterministic hash from message ID, peer ID, and local device ID
+        let mut hasher = DefaultHasher::new();
+        message_id.hash(&mut hasher);
+        peer_id.hash(&mut hasher);
+        self.local_device_id.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Convert hash to probability (0.0 to 1.0)
+        let hash_probability = (hash as f64 / u64::MAX as f64) as f32;
+
+        hash_probability < probability
+    }
+
+    /// Selects the best path(s) for message delivery with gossip-based filtering.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to route
+    /// * `neighbors` - Available neighboring devices
+    /// * `total_visible_peers` - Total number of peers visible in the network
+    ///   (may be larger than neighbors if some peers are not connected)
+    ///
+    /// # Returns
+    ///
+    /// Returns a forwarding decision with selected peers and metadata.
+    pub fn select_paths_with_gossip(
+        &self,
+        message: &Message,
+        neighbors: &[NeighborInfo],
+        total_visible_peers: usize,
+    ) -> ForwardingDecision {
+        if neighbors.is_empty() {
+            return ForwardingDecision {
+                peers: Vec::new(),
+                gossip_applied: false,
+                probability: 1.0,
+                dropped_count: 0,
+            };
+        }
+
+        // Check if high-priority message should bypass gossip
+        let bypass_gossip = self.config.gossip.priority_bypass
+            && matches!(
+                message.priority,
+                offline_protocol_core::MessagePriority::High
+                    | offline_protocol_core::MessagePriority::Critical
+            );
+
+        // Compute forwarding probability
+        let probability = if bypass_gossip {
+            1.0
+        } else {
+            self.compute_forwarding_probability(total_visible_peers.max(neighbors.len()))
+        };
+
+        let gossip_applied = probability < 1.0;
+
+        // Calculate scores for each neighbor
+        let mut scored_neighbors: Vec<(String, PathScore)> = neighbors
+            .iter()
+            .map(|neighbor| {
+                let score = self.calculate_path_score(message, neighbor);
+                (neighbor.peer_id.clone(), score)
+            })
+            .collect();
+
+        // Filter out neighbors with relay congestion > max threshold
+        scored_neighbors.retain(|(peer_id, _)| {
+            if let Some(neighbor) = neighbors.iter().find(|n| n.peer_id == *peer_id) {
+                if let Some(relay_info) = &neighbor.relay_info {
+                    return relay_info.congestion_level <= self.config.max_congestion_level;
+                }
+            }
+            true
+        });
+
+        // Sort by total score (descending)
+        scored_neighbors.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap());
+
+        // Take top K candidates
+        let candidates: Vec<String> = scored_neighbors
+            .into_iter()
+            .take(self.config.forward_to_top_k)
+            .map(|(peer_id, _)| peer_id)
+            .collect();
+
+        // Apply probabilistic filtering if gossip is active
+        let initial_count = candidates.len();
+        let message_id = message.id.as_str();
+        let peers: Vec<String> = if gossip_applied {
+            candidates
+                .into_iter()
+                .filter(|peer_id| {
+                    self.should_forward_to_peer(&message_id, peer_id.as_str(), probability)
+                })
+                .collect()
+        } else {
+            candidates
+        };
+
+        let dropped_count = initial_count.saturating_sub(peers.len());
+
+        ForwardingDecision {
+            peers,
+            gossip_applied,
+            probability,
+            dropped_count,
         }
     }
 
@@ -91,6 +536,9 @@ impl PathSelector {
     /// # Returns
     ///
     /// Returns a list of neighbors to forward the message to, ordered by preference.
+    ///
+    /// Note: This method does not apply gossip filtering. Use `select_paths_with_gossip`
+    /// for scalable routing in large networks.
     pub fn select_paths(&self, message: &Message, neighbors: &[NeighborInfo]) -> Vec<String> {
         if neighbors.is_empty() {
             return Vec::new();
@@ -238,6 +686,75 @@ impl PathSelector {
     pub fn config(&self) -> &PathConfig {
         &self.config
     }
+
+    // MARK: - Gradient Routing Methods
+
+    /// Learns a route from an incoming message.
+    /// Call this when receiving a message from a neighbor to learn
+    /// that the neighbor can reach the message's sender.
+    pub fn learn_route_from_message(&mut self, message: &Message, from_neighbor: &str, quality: f32) {
+        let sender = message.sender.as_str();
+        let hop_count = message.hop_count.value();
+        self.routing_table.learn_route(sender, from_neighbor, hop_count, quality);
+    }
+
+    /// Gets the best route to a destination, if known.
+    pub fn get_route_to(&self, destination: &str) -> Option<&RouteEntry> {
+        self.routing_table.get_route(destination)
+    }
+
+    /// Checks if we have a known route to a destination.
+    pub fn has_route_to(&self, destination: &str) -> bool {
+        self.routing_table.has_route(destination)
+    }
+
+    /// Selects the best path for a message using gradient routing when available.
+    /// Falls back to flooding if no route is known.
+    pub fn select_directed_path(
+        &self,
+        message: &Message,
+        neighbors: &[NeighborInfo],
+    ) -> Option<String> {
+        let recipient = message.recipient.as_str();
+
+        // Check if any neighbor IS the recipient
+        for neighbor in neighbors {
+            if neighbor.peer_id == recipient {
+                return Some(neighbor.peer_id.clone());
+            }
+        }
+
+        // Check if we have a learned route
+        if let Some(route) = self.routing_table.get_route(recipient) {
+            // Verify the next hop is in our current neighbors
+            if neighbors.iter().any(|n| n.peer_id == route.next_hop) {
+                return Some(route.next_hop.clone());
+            }
+        }
+
+        // No direct route known, fall back to best path selection
+        self.select_best_path(message, neighbors)
+    }
+
+    /// Removes a neighbor from the routing table (e.g., on disconnect).
+    pub fn remove_neighbor_routes(&mut self, neighbor: &str) {
+        self.routing_table.remove_neighbor(neighbor);
+    }
+
+    /// Cleans up expired routes.
+    pub fn cleanup_routes(&mut self) {
+        self.routing_table.cleanup_expired();
+    }
+
+    /// Returns routing table statistics.
+    pub fn routing_stats(&self) -> (usize, usize) {
+        (self.routing_table.destination_count(), self.routing_table.route_count())
+    }
+
+    /// Gets a mutable reference to the routing table for advanced operations.
+    pub fn routing_table_mut(&mut self) -> &mut GradientRoutingTable {
+        &mut self.routing_table
+    }
 }
 
 impl Default for PathSelector {
@@ -377,5 +894,116 @@ mod tests {
 
         let normal = create_neighbor("peer2", -60, Some(2), 0.3);
         assert!(!selector.should_route_around_congestion(&normal));
+    }
+
+    #[test]
+    fn test_gossip_probability_small_network() {
+        let selector = PathSelector::new();
+
+        // Below threshold (10), probability should be 1.0
+        assert_eq!(selector.compute_forwarding_probability(5), 1.0);
+        assert_eq!(selector.compute_forwarding_probability(10), 1.0);
+    }
+
+    #[test]
+    fn test_gossip_probability_large_network() {
+        let selector = PathSelector::new();
+
+        // Above threshold, probability should scale down
+        // target_fanout = 4, so at 40 peers: probability = 4/40 = 0.1
+        // But min_probability = 0.15, so it should be 0.15
+        let prob = selector.compute_forwarding_probability(40);
+        assert!((prob - 0.15).abs() < 0.01);
+
+        // At 20 peers: probability = 4/20 = 0.2
+        let prob = selector.compute_forwarding_probability(20);
+        assert!((prob - 0.2).abs() < 0.01);
+
+        // At 100 peers: probability = 4/100 = 0.04, but min is 0.15
+        let prob = selector.compute_forwarding_probability(100);
+        assert!((prob - 0.15).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gossip_disabled() {
+        let config = PathConfig {
+            gossip: GossipConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let selector = PathSelector::with_config(config, RelayManager::new());
+
+        // Even with 1000 peers, probability should be 1.0 when disabled
+        assert_eq!(selector.compute_forwarding_probability(1000), 1.0);
+    }
+
+    #[test]
+    fn test_gossip_forwarding_deterministic() {
+        let mut selector = PathSelector::new();
+        selector.set_local_device_id("device1");
+
+        let message = create_test_message();
+        let neighbors = vec![
+            create_neighbor("peer1", -60, Some(2), 0.2),
+            create_neighbor("peer2", -60, Some(2), 0.2),
+            create_neighbor("peer3", -60, Some(2), 0.2),
+        ];
+
+        // Same input should produce same output
+        let decision1 = selector.select_paths_with_gossip(&message, &neighbors, 50);
+        let decision2 = selector.select_paths_with_gossip(&message, &neighbors, 50);
+
+        assert_eq!(decision1.peers, decision2.peers);
+        assert!(decision1.gossip_applied);
+    }
+
+    #[test]
+    fn test_gossip_priority_bypass() {
+        use offline_protocol_core::MessagePriority;
+
+        let mut selector = PathSelector::new();
+        selector.set_local_device_id("device1");
+
+        let high_priority_message = Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test").unwrap(),
+        )
+        .content("Test")
+        .priority(MessagePriority::High)
+        .build();
+
+        let neighbors = vec![
+            create_neighbor("peer1", -60, Some(2), 0.2),
+            create_neighbor("peer2", -60, Some(2), 0.2),
+        ];
+
+        // High priority should bypass gossip
+        let decision = selector.select_paths_with_gossip(&high_priority_message, &neighbors, 100);
+        assert!(!decision.gossip_applied);
+        assert_eq!(decision.probability, 1.0);
+    }
+
+    #[test]
+    fn test_gossip_reduces_forwarding_count() {
+        let mut selector = PathSelector::new();
+        selector.set_local_device_id("test-device");
+
+        let neighbors: Vec<NeighborInfo> = (0..20)
+            .map(|i| create_neighbor(&format!("peer{}", i), -60, Some(2), 0.2))
+            .collect();
+
+        let message = create_test_message();
+
+        // With 100 visible peers and target_fanout=4, probability ≈ 0.15
+        // So we should forward to fewer peers on average
+        let decision = selector.select_paths_with_gossip(&message, &neighbors, 100);
+
+        // Gossip should be applied
+        assert!(decision.gossip_applied);
+        // Probability should be at minimum (0.15)
+        assert!((decision.probability - 0.15).abs() < 0.01);
     }
 }

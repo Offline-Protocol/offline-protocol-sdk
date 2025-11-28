@@ -3,6 +3,37 @@
 /// Number of top relays to forward to for redundancy.
 pub const DEFAULT_FORWARD_TO_TOP_K: usize = 3;
 
+// Adaptive TTL constants
+
+/// Base TTL for small networks (< 50 devices).
+pub const ADAPTIVE_TTL_BASE: u8 = 8;
+
+/// Additional TTL per 100 devices in the network.
+pub const ADAPTIVE_TTL_PER_100_DEVICES: u8 = 2;
+
+/// Maximum TTL to prevent infinite propagation.
+pub const ADAPTIVE_TTL_MAX: u8 = 24;
+
+/// Minimum TTL to ensure basic propagation.
+pub const ADAPTIVE_TTL_MIN: u8 = 4;
+
+/// TTL boost for messages that have been queued due to congestion.
+pub const ADAPTIVE_TTL_CONGESTION_BOOST: u8 = 2;
+
+/// Network size threshold for small networks (no adaptive TTL needed).
+pub const ADAPTIVE_TTL_SMALL_NETWORK_THRESHOLD: usize = 50;
+
+// Gossip forwarding constants
+
+/// Target number of peers to forward messages to in large networks.
+pub const DEFAULT_GOSSIP_TARGET_FANOUT: usize = 4;
+
+/// Minimum forwarding probability to ensure message propagation.
+pub const DEFAULT_GOSSIP_MIN_PROBABILITY: f32 = 0.15;
+
+/// Peer count threshold below which we use full flooding instead of gossip.
+pub const DEFAULT_GOSSIP_SMALL_NETWORK_THRESHOLD: usize = 10;
+
 /// Maximum acceptable congestion level.
 pub const DEFAULT_MAX_CONGESTION_LEVEL: f32 = 0.7;
 

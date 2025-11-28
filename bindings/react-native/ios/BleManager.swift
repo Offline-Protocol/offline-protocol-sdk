@@ -57,6 +57,21 @@ public class BleManager: NSObject, TransportManager {
     private let LOAD_SATURATION_COUNT = 20
     private let MESH_OBSERVATION_TTL: TimeInterval = 120.0
     
+    // MARK: - Adaptive Scan Configuration
+    
+    /// Minimum RSSI to consider for connection (filter weak signals early)
+    private let ADAPTIVE_MIN_RSSI: Int16 = -85
+    /// Peer count threshold below which we process all advertisements
+    private let ADAPTIVE_LOW_DENSITY_THRESHOLD = 10
+    /// Peer count threshold above which we apply maximum throttling
+    private let ADAPTIVE_HIGH_DENSITY_THRESHOLD = 50
+    /// Maximum connection attempts per minute in dense networks
+    private let ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE = 6
+    /// Minimum interval between connection attempts to the same peripheral
+    private let ADAPTIVE_COOLDOWN_PER_PERIPHERAL: TimeInterval = 30.0
+    /// Interval for updating visible peer count estimate
+    private let ADAPTIVE_PEER_COUNT_WINDOW: TimeInterval = 5.0
+    
     // MARK: - Properties
     
     private let protocolInstance: OfflineProtocol
@@ -117,6 +132,18 @@ public class BleManager: NSObject, TransportManager {
     private var scanStateMonitor: DispatchSourceTimer?
     private var lastDiscoveryDate: Date?
     private var scanStartDate: Date?
+    
+    // Adaptive scan state
+    /// Timestamps of recent peripheral discoveries for density estimation
+    private var recentDiscoveryTimestamps: [Date] = []
+    /// Last connection attempt timestamps per peripheral for rate limiting
+    private var peripheralConnectionAttempts: [UUID: Date] = [:]
+    /// Global connection attempts in the last minute for rate limiting
+    private var globalConnectionAttempts: [Date] = []
+    /// Current estimated visible peer count
+    private var estimatedVisiblePeerCount: Int = 0
+    /// Last time we updated the peer count estimate
+    private var lastPeerCountUpdate: Date?
     private let SCAN_HEARTBEAT_INTERVAL: TimeInterval = 10.0
     private let SCAN_RESTART_INTERVAL: TimeInterval = 30.0
     private var connectionMonitor: DispatchSourceTimer?
@@ -1105,6 +1132,108 @@ public class BleManager: NSObject, TransportManager {
     private func pruneMeshObservations(now: Date = Date()) {
         lastSeenMeshAdvertisements = lastSeenMeshAdvertisements.filter { now.timeIntervalSince($0.value.timestamp) <= MESH_OBSERVATION_TTL }
     }
+    
+    // MARK: - Adaptive Scan Methods
+    
+    /// Updates the estimated visible peer count based on recent discoveries.
+    private func updateVisiblePeerCount(now: Date) {
+        // Only update periodically to avoid overhead
+        if let lastUpdate = lastPeerCountUpdate, now.timeIntervalSince(lastUpdate) < 1.0 {
+            return
+        }
+        lastPeerCountUpdate = now
+        
+        // Clean up old timestamps
+        let windowStart = now.addingTimeInterval(-ADAPTIVE_PEER_COUNT_WINDOW)
+        recentDiscoveryTimestamps = recentDiscoveryTimestamps.filter { $0 > windowStart }
+        
+        // Estimate peer count from unique discoveries in window
+        // Also consider cached observations as a lower bound
+        let recentCount = recentDiscoveryTimestamps.count
+        let cachedCount = lastSeenMeshAdvertisements.count
+        estimatedVisiblePeerCount = max(recentCount, cachedCount)
+    }
+    
+    /// Records a peripheral discovery for density estimation.
+    private func recordDiscoveryForDensity(now: Date) {
+        recentDiscoveryTimestamps.append(now)
+        updateVisiblePeerCount(now: now)
+    }
+    
+    /// Checks if we should skip this peripheral based on RSSI filtering.
+    /// Returns true if the signal is too weak and we're in a dense environment.
+    private func shouldFilterByRssi(_ rssi: Int16) -> Bool {
+        // In dense networks, apply stricter RSSI filtering
+        let threshold: Int16
+        if estimatedVisiblePeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD {
+            // Very dense - only consider strong signals
+            threshold = -70
+        } else if estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD {
+            // Moderately dense - standard threshold
+            threshold = ADAPTIVE_MIN_RSSI
+        } else {
+            // Sparse network - accept all signals
+            return false
+        }
+        return rssi < threshold
+    }
+    
+    /// Checks if we should throttle connection attempts based on rate limits.
+    /// Returns true if we should skip this connection attempt.
+    private func shouldThrottleConnection(to peripheral: UUID, now: Date) -> Bool {
+        // Prune old entries
+        let oneMinuteAgo = now.addingTimeInterval(-60.0)
+        globalConnectionAttempts = globalConnectionAttempts.filter { $0 > oneMinuteAgo }
+        peripheralConnectionAttempts = peripheralConnectionAttempts.filter { 
+            now.timeIntervalSince($0.value) < ADAPTIVE_COOLDOWN_PER_PERIPHERAL 
+        }
+        
+        // Check per-peripheral cooldown
+        if let lastAttempt = peripheralConnectionAttempts[peripheral],
+           now.timeIntervalSince(lastAttempt) < ADAPTIVE_COOLDOWN_PER_PERIPHERAL {
+            return true
+        }
+        
+        // In dense networks, apply global rate limiting
+        if estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD {
+            let maxAttempts = ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE
+            if globalConnectionAttempts.count >= maxAttempts {
+                if logThrottler.shouldLog(key: "adaptive_rate_limit", interval: 5) {
+                    print("[BleManager] Adaptive: rate limiting connections (\(globalConnectionAttempts.count)/\(maxAttempts) in last minute)")
+                }
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /// Records a connection attempt for rate limiting.
+    private func recordConnectionAttempt(to peripheral: UUID, now: Date) {
+        peripheralConnectionAttempts[peripheral] = now
+        globalConnectionAttempts.append(now)
+    }
+    
+    /// Returns true if we should apply probabilistic filtering based on network density.
+    /// Uses deterministic pseudo-randomness based on peripheral ID to ensure consistency.
+    private func shouldProbabilisticallySkip(_ peripheral: UUID) -> Bool {
+        guard estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD else {
+            return false
+        }
+        
+        // Calculate skip probability based on density
+        // At 50+ peers, skip ~80% of evaluations
+        // At 10-50 peers, scale linearly
+        let density = Double(estimatedVisiblePeerCount - ADAPTIVE_LOW_DENSITY_THRESHOLD)
+        let range = Double(ADAPTIVE_HIGH_DENSITY_THRESHOLD - ADAPTIVE_LOW_DENSITY_THRESHOLD)
+        let skipProbability = min(0.8, density / range * 0.8)
+        
+        // Use peripheral UUID hash for deterministic selection
+        let hash = peripheral.hashValue
+        let normalizedHash = Double(abs(hash) % 1000) / 1000.0
+        
+        return normalizedHash < skipProbability
+    }
 
     private func identifierForNodeHash(_ nodeHash: UInt64) -> UUID? {
         for (identifier, observation) in lastSeenMeshAdvertisements where observation.advertisement.nodeIdHash == nodeHash {
@@ -1280,10 +1409,27 @@ extension BleManager: CBCentralManagerDelegate {
         let rssiValue = RSSI.int16Value
         markDiscoveryEvent()
         
+        let now = Date()
+        
+        // Adaptive scanning: track discoveries for density estimation
+        recordDiscoveryForDensity(now: now)
+        
+        // Adaptive scanning: early RSSI filtering in dense networks
+        if shouldFilterByRssi(rssiValue) {
+            if logThrottler.shouldLog(key: "adaptive_rssi_filter", interval: 10) {
+                print("[BleManager] Adaptive: filtering weak signal (\(rssiValue)dBm) in dense network (\(estimatedVisiblePeerCount) peers)")
+            }
+            return
+        }
+        
+        // Adaptive scanning: probabilistic filtering in very dense networks
+        if shouldProbabilisticallySkip(peripheral.identifier) {
+            return // Silently skip to reduce log spam in dense networks
+        }
+        
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
         
-        let now = Date()
         let isConnectable: Bool
         if #available(iOS 13.0, *) {
             isConnectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? true
@@ -1292,11 +1438,12 @@ extension BleManager: CBCentralManagerDelegate {
         }
         if discoveryLogTimestamps[peripheral.identifier] == nil || (now.timeIntervalSince(discoveryLogTimestamps[peripheral.identifier]!) > 30) {
             discoveryLogTimestamps[peripheral.identifier] = now
-            print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI=\(rssiValue)")
+            print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI=\(rssiValue) (density: \(estimatedVisiblePeerCount))")
             emitDiagnostic("info", "Discovered BLE peripheral", context: [
                 "identifier": peripheral.identifier.uuidString,
                 "rssi": rssiValue,
-                "connectable": isConnectable
+                "connectable": isConnectable,
+                "visiblePeers": estimatedVisiblePeerCount
             ])
         }
 
@@ -1315,6 +1462,14 @@ extension BleManager: CBCentralManagerDelegate {
             }
             return
         }
+        
+        // Adaptive scanning: rate limit connection attempts
+        if shouldThrottleConnection(to: peripheral.identifier, now: now) {
+            if logThrottler.shouldLog(key: "adaptive_throttle_\(peripheral.identifier.uuidString)", interval: 30) {
+                print("[BleManager] Adaptive: throttling connection to \(peripheral.identifier)")
+            }
+            return
+        }
 
         let desiredRole: MeshController.MeshRole = (decision.intent == .interCluster) ? .bridge : .member
 
@@ -1328,6 +1483,9 @@ extension BleManager: CBCentralManagerDelegate {
             }
             return
         }
+        
+        // Record the connection attempt for rate limiting
+        recordConnectionAttempt(to: peripheral.identifier, now: now)
 
         guard currentConnectionCount() < MAX_CONNECTIONS_PER_DEVICE else {
             if logThrottler.shouldLog(key: "mesh_conn_cap_ios", interval: 10) {

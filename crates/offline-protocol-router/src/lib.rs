@@ -8,13 +8,17 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod congestion;
 pub mod constants;
 pub mod dors;
 pub mod error;
 pub mod relay;
 pub mod router;
+pub mod ttl;
 
+pub use congestion::{CongestionConfig, CongestionController, DeliveryOutcome, SendDecision};
 pub use dors::{DorsConfig, TransportSelector};
 pub use error::{Error, Result};
 pub use relay::{RelayConfig, RelayManager};
-pub use router::{PathConfig, PathSelector};
+pub use router::{ForwardingDecision, GossipConfig, PathConfig, PathSelector};
+pub use ttl::{AdaptiveTtlCalculator, AdaptiveTtlConfig, NetworkSizeEstimate};

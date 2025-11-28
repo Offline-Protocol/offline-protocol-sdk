@@ -208,8 +208,10 @@ impl InternetTransport {
     }
 
     /// Increments reconnection attempt counter.
+    /// Uses saturating addition to prevent overflow.
     pub fn increment_reconnect_attempts(&self) {
-        *self.reconnect_attempts.lock().unwrap() += 1;
+        let mut attempts = self.reconnect_attempts.lock().unwrap();
+        *attempts = attempts.saturating_add(1);
     }
 
     /// Updates heartbeat timestamp.
