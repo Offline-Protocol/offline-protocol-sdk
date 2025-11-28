@@ -107,12 +107,39 @@ impl InternetTransport {
     }
 
     /// Called when connection status changes.
+    /// 
+    /// EDGE CASE HANDLING:
+    /// - Messages in send_queue are preserved during disconnection
+    /// - They will be sent when transport becomes available again
+    /// - Reconnect counter is reset on successful connection
     pub fn on_status_changed(&self, status: TransportStatus) {
+        let previous_status = *self.status.lock().unwrap();
         *self.status.lock().unwrap() = status;
 
         // Reset reconnect counter on successful connection
         if status == TransportStatus::Available {
             *self.reconnect_attempts.lock().unwrap() = 0;
+            
+            // Log if we have pending messages to send after reconnection
+            let queue_len = self.send_queue.lock().unwrap().len();
+            if queue_len > 0 {
+                tracing::info!(
+                    pending_messages = queue_len,
+                    "Internet transport available, {} messages pending in queue",
+                    queue_len
+                );
+            }
+        } else if previous_status == TransportStatus::Available && status != TransportStatus::Available {
+            // Log disconnection with pending messages
+            let queue_len = self.send_queue.lock().unwrap().len();
+            if queue_len > 0 {
+                tracing::warn!(
+                    pending_messages = queue_len,
+                    new_status = ?status,
+                    "Internet transport disconnected with {} messages in queue (will retry)",
+                    queue_len
+                );
+            }
         }
     }
 

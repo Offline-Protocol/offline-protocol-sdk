@@ -321,7 +321,7 @@ class InternetManager(
             updateState(TransportState.RUNNING)
         }
         
-        // Notify protocol
+        // Notify protocol - this will trigger outbox flush for pending messages
         try {
             protocol.internetStatusChanged(true)
         } catch (e: Exception) {
@@ -332,6 +332,10 @@ class InternetManager(
         mainHandler.post {
             startMessagePolling()
             startPingTimer()
+            
+            // EDGE CASE: Immediately poll for messages to flush outbox after reconnection
+            // This ensures messages queued during disconnection are sent promptly
+            pollAndSendMessages()
         }
         
         emitDiagnostic("info", "Authenticated with relay server", mapOf(
@@ -345,17 +349,24 @@ class InternetManager(
         val wasAuthenticated = isAuthenticated.getAndSet(false)
         isConnecting.set(false)
         
+        // Stop polling and pinging immediately to prevent sending on dead connection
         mainHandler.post {
             stopMessagePolling()
             stopPingTimer()
         }
         
+        // EDGE CASE: Always notify protocol of disconnection
+        // This ensures the protocol knows the transport is unavailable
+        // even if we weren't fully authenticated
         if (wasConnected || wasAuthenticated) {
-            // Notify protocol of disconnection
+            // Notify protocol of disconnection - this keeps outbox messages pending
             try {
                 protocol.internetStatusChanged(false)
             } catch (e: Exception) {
                 Log.e(TAG, "Error notifying protocol of disconnect", e)
+                emitDiagnostic("error", "Failed to notify protocol of disconnection", mapOf(
+                    "error" to (e.message ?: "unknown")
+                ))
             }
         }
         
@@ -367,6 +378,7 @@ class InternetManager(
         ))
         
         // Attempt reconnection if enabled
+        // Messages in outbox will be flushed on successful reconnection
         if (autoReconnect && state != TransportState.STOPPING && state != TransportState.STOPPED) {
             mainHandler.post { scheduleReconnect() }
         } else {
@@ -545,13 +557,34 @@ class InternetManager(
     }
     
     private fun pollAndSendMessages() {
+        // EDGE CASE: Double-check connection state to handle race conditions
+        // This prevents sending messages right after transport disconnect
         if (!isConnected.get() || !isAuthenticated.get()) return
         
         try {
-            // Poll for next message from protocol
-            val message = protocol.internetGetNextMessage()
-            if (message != null) {
+            // Poll for next message from protocol - batch send up to 10 messages per poll
+            // to efficiently flush the outbox after reconnection
+            var messagesSent = 0
+            val maxBatchSize = 10
+            
+            while (messagesSent < maxBatchSize) {
+                // Re-check connection state between messages to handle mid-batch disconnects
+                if (!isConnected.get() || !isAuthenticated.get()) {
+                    emitDiagnostic("warning", "Connection lost mid-batch, stopping message send", mapOf(
+                        "messagesSent" to messagesSent
+                    ))
+                    break
+                }
+                
+                val message = protocol.internetGetNextMessage() ?: break
                 sendMessage(message.recipientId, message.data.map { it.toByte() }.toByteArray())
+                messagesSent++
+            }
+            
+            if (messagesSent > 1) {
+                emitDiagnostic("debug", "Batch sent messages", mapOf(
+                    "count" to messagesSent
+                ))
             }
         } catch (e: Exception) {
             emitDiagnostic("error", "Error polling messages", mapOf(
@@ -562,8 +595,17 @@ class InternetManager(
     
     private fun sendMessage(recipientId: String, data: ByteArray) {
         val ws = webSocket
+        // EDGE CASE: Re-check connection state right before sending
+        // This handles race conditions where connection drops between poll and send
         if (!isConnected.get() || !isAuthenticated.get() || ws == null) {
-            emitDiagnostic("warning", "Cannot send message - not connected or not authenticated")
+            emitDiagnostic("warning", "Cannot send message - not connected or not authenticated", mapOf(
+                "recipientId" to recipientId,
+                "isConnected" to isConnected.get(),
+                "isAuthenticated" to isAuthenticated.get(),
+                "hasSocket" to (ws != null)
+            ))
+            // The message remains in the protocol's outbox and will be retried
+            // when connection is restored
             return
         }
         
@@ -597,6 +639,7 @@ class InternetManager(
                 "consecutiveFailures" to failures
             ))
             
+            // EDGE CASE: If send fails, the message stays in outbox and will be retried
             // If too many consecutive send failures, the connection is likely dead
             // Trigger disconnect so DORS can switch to another transport
             if (failures >= MAX_CONSECUTIVE_FAILURES) {

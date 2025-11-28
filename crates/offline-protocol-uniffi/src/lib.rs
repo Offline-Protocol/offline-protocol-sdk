@@ -807,7 +807,18 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Internet: Status changed (connected/disconnected to relay server)
+    /// 
+    /// EDGE CASE HANDLING:
+    /// - When internet reconnects, triggers immediate flush of pending outbox messages
+    /// - Handles race conditions between transport switching and message sending
+    /// - Ensures messages queued during disconnection are sent when transport is available
     pub fn internet_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
+        // Track previous state for edge case handling
+        let was_connected = {
+            let internet_state = self.internet_state.lock().unwrap();
+            internet_state.is_connected
+        };
+        
         // Update internal state
         {
             let mut internet_state = self.internet_state.lock().unwrap();
@@ -815,22 +826,35 @@ impl OfflineProtocol {
         }
 
         // Update the Internet transport status in the transport manager
-        let protocol = self.inner.lock().unwrap();
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::Internet)
         {
-            let transport = transport_arc.lock().unwrap();
-            if let Some(internet_transport) = transport
-                .as_any()
-                .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            let protocol = self.inner.lock().unwrap();
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::Internet)
             {
-                let new_status = if is_connected {
-                    offline_protocol_transport::TransportStatus::Available
-                } else {
-                    offline_protocol_transport::TransportStatus::Disconnected
-                };
-                internet_transport.on_status_changed(new_status);
+                let transport = transport_arc.lock().unwrap();
+                if let Some(internet_transport) = transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+                {
+                    let new_status = if is_connected {
+                        offline_protocol_transport::TransportStatus::Available
+                    } else {
+                        offline_protocol_transport::TransportStatus::Disconnected
+                    };
+                    internet_transport.on_status_changed(new_status);
+                }
+            }
+        }
+
+        // EDGE CASE: When reconnecting after disconnection, trigger outbox flush
+        // This ensures pending messages are retried immediately
+        if is_connected && !was_connected {
+            // Process pending retries to flush outbox
+            let mut protocol = self.inner.lock().unwrap();
+            if let Err(e) = protocol.process() {
+                // Log but don't fail - outbox flush is best-effort
+                eprintln!("Warning: Failed to flush outbox on reconnect: {}", e);
             }
         }
 

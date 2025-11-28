@@ -336,13 +336,29 @@ impl OfflineProtocol {
     }
 
     /// Handles failed message send by persisting to outbox and scheduling retry.
+    /// 
+    /// EDGE CASE HANDLING:
+    /// - Ensures message is persisted to outbox for recovery
+    /// - Schedules retry with exponential backoff
+    /// - Records transport failure for DORS decision making
+    /// - Handles case where all transports are unavailable
     fn handle_send_failure(
         &mut self,
         message: &Message,
         transport: Option<TransportType>,
     ) -> Result<()> {
+        // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
-        self.retry_queue.enqueue(message.clone(), 0)?;
+        
+        // Schedule retry - if this fails (max retries exceeded), the message
+        // will still be in the outbox and can be recovered
+        if let Err(e) = self.retry_queue.enqueue(message.clone(), 0) {
+            warn!(
+                message_id = %message.id,
+                error = %e,
+                "Failed to enqueue message for retry, message remains in outbox"
+            );
+        }
 
         if let Some(transport) = transport {
             self.transport_manager.record_retry_failure(transport);
@@ -350,6 +366,7 @@ impl OfflineProtocol {
 
         warn!(
             message_id = %message.id,
+            transport = ?transport,
             "Deferred message due to send error"
         );
         Ok(())
@@ -631,38 +648,81 @@ impl OfflineProtocol {
     }
 
     /// Processes messages ready for retry from the retry queue.
+    /// 
+    /// EDGE CASE HANDLING:
+    /// - Checks transport availability before each retry attempt
+    /// - Handles transport switch mid-retry
+    /// - Properly tracks retry counts and transport failures
     fn process_retry_queue(&mut self) -> Result<()> {
-        while let Some(entry) = self.retry_queue.dequeue_ready() {
+        // Limit batch size to prevent blocking on large queues
+        let max_batch_size = 20;
+        let mut processed = 0;
+        
+        while processed < max_batch_size {
+            let entry = match self.retry_queue.dequeue_ready() {
+                Some(e) => e,
+                None => break,
+            };
+            
+            processed += 1;
             let previous_transport = self.transport_manager.current_transport();
             self.ensure_outbox_entry(&entry.message);
 
-            if self.transport_manager.send(&entry.message).is_err() {
-                // Re-enqueue with incremented retry count
-                let _ = self
-                    .retry_queue
-                    .enqueue(entry.message.clone(), entry.retry_count + 1);
+            // Attempt to send via DORS-selected transport
+            match self.transport_manager.send(&entry.message) {
+                Ok(()) => {
+                    let current_transport = self.transport_manager.current_transport();
+                    let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
 
-                if let Some(transport) = previous_transport {
-                    self.transport_manager.record_retry_failure(transport);
+                    if !ack_registered_now {
+                        self.ack_manager.increment_retry_count(&entry.message.id);
+                    }
+                    self.mark_message_sent(
+                        &entry.message,
+                        current_transport,
+                        Some(entry.retry_count.saturating_add(1)),
+                    );
+
+                    if let Some(transport) = current_transport {
+                        self.transport_manager.reset_retry_count(transport);
+                    }
+                    
+                    debug!(
+                        message_id = %entry.message.id,
+                        retry_count = entry.retry_count,
+                        transport = ?current_transport,
+                        "Retry send succeeded"
+                    );
                 }
-            } else {
-                let current_transport = self.transport_manager.current_transport();
-                let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
+                Err(e) => {
+                    // Re-enqueue with incremented retry count
+                    // If this fails (max retries), the message remains in outbox
+                    if self.retry_queue.enqueue(entry.message.clone(), entry.retry_count + 1).is_err() {
+                        warn!(
+                            message_id = %entry.message.id,
+                            retry_count = entry.retry_count,
+                            "Max retries exceeded, message remains in outbox for recovery"
+                        );
+                    }
 
-                if !ack_registered_now {
-                    self.ack_manager.increment_retry_count(&entry.message.id);
-                }
-                self.mark_message_sent(
-                    &entry.message,
-                    current_transport,
-                    Some(entry.retry_count.saturating_add(1)),
-                );
-
-                if let Some(transport) = current_transport {
-                    self.transport_manager.reset_retry_count(transport);
+                    if let Some(transport) = previous_transport {
+                        self.transport_manager.record_retry_failure(transport);
+                    }
+                    
+                    debug!(
+                        message_id = %entry.message.id,
+                        retry_count = entry.retry_count,
+                        error = %e,
+                        "Retry send failed, will retry later"
+                    );
                 }
             }
         }
+        
+        if processed > 0 {
+            debug!(processed = processed, "Processed retry queue entries");
+        }
+        
         Ok(())
     }
 
