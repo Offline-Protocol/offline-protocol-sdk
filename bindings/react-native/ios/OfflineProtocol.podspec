@@ -19,6 +19,7 @@ Pod::Spec.new do |s|
     "TransportManager.swift",
     "BleManager.swift",
     "InternetManager.swift",
+    "WifiDirectManager.swift",
     "ble/**/*.swift",
     "mesh/**/*.swift",
     "Generated/offline_protocol.swift",  # UniFFI generated Swift file
@@ -53,7 +54,7 @@ Pod::Spec.new do |s|
   }
 
   # System libraries and frameworks
-  s.frameworks = "Foundation", "CoreBluetooth"
+  s.frameworks = "Foundation", "CoreBluetooth", "MultipeerConnectivity"
 
   # React Native dependency
   s.dependency "React-Core"
