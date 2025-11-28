@@ -527,3 +527,87 @@ export interface MessageDeliveryStats {
   /** Delivery latency in milliseconds (if delivered) */
   latency_ms?: number;
 }
+
+// ============================================================================
+// GRADIENT ROUTING TYPES
+// ============================================================================
+
+/**
+ * A route entry representing a path to a destination through a neighbor
+ */
+export interface RouteEntry {
+  /** Next hop neighbor ID */
+  nextHop: string;
+  /** Number of hops to destination */
+  hopCount: number;
+  /** Route quality score (0.0 - 1.0) */
+  quality: number;
+  /** Timestamp when route was last seen (ms since epoch) */
+  lastSeenMs: number;
+}
+
+/**
+ * Routing table statistics
+ */
+export interface RoutingStats {
+  /** Number of unique destinations in routing table */
+  destinationCount: number;
+  /** Total number of routes across all destinations */
+  routeCount: number;
+}
+
+/**
+ * Gradient routing configuration
+ */
+export interface GradientRoutingConfig {
+  /** Maximum routes to keep per destination */
+  maxRoutesPerDestination?: number;
+  /** Route TTL in seconds before expiration */
+  routeTtlSecs?: number;
+  /** Maximum total routing table size */
+  maxRoutingTableSize?: number;
+}
+
+// ============================================================================
+// FILE TRANSFER TYPES
+// ============================================================================
+
+/**
+ * Parameters for processing a file chunk
+ */
+export interface ProcessFileChunkParams {
+  /** File identifier */
+  fileId: string;
+  /** Zero-based chunk index */
+  chunkIndex: number;
+  /** Chunk data as array of bytes */
+  data: number[];
+}
+
+// ============================================================================
+// WIFI DIRECT TYPES
+// ============================================================================
+
+/**
+ * WiFi Direct outgoing message
+ */
+export interface WifiDirectMessage {
+  /** Recipient peer ID */
+  recipientId: string;
+  /** Message data as array of bytes */
+  data: number[];
+}
+
+// ============================================================================
+// INTERNET TRANSPORT TYPES
+// ============================================================================
+
+/**
+ * Internet transport outgoing message
+ */
+export interface InternetMessage {
+  /** Recipient ID */
+  recipientId: string;
+  /** Message data as array of bytes */
+  data: number[];
+}

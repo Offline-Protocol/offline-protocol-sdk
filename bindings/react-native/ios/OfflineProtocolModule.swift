@@ -1368,6 +1368,328 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(NSNumber(value: proto.getRetryQueueSize()))
     }
     
+    // MARK: - Gradient Routing
+    
+    @objc func learnRoute(_ destination: String,
+                          nextHop: String,
+                          hopCount: Int,
+                          quality: Double,
+                          resolver: @escaping RCTPromiseResolveBlock,
+                          rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        proto.learnRoute(
+            destination: destination,
+            nextHop: nextHop,
+            hopCount: UInt8(min(255, max(0, hopCount))),
+            quality: Float(quality)
+        )
+        resolver(nil)
+    }
+    
+    @objc func getBestRoute(_ destination: String,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        if let route = proto.getBestRoute(destination: destination) {
+            let routeDict: [String: Any] = [
+                "nextHop": route.nextHop,
+                "hopCount": Int(route.hopCount),
+                "quality": Double(route.quality),
+                "lastSeenMs": Int(route.lastSeenMs)
+            ]
+            resolver(routeDict)
+        } else {
+            resolver(NSNull())
+        }
+    }
+    
+    @objc func getAllRoutes(_ destination: String,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        let routes = proto.getAllRoutes(destination: destination)
+        let routesArray = routes.map { route -> [String: Any] in
+            [
+                "nextHop": route.nextHop,
+                "hopCount": Int(route.hopCount),
+                "quality": Double(route.quality),
+                "lastSeenMs": Int(route.lastSeenMs)
+            ]
+        }
+        resolver(routesArray)
+    }
+    
+    @objc func hasRoute(_ destination: String,
+                        resolver: @escaping RCTPromiseResolveBlock,
+                        rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        let exists = proto.hasRoute(destination: destination)
+        resolver(NSNumber(value: exists))
+    }
+    
+    @objc func removeNeighborRoutes(_ neighborId: String,
+                                    resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        proto.removeNeighborRoutes(neighborId: neighborId)
+        resolver(nil)
+    }
+    
+    @objc func cleanupExpiredRoutes(_ resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        proto.cleanupExpiredRoutes()
+        resolver(nil)
+    }
+    
+    @objc func getRoutingStats(_ resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        let stats = proto.getRoutingStats()
+        let statsDict: [String: Any] = [
+            "destinationCount": Int(stats.destinationCount),
+            "routeCount": Int(stats.routeCount)
+        ]
+        resolver(statsDict)
+    }
+    
+    @objc func updateRoutingConfig(_ configJson: String,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let jsonData = configJson.data(using: .utf8),
+                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                             userInfo: [NSLocalizedDescriptionKey: "Invalid routing config JSON"])
+            }
+            
+            let routingConfig = GradientRoutingConfig(
+                maxRoutesPerDestination: (config["maxRoutesPerDestination"] as? NSNumber)?.uint32Value ?? 3,
+                routeTtlSecs: (config["routeTtlSecs"] as? NSNumber)?.uint64Value ?? 300,
+                maxRoutingTableSize: (config["maxRoutingTableSize"] as? NSNumber)?.uint32Value ?? 1000
+            )
+            
+            proto.updateRoutingConfig(config: routingConfig)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_ROUTING", "Failed to update routing config: \(error.localizedDescription)", error)
+        }
+    }
+    
+    // MARK: - DORS Decision Support
+    
+    @objc func shouldEscalateToWifi(_ resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_DORS", "Protocol not initialized", nil)
+            return
+        }
+        let shouldEscalate = proto.shouldEscalateToWifi()
+        resolver(NSNumber(value: shouldEscalate))
+    }
+    
+    // MARK: - File Transfer Operations
+    
+    @objc func processFileChunk(_ fileId: String,
+                                chunkIndex: Int,
+                                data: [NSNumber],
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_FILE", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let bytes = data.map { UInt8($0.intValue) }
+            try proto.processFileChunk(fileId: fileId, chunkIndex: UInt32(chunkIndex), data: bytes)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_FILE", "Failed to process file chunk: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func finalizeFile(_ fileId: String,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_FILE", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.finalizeFile(fileId: fileId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_FILE", "Failed to finalize file: \(error.localizedDescription)", error)
+        }
+    }
+    
+    // MARK: - WiFi Direct Transport Methods
+    
+    @objc func wifiDirectStatusChanged(_ isConnected: Bool,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.wifiDirectStatusChanged(isConnected: isConnected)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct status changed failed: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func wifiDirectMessageReceived(_ senderId: String,
+                                         data: [NSNumber],
+                                         resolver: @escaping RCTPromiseResolveBlock,
+                                         rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let bytes = data.map { UInt8($0.intValue) }
+            try proto.wifiDirectMessageReceived(senderId: senderId, data: bytes)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct message received failed: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func wifiDirectGetNextMessage(_ resolver: @escaping RCTPromiseResolveBlock,
+                                        rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
+            return
+        }
+        if let message = proto.wifiDirectGetNextMessage() {
+            let dict: [String: Any] = [
+                "recipientId": message.recipientId,
+                "data": message.data.map { NSNumber(value: $0) }
+            ]
+            resolver(dict)
+        } else {
+            resolver(NSNull())
+        }
+    }
+    
+    @objc func wifiDirectPeerConnected(_ peerId: String,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.wifiDirectPeerConnected(peerId: peerId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct peer connected failed: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func wifiDirectPeerDisconnected(_ peerId: String,
+                                          resolver: @escaping RCTPromiseResolveBlock,
+                                          rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_WIFI_DIRECT", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.wifiDirectPeerDisconnected(peerId: peerId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_WIFI_DIRECT", "WiFi Direct peer disconnected failed: \(error.localizedDescription)", error)
+        }
+    }
+    
+    // MARK: - Internet Transport Methods
+    
+    @objc func internetStatusChanged(_ isConnected: Bool,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.internetStatusChanged(isConnected: isConnected)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_INTERNET", "Internet status changed failed: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func internetMessageReceived(_ senderId: String,
+                                       data: [NSNumber],
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let bytes = data.map { UInt8($0.intValue) }
+            try proto.internetMessageReceived(senderId: senderId, data: bytes)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_INTERNET", "Internet message received failed: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func internetGetNextMessage(_ resolver: @escaping RCTPromiseResolveBlock,
+                                      rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
+            return
+        }
+        if let message = proto.internetGetNextMessage() {
+            let dict: [String: Any] = [
+                "recipientId": message.recipientId,
+                "data": message.data.map { NSNumber(value: $0) }
+            ]
+            resolver(dict)
+        } else {
+            resolver(NSNull())
+        }
+    }
+    
+    @objc func internetReturnMessage(_ resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
+            return
+        }
+        proto.internetReturnMessage()
+        resolver(nil)
+    }
+    
     // MARK: - Helpers
     
     private func parseInternetConfig(_ config: NSDictionary?) throws -> (String, UInt16) {

@@ -967,6 +967,278 @@ export class OfflineProtocol {
     return await OfflineProtocolNativeModule.getRetryQueueSize();
   }
 
+  // ============================================================================
+  // GRADIENT ROUTING
+  // ============================================================================
+
+  /**
+   * Learns a route from an incoming message.
+   * Call this when receiving a message from a neighbor to record that
+   * the neighbor can reach the message's original sender.
+   *
+   * @param destination - Destination user ID
+   * @param nextHop - Neighbor ID that delivered the message
+   * @param hopCount - Number of hops to reach destination
+   * @param quality - Route quality score (0.0 - 1.0)
+   */
+  async learnRoute(
+    destination: string,
+    nextHop: string,
+    hopCount: number,
+    quality: number
+  ): Promise<void> {
+    return await OfflineProtocolNativeModule.learnRoute(
+      destination,
+      nextHop,
+      hopCount,
+      quality
+    );
+  }
+
+  /**
+   * Gets the best (highest quality) route to a destination.
+   *
+   * @param destination - Destination user ID
+   * @returns Best route entry or null if no route exists
+   */
+  async getBestRoute(destination: string): Promise<{
+    nextHop: string;
+    hopCount: number;
+    quality: number;
+    lastSeenMs: number;
+  } | null> {
+    return await OfflineProtocolNativeModule.getBestRoute(destination);
+  }
+
+  /**
+   * Gets all valid (non-expired) routes to a destination.
+   *
+   * @param destination - Destination user ID
+   * @returns Array of route entries
+   */
+  async getAllRoutes(destination: string): Promise<
+    Array<{
+      nextHop: string;
+      hopCount: number;
+      quality: number;
+      lastSeenMs: number;
+    }>
+  > {
+    return await OfflineProtocolNativeModule.getAllRoutes(destination);
+  }
+
+  /**
+   * Checks if a route exists to the destination.
+   *
+   * @param destination - Destination user ID
+   * @returns True if at least one route exists
+   */
+  async hasRoute(destination: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.hasRoute(destination);
+  }
+
+  /**
+   * Removes all routes through a neighbor.
+   * Call this when a neighbor disconnects to clean up stale routes.
+   *
+   * @param neighborId - Neighbor ID to remove routes for
+   */
+  async removeNeighborRoutes(neighborId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.removeNeighborRoutes(neighborId);
+  }
+
+  /**
+   * Cleans up expired routes.
+   * Call this periodically (e.g., every 30 seconds) for maintenance.
+   */
+  async cleanupExpiredRoutes(): Promise<void> {
+    return await OfflineProtocolNativeModule.cleanupExpiredRoutes();
+  }
+
+  /**
+   * Gets routing table statistics for monitoring.
+   *
+   * @returns Routing statistics
+   */
+  async getRoutingStats(): Promise<{
+    destinationCount: number;
+    routeCount: number;
+  }> {
+    return await OfflineProtocolNativeModule.getRoutingStats();
+  }
+
+  /**
+   * Updates the gradient routing configuration.
+   *
+   * @param config - Routing configuration
+   */
+  async updateRoutingConfig(config: {
+    maxRoutesPerDestination?: number;
+    routeTtlSecs?: number;
+    maxRoutingTableSize?: number;
+  }): Promise<void> {
+    return await OfflineProtocolNativeModule.updateRoutingConfig(
+      JSON.stringify(config)
+    );
+  }
+
+  // ============================================================================
+  // DORS DECISION SUPPORT
+  // ============================================================================
+
+  /**
+   * Checks if DORS recommends escalating to WiFi.
+   * Use this to query whether the protocol should switch from BLE to WiFi Direct.
+   *
+   * @returns True if escalation to WiFi is recommended
+   */
+  async shouldEscalateToWifi(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.shouldEscalateToWifi();
+  }
+
+  // ============================================================================
+  // FILE TRANSFER OPERATIONS
+  // ============================================================================
+
+  /**
+   * Processes a file chunk.
+   * Use this for custom file transfer handling.
+   *
+   * @param fileId - File identifier
+   * @param chunkIndex - Zero-based chunk index
+   * @param data - Chunk data as array of bytes
+   */
+  async processFileChunk(
+    fileId: string,
+    chunkIndex: number,
+    data: number[]
+  ): Promise<void> {
+    return await OfflineProtocolNativeModule.processFileChunk(
+      fileId,
+      chunkIndex,
+      data
+    );
+  }
+
+  /**
+   * Finalizes a file transfer.
+   * Call this after all chunks have been processed.
+   *
+   * @param fileId - File identifier
+   */
+  async finalizeFile(fileId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.finalizeFile(fileId);
+  }
+
+  // ============================================================================
+  // WIFI DIRECT TRANSPORT METHODS (Low-Level)
+  // ============================================================================
+
+  /**
+   * Notifies the protocol of WiFi Direct connection state change.
+   *
+   * @param isConnected - Whether WiFi Direct is connected
+   */
+  async wifiDirectStatusChanged(isConnected: boolean): Promise<void> {
+    return await OfflineProtocolNativeModule.wifiDirectStatusChanged(
+      isConnected
+    );
+  }
+
+  /**
+   * Handles an incoming WiFi Direct message.
+   *
+   * @param senderId - Sender peer ID
+   * @param data - Message data as array of bytes
+   */
+  async wifiDirectMessageReceived(
+    senderId: string,
+    data: number[]
+  ): Promise<void> {
+    return await OfflineProtocolNativeModule.wifiDirectMessageReceived(
+      senderId,
+      data
+    );
+  }
+
+  /**
+   * Gets the next outgoing WiFi Direct message.
+   *
+   * @returns Message to send or null if queue is empty
+   */
+  async wifiDirectGetNextMessage(): Promise<{
+    recipientId: string;
+    data: number[];
+  } | null> {
+    return await OfflineProtocolNativeModule.wifiDirectGetNextMessage();
+  }
+
+  /**
+   * Notifies the protocol that a WiFi Direct peer has connected.
+   *
+   * @param peerId - Peer ID
+   */
+  async wifiDirectPeerConnected(peerId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.wifiDirectPeerConnected(peerId);
+  }
+
+  /**
+   * Notifies the protocol that a WiFi Direct peer has disconnected.
+   *
+   * @param peerId - Peer ID
+   */
+  async wifiDirectPeerDisconnected(peerId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.wifiDirectPeerDisconnected(peerId);
+  }
+
+  // ============================================================================
+  // INTERNET TRANSPORT METHODS (Low-Level)
+  // ============================================================================
+
+  /**
+   * Notifies the protocol of internet connection state change.
+   *
+   * @param isConnected - Whether internet transport is connected
+   */
+  async internetStatusChanged(isConnected: boolean): Promise<void> {
+    return await OfflineProtocolNativeModule.internetStatusChanged(isConnected);
+  }
+
+  /**
+   * Handles an incoming internet message.
+   *
+   * @param senderId - Sender ID
+   * @param data - Message data as array of bytes
+   */
+  async internetMessageReceived(
+    senderId: string,
+    data: number[]
+  ): Promise<void> {
+    return await OfflineProtocolNativeModule.internetMessageReceived(
+      senderId,
+      data
+    );
+  }
+
+  /**
+   * Gets the next outgoing internet message.
+   *
+   * @returns Message to send or null if queue is empty
+   */
+  async internetGetNextMessage(): Promise<{
+    recipientId: string;
+    data: number[];
+  } | null> {
+    return await OfflineProtocolNativeModule.internetGetNextMessage();
+  }
+
+  /**
+   * Marks the last internet message as sent.
+   */
+  async internetReturnMessage(): Promise<void> {
+    return await OfflineProtocolNativeModule.internetReturnMessage();
+  }
+
   /**
    * Destroys the protocol instance and cleans up resources
    */

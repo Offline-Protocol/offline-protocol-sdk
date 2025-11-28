@@ -1229,6 +1229,327 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // ========================================================================
+    // GRADIENT ROUTING
+    // ========================================================================
+
+    @ReactMethod
+    fun learnRoute(destination: String, nextHop: String, hopCount: Int, quality: Double, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.learnRoute(
+                destination,
+                nextHop,
+                hopCount.coerceIn(0, 255).toUByte(),
+                quality.toFloat()
+            )
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to learn route: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getBestRoute(destination: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val route = proto.getBestRoute(destination)
+            if (route != null) {
+                val map = Arguments.createMap().apply {
+                    putString("nextHop", route.nextHop)
+                    putInt("hopCount", route.hopCount.toInt())
+                    putDouble("quality", route.quality.toDouble())
+                    putDouble("lastSeenMs", route.lastSeenMs.toDouble())
+                }
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to get best route: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getAllRoutes(destination: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val routes = proto.getAllRoutes(destination)
+            val array = Arguments.createArray()
+            routes.forEach { route ->
+                val map = Arguments.createMap().apply {
+                    putString("nextHop", route.nextHop)
+                    putInt("hopCount", route.hopCount.toInt())
+                    putDouble("quality", route.quality.toDouble())
+                    putDouble("lastSeenMs", route.lastSeenMs.toDouble())
+                }
+                array.pushMap(map)
+            }
+            promise.resolve(array)
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to get all routes: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun hasRoute(destination: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val exists = proto.hasRoute(destination)
+            promise.resolve(exists)
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to check route: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun removeNeighborRoutes(neighborId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.removeNeighborRoutes(neighborId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to remove neighbor routes: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun cleanupExpiredRoutes(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.cleanupExpiredRoutes()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to cleanup expired routes: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getRoutingStats(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val stats = proto.getRoutingStats()
+            val map = Arguments.createMap().apply {
+                putInt("destinationCount", stats.destinationCount.toInt())
+                putInt("routeCount", stats.routeCount.toInt())
+            }
+            promise.resolve(map)
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to get routing stats: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun updateRoutingConfig(configJson: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val json = JSONObject(configJson)
+            val routingConfig = GradientRoutingConfig(
+                maxRoutesPerDestination = json.optInt("maxRoutesPerDestination", 3).toUInt(),
+                routeTtlSecs = json.optLong("routeTtlSecs", 300).toULong(),
+                maxRoutingTableSize = json.optInt("maxRoutingTableSize", 1000).toUInt()
+            )
+            proto.updateRoutingConfig(routingConfig)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_ROUTING", "Failed to update routing config: ${e.message}", e)
+        }
+    }
+
+    // ========================================================================
+    // DORS DECISION SUPPORT
+    // ========================================================================
+
+    @ReactMethod
+    fun shouldEscalateToWifi(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val shouldEscalate = proto.shouldEscalateToWifi()
+            promise.resolve(shouldEscalate)
+        } catch (e: Exception) {
+            promise.reject("ERROR_DORS", "Failed to check escalation: ${e.message}", e)
+        }
+    }
+
+    // ========================================================================
+    // FILE TRANSFER OPERATIONS
+    // ========================================================================
+
+    @ReactMethod
+    fun processFileChunk(fileId: String, chunkIndex: Int, data: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bytes = mutableListOf<UByte>()
+            for (i in 0 until data.size()) {
+                bytes.add(data.getInt(i).toUByte())
+            }
+            proto.processFileChunk(fileId, chunkIndex.toUInt(), bytes)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_FILE", "Failed to process file chunk: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_FILE", "Failed to process file chunk: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun finalizeFile(fileId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.finalizeFile(fileId)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_FILE", "Failed to finalize file: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_FILE", "Failed to finalize file: ${e.message}", e)
+        }
+    }
+
+    // ========================================================================
+    // WIFI DIRECT TRANSPORT METHODS
+    // ========================================================================
+
+    @ReactMethod
+    fun wifiDirectStatusChanged(isConnected: Boolean, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.wifiDirectStatusChanged(isConnected)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct status changed failed: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct status changed failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun wifiDirectMessageReceived(senderId: String, data: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bytes = mutableListOf<UByte>()
+            for (i in 0 until data.size()) {
+                bytes.add(data.getInt(i).toUByte())
+            }
+            proto.wifiDirectMessageReceived(senderId, bytes)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct message received failed: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct message received failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun wifiDirectGetNextMessage(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val message = proto.wifiDirectGetNextMessage()
+            if (message != null) {
+                val map = Arguments.createMap()
+                map.putString("recipientId", message.recipientId)
+                val array = Arguments.createArray()
+                message.data.forEach { array.pushInt(it.toInt()) }
+                map.putArray("data", array)
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct get next message failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun wifiDirectPeerConnected(peerId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.wifiDirectPeerConnected(peerId)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer connected failed: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer connected failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun wifiDirectPeerDisconnected(peerId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.wifiDirectPeerDisconnected(peerId)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer disconnected failed: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_WIFI_DIRECT", "WiFi Direct peer disconnected failed: ${e.message}", e)
+        }
+    }
+
+    // ========================================================================
+    // INTERNET TRANSPORT METHODS
+    // ========================================================================
+
+    @ReactMethod
+    fun internetStatusChanged(isConnected: Boolean, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.internetStatusChanged(isConnected)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_INTERNET", "Internet status changed failed: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_INTERNET", "Internet status changed failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun internetMessageReceived(senderId: String, data: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bytes = mutableListOf<UByte>()
+            for (i in 0 until data.size()) {
+                bytes.add(data.getInt(i).toUByte())
+            }
+            proto.internetMessageReceived(senderId, bytes)
+            promise.resolve(null)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_INTERNET", "Internet message received failed: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_INTERNET", "Internet message received failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun internetGetNextMessage(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val message = proto.internetGetNextMessage()
+            if (message != null) {
+                val map = Arguments.createMap()
+                map.putString("recipientId", message.recipientId)
+                val array = Arguments.createArray()
+                message.data.forEach { array.pushInt(it.toInt()) }
+                map.putArray("data", array)
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_INTERNET", "Internet get next message failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun internetReturnMessage(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.internetReturnMessage()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_INTERNET", "Internet return message failed: ${e.message}", e)
+        }
+    }
+
     /**
      * Start background process scheduler
      */
