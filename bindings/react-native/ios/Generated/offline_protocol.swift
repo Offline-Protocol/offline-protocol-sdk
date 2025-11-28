@@ -684,6 +684,16 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func updateTransportMetrics(transportType: TransportType, metrics: TransportMetrics) throws 
     
+    func wifiDirectGetNextMessage()  -> WifiDirectMessage?
+    
+    func wifiDirectMessageReceived(senderId: String, data: [UInt8]) throws 
+    
+    func wifiDirectPeerConnected(peerId: String) throws 
+    
+    func wifiDirectPeerDisconnected(peerId: String) throws 
+    
+    func wifiDirectStatusChanged(isConnected: Bool) throws 
+    
 }
 open class OfflineProtocol: OfflineProtocolProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -1126,6 +1136,47 @@ open func updateTransportMetrics(transportType: TransportType, metrics: Transpor
             self.uniffiCloneHandle(),
         FfiConverterTypeTransportType_lower(transportType),
         FfiConverterTypeTransportMetrics_lower(metrics),$0
+    )
+}
+}
+    
+open func wifiDirectGetNextMessage() -> WifiDirectMessage?  {
+    return try!  FfiConverterOptionTypeWifiDirectMessage.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func wifiDirectMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(senderId),
+        FfiConverterSequenceUInt8.lower(data),$0
+    )
+}
+}
+    
+open func wifiDirectPeerConnected(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
+    )
+}
+}
+    
+open func wifiDirectPeerDisconnected(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
+    )
+}
+}
+    
+open func wifiDirectStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(isConnected),$0
     )
 }
 }
@@ -2341,6 +2392,58 @@ public func FfiConverterTypeTransportMetrics_lower(_ value: TransportMetrics) ->
     return FfiConverterTypeTransportMetrics.lower(value)
 }
 
+
+public struct WifiDirectMessage: Equatable, Hashable {
+    public var recipientId: String
+    public var data: [UInt8]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(recipientId: String, data: [UInt8]) {
+        self.recipientId = recipientId
+        self.data = data
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension WifiDirectMessage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWifiDirectMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WifiDirectMessage {
+        return
+            try WifiDirectMessage(
+                recipientId: FfiConverterString.read(from: &buf), 
+                data: FfiConverterSequenceUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WifiDirectMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.recipientId, into: &buf)
+        FfiConverterSequenceUInt8.write(value.data, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWifiDirectMessage_lift(_ buf: RustBuffer) throws -> WifiDirectMessage {
+    return try FfiConverterTypeWifiDirectMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWifiDirectMessage_lower(_ value: WifiDirectMessage) -> RustBuffer {
+    return FfiConverterTypeWifiDirectMessage.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
@@ -3081,6 +3184,30 @@ fileprivate struct FfiConverterOptionTypeTransportMetrics: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWifiDirectMessage: FfiConverterRustBuffer {
+    typealias SwiftType = WifiDirectMessage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWifiDirectMessage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWifiDirectMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt8: FfiConverterRustBuffer {
     typealias SwiftType = [UInt8]
 
@@ -3360,6 +3487,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 62211) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 3197) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 17734) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 35006) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125) {

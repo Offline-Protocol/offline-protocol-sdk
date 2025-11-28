@@ -324,12 +324,15 @@ impl TransportSelector {
         let total = match transport_type {
             TransportType::Internet => {
                 // Internet prioritises bandwidth and reliability.
-                let baseline = if self.config.prefer_online { 20.0 } else { 0.0 };
+                // Give Internet a baseline advantage when connected to ensure it's competitive.
+                // Additional boost when prefer_online is enabled.
+                let baseline = if self.config.prefer_online { 25.0 } else { 10.0 };
                 baseline
-                    + (bandwidth_score * 0.4)
+                    + (bandwidth_score * 0.35)
                     + (reliability_score * 0.3)
-                    + (congestion_score * 0.2)
+                    + (congestion_score * 0.15)
                     + (energy_score * 0.1)
+                    + (load_score * 0.1)
             }
             TransportType::BLE => {
                 // BLE: balanced for signal, energy, congestion, proximity, reliability, and available capacity

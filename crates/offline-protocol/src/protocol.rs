@@ -7,7 +7,7 @@ use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManage
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
-use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
+use offline_protocol_router::{DorsConfig, PathSelector, RelayManager, TransportSelector};
 use offline_protocol_transport::TransportType;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -441,6 +441,75 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
+    /// Sends a message via a specific transport, bypassing DORS selection.
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient` - Recipient's user ID
+    /// * `content` - Message content
+    /// * `priority` - Message priority (optional, defaults to Medium)
+    /// * `transport` - The transport to use
+    ///
+    /// # Returns
+    ///
+    /// Returns the message ID if successful.
+    pub fn send_message_via_transport(
+        &mut self,
+        recipient: impl Into<String>,
+        content: impl Into<String>,
+        priority: Option<MessagePriority>,
+        transport: TransportType,
+    ) -> Result<MessageId> {
+        // Check if protocol is running
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        // Create message
+        let message = self.create_message(recipient, content, priority)?;
+        let message_id = message.id.clone();
+
+        // Check for duplicates
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        // Mark as seen
+        self.deduplicator.mark_seen(message_id.clone());
+
+        // Track previous transport before sending
+        let previous_transport = self.transport_manager.current_transport();
+
+        // Attempt to send via the specified transport (bypassing DORS)
+        let send_result = self.transport_manager.send_via_transport(&message, transport);
+        let current_transport = Some(transport);
+
+        // Handle send result
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    message_id = %message.id,
+                    transport = ?transport,
+                    error = %err,
+                    "Send via forced transport failed, message deferred"
+                );
+            }
+        }
+
+        // Emit events
+        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        self.emit_message_sent_event(&message)?;
+
+        Ok(message_id)
+    }
+
     /// Receives the next available message.
     ///
     /// # Returns
@@ -758,6 +827,13 @@ impl OfflineProtocol {
     /// Gets a reference to the transport manager.
     pub fn transport_manager(&self) -> &TransportManager {
         &self.transport_manager
+    }
+
+    /// Updates the DORS configuration at runtime.
+    ///
+    /// This replaces the current DORS selector configuration with the provided config.
+    pub fn update_dors_config(&mut self, config: DorsConfig) {
+        self.transport_manager.update_selector_config(config);
     }
 
     fn ensure_outbox_entry(&mut self, message: &Message) {

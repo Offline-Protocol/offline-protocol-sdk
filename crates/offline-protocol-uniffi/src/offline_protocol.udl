@@ -262,6 +262,21 @@ interface OfflineProtocol {
     
     void internet_return_message();
     
+    // WiFi Direct transport operations
+    [Throws=ProtocolError]
+    void wifi_direct_status_changed(boolean is_connected);
+    
+    [Throws=ProtocolError]
+    void wifi_direct_message_received(string sender_id, sequence<u8> data);
+    
+    WifiDirectMessage? wifi_direct_get_next_message();
+    
+    [Throws=ProtocolError]
+    void wifi_direct_peer_connected(string peer_id);
+    
+    [Throws=ProtocolError]
+    void wifi_direct_peer_disconnected(string peer_id);
+    
     // Transport management
     [Throws=ProtocolError]
     void add_internet_transport(string server_url, u16 port);
@@ -344,6 +359,12 @@ dictionary BleFragment {
 
 // Internet message for outgoing data
 dictionary InternetMessage {
+    string recipient_id;
+    sequence<u8> data;
+};
+
+// WiFi Direct message for outgoing data
+dictionary WifiDirectMessage {
     string recipient_id;
     sequence<u8> data;
 };

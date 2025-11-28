@@ -22,6 +22,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var protocolInstance: OfflineProtocol?
     private var bleManager: BleManager?
     private var internetManager: InternetManager?
+    private var wifiDirectManager: WifiDirectManager?
     private var hasListeners = false
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
@@ -39,6 +40,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         bleManager = nil
         internetManager?.stop()
         internetManager = nil
+        wifiDirectManager?.stop()
+        wifiDirectManager = nil
         protocolInstance = nil
     }
     
@@ -569,7 +572,17 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
                 try configureAndStartInternet(manager: manager, config: config)
             case "wifidirect", "wifi_direct":
-                try proto.addWifiDirectTransport()
+                // Configure and start WiFi Direct transport via WifiDirectManager
+                guard let manager = wifiDirectManager else {
+                    // Create manager if not already created
+                    let newManager = WifiDirectManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    newManager.delegate = self
+                    wifiDirectManager = newManager
+                    emitDiagnostic(level: "info", message: "WiFi Direct manager created on demand")
+                    try newManager.start()
+                    break
+                }
+                try manager.start()
             case "ble":
                 break // BLE managed automatically
             default:
@@ -626,9 +639,15 @@ class OfflineProtocolModule: RCTEventEmitter {
             let transport = try transportType(from: type)
             
             // Stop corresponding transport manager
-            if type.lowercased() == "internet" {
+            switch type.lowercased() {
+            case "internet":
                 internetManager?.stop()
                 emitDiagnostic(level: "info", message: "Internet manager stopped via disableTransport")
+            case "wifidirect", "wifi_direct":
+                wifiDirectManager?.stop()
+                emitDiagnostic(level: "info", message: "WiFi Direct manager stopped via disableTransport")
+            default:
+                break
             }
             
             try proto.removeTransport(transportType: transport)

@@ -23,6 +23,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var protocol: OfflineProtocol? = null
     private var bleManager: BleManager? = null
     private var internetManager: InternetManager? = null
+    private var wifiDirectManager: WifiDirectManager? = null
     private var processScheduler: ScheduledExecutorService? = null
     private var listenerCount: Int = 0
     private var currentConfig: ProtocolConfig? = null
@@ -61,6 +62,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         bleManager = null
         internetManager?.stop()
         internetManager = null
+        wifiDirectManager?.stop()
+        wifiDirectManager = null
         protocol = null
     }
 
@@ -515,6 +518,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             stopProcessScheduler()
             bleManager?.stop()
             bleManager = null
+            internetManager?.stop()
+            internetManager = null
+            wifiDirectManager?.stop()
+            wifiDirectManager = null
 
             try {
                 protocol?.stop()
@@ -554,7 +561,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     configureAndStartInternet(manager, config)
                 }
                 "wifidirect", "wifi_direct" -> {
-                    proto.addWifiDirectTransport()
+                    // Configure and start WiFi Direct transport via WifiDirectManager
+                    var manager = wifiDirectManager
+                    if (manager == null) {
+                        // Create manager if not already created
+                        manager = WifiDirectManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                            emitDiagnostic(level, message, context)
+                        }
+                        wifiDirectManager = manager
+                        emitDiagnostic("info", "WiFi Direct manager created on demand")
+                    }
+                    manager.start()
                 }
                 "ble" -> {
                     // BLE transport is managed automatically
@@ -623,9 +640,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             
             // Stop corresponding transport manager
-            if (type.lowercase() == "internet") {
-                internetManager?.stop()
-                emitDiagnostic("info", "Internet manager stopped via disableTransport")
+            when (type.lowercase()) {
+                "internet" -> {
+                    internetManager?.stop()
+                    emitDiagnostic("info", "Internet manager stopped via disableTransport")
+                }
+                "wifidirect", "wifi_direct" -> {
+                    wifiDirectManager?.stop()
+                    emitDiagnostic("info", "WiFi Direct manager stopped via disableTransport")
+                }
             }
             
             val transportType = mapTransportType(type)

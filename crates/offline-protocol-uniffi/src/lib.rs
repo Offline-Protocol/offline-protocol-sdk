@@ -11,8 +11,10 @@ use offline_protocol::{
     OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
+use offline_protocol_router::DorsConfig as CoreDorsConfig;
 use offline_protocol_transport::{
-    ble::BleTransport, internet::InternetTransport, Transport, TransportType as CoreTransportType,
+    ble::BleTransport, internet::InternetTransport, wifi_direct::WifiDirectTransport,
+    Transport, TransportType as CoreTransportType,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -302,6 +304,13 @@ pub struct InternetMessage {
     pub data: Vec<u8>,
 }
 
+/// WiFi Direct message for outgoing data
+#[derive(Debug, Clone)]
+pub struct WifiDirectMessage {
+    pub recipient_id: String,
+    pub data: Vec<u8>,
+}
+
 /// Internal state for BLE operations
 struct BleState {
     fragments: VecDeque<(String, Vec<u8>)>,
@@ -320,6 +329,17 @@ struct InternetState {
     server_url: Option<String>,
 }
 
+/// Internal state for WiFi Direct transport operations
+struct WifiDirectState {
+    /// Outgoing messages queue
+    outgoing_messages: VecDeque<(String, Vec<u8>)>,
+    /// Whether WiFi Direct is connected to a peer group
+    is_connected: bool,
+    /// Peer device address (if connected)
+    #[allow(dead_code)]
+    connected_peer: Option<String>,
+}
+
 /// Main protocol wrapper for UniFFI - COMPLETE IMPLEMENTATION
 pub struct OfflineProtocol {
     inner: Mutex<CoreProtocol>,
@@ -328,6 +348,7 @@ pub struct OfflineProtocol {
     event_queue: Arc<Mutex<VecDeque<String>>>,
     ble_state: Mutex<BleState>,
     internet_state: Mutex<InternetState>,
+    wifi_direct_state: Mutex<WifiDirectState>,
     file_manager: Mutex<FileTransferManager>,
     visualizer: Mutex<NetworkVisualizer>,
     battery_level: RwLock<Option<u8>>,
@@ -409,6 +430,11 @@ impl OfflineProtocol {
                 outgoing_messages: VecDeque::new(),
                 is_connected: false,
                 server_url: None,
+            }),
+            wifi_direct_state: Mutex::new(WifiDirectState {
+                outgoing_messages: VecDeque::new(),
+                is_connected: false,
+                connected_peer: None,
             }),
             file_manager: Mutex::new(FileTransferManager::new()),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
@@ -558,6 +584,9 @@ impl OfflineProtocol {
     ) -> Result<String, ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
 
+        // Check if a transport is forced (bypasses DORS)
+        let forced = *self.forced_transport.read().unwrap();
+
         // CRITICAL FIX: Ensure BLE transport is available before attempting to send
         if let Some(transport_arc) = protocol
             .transport_manager()
@@ -574,9 +603,21 @@ impl OfflineProtocol {
             }
         }
 
-        let message_id = protocol
-            .send_message(&recipient, &content, Some(priority.into()))
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+        // If a transport is forced, use it directly; otherwise use DORS selection
+        let message_id = if let Some(forced_type) = forced {
+            let core_transport = match forced_type {
+                TransportType::Internet => CoreTransportType::Internet,
+                TransportType::Ble => CoreTransportType::BLE,
+                TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
+            };
+            protocol
+                .send_message_via_transport(&recipient, &content, Some(priority.into()), core_transport)
+                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+        } else {
+            protocol
+                .send_message(&recipient, &content, Some(priority.into()))
+                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+        };
 
         Ok(message_id.as_str())
     }
@@ -908,6 +949,185 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // WIFI DIRECT TRANSPORT OPERATIONS
+    // ========================================================================
+
+    /// WiFi Direct: Status changed (connected/disconnected to peer group)
+    pub fn wifi_direct_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
+        // Update internal state
+        {
+            let mut wifi_direct_state = self.wifi_direct_state.lock().unwrap();
+            wifi_direct_state.is_connected = is_connected;
+            if !is_connected {
+                wifi_direct_state.connected_peer = None;
+            }
+        }
+
+        // Update the WiFi Direct transport status in the transport manager
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(wifi_transport) = transport
+                .as_any()
+                .downcast_ref::<WifiDirectTransport>()
+            {
+                let new_status = if is_connected {
+                    offline_protocol_transport::TransportStatus::Available
+                } else {
+                    offline_protocol_transport::TransportStatus::Disconnected
+                };
+                wifi_transport.on_status_changed(new_status);
+            }
+        }
+
+        // Emit connection event
+        let event = if is_connected {
+            CoreEvent::TransportSwitched {
+                from: None,
+                to: "WiFiDirect".to_string(),
+                reason: "Connected to WiFi Direct peer group".to_string(),
+            }
+        } else {
+            CoreEvent::TransportSwitched {
+                from: Some("WiFiDirect".to_string()),
+                to: "None".to_string(),
+                reason: "Disconnected from WiFi Direct peer group".to_string(),
+            }
+        };
+        self.emit_event(event);
+
+        Ok(())
+    }
+
+    /// WiFi Direct: Message received from peer
+    pub fn wifi_direct_message_received(
+        &self,
+        sender_id: String,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        // Try to deserialize and process the message through the transport
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(wifi_transport) = transport
+                .as_any()
+                .downcast_ref::<WifiDirectTransport>()
+            {
+                // Pass raw data to the transport for processing
+                if let Err(e) = wifi_transport.on_data_received(data.clone()) {
+                    return Err(ProtocolError::Other(format!(
+                        "Failed to process WiFi Direct message: {}",
+                        e
+                    )));
+                }
+            }
+        }
+        drop(protocol);
+
+        // Emit peer discovery event
+        let event = CoreEvent::NeighborDiscovered {
+            peer_id: sender_id.clone(),
+            transport: "WiFiDirect".to_string(),
+            rssi: None,
+        };
+        self.emit_event(event);
+
+        // Process any completed messages
+        let mut protocol = self.inner.lock().unwrap();
+        while protocol.receive_message().is_some() {
+            // Messages are processed and events emitted automatically
+        }
+
+        Ok(())
+    }
+
+    /// WiFi Direct: Get next message to send
+    pub fn wifi_direct_get_next_message(&self) -> Option<WifiDirectMessage> {
+        // Check if connected
+        {
+            let wifi_direct_state = self.wifi_direct_state.lock().unwrap();
+            if !wifi_direct_state.is_connected {
+                return None;
+            }
+        }
+
+        // Try to get message from the WiFi Direct transport
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(wifi_transport) = transport
+                .as_any()
+                .downcast_ref::<WifiDirectTransport>()
+            {
+                if let Ok(Some((recipient, data))) = wifi_transport.get_next_message() {
+                    return Some(WifiDirectMessage {
+                        recipient_id: recipient,
+                        data,
+                    });
+                }
+            }
+        }
+
+        // Fallback to local queue
+        let mut wifi_direct_state = self.wifi_direct_state.lock().unwrap();
+        if let Some((recipient, data)) = wifi_direct_state.outgoing_messages.pop_front() {
+            return Some(WifiDirectMessage {
+                recipient_id: recipient,
+                data,
+            });
+        }
+
+        None
+    }
+
+    /// WiFi Direct: Peer connected
+    pub fn wifi_direct_peer_connected(&self, peer_id: String) -> Result<(), ProtocolError> {
+        // Update internal state
+        {
+            let mut wifi_direct_state = self.wifi_direct_state.lock().unwrap();
+            wifi_direct_state.connected_peer = Some(peer_id.clone());
+        }
+
+        // Emit NeighborDiscovered event
+        let event = CoreEvent::NeighborDiscovered {
+            peer_id,
+            transport: "WiFiDirect".to_string(),
+            rssi: None,
+        };
+        self.emit_event(event);
+
+        Ok(())
+    }
+
+    /// WiFi Direct: Peer disconnected
+    pub fn wifi_direct_peer_disconnected(&self, peer_id: String) -> Result<(), ProtocolError> {
+        // Update internal state
+        {
+            let mut wifi_direct_state = self.wifi_direct_state.lock().unwrap();
+            if wifi_direct_state.connected_peer.as_ref() == Some(&peer_id) {
+                wifi_direct_state.connected_peer = None;
+            }
+        }
+
+        // Emit NeighborLost event
+        let event = CoreEvent::NeighborLost {
+            peer_id,
+        };
+        self.emit_event(event);
+
+        Ok(())
+    }
+
+    // ========================================================================
     // TRANSPORT MANAGEMENT
     // ========================================================================
 
@@ -1236,8 +1456,33 @@ impl OfflineProtocol {
 
     /// Updates DORS configuration at runtime
     pub fn update_dors_config(&self, config: DorsConfig) -> Result<(), ProtocolError> {
-        *self.dors_config.write().unwrap() = Some(config);
-        // In a production implementation, this would update the internal DORS selector
+        // Store locally for retrieval
+        *self.dors_config.write().unwrap() = Some(config.clone());
+
+        // Convert to core DorsConfig and update the protocol
+        let core_config = CoreDorsConfig {
+            switch_hysteresis: config.switch_hysteresis,
+            switch_cooldown_secs: config.switch_cooldown_secs,
+            ble_to_wifi_retry_threshold: config.ble_to_wifi_retry_threshold,
+            rssi_switch_threshold: config.rssi_switch_threshold,
+            congestion_queue_threshold: config.congestion_queue_threshold as usize,
+            stability_window_secs: config.stability_window_secs,
+            poor_signal_duration_secs: config.poor_signal_duration_secs,
+            ttl_escalation_threshold: config.ttl_escalation_threshold,
+            prefer_online: config.prefer_online,
+            congestion_duration_secs: config.congestion_duration_secs,
+            ttl_escalation_hold_secs: config.ttl_escalation_hold_secs,
+            history_window_size: config.history_window_size as usize,
+            queue_recovery_ratio: config.queue_recovery_ratio,
+            // Use defaults for fields not exposed via uniffi
+            low_battery_threshold: 20,
+            relay_min_battery_level: 30,
+            relay_optimal_connection_count: 4,
+        };
+
+        let mut protocol = self.inner.lock().unwrap();
+        protocol.update_dors_config(core_config);
+
         Ok(())
     }
 

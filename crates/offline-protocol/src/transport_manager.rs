@@ -9,7 +9,7 @@ use crate::constants::{
 };
 use crate::{Error, Result};
 use offline_protocol_core::Message;
-use offline_protocol_router::TransportSelector;
+use offline_protocol_router::{DorsConfig, TransportSelector};
 use offline_protocol_transport::{Transport, TransportMetrics, TransportStatus, TransportType};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -167,6 +167,49 @@ impl TransportManager {
         let transport_lock = transport.lock().map_err(|_| {
             Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
         })?;
+        transport_lock
+            .send(message)
+            .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Sends a message via a specific transport, bypassing DORS selection.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to send
+    /// * `transport_type` - The transport to use
+    ///
+    /// # Returns
+    ///
+    /// Returns Ok(()) if sent successfully, Err otherwise.
+    pub fn send_via_transport(
+        &mut self,
+        message: &Message,
+        transport_type: TransportType,
+    ) -> Result<()> {
+        // Update current transport
+        self.current_transport = Some(transport_type);
+
+        // Get transport and send
+        let transport = self
+            .transports
+            .get(&transport_type)
+            .ok_or_else(|| Error::Other(format!("Transport {:?} not found", transport_type)))?;
+
+        let transport_lock = transport.lock().map_err(|_| {
+            Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
+        })?;
+
+        // Check transport is available
+        if transport_lock.status() != TransportStatus::Available {
+            return Err(Error::Other(format!(
+                "Transport {:?} is not available",
+                transport_type
+            )));
+        }
+
         transport_lock
             .send(message)
             .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
@@ -343,6 +386,13 @@ impl TransportManager {
     pub fn record_delivery_failure(&mut self, transport_type: TransportType) {
         let stats = self.observations.entry(transport_type).or_default();
         stats.record_failure();
+    }
+
+    /// Updates the DORS selector configuration at runtime.
+    ///
+    /// This replaces the current selector with a new one using the provided config.
+    pub fn update_selector_config(&mut self, config: DorsConfig) {
+        self.selector = TransportSelector::with_config(config);
     }
 }
 

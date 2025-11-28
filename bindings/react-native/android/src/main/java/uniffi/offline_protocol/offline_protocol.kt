@@ -752,6 +752,16 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics(
     ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected(
+    ): Short
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed(
+    ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new(
     ): Short
     external fun uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event(
@@ -876,6 +886,16 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,`metrics`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback(`vtable`: UniffiVTableCallbackInterfaceEventCallback,
 ): Unit
@@ -1140,6 +1160,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 62211.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 3197.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 17734.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 35006.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125.toShort()) {
@@ -1748,6 +1783,16 @@ public interface OfflineProtocolInterface {
     fun `updateDorsConfig`(`config`: DorsConfig)
     
     fun `updateTransportMetrics`(`transportType`: TransportType, `metrics`: TransportMetrics)
+    
+    fun `wifiDirectGetNextMessage`(): WifiDirectMessage?
+    
+    fun `wifiDirectMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+    
+    fun `wifiDirectPeerConnected`(`peerId`: kotlin.String)
+    
+    fun `wifiDirectPeerDisconnected`(`peerId`: kotlin.String)
+    
+    fun `wifiDirectStatusChanged`(`isConnected`: kotlin.Boolean)
     
     companion object
 }
@@ -2472,6 +2517,71 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(
         it,
         FfiConverterTypeTransportType.lower(`transportType`),FfiConverterTypeTransportMetrics.lower(`metrics`),_status)
+}
+    }
+    
+    
+
+    override fun `wifiDirectGetNextMessage`(): WifiDirectMessage? {
+            return FfiConverterOptionalTypeWifiDirectMessage.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `wifiDirectMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(
+        it,
+        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `wifiDirectPeerConnected`(`peerId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `wifiDirectPeerDisconnected`(`peerId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `wifiDirectStatusChanged`(`isConnected`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(
+        it,
+        FfiConverterBoolean.lower(`isConnected`),_status)
 }
     }
     
@@ -3421,6 +3531,42 @@ public object FfiConverterTypeTransportMetrics: FfiConverterRustBuffer<Transport
 
 
 
+data class WifiDirectMessage (
+    var `recipientId`: kotlin.String
+    , 
+    var `data`: List<kotlin.UByte>
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWifiDirectMessage: FfiConverterRustBuffer<WifiDirectMessage> {
+    override fun read(buf: ByteBuffer): WifiDirectMessage {
+        return WifiDirectMessage(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceUByte.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WifiDirectMessage) = (
+            FfiConverterString.allocationSize(value.`recipientId`) +
+            FfiConverterSequenceUByte.allocationSize(value.`data`)
+    )
+
+    override fun write(value: WifiDirectMessage, buf: ByteBuffer) {
+            FfiConverterString.write(value.`recipientId`, buf)
+            FfiConverterSequenceUByte.write(value.`data`, buf)
+    }
+}
+
+
+
 
 enum class MessagePriority {
     
@@ -3935,6 +4081,38 @@ public object FfiConverterOptionalTypeTransportMetrics: FfiConverterRustBuffer<T
         } else {
             buf.put(1)
             FfiConverterTypeTransportMetrics.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeWifiDirectMessage: FfiConverterRustBuffer<WifiDirectMessage?> {
+    override fun read(buf: ByteBuffer): WifiDirectMessage? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWifiDirectMessage.read(buf)
+    }
+
+    override fun allocationSize(value: WifiDirectMessage?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWifiDirectMessage.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WifiDirectMessage?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWifiDirectMessage.write(value, buf)
         }
     }
 }
