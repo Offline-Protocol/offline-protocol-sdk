@@ -608,6 +608,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func cancelFileTransfer(fileId: String) throws 
     
+    func cleanupExpiredRoutes() 
+    
     func emitTestEvent() 
     
     func finalizeFile(fileId: String) throws 
@@ -616,7 +618,13 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getActiveTransports()  -> [String]
     
+    func getAllRoutes(destination: String)  -> [RouteEntry]
+    
     func getBatteryLevel()  -> UInt8?
+    
+    func getBestRoute(destination: String)  -> RouteEntry?
+    
+    func getDedupStats()  -> DedupStats
     
     func getDeliverySuccessRate()  -> Float
     
@@ -630,13 +638,21 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getMessageStats()  -> [MessageStats]
     
+    func getPendingAckCount()  -> UInt64
+    
     func getRelayPriority()  -> RelayPriority
+    
+    func getRetryQueueSize()  -> UInt64
+    
+    func getRoutingStats()  -> RoutingStats
     
     func getState()  -> ProtocolState
     
     func getTopology() throws  -> NetworkTopology
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
+    
+    func hasRoute(destination: String)  -> Bool
     
     func internetGetNextMessage()  -> InternetMessage?
     
@@ -647,6 +663,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func internetStatusChanged(isConnected: Bool) throws 
     
     func isRelay()  -> Bool
+    
+    func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float) 
     
     func pause() throws 
     
@@ -659,6 +677,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func receiveMessage()  -> String?
     
     func releaseTransportLock() 
+    
+    func removeNeighborRoutes(neighborId: String) 
     
     func removeTransport(transportType: TransportType) throws 
     
@@ -680,7 +700,15 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func stop() throws 
     
+    func updateAckConfig(config: AckConfig) 
+    
+    func updateDedupConfig(config: DedupConfig) 
+    
     func updateDorsConfig(config: DorsConfig) throws 
+    
+    func updateRetryConfig(config: RetryConfig) 
+    
+    func updateRoutingConfig(config: GradientRoutingConfig) 
     
     func updateTransportMetrics(transportType: TransportType, metrics: TransportMetrics) throws 
     
@@ -832,6 +860,13 @@ open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiC
 }
 }
     
+open func cleanupExpiredRoutes()  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
 open func emitTestEvent()  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(
             self.uniffiCloneHandle(),$0
@@ -863,9 +898,35 @@ open func getActiveTransports() -> [String]  {
 })
 }
     
+open func getAllRoutes(destination: String) -> [RouteEntry]  {
+    return try!  FfiConverterSequenceTypeRouteEntry.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_all_routes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(destination),$0
+    )
+})
+}
+    
 open func getBatteryLevel() -> UInt8?  {
     return try!  FfiConverterOptionUInt8.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getBestRoute(destination: String) -> RouteEntry?  {
+    return try!  FfiConverterOptionTypeRouteEntry.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_best_route(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(destination),$0
+    )
+})
+}
+    
+open func getDedupStats() -> DedupStats  {
+    return try!  FfiConverterTypeDedupStats_lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dedup_stats(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -920,9 +981,33 @@ open func getMessageStats() -> [MessageStats]  {
 })
 }
     
+open func getPendingAckCount() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
 open func getRelayPriority() -> RelayPriority  {
     return try!  FfiConverterTypeRelayPriority_lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getRetryQueueSize() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_queue_size(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getRoutingStats() -> RoutingStats  {
+    return try!  FfiConverterTypeRoutingStats_lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_routing_stats(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -949,6 +1034,15 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
             self.uniffiCloneHandle(),
         FfiConverterTypeTransportType_lower(transportType),$0
+    )
+})
+}
+    
+open func hasRoute(destination: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(destination),$0
     )
 })
 }
@@ -991,6 +1085,17 @@ open func isRelay() -> Bool  {
             self.uniffiCloneHandle(),$0
     )
 })
+}
+    
+open func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(destination),
+        FfiConverterString.lower(nextHop),
+        FfiConverterUInt8.lower(hopCount),
+        FfiConverterFloat.lower(quality),$0
+    )
+}
 }
     
 open func pause()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
@@ -1036,6 +1141,14 @@ open func receiveMessage() -> String?  {
 open func releaseTransportLock()  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(
             self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+open func removeNeighborRoutes(neighborId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(neighborId),$0
     )
 }
 }
@@ -1123,10 +1236,42 @@ open func stop()throws   {try rustCallWithError(FfiConverterTypeProtocolError_li
 }
 }
     
+open func updateAckConfig(config: AckConfig)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeAckConfig_lower(config),$0
+    )
+}
+}
+    
+open func updateDedupConfig(config: DedupConfig)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDedupConfig_lower(config),$0
+    )
+}
+}
+    
 open func updateDorsConfig(config: DorsConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(
             self.uniffiCloneHandle(),
         FfiConverterTypeDorsConfig_lower(config),$0
+    )
+}
+}
+    
+open func updateRetryConfig(config: RetryConfig)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeRetryConfig_lower(config),$0
+    )
+}
+}
+    
+open func updateRoutingConfig(config: GradientRoutingConfig)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_routing_config(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeGradientRoutingConfig_lower(config),$0
     )
 }
 }
@@ -1385,6 +1530,66 @@ public func FfiConverterTypeDedupConfig_lower(_ value: DedupConfig) -> RustBuffe
 }
 
 
+public struct DedupStats: Equatable, Hashable {
+    public var totalTracked: UInt64
+    public var recentTracked: UInt64
+    public var capacityUsedPercent: UInt8
+    public var mode: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(totalTracked: UInt64, recentTracked: UInt64, capacityUsedPercent: UInt8, mode: String) {
+        self.totalTracked = totalTracked
+        self.recentTracked = recentTracked
+        self.capacityUsedPercent = capacityUsedPercent
+        self.mode = mode
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension DedupStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDedupStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DedupStats {
+        return
+            try DedupStats(
+                totalTracked: FfiConverterUInt64.read(from: &buf), 
+                recentTracked: FfiConverterUInt64.read(from: &buf), 
+                capacityUsedPercent: FfiConverterUInt8.read(from: &buf), 
+                mode: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DedupStats, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.totalTracked, into: &buf)
+        FfiConverterUInt64.write(value.recentTracked, into: &buf)
+        FfiConverterUInt8.write(value.capacityUsedPercent, into: &buf)
+        FfiConverterString.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDedupStats_lift(_ buf: RustBuffer) throws -> DedupStats {
+    return try FfiConverterTypeDedupStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDedupStats_lower(_ value: DedupStats) -> RustBuffer {
+    return FfiConverterTypeDedupStats.lower(value)
+}
+
+
 public struct DorsConfig: Equatable, Hashable {
     public var preferOnline: Bool
     public var switchHysteresis: Float
@@ -1538,6 +1743,62 @@ public func FfiConverterTypeFileProgress_lift(_ buf: RustBuffer) throws -> FileP
 #endif
 public func FfiConverterTypeFileProgress_lower(_ value: FileProgress) -> RustBuffer {
     return FfiConverterTypeFileProgress.lower(value)
+}
+
+
+public struct GradientRoutingConfig: Equatable, Hashable {
+    public var maxRoutesPerDestination: UInt32
+    public var routeTtlSecs: UInt64
+    public var maxRoutingTableSize: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(maxRoutesPerDestination: UInt32, routeTtlSecs: UInt64, maxRoutingTableSize: UInt32) {
+        self.maxRoutesPerDestination = maxRoutesPerDestination
+        self.routeTtlSecs = routeTtlSecs
+        self.maxRoutingTableSize = maxRoutingTableSize
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension GradientRoutingConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGradientRoutingConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GradientRoutingConfig {
+        return
+            try GradientRoutingConfig(
+                maxRoutesPerDestination: FfiConverterUInt32.read(from: &buf), 
+                routeTtlSecs: FfiConverterUInt64.read(from: &buf), 
+                maxRoutingTableSize: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: GradientRoutingConfig, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.maxRoutesPerDestination, into: &buf)
+        FfiConverterUInt64.write(value.routeTtlSecs, into: &buf)
+        FfiConverterUInt32.write(value.maxRoutingTableSize, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGradientRoutingConfig_lift(_ buf: RustBuffer) throws -> GradientRoutingConfig {
+    return try FfiConverterTypeGradientRoutingConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGradientRoutingConfig_lower(_ value: GradientRoutingConfig) -> RustBuffer {
+    return FfiConverterTypeGradientRoutingConfig.lower(value)
 }
 
 
@@ -2266,6 +2527,118 @@ public func FfiConverterTypeRetryConfig_lift(_ buf: RustBuffer) throws -> RetryC
 #endif
 public func FfiConverterTypeRetryConfig_lower(_ value: RetryConfig) -> RustBuffer {
     return FfiConverterTypeRetryConfig.lower(value)
+}
+
+
+public struct RouteEntry: Equatable, Hashable {
+    public var nextHop: String
+    public var hopCount: UInt8
+    public var quality: Float
+    public var lastSeenMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(nextHop: String, hopCount: UInt8, quality: Float, lastSeenMs: UInt64) {
+        self.nextHop = nextHop
+        self.hopCount = hopCount
+        self.quality = quality
+        self.lastSeenMs = lastSeenMs
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension RouteEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRouteEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RouteEntry {
+        return
+            try RouteEntry(
+                nextHop: FfiConverterString.read(from: &buf), 
+                hopCount: FfiConverterUInt8.read(from: &buf), 
+                quality: FfiConverterFloat.read(from: &buf), 
+                lastSeenMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RouteEntry, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.nextHop, into: &buf)
+        FfiConverterUInt8.write(value.hopCount, into: &buf)
+        FfiConverterFloat.write(value.quality, into: &buf)
+        FfiConverterUInt64.write(value.lastSeenMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRouteEntry_lift(_ buf: RustBuffer) throws -> RouteEntry {
+    return try FfiConverterTypeRouteEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRouteEntry_lower(_ value: RouteEntry) -> RustBuffer {
+    return FfiConverterTypeRouteEntry.lower(value)
+}
+
+
+public struct RoutingStats: Equatable, Hashable {
+    public var destinationCount: UInt32
+    public var routeCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(destinationCount: UInt32, routeCount: UInt32) {
+        self.destinationCount = destinationCount
+        self.routeCount = routeCount
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension RoutingStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRoutingStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RoutingStats {
+        return
+            try RoutingStats(
+                destinationCount: FfiConverterUInt32.read(from: &buf), 
+                routeCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RoutingStats, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.destinationCount, into: &buf)
+        FfiConverterUInt32.write(value.routeCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingStats_lift(_ buf: RustBuffer) throws -> RoutingStats {
+    return try FfiConverterTypeRoutingStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingStats_lower(_ value: RoutingStats) -> RustBuffer {
+    return FfiConverterTypeRoutingStats.lower(value)
 }
 
 
@@ -3160,6 +3533,30 @@ fileprivate struct FfiConverterOptionTypeInternetMessage: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeRouteEntry: FfiConverterRustBuffer {
+    typealias SwiftType = RouteEntry?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRouteEntry.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRouteEntry.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTransportMetrics: FfiConverterRustBuffer {
     typealias SwiftType = TransportMetrics?
 
@@ -3330,6 +3727,31 @@ fileprivate struct FfiConverterSequenceTypeNetworkNode: FfiConverterRustBuffer {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeRouteEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [RouteEntry]
+
+    public static func write(_ value: [RouteEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRouteEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RouteEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RouteEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRouteEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
 private enum InitializationResult {
     case ok
     case contractVersionMismatch
@@ -3375,6 +3797,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes() != 32382) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3387,7 +3812,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_all_routes() != 27292) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 12938) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_best_route() != 31041) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 43759) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() != 62412) {
@@ -3408,7 +3842,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 30825) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 9023) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 38001) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 53188) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_routing_stats() != 51722) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 51778) {
@@ -3418,6 +3861,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 44869) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075) {
@@ -3433,6 +3879,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 38824) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362) {
@@ -3451,6 +3900,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes() != 19049) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891) {
@@ -3483,7 +3935,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 58995) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 4301) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 19988) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config() != 61324) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165) {
