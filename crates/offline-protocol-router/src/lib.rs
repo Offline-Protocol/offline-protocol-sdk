@@ -20,5 +20,8 @@ pub use congestion::{CongestionConfig, CongestionController, DeliveryOutcome, Se
 pub use dors::{DorsConfig, TransportSelector};
 pub use error::{Error, Result};
 pub use relay::{RelayConfig, RelayManager};
-pub use router::{ForwardingDecision, GossipConfig, PathConfig, PathSelector};
+pub use router::{
+    ForwardingDecision, GossipConfig, GradientRoutingConfig, GradientRoutingTable, PathConfig,
+    PathSelector, RouteEntry,
+};
 pub use ttl::{AdaptiveTtlCalculator, AdaptiveTtlConfig, NetworkSizeEstimate};

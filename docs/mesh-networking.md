@@ -501,7 +501,7 @@ This provides:
 
 ## Rust Core: Gradient Routing Table
 
-The Rust `offline-protocol-router` crate includes a `GradientRoutingTable` designed for multi-hop directed message delivery. While currently not actively used by the native mesh implementations (which use direct delivery), this infrastructure exists for future multi-hop routing scenarios.
+The Rust `offline-protocol-router` crate includes a `GradientRoutingTable` designed for multi-hop directed message delivery. This routing table is exposed to native mesh implementations (iOS/Android) via UniFFI bindings, enabling gradient-based routing decisions in the native layer.
 
 ### Design Overview
 
@@ -537,7 +537,7 @@ Each route entry contains:
 - **next_hop**: The neighbor to forward messages through
 - **hop_count**: Number of hops to destination (used for shortest-path selection)
 - **quality**: Route quality score (0.0-1.0, higher is better)
-- **last_seen**: Timestamp for TTL-based expiration
+- **last_seen_ms**: Timestamp (milliseconds since epoch) for TTL-based expiration
 
 ### Configuration
 
@@ -547,12 +547,27 @@ Each route entry contains:
 | `route_ttl_secs` | 300 | Route expiration time (5 minutes) |
 | `max_routing_table_size` | 1000 | Maximum total entries |
 
+### UniFFI API
+
+The gradient routing table is exposed via the `OfflineProtocol` interface with the following methods:
+
+| Method | Description |
+|--------|-------------|
+| `learn_route(destination, next_hop, hop_count, quality)` | Record a learned route from an incoming message |
+| `get_best_route(destination) -> RouteEntry?` | Get the highest-quality route to a destination |
+| `get_all_routes(destination) -> [RouteEntry]` | Get all valid (non-expired) routes to a destination |
+| `has_route(destination) -> bool` | Check if any route exists to the destination |
+| `remove_neighbor_routes(neighbor_id)` | Remove all routes through a neighbor (call on disconnect) |
+| `cleanup_expired_routes()` | Clean up expired routes (call periodically) |
+| `get_routing_stats() -> RoutingStats` | Get routing table statistics for monitoring |
+| `update_routing_config(config)` | Update routing configuration at runtime |
+
 ### Route Learning
 
-When a message is received, the table learns:
+When a message is received, the native layer should call `learn_route()`:
 1. The sender can be reached through the delivering neighbor
-2. The hop count is incremented from the message's TTL usage
-3. Route quality is computed from link metrics
+2. The hop count is incremented from the message's hop count
+3. Route quality is computed from link metrics (RSSI, connection stability)
 
 If the destination already has maximum routes, the lowest-quality route is evicted.
 
@@ -563,15 +578,74 @@ When sending to a known destination:
 2. Sort by quality score
 3. Return the highest-quality route
 
+### Usage Example (Swift)
+
+```swift
+// On message receive - learn route to sender through delivering neighbor:
+protocol.learnRoute(
+    destination: message.sender,
+    nextHop: neighborId,
+    hopCount: UInt8(message.hopCount + 1),
+    quality: computeQuality(rssi: rssi, stability: linkStability)
+)
+
+// On send - use directed delivery if route known:
+if let route = protocol.getBestRoute(destination: recipient) {
+    // Forward via learned route
+    sendToNeighbor(route.nextHop, message: data)
+} else {
+    // Fall back to flooding
+    broadcastToAllNeighbors(message: data)
+}
+
+// On peer disconnect - cleanup stale routes:
+protocol.removeNeighborRoutes(neighborId: disconnectedPeerId)
+
+// Periodic maintenance (e.g., every 30 seconds):
+protocol.cleanupExpiredRoutes()
+```
+
+### Usage Example (Kotlin)
+
+```kotlin
+// On message receive - learn route to sender through delivering neighbor:
+protocol.learnRoute(
+    destination = message.sender,
+    nextHop = neighborId,
+    hopCount = (message.hopCount + 1).toUByte(),
+    quality = computeQuality(rssi, linkStability)
+)
+
+// On send - use directed delivery if route known:
+val route = protocol.getBestRoute(destination = recipient)
+if (route != null) {
+    // Forward via learned route
+    sendToNeighbor(route.nextHop, message = data)
+} else {
+    // Fall back to flooding
+    broadcastToAllNeighbors(message = data)
+}
+
+// On peer disconnect - cleanup stale routes:
+protocol.removeNeighborRoutes(neighborId = disconnectedPeerId)
+
+// Periodic maintenance (e.g., every 30 seconds):
+protocol.cleanupExpiredRoutes()
+```
+
 ### Cleanup Operations
 
-- **remove_neighbor()**: Called on disconnect, removes all routes through that neighbor
-- **cleanup_expired()**: Periodic cleanup of stale routes
-- **enforce_size_limit()**: LRU eviction when table exceeds max size
+- **removeNeighborRoutes()**: Called on disconnect, removes all routes through that neighbor
+- **cleanupExpiredRoutes()**: Periodic cleanup of stale routes (recommended: every 30 seconds)
 
-### Current Status
+### Monitoring
 
-The `GradientRoutingTable` is instantiated in the Rust core but not actively queried for message routing decisions. The current implementation uses direct delivery through the native mesh layer. This routing infrastructure is available for future enhancements requiring true multi-hop routing with directed delivery.
+Use `getRoutingStats()` to monitor routing table health:
+
+```swift
+let stats = protocol.getRoutingStats()
+print("Destinations: \(stats.destinationCount), Routes: \(stats.routeCount)")
+```
 
 ## Events and Monitoring
 

@@ -151,6 +151,27 @@ dictionary PathConfig {
     u32 max_congestion_level;
 };
 
+// Gradient routing table entry - represents a learned route to a destination
+dictionary RouteEntry {
+    string next_hop;
+    u8 hop_count;
+    f32 quality;
+    u64 last_seen_ms;
+};
+
+// Gradient routing configuration
+dictionary GradientRoutingConfig {
+    u32 max_routes_per_destination;
+    u64 route_ttl_secs;
+    u32 max_routing_table_size;
+};
+
+// Routing table statistics for monitoring
+dictionary RoutingStats {
+    u32 destination_count;
+    u32 route_count;
+};
+
 // Relay configuration
 dictionary RelayConfig {
     u64 relay_threshold;
@@ -349,6 +370,31 @@ interface OfflineProtocol {
     void update_dors_config(DorsConfig config);
     
     DorsConfig get_dors_config();
+    
+    // Gradient routing table operations
+    // Learn a route from an incoming message - call when receiving a message from a neighbor
+    void learn_route(string destination, string next_hop, u8 hop_count, f32 quality);
+    
+    // Get the best (highest quality) route to a destination
+    RouteEntry? get_best_route(string destination);
+    
+    // Get all valid (non-expired) routes to a destination
+    sequence<RouteEntry> get_all_routes(string destination);
+    
+    // Check if a route exists to the destination
+    boolean has_route(string destination);
+    
+    // Remove all routes through a neighbor (call on disconnect)
+    void remove_neighbor_routes(string neighbor_id);
+    
+    // Clean up expired routes (call periodically)
+    void cleanup_expired_routes();
+    
+    // Get routing table statistics
+    RoutingStats get_routing_stats();
+    
+    // Update gradient routing configuration
+    void update_routing_config(GradientRoutingConfig config);
 };
 
 // BLE fragment for outgoing data

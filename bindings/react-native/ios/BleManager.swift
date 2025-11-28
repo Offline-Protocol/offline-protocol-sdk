@@ -98,6 +98,10 @@ public class BleManager: NSObject, TransportManager {
     private var fragmentTimer: Timer?
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
     
+    // Gradient routing cleanup
+    private var routingCleanupTimer: Timer?
+    private let ROUTING_CLEANUP_INTERVAL: TimeInterval = 30.0
+    
     // Pending fragments waiting for device ID
     private var pendingFragments: [UUID: [(Data, Date)]] = [:]
     private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0
@@ -803,12 +807,70 @@ public class BleManager: NSObject, TransportManager {
         RunLoop.current.add(fragmentTimer!, forMode: .common)
         print("[BleManager] Fragment polling started")
         emitDiagnostic("info", "Fragment polling started")
+        
+        startRoutingCleanup()
     }
     
     private func stopFragmentPolling() {
         fragmentTimer?.invalidate()
         fragmentTimer = nil
+        stopRoutingCleanup()
         emitDiagnostic("info", "Fragment polling stopped")
+    }
+    
+    // MARK: - Gradient Routing
+    
+    private func startRoutingCleanup() {
+        stopRoutingCleanup()
+        
+        routingCleanupTimer = Timer.scheduledTimer(
+            withTimeInterval: ROUTING_CLEANUP_INTERVAL,
+            repeats: true
+        ) { [weak self] _ in
+            self?.protocolInstance.cleanupExpiredRoutes()
+        }
+        
+        if let timer = routingCleanupTimer {
+            RunLoop.current.add(timer, forMode: .common)
+        }
+    }
+    
+    private func stopRoutingCleanup() {
+        routingCleanupTimer?.invalidate()
+        routingCleanupTimer = nil
+    }
+    
+    /// Computes route quality from RSSI value (0.0 to 1.0)
+    private func computeRouteQuality(rssi: Int?) -> Float {
+        guard let rssi = rssi else { return 0.5 }
+        // Map RSSI from [-100, -20] to [0.0, 1.0]
+        let normalized = Float(max(-100, min(-20, rssi)) + 100) / 80.0
+        return normalized
+    }
+    
+    /// Learns a route from a received message
+    private func learnRouteFromMessage(_ messageJson: String, deliveredBy neighborId: String, neighborUUID: UUID?) {
+        guard let data = messageJson.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sender = json["sender"] as? String,
+              let hopCount = json["hop_count"] as? Int else {
+            return
+        }
+        
+        // Don't learn route to ourselves
+        if sender == deviceId { return }
+        
+        // Compute quality from RSSI
+        let rssi = neighborUUID.flatMap { peripheralRSSI[$0] }.map { Int($0) }
+        let quality = computeRouteQuality(rssi: rssi)
+        
+        // Learn the route: sender can be reached through neighborId
+        protocolInstance.learnRoute(
+            destination: sender,
+            nextHop: neighborId,
+            hopCount: UInt8(min(255, hopCount + 1)),
+            quality: quality
+        )
     }
     
     private func pollAndSendFragments() {
@@ -949,6 +1011,9 @@ public class BleManager: NSObject, TransportManager {
         connectionAttemptTimestamps.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
         refreshSelfMetrics()
+        
+        // Clean up routes through this neighbor
+        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
         try? protocolInstance.blePeerLost(peerId: deviceId)
         DispatchQueue.main.async {
             self.refreshAdvertising(reason: "evict_\(reason)")
@@ -1068,6 +1133,9 @@ public class BleManager: NSObject, TransportManager {
                         "senderId": senderId,
                         "messageContent": completedMessage
                     ])
+                    
+                    // Learn route from the message sender through the delivering neighbor
+                    self.learnRouteFromMessage(completedMessage, deliveredBy: senderId, neighborUUID: centralId)
                 } else {
                     print("[BleManager] 📦 Fragment processed, waiting for more fragments to complete message")
                 }
@@ -1553,6 +1621,8 @@ extension BleManager: CBCentralManagerDelegate {
                 if isPermanentError {
                     // Permanent error - notify peer lost
                     if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
+                        // Clean up routes through this neighbor
+                        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
                         try? self.protocolInstance.blePeerLost(peerId: deviceId)
                         meshController.registerDisconnection(peerId: deviceId)
                         refreshSelfMetrics()
@@ -1578,6 +1648,8 @@ extension BleManager: CBCentralManagerDelegate {
         } else {
             // Wasn't connected, just notify if we had device ID
             if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
+                // Clean up routes through this neighbor
+                protocolInstance.removeNeighborRoutes(neighborId: deviceId)
                 try? self.protocolInstance.blePeerLost(peerId: deviceId)
                 meshController.registerDisconnection(peerId: deviceId)
                 refreshSelfMetrics()

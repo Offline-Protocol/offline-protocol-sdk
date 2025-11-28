@@ -182,6 +182,18 @@ class BleManager(
             }
         }
     }
+    
+    // Gradient routing cleanup
+    private val ROUTING_CLEANUP_INTERVAL_MS = 30_000L
+    private val routingCleanupRunnable = object : Runnable {
+        override fun run() {
+            protocol.cleanupExpiredRoutes()
+            if (state == TransportState.RUNNING) {
+                mainHandler.postDelayed(this, ROUTING_CLEANUP_INTERVAL_MS)
+            }
+        }
+    }
+    
     private val pendingOutboundFragments = mutableMapOf<String, MutableList<ByteArray>>()
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
     private var pendingAdvertiseRestart: Runnable? = null
@@ -312,6 +324,9 @@ class BleManager(
             // Start fragment polling
             mainHandler.post(fragmentPollingRunnable)
             
+            // Start routing cleanup
+            mainHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
+            
             updateState(TransportState.RUNNING)
             Log.i(TAG, "✅ BLE Manager started successfully - calling bleStatusChanged(true)")
             emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
@@ -369,6 +384,9 @@ class BleManager(
         // Stop fragment polling
         mainHandler.removeCallbacks(fragmentPollingRunnable)
         
+        // Stop routing cleanup
+        mainHandler.removeCallbacks(routingCleanupRunnable)
+        
         // Stop scanning
         stopScanning("stop")
         
@@ -412,6 +430,7 @@ class BleManager(
         // For Android background mode
         stopScanning("pause")
         mainHandler.removeCallbacks(fragmentPollingRunnable)
+        mainHandler.removeCallbacks(routingCleanupRunnable)
     }
     
     override fun resume() {
@@ -425,6 +444,7 @@ class BleManager(
         if (state == TransportState.RUNNING) {
             startScanning("resume")
             mainHandler.post(fragmentPollingRunnable)
+            mainHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
         }
     }
     
@@ -936,6 +956,9 @@ class BleManager(
         meshController.registerDisconnection(peerId)
         refreshSelfMetrics()
 
+        // Clean up routes through this neighbor
+        protocol.removeNeighborRoutes(peerId)
+        
         try {
             protocol.blePeerLost(peerId)
         } catch (e: Exception) {
@@ -1182,6 +1205,9 @@ class BleManager(
                         "senderId" to senderId,
                         "messageContent" to completedMessage
                     ))
+                    
+                    // Learn route from the message sender through the delivering neighbor
+                    learnRouteFromMessage(completedMessage, senderId, address)
                 } else {
                     Log.d(TAG, "📦 Fragment processed, waiting for more fragments to complete message")
                 }
@@ -1249,6 +1275,42 @@ class BleManager(
             if (now - entry.value.timestamp > MESH_OBSERVATION_TTL_MS) {
                 iterator.remove()
             }
+        }
+    }
+    
+    // MARK: - Gradient Routing
+    
+    /** Computes route quality from RSSI value (0.0 to 1.0) */
+    private fun computeRouteQuality(rssi: Int?): Float {
+        if (rssi == null) return 0.5f
+        // Map RSSI from [-100, -20] to [0.0, 1.0]
+        val clamped = rssi.coerceIn(-100, -20)
+        return (clamped + 100).toFloat() / 80f
+    }
+    
+    /** Learns a route from a received message */
+    private fun learnRouteFromMessage(messageJson: String, neighborId: String, neighborAddress: String?) {
+        try {
+            val json = org.json.JSONObject(messageJson)
+            val sender = json.optString("sender", null) ?: return
+            val hopCount = json.optInt("hop_count", 0)
+            
+            // Don't learn route to ourselves
+            if (sender == deviceId) return
+            
+            // Compute quality from RSSI
+            val rssi = neighborAddress?.let { lastSeenRssi[it]?.toInt() }
+            val quality = computeRouteQuality(rssi)
+            
+            // Learn the route: sender can be reached through neighborId
+            protocol.learnRoute(
+                destination = sender,
+                nextHop = neighborId,
+                hopCount = minOf(255, hopCount + 1).toUByte(),
+                quality = quality
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to learn route from message: ${e.message}")
         }
     }
     
@@ -1429,6 +1491,8 @@ class BleManager(
                     if (status != 0 && status != 19) { // Not normal disconnect or connection timeout
                         lastSeenRssi.remove(address)
                         connections.deviceIdForAddress(address)?.let { peerId ->
+                            // Clean up routes through this neighbor
+                            protocol.removeNeighborRoutes(peerId)
                             try {
                                 protocol.blePeerLost(peerId)
                             } catch (e: Exception) {
@@ -1564,6 +1628,8 @@ class BleManager(
                     } else {
                         // Notify protocol of peer loss only if we're not reconnecting
                         connections.deviceIdForAddress(address)?.let { deviceId ->
+                            // Clean up routes through this neighbor
+                            protocol.removeNeighborRoutes(deviceId)
                             try {
                                 protocol.blePeerLost(deviceId)
                             } catch (e: Exception) {
