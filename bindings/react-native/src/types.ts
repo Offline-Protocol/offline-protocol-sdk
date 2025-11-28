@@ -48,6 +48,20 @@ export interface DedupConfig {
   retentionTimeSecs?: number;
 }
 
+/**
+ * Deduplicator statistics for monitoring
+ */
+export interface DedupStats {
+  /** Total number of messages being tracked */
+  totalTracked: number;
+  /** Number of messages seen in the last minute */
+  recentTracked: number;
+  /** Percentage of capacity used (0-100) */
+  capacityUsedPercent: number;
+  /** Deduplication mode ("HashMap" or "BloomFilter") */
+  mode: string;
+}
+
 export interface ReliabilityConfig {
   /** ACK handling configuration */
   ack?: AckConfig;

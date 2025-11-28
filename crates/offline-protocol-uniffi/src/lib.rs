@@ -218,6 +218,15 @@ pub struct DedupConfig {
     pub retention_time_secs: u64,
 }
 
+/// Deduplicator statistics for monitoring
+#[derive(Debug, Clone)]
+pub struct DedupStats {
+    pub total_tracked: u64,
+    pub recent_tracked: u64,
+    pub capacity_used_percent: u8,
+    pub mode: String,
+}
+
 /// Reliability configuration
 #[derive(Debug, Clone)]
 pub struct ReliabilityConfig {
@@ -1667,6 +1676,64 @@ impl OfflineProtocol {
         path_config.gradient_routing = core_config;
         *path_selector =
             PathSelector::with_config(path_config, offline_protocol_router::RelayManager::new());
+    }
+
+    /// Updates the ACK configuration at runtime.
+    pub fn update_ack_config(&self, config: AckConfig) {
+        let core_config = offline_protocol::AckConfig {
+            default_timeout_ms: config.default_timeout_ms,
+            max_pending_acks: config.max_pending_acks as usize,
+        };
+        let mut protocol = self.inner.lock().unwrap();
+        protocol.update_ack_config(core_config);
+    }
+
+    /// Updates the retry configuration at runtime.
+    pub fn update_retry_config(&self, config: RetryConfig) {
+        let core_config = offline_protocol::RetryConfig {
+            max_retries: config.max_retries,
+            initial_delay_ms: config.initial_delay_ms,
+            max_delay_ms: config.max_delay_ms,
+            backoff_multiplier: config.backoff_multiplier,
+            outbox_max_lifetime_ms: config.outbox_max_lifetime_ms,
+        };
+        let mut protocol = self.inner.lock().unwrap();
+        protocol.update_retry_config(core_config);
+    }
+
+    /// Updates the deduplication configuration at runtime.
+    pub fn update_dedup_config(&self, config: DedupConfig) {
+        let core_config = offline_protocol::DeduplicatorConfig {
+            max_tracked_messages: config.max_tracked_messages as usize,
+            retention_time_secs: config.retention_time_secs,
+            ..Default::default()
+        };
+        let mut protocol = self.inner.lock().unwrap();
+        protocol.update_dedup_config(core_config);
+    }
+
+    /// Gets deduplicator statistics for monitoring.
+    pub fn get_dedup_stats(&self) -> DedupStats {
+        let protocol = self.inner.lock().unwrap();
+        let stats = protocol.deduplicator_stats();
+        DedupStats {
+            total_tracked: stats.total_tracked as u64,
+            recent_tracked: stats.recent_tracked as u64,
+            capacity_used_percent: stats.capacity_used_percent,
+            mode: format!("{:?}", stats.mode),
+        }
+    }
+
+    /// Gets the number of pending ACKs.
+    pub fn get_pending_ack_count(&self) -> u64 {
+        let protocol = self.inner.lock().unwrap();
+        protocol.pending_ack_count() as u64
+    }
+
+    /// Gets the retry queue size.
+    pub fn get_retry_queue_size(&self) -> u64 {
+        let protocol = self.inner.lock().unwrap();
+        protocol.retry_queue_size() as u64
     }
 }
 

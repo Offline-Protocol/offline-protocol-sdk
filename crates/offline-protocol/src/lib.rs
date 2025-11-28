@@ -25,3 +25,8 @@ pub use transport_manager::TransportManager;
 pub use visualization::{
     MessageStats, NetworkLink, NetworkNode, NetworkTopology, NetworkVisualizer, NodeRole,
 };
+
+// Re-export reliability types for configuration
+pub use offline_protocol_reliability::{
+    AckConfig, DeduplicatorConfig, DeduplicatorMode, DeduplicatorStats, RetryConfig,
+};

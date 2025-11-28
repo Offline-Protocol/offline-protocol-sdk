@@ -1251,6 +1251,123 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(configDict)
     }
     
+    // MARK: - Reliability Configuration
+    
+    @objc func updateAckConfig(_ configJson: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let jsonData = configJson.data(using: .utf8),
+                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                             userInfo: [NSLocalizedDescriptionKey: "Invalid ACK config JSON"])
+            }
+            
+            let ackConfig = AckConfig(
+                defaultTimeoutMs: (config["defaultTimeoutMs"] as? NSNumber)?.uint64Value ?? 5000,
+                maxPendingAcks: (config["maxPendingAcks"] as? NSNumber)?.uint64Value ?? 1000
+            )
+            
+            try proto.updateAckConfig(config: ackConfig)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_CONFIG", "Failed to update ACK config: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func updateRetryConfig(_ configJson: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let jsonData = configJson.data(using: .utf8),
+                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                             userInfo: [NSLocalizedDescriptionKey: "Invalid retry config JSON"])
+            }
+            
+            let retryConfig = RetryConfig(
+                maxRetries: (config["maxRetries"] as? NSNumber)?.uint32Value ?? 3,
+                initialDelayMs: (config["initialDelayMs"] as? NSNumber)?.uint64Value ?? 1000,
+                maxDelayMs: (config["maxDelayMs"] as? NSNumber)?.uint64Value ?? 30000,
+                backoffMultiplier: (config["backoffMultiplier"] as? NSNumber)?.floatValue ?? 2.0,
+                outboxMaxLifetimeMs: (config["outboxMaxLifetimeMs"] as? NSNumber)?.uint64Value ?? 3600000
+            )
+            
+            try proto.updateRetryConfig(config: retryConfig)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_CONFIG", "Failed to update retry config: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func updateDedupConfig(_ configJson: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_CONFIG", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let jsonData = configJson.data(using: .utf8),
+                  let config = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                             userInfo: [NSLocalizedDescriptionKey: "Invalid dedup config JSON"])
+            }
+            
+            let dedupConfig = DedupConfig(
+                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 10000,
+                retentionTimeSecs: (config["retentionTimeSecs"] as? NSNumber)?.uint64Value ?? 3600
+            )
+            
+            try proto.updateDedupConfig(config: dedupConfig)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_CONFIG", "Failed to update dedup config: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func getDedupStats(_ resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_STATS", "Protocol not initialized", nil)
+            return
+        }
+        let stats = proto.getDedupStats()
+        let statsDict: [String: Any] = [
+            "totalTracked": stats.totalTracked,
+            "recentTracked": stats.recentTracked,
+            "capacityUsedPercent": stats.capacityUsedPercent,
+            "mode": stats.mode
+        ]
+        resolver(statsDict)
+    }
+    
+    @objc func getPendingAckCount(_ resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_STATS", "Protocol not initialized", nil)
+            return
+        }
+        resolver(NSNumber(value: proto.getPendingAckCount()))
+    }
+    
+    @objc func getRetryQueueSize(_ resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_STATS", "Protocol not initialized", nil)
+            return
+        }
+        resolver(NSNumber(value: proto.getRetryQueueSize()))
+    }
+    
     // MARK: - Helpers
     
     private func parseInternetConfig(_ config: NSDictionary?) throws -> (String, UInt16) {

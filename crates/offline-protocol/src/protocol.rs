@@ -4,7 +4,10 @@ use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OU
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
-use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
+use offline_protocol_reliability::{
+    AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
+    RetryQueue,
+};
 use offline_protocol_router::{DorsConfig, PathSelector, RelayManager, TransportSelector};
 use offline_protocol_transport::TransportType;
 use std::collections::HashMap;
@@ -80,13 +83,9 @@ pub struct OfflineProtocol {
     /// Transport manager (manages all transports with DORS).
     transport_manager: TransportManager,
 
-    /// Path selector for routing.
+    /// Path selector for routing (includes relay scoring logic).
     #[allow(dead_code)]
     path_selector: PathSelector,
-
-    /// Relay manager.
-    #[allow(dead_code)]
-    relay_manager: RelayManager,
 
     /// ACK manager for tracking acknowledgments.
     ack_manager: AckManager,
@@ -130,7 +129,6 @@ impl OfflineProtocol {
                 config.path.clone(),
                 RelayManager::with_config(config.relay.clone()),
             ),
-            relay_manager: RelayManager::with_config(config.relay.clone()),
             ack_manager: AckManager::with_config(config.reliability.ack.clone()),
             retry_queue: RetryQueue::with_config(config.reliability.retry.clone()),
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),
@@ -922,6 +920,45 @@ impl OfflineProtocol {
     /// This replaces the current DORS selector configuration with the provided config.
     pub fn update_dors_config(&mut self, config: DorsConfig) {
         self.transport_manager.update_selector_config(config);
+    }
+
+    /// Updates the ACK configuration at runtime.
+    ///
+    /// Note: This affects new ACK registrations; existing pending ACKs keep their original timeout.
+    pub fn update_ack_config(&mut self, config: AckConfig) {
+        self.ack_manager = AckManager::with_config(config.clone());
+        self.config.reliability.ack = config;
+    }
+
+    /// Updates the retry configuration at runtime.
+    ///
+    /// Note: This affects new retry entries; existing entries keep their original timing.
+    pub fn update_retry_config(&mut self, config: RetryConfig) {
+        self.retry_queue = RetryQueue::with_config(config.clone());
+        self.config.reliability.retry = config;
+    }
+
+    /// Updates the deduplication configuration at runtime.
+    ///
+    /// Note: This clears the deduplication cache and applies the new config.
+    pub fn update_dedup_config(&mut self, config: DeduplicatorConfig) {
+        self.deduplicator = Deduplicator::with_config(config.clone());
+        self.config.reliability.dedup = config;
+    }
+
+    /// Gets deduplicator statistics for monitoring.
+    pub fn deduplicator_stats(&self) -> DeduplicatorStats {
+        self.deduplicator.stats()
+    }
+
+    /// Gets the current ACK manager statistics.
+    pub fn pending_ack_count(&self) -> usize {
+        self.ack_manager.pending_count()
+    }
+
+    /// Gets the current retry queue statistics.
+    pub fn retry_queue_size(&self) -> usize {
+        self.retry_queue.len()
     }
 
     fn ensure_outbox_entry(&mut self, message: &Message) {

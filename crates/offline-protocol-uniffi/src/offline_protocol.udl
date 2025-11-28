@@ -138,6 +138,14 @@ dictionary DedupConfig {
     u64 retention_time_secs;
 };
 
+// Deduplicator statistics for monitoring
+dictionary DedupStats {
+    u64 total_tracked;
+    u64 recent_tracked;
+    u8 capacity_used_percent;
+    string mode;
+};
+
 // Reliability configuration
 dictionary ReliabilityConfig {
     AckConfig ack;
@@ -395,6 +403,16 @@ interface OfflineProtocol {
     
     // Update gradient routing configuration
     void update_routing_config(GradientRoutingConfig config);
+    
+    // Reliability configuration updates
+    void update_ack_config(AckConfig config);
+    void update_retry_config(RetryConfig config);
+    void update_dedup_config(DedupConfig config);
+    
+    // Reliability statistics for monitoring
+    DedupStats get_dedup_stats();
+    u64 get_pending_ack_count();
+    u64 get_retry_queue_size();
 };
 
 // BLE fragment for outgoing data

@@ -1136,6 +1136,98 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_CONFIG", "Failed to get DORS config: ${e.message}", e)
         }
     }
+    
+    // MARK: - Reliability Configuration
+    
+    @ReactMethod
+    fun updateAckConfig(configJson: String, promise: Promise) {
+        try {
+            val json = JSONObject(configJson)
+            val ackConfig = AckConfig(
+                defaultTimeoutMs = json.optLong("defaultTimeoutMs", 5000).toULong(),
+                maxPendingAcks = json.optLong("maxPendingAcks", 1000).toULong()
+            )
+            
+            protocol?.updateAckConfig(ackConfig)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CONFIG", "Failed to update ACK config: ${e.message}", e)
+        }
+    }
+    
+    @ReactMethod
+    fun updateRetryConfig(configJson: String, promise: Promise) {
+        try {
+            val json = JSONObject(configJson)
+            val retryConfig = RetryConfig(
+                maxRetries = json.optInt("maxRetries", 3).toUInt(),
+                initialDelayMs = json.optLong("initialDelayMs", 1000).toULong(),
+                maxDelayMs = json.optLong("maxDelayMs", 30000).toULong(),
+                backoffMultiplier = json.optDouble("backoffMultiplier", 2.0).toFloat(),
+                outboxMaxLifetimeMs = json.optLong("outboxMaxLifetimeMs", 3600000).toULong()
+            )
+            
+            protocol?.updateRetryConfig(retryConfig)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CONFIG", "Failed to update retry config: ${e.message}", e)
+        }
+    }
+    
+    @ReactMethod
+    fun updateDedupConfig(configJson: String, promise: Promise) {
+        try {
+            val json = JSONObject(configJson)
+            val dedupConfig = DedupConfig(
+                maxTrackedMessages = json.optLong("maxTrackedMessages", 10000).toULong(),
+                retentionTimeSecs = json.optLong("retentionTimeSecs", 3600).toULong()
+            )
+            
+            protocol?.updateDedupConfig(dedupConfig)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CONFIG", "Failed to update dedup config: ${e.message}", e)
+        }
+    }
+    
+    @ReactMethod
+    fun getDedupStats(promise: Promise) {
+        try {
+            val stats = protocol?.getDedupStats()
+            if (stats != null) {
+                val map = Arguments.createMap()
+                map.putDouble("totalTracked", stats.totalTracked.toDouble())
+                map.putDouble("recentTracked", stats.recentTracked.toDouble())
+                map.putInt("capacityUsedPercent", stats.capacityUsedPercent.toInt())
+                map.putString("mode", stats.mode)
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_STATS", "Failed to get dedup stats: ${e.message}", e)
+        }
+    }
+    
+    @ReactMethod
+    fun getPendingAckCount(promise: Promise) {
+        try {
+            val count = protocol?.getPendingAckCount() ?: 0UL
+            promise.resolve(count.toDouble())
+        } catch (e: Exception) {
+            promise.reject("ERROR_STATS", "Failed to get pending ACK count: ${e.message}", e)
+        }
+    }
+    
+    @ReactMethod
+    fun getRetryQueueSize(promise: Promise) {
+        try {
+            val size = protocol?.getRetryQueueSize() ?: 0UL
+            promise.resolve(size.toDouble())
+        } catch (e: Exception) {
+            promise.reject("ERROR_STATS", "Failed to get retry queue size: ${e.message}", e)
+        }
+    }
 
     /**
      * Start background process scheduler

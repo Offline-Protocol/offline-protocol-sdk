@@ -24,6 +24,7 @@ import type {
   AckConfig,
   RetryConfig,
   DedupConfig,
+  DedupStats,
 } from './types';
 import { MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
@@ -907,6 +908,63 @@ export class OfflineProtocol {
     queueRecoveryRatio: number;
   }> {
     return await OfflineProtocolNativeModule.getDorsConfig();
+  }
+  
+  /**
+   * Updates ACK configuration at runtime
+   *
+   * @param config - ACK configuration
+   * @throws Error if update fails
+   */
+  async updateAckConfig(config: AckConfig): Promise<void> {
+    return await OfflineProtocolNativeModule.updateAckConfig(JSON.stringify(config));
+  }
+  
+  /**
+   * Updates retry configuration at runtime
+   *
+   * @param config - Retry configuration
+   * @throws Error if update fails
+   */
+  async updateRetryConfig(config: RetryConfig): Promise<void> {
+    return await OfflineProtocolNativeModule.updateRetryConfig(JSON.stringify(config));
+  }
+  
+  /**
+   * Updates deduplication configuration at runtime
+   *
+   * @param config - Deduplication configuration
+   * @throws Error if update fails
+   */
+  async updateDedupConfig(config: DedupConfig): Promise<void> {
+    return await OfflineProtocolNativeModule.updateDedupConfig(JSON.stringify(config));
+  }
+  
+  /**
+   * Gets deduplicator statistics for monitoring
+   *
+   * @returns Deduplication statistics
+   */
+  async getDedupStats(): Promise<DedupStats> {
+    return await OfflineProtocolNativeModule.getDedupStats();
+  }
+  
+  /**
+   * Gets the number of pending ACKs waiting for confirmation
+   *
+   * @returns Number of pending ACKs
+   */
+  async getPendingAckCount(): Promise<number> {
+    return await OfflineProtocolNativeModule.getPendingAckCount();
+  }
+  
+  /**
+   * Gets the current retry queue size
+   *
+   * @returns Number of messages in retry queue
+   */
+  async getRetryQueueSize(): Promise<number> {
+    return await OfflineProtocolNativeModule.getRetryQueueSize();
   }
 
   /**
