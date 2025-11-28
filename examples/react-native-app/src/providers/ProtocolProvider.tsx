@@ -12,6 +12,7 @@ import {
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
 import { generateUserId } from '../utils/user';
 import {
+  DEFAULT_RELAY_SERVER_URL,
   PRESENCE_MESSAGE_PREFIX,
   PRESENCE_REBROADCAST_INTERVAL_MS,
   PROCESSED_MESSAGE_RETENTION_MS,
@@ -168,8 +169,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         enabled: true,
       },
       internet: {
-        enabled: false,
-        serverAddress: 'wss://relay.example.com',
+        enabled: true,
+        serverAddress: DEFAULT_RELAY_SERVER_URL,
         autoReconnect: true,
       },
       wifiDirect: {
@@ -179,7 +180,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       },
     },
     dors: {
-      preferOnline: false,
+      preferOnline: true,
       switchHysteresis: 15.0,
       switchCooldownSecs: 20,
       bleToWifiRetryThreshold: 2,

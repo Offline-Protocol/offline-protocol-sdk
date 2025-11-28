@@ -12,7 +12,7 @@ use offline_protocol::{
 };
 use offline_protocol_core::MessagePriority as CorePriority;
 use offline_protocol_transport::{
-    ble::BleTransport, Transport, TransportType as CoreTransportType,
+    ble::BleTransport, internet::InternetTransport, Transport, TransportType as CoreTransportType,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -343,6 +343,7 @@ impl OfflineProtocol {
     pub fn new(config: ProtocolConfig) -> Result<Self, ProtocolError> {
         let user_id = config.user_id.clone();
         let ble_enabled = config.ble_enabled;
+        let internet_enabled = config.internet_enabled;
         let core_config: CoreConfig = config.into();
         core_config.validate().map_err(ProtocolError::from)?;
 
@@ -355,6 +356,16 @@ impl OfflineProtocol {
             protocol
                 .transport_manager_mut()
                 .add_transport(CoreTransportType::BLE, Box::new(ble_transport));
+        }
+
+        // Add Internet transport if enabled
+        // The platform code (iOS/Android) will manage the actual WebSocket connection
+        // and call internetStatusChanged when connected/disconnected
+        if internet_enabled {
+            let internet_transport = InternetTransport::new(user_id.clone());
+            protocol
+                .transport_manager_mut()
+                .add_transport(CoreTransportType::Internet, Box::new(internet_transport));
         }
 
         // Create the event queue and callback that will be shared with the event handler

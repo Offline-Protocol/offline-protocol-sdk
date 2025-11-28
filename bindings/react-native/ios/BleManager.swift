@@ -66,6 +66,11 @@ public class BleManager: NSObject, TransportManager {
     // Central (scanner/client) components
     private var centralManager: CBCentralManager?
     private let connections = MeshConnectionRegistry()
+    
+    /// Public accessor for the Bluetooth state
+    var bluetoothState: CBManagerState {
+        return centralManager?.state ?? .unknown
+    }
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
     private var peripheralRSSI: [UUID: Int16] = [:]
     

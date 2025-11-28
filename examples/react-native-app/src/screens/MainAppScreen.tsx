@@ -20,6 +20,7 @@ import { ProfileScreen } from './ProfileScreen';
 import { ControlCenterScreen } from './ControlCenterScreen';
 import { VisualizationScreen } from './VisualizationScreen';
 import { NetworkScreen } from './NetworkScreen';
+import { OnlineScreen } from './OnlineScreen';
 
 // Components
 import { Icon } from '../components/Icon';
@@ -29,7 +30,7 @@ import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 
 type Tab = 'chats' | 'contacts' | 'analytics' | 'settings';
-type Screen = 'main' | 'chatDetail' | 'profile' | 'controlCenter' | 'visualization' | 'network';
+type Screen = 'main' | 'chatDetail' | 'profile' | 'controlCenter' | 'visualization' | 'network' | 'online';
 
 interface ChatDetailParams {
   peerId: string;
@@ -96,6 +97,10 @@ export function MainAppScreen() {
 
   const navigateToNetwork = () => {
     setCurrentScreen('network');
+  };
+
+  const navigateToOnline = () => {
+    setCurrentScreen('online');
   };
 
   const navigateBack = () => {
@@ -243,6 +248,10 @@ export function MainAppScreen() {
       return <NetworkScreen events={events} insights={insights} />;
     }
 
+    if (currentScreen === 'online') {
+      return <OnlineScreen />;
+    }
+
     // Main tabs
     switch (activeTab) {
       case 'chats':
@@ -267,6 +276,7 @@ export function MainAppScreen() {
             onOpenControlCenter={navigateToControlCenter}
             onOpenNetwork={navigateToNetwork}
             onOpenVisualization={navigateToVisualization}
+            onOpenOnline={navigateToOnline}
           />
         );
       default:

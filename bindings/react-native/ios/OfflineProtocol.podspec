@@ -18,13 +18,17 @@ Pod::Spec.new do |s|
     "OfflineProtocolModule.{h,m,swift}",
     "TransportManager.swift",
     "BleManager.swift",
+    "InternetManager.swift",
     "ble/**/*.swift",
     "mesh/**/*.swift",
     "Generated/offline_protocol.swift",  # UniFFI generated Swift file
     "Generated/*.h"  # Include headers (but not module maps)
   ]
   
-  # Let CocoaPods generate the module map automatically
+  # Preserve the FFI module map for Swift imports
+  s.preserve_paths = [
+    "Generated/offline_protocolFFI.modulemap"
+  ]
 
   # Native library - use vendored_libraries with specific per-platform linking
   s.vendored_libraries = "libs/*.a"

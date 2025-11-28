@@ -76,6 +76,7 @@ class InternetManager(
     // Connection state
     private val isConnected = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
+    private val isAuthenticated = AtomicBoolean(false)
     private var reconnectAttempts = AtomicInteger(0)
     private var currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
     private var reconnectRunnable: Runnable? = null
@@ -241,6 +242,7 @@ class InternetManager(
             "messages_sent" to messagesSent,
             "messages_received" to messagesReceived,
             "is_connected" to isConnected.get(),
+            "is_authenticated" to isAuthenticated.get(),
             "reconnect_attempts" to reconnectAttempts.get()
         )
     }
@@ -270,13 +272,45 @@ class InternetManager(
         webSocket = null
         isConnected.set(false)
         isConnecting.set(false)
+        isAuthenticated.set(false)
     }
     
     private fun handleConnectionOpened() {
         isConnected.set(true)
         isConnecting.set(false)
+        isAuthenticated.set(false)
         reconnectAttempts.set(0)
         currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+        
+        emitDiagnostic("info", "WebSocket connected, authenticating...", mapOf(
+            "serverUrl" to (serverUrl ?: "unknown")
+        ))
+        
+        // Authenticate with the relay server using deviceId as the user ID
+        sendAuthentication()
+    }
+    
+    private fun sendAuthentication() {
+        val ws = webSocket ?: return
+        
+        // In test mode, the token becomes the user ID
+        val authMessage = org.json.JSONObject().apply {
+            put("type", "Authenticate")
+            put("token", deviceId)
+        }
+        
+        val sent = ws.send(authMessage.toString())
+        if (sent) {
+            emitDiagnostic("debug", "Auth message sent", mapOf(
+                "userId" to deviceId
+            ))
+        } else {
+            emitDiagnostic("error", "Failed to send auth message")
+        }
+    }
+    
+    private fun handleAuthenticated(userId: String, username: String) {
+        isAuthenticated.set(true)
         
         mainHandler.post {
             updateState(TransportState.RUNNING)
@@ -295,13 +329,15 @@ class InternetManager(
             startPingTimer()
         }
         
-        emitDiagnostic("info", "WebSocket connected", mapOf(
-            "serverUrl" to (serverUrl ?: "unknown")
+        emitDiagnostic("info", "Authenticated with relay server", mapOf(
+            "userId" to userId,
+            "username" to username
         ))
     }
     
     private fun handleConnectionClosed(code: Int, reason: String?) {
         val wasConnected = isConnected.getAndSet(false)
+        val wasAuthenticated = isAuthenticated.getAndSet(false)
         isConnecting.set(false)
         
         mainHandler.post {
@@ -309,7 +345,7 @@ class InternetManager(
             stopPingTimer()
         }
         
-        if (wasConnected) {
+        if (wasConnected || wasAuthenticated) {
             // Notify protocol of disconnection
             try {
                 protocol.internetStatusChanged(false)
@@ -321,7 +357,8 @@ class InternetManager(
         emitDiagnostic("warning", "WebSocket disconnected", mapOf(
             "code" to code,
             "reason" to (reason ?: "none"),
-            "wasConnected" to wasConnected
+            "wasConnected" to wasConnected,
+            "wasAuthenticated" to wasAuthenticated
         ))
         
         // Attempt reconnection if enabled
@@ -405,32 +442,91 @@ class InternetManager(
     
     private fun processReceivedData(data: ByteArray) {
         bytesReceived += data.size
-        messagesReceived++
         
-        // Try to extract sender ID from the message
-        var senderId = "relay-server"
+        val json: org.json.JSONObject
+        val messageType: String
+        
         try {
-            val json = org.json.JSONObject(String(data, Charsets.UTF_8))
-            if (json.has("sender")) {
-                senderId = json.getString("sender")
-            }
+            json = org.json.JSONObject(String(data, Charsets.UTF_8))
+            messageType = json.optString("type", "")
         } catch (e: Exception) {
-            // Ignore JSON parsing errors
-        }
-        
-        try {
-            val bytes = data.map { it.toUByte() }
-            protocol.internetMessageReceived(senderId, bytes)
-            
-            emitDiagnostic("debug", "Internet message received", mapOf(
-                "senderId" to senderId,
+            emitDiagnostic("warning", "Received non-JSON or invalid message", mapOf(
                 "size" to data.size
             ))
-        } catch (e: Exception) {
-            emitDiagnostic("error", "Error processing internet message", mapOf(
-                "error" to (e.message ?: "unknown"),
-                "exception" to e.javaClass.simpleName
-            ))
+            return
+        }
+        
+        when (messageType) {
+            "Authenticated" -> {
+                // Handle authentication success
+                val userId = json.optString("user_id", deviceId)
+                val username = json.optString("username", deviceId)
+                handleAuthenticated(userId, username)
+            }
+            
+            "AuthError" -> {
+                // Handle authentication error
+                val reason = json.optString("reason", "Unknown error")
+                emitDiagnostic("error", "Authentication failed", mapOf(
+                    "reason" to reason
+                ))
+                handleConnectionClosed(-1, reason)
+            }
+            
+            "MessageReceived" -> {
+                // Handle incoming direct message
+                val senderId = json.optString("sender", "")
+                val content = json.optString("content", "")
+                
+                if (senderId.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid MessageReceived format")
+                    return
+                }
+                
+                messagesReceived++
+                
+                try {
+                    // Convert content string to bytes for the protocol
+                    val contentBytes = content.toByteArray(Charsets.UTF_8)
+                    val bytes = contentBytes.map { it.toUByte() }
+                    protocol.internetMessageReceived(senderId, bytes)
+                    
+                    emitDiagnostic("debug", "Message received from relay", mapOf(
+                        "senderId" to senderId,
+                        "contentLength" to content.length
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing relay message", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
+            }
+            
+            "DeliveryError" -> {
+                // Handle delivery error
+                val recipient = json.optString("recipient", "unknown")
+                val reason = json.optString("reason", "Unknown error")
+                emitDiagnostic("warning", "Message delivery failed", mapOf(
+                    "recipient" to recipient,
+                    "reason" to reason
+                ))
+            }
+            
+            "PresenceStatus", "PresenceStatusWithLastSeen" -> {
+                // Handle presence updates (optional logging)
+                val userId = json.optString("user_id", "unknown")
+                val online = json.optBoolean("online", false)
+                emitDiagnostic("debug", "Presence update", mapOf(
+                    "userId" to userId,
+                    "online" to online
+                ))
+            }
+            
+            else -> {
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to messageType
+                ))
+            }
         }
     }
     
@@ -444,7 +540,7 @@ class InternetManager(
     }
     
     private fun pollAndSendMessages() {
-        if (!isConnected.get()) return
+        if (!isConnected.get() || !isAuthenticated.get()) return
         
         try {
             // Poll for next message from protocol
@@ -461,20 +557,31 @@ class InternetManager(
     
     private fun sendMessage(recipientId: String, data: ByteArray) {
         val ws = webSocket
-        if (!isConnected.get() || ws == null) {
-            emitDiagnostic("warning", "Cannot send message - not connected")
+        if (!isConnected.get() || !isAuthenticated.get() || ws == null) {
+            emitDiagnostic("warning", "Cannot send message - not connected or not authenticated")
             return
         }
         
-        val sent = ws.send(okio.ByteString.of(*data))
+        // Convert data to string content for the relay protocol
+        val content = String(data, Charsets.UTF_8)
+        
+        // Wrap in relay server protocol format
+        val relayMessage = org.json.JSONObject().apply {
+            put("type", "SendMessage")
+            put("recipient", recipientId)
+            put("content", content)
+        }
+        
+        val jsonString = relayMessage.toString()
+        val sent = ws.send(jsonString)
         
         if (sent) {
-            bytesSent += data.size
+            bytesSent += jsonString.length
             messagesSent++
             
-            emitDiagnostic("debug", "Message sent via WebSocket", mapOf(
+            emitDiagnostic("debug", "Message sent via relay", mapOf(
                 "recipientId" to recipientId,
-                "size" to data.size
+                "contentLength" to content.length
             ))
         } else {
             emitDiagnostic("error", "Failed to send WebSocket message", mapOf(

@@ -20,6 +20,7 @@ import type {
   RelayPriorityInput,
 } from '../types/runtime';
 import { labelRelayPriority, mapRelayInputToNative } from '../types/runtime';
+import { DEFAULT_RELAY_SERVER_URL } from '../constants';
 
 interface ControlCenterScreenProps {
   isStarted: boolean;
@@ -97,6 +98,19 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
       setBatteryDraft(batteryLevel);
     }
   }, [batteryLevel]);
+
+  const handleEnableTransport = useCallback(
+    (transport: TransportType) => {
+      if (transport === 'internet') {
+        return onEnableTransport(transport, {
+          serverAddress: DEFAULT_RELAY_SERVER_URL,
+          autoReconnect: true,
+        });
+      }
+      return onEnableTransport(transport);
+    },
+    [onEnableTransport]
+  );
 
   const normalizedActive = useMemo(
     () => activeTransports.map((t) => t.toLowerCase()),
@@ -238,7 +252,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
                   onPress={() =>
                     isActive
                       ? onDisableTransport(transport)
-                      : onEnableTransport(transport)
+                      : handleEnableTransport(transport)
                   }
                   disabled={isBLE || !isStarted}
                   variant={isActive ? 'danger' : 'primary'}

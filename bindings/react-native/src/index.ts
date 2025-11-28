@@ -502,6 +502,21 @@ export class OfflineProtocol {
     }
 
     await OfflineProtocolNativeModule.start();
+
+    // Auto-enable internet transport if configured with a server address
+    const internetConfig = this.config.transports?.internet;
+    if (internetConfig?.enabled && internetConfig?.serverAddress) {
+      try {
+        await this.enableTransport('internet', {
+          enabled: true,
+          serverAddress: internetConfig.serverAddress,
+          autoReconnect: internetConfig.autoReconnect ?? true,
+        });
+        console.log('[OfflineProtocol] Internet transport auto-enabled');
+      } catch (error) {
+        console.warn('[OfflineProtocol] Failed to auto-enable internet transport:', error);
+      }
+    }
   }
 
   /**
@@ -585,6 +600,27 @@ export class OfflineProtocol {
    */
   async disableTransport(type: TransportType): Promise<void> {
     return await OfflineProtocolNativeModule.disableTransport(type);
+  }
+
+  /**
+   * Checks if Bluetooth is enabled on the device
+   *
+   * @returns True if Bluetooth is enabled, false otherwise
+   */
+  async isBluetoothEnabled(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.isBluetoothEnabled();
+  }
+
+  /**
+   * Requests the user to enable Bluetooth
+   *
+   * On Android, this shows a system dialog to enable Bluetooth.
+   * On iOS, this returns false as iOS doesn't allow programmatic Bluetooth enabling.
+   *
+   * @returns True if Bluetooth was enabled, false otherwise
+   */
+  async requestEnableBluetooth(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.requestEnableBluetooth();
   }
 
   /**

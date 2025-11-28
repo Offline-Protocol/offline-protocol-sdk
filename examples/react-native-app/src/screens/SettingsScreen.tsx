@@ -9,6 +9,8 @@ import {
   Alert,
   Platform,
   TextInput,
+  Clipboard,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Icon } from '../components/Icon';
@@ -102,12 +104,14 @@ interface SettingsScreenProps {
   onOpenControlCenter?: () => void;
   onOpenNetwork?: () => void;
   onOpenVisualization?: () => void;
+  onOpenOnline?: () => void;
 }
 
 export function SettingsScreen({
   onOpenControlCenter = () => {},
   onOpenNetwork = () => {},
   onOpenVisualization = () => {},
+  onOpenOnline = () => {},
 }: SettingsScreenProps) {
   const { theme, isDark, toggleTheme, setTheme } = useTheme();
   const { 
@@ -124,9 +128,41 @@ export function SettingsScreen({
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
+  const [showAddContactModal, setShowAddContactModal] = useState(false);
+  const [contactIdInput, setContactIdInput] = useState('');
 
   const avatarColor = generateAvatarColor(currentUserId);
   const initials = getUserInitials(currentUserName);
+
+  const handleShareUserId = () => {
+    Clipboard.setString(currentUserId);
+    Alert.alert(
+      'User ID Copied',
+      `Your ID has been copied to clipboard:\n\n${currentUserId}\n\nShare this with others so they can message you.`,
+      [{ text: 'OK' }]
+    );
+  };
+
+  const handleAddContact = () => {
+    const trimmedId = contactIdInput.trim();
+    if (!trimmedId) {
+      Alert.alert('Error', 'Please enter a user ID');
+      return;
+    }
+    if (trimmedId === currentUserId) {
+      Alert.alert('Error', 'You cannot add yourself as a contact');
+      return;
+    }
+    // For now, we'll just show an alert that the contact was added
+    // The actual chat will be created when you send them a message
+    Alert.alert(
+      'Contact Added',
+      `You can now message user: ${trimmedId}\n\nGo to Chats and start a new conversation with this ID.`,
+      [{ text: 'OK' }]
+    );
+    setContactIdInput('');
+    setShowAddContactModal(false);
+  };
 
   const handleNameEdit = () => {
     if (isEditingName) {
@@ -298,6 +334,27 @@ export function SettingsScreen({
           />
         </SettingSection>
 
+        {/* Connect Section - for internet transport */}
+        <SettingSection title="CONNECT">
+          <SettingItem
+            title="Share Your User ID"
+            subtitle="Let others message you via internet"
+            icon="share-social"
+            onPress={handleShareUserId}
+            showChevron
+            index={2}
+          />
+          
+          <SettingItem
+            title="Add Contact by ID"
+            subtitle="Message someone without BLE discovery"
+            icon="person-add"
+            onPress={() => setShowAddContactModal(true)}
+            showChevron
+            index={3}
+          />
+        </SettingSection>
+
         {/* Notifications Section */}
         <SettingSection title="NOTIFICATIONS">
           <SettingItem
@@ -315,7 +372,7 @@ export function SettingsScreen({
                 thumbColor={notificationsEnabled ? theme.colors.primary : theme.colors.textSecondary}
               />
             }
-            index={2}
+            index={4}
           />
           
           <SettingItem
@@ -333,7 +390,7 @@ export function SettingsScreen({
                 thumbColor={soundEnabled ? theme.colors.primary : theme.colors.textSecondary}
               />
             }
-            index={3}
+            index={5}
           />
         </SettingSection>
 
@@ -345,7 +402,7 @@ export function SettingsScreen({
             icon="color-palette"
             onPress={handleThemeChange}
             showChevron
-            index={4}
+            index={6}
           />
         </SettingSection>
 
@@ -357,7 +414,7 @@ export function SettingsScreen({
             icon="information-circle"
             onPress={handleAbout}
             showChevron
-            index={5}
+            index={7}
           />
           
           <SettingItem
@@ -366,7 +423,7 @@ export function SettingsScreen({
             icon="shield-checkmark"
             onPress={handlePrivacy}
             showChevron
-            index={6}
+            index={8}
           />
           
           <SettingItem
@@ -375,19 +432,28 @@ export function SettingsScreen({
             icon="help-circle"
             onPress={handleHelp}
             showChevron
-            index={7}
+            index={9}
           />
         </SettingSection>
 
         {/* Advanced Section */}
         <SettingSection title="ADVANCED">
           <SettingItem
+            title="Online Transport"
+            subtitle="Connect via WebSocket relay server"
+            icon="cloud"
+            onPress={onOpenOnline}
+            showChevron
+            index={10}
+          />
+
+          <SettingItem
             title="Runtime Control Center"
             subtitle="Tune transports, relays, and DORS heuristics"
             icon="options"
             onPress={onOpenControlCenter}
             showChevron
-            index={8}
+            index={11}
           />
 
           <SettingItem
@@ -396,7 +462,7 @@ export function SettingsScreen({
             icon="pulse"
             onPress={onOpenNetwork}
             showChevron
-            index={9}
+            index={12}
           />
 
           <SettingItem
@@ -405,10 +471,77 @@ export function SettingsScreen({
             icon="planet"
             onPress={onOpenVisualization}
             showChevron
-            index={10}
+            index={13}
           />
         </SettingSection>
       </ScrollView>
+
+      {/* Add Contact Modal */}
+      <Modal
+        visible={showAddContactModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAddContactModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.colors.surface }]}>
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitle, { color: theme.colors.text }]}>
+                Add Contact by ID
+              </Text>
+              <TouchableOpacity
+                onPress={() => {
+                  setContactIdInput('');
+                  setShowAddContactModal(false);
+                }}
+              >
+                <Icon name="close" size={24} color={theme.colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+            
+            <Text style={[styles.modalDescription, { color: theme.colors.textSecondary }]}>
+              Enter the user ID of the person you want to message. They can share their ID with you from their Settings.
+            </Text>
+            
+            <TextInput
+              style={[styles.modalInput, { 
+                color: theme.colors.text,
+                backgroundColor: theme.colors.background,
+                borderColor: theme.colors.border,
+              }]}
+              value={contactIdInput}
+              onChangeText={setContactIdInput}
+              placeholder="Enter user ID..."
+              placeholderTextColor={theme.colors.textSecondary}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalButtonSecondary, { borderColor: theme.colors.border }]}
+                onPress={() => {
+                  setContactIdInput('');
+                  setShowAddContactModal(false);
+                }}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.colors.text }]}>
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: theme.colors.primary }]}
+                onPress={handleAddContact}
+              >
+                <Text style={[styles.modalButtonText, { color: theme.colors.textInverse }]}>
+                  Add Contact
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -552,5 +685,69 @@ const styles = StyleSheet.create({
   settingRight: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    width: '100%',
+    maxWidth: 400,
+    borderRadius: 16,
+    padding: 20,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 8,
+      },
+      android: {
+        elevation: 8,
+      },
+    }),
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  modalDescription: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    fontSize: 16,
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  modalButtonSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+  },
+  modalButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
   },
 });

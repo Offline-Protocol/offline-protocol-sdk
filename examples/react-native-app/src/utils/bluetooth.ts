@@ -1,39 +1,23 @@
 import { Platform, NativeModules, Alert, Linking } from 'react-native';
 
+const { OfflineProtocolModule } = NativeModules;
+
 /**
  * Check if Bluetooth is enabled on the device
  * Note: On Android 12+, requires BLUETOOTH_CONNECT permission
  */
 export async function isBluetoothEnabled(): Promise<boolean> {
-  if (Platform.OS === 'ios') {
-    // iOS doesn't allow checking Bluetooth state directly
-    // The system will prompt automatically when trying to use Bluetooth
+  try {
+    if (OfflineProtocolModule?.isBluetoothEnabled) {
+      return await OfflineProtocolModule.isBluetoothEnabled();
+    }
+    // Fallback: assume enabled if module not available
+    console.log('OfflineProtocolModule not available, assuming Bluetooth is enabled');
+    return true;
+  } catch (error) {
+    console.warn('Could not check Bluetooth state:', error);
     return true;
   }
-
-  if (Platform.OS === 'android') {
-    try {
-      // Try to use the BluetoothAdapter to check if Bluetooth is enabled
-      // This is a simple approach that works without additional dependencies
-      const { RNBluetoothManager } = NativeModules;
-      
-      // If we don't have a native module, assume Bluetooth is available
-      // The protocol will fail gracefully if it's not
-      if (!RNBluetoothManager) {
-        console.log('Native Bluetooth module not available, assuming Bluetooth is enabled');
-        return true;
-      }
-
-      const enabled = await RNBluetoothManager.isEnabled();
-      return enabled;
-    } catch (error) {
-      console.warn('Could not check Bluetooth state:', error);
-      // If we can't check, assume it's enabled and let the protocol handle it
-      return true;
-    }
-  }
-
-  return true;
 }
 
 /**
@@ -69,16 +53,15 @@ export async function requestEnableBluetooth(): Promise<boolean> {
 
   if (Platform.OS === 'android') {
     try {
-      const { RNBluetoothManager } = NativeModules;
-      
-      if (!RNBluetoothManager) {
-        // No native module available, show a generic alert
-        return showBluetoothAlert();
+      if (OfflineProtocolModule?.requestEnableBluetooth) {
+        const enabled = await OfflineProtocolModule.requestEnableBluetooth();
+        if (!enabled) {
+          // System dialog was shown, show additional alert
+          return showBluetoothAlert();
+        }
+        return enabled;
       }
-
-      // Request to enable Bluetooth (shows system dialog on Android)
-      const enabled = await RNBluetoothManager.enable();
-      return enabled;
+      return showBluetoothAlert();
     } catch (error) {
       console.warn('Could not request Bluetooth enable:', error);
       return showBluetoothAlert();

@@ -52,6 +52,7 @@ public class InternetManager: NSObject, TransportManager {
     // State tracking
     private var isConnected = false
     private var isConnecting = false
+    private var isAuthenticated = false
     private var transportStartAt: Date?
     
     // Metrics
@@ -205,13 +206,52 @@ public class InternetManager: NSObject, TransportManager {
         webSocketTask = nil
         isConnected = false
         isConnecting = false
+        isAuthenticated = false
     }
     
     private func handleConnectionOpened() {
         isConnected = true
         isConnecting = false
+        isAuthenticated = false
         reconnectAttempts = 0
         currentReconnectDelay = RECONNECT_INITIAL_DELAY
+        
+        emitDiagnostic("info", "WebSocket connected, authenticating...", context: [
+            "serverUrl": serverUrl?.absoluteString ?? "unknown"
+        ])
+        
+        // Authenticate with the relay server using deviceId as the user ID
+        sendAuthentication()
+    }
+    
+    private func sendAuthentication() {
+        // In test mode, the token becomes the user ID
+        let authMessage: [String: Any] = [
+            "type": "Authenticate",
+            "token": deviceId
+        ]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: authMessage),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            emitDiagnostic("error", "Failed to create auth message")
+            return
+        }
+        
+        webSocketTask?.send(.string(jsonString)) { [weak self] error in
+            if let error = error {
+                self?.emitDiagnostic("error", "Failed to send auth message", context: [
+                    "error": error.localizedDescription
+                ])
+            } else {
+                self?.emitDiagnostic("debug", "Auth message sent", context: [
+                    "userId": self?.deviceId ?? "unknown"
+                ])
+            }
+        }
+    }
+    
+    private func handleAuthenticated(userId: String, username: String) {
+        isAuthenticated = true
         
         updateState(.running)
         
@@ -222,27 +262,31 @@ public class InternetManager: NSObject, TransportManager {
         startMessagePolling()
         startPingTimer()
         
-        emitDiagnostic("info", "WebSocket connected", context: [
-            "serverUrl": serverUrl?.absoluteString ?? "unknown"
+        emitDiagnostic("info", "Authenticated with relay server", context: [
+            "userId": userId,
+            "username": username
         ])
     }
     
     private func handleConnectionClosed(error: Error?) {
         let wasConnected = isConnected
+        let wasAuthenticated = isAuthenticated
         isConnected = false
         isConnecting = false
+        isAuthenticated = false
         
         stopMessagePolling()
         stopPingTimer()
         
-        if wasConnected {
+        if wasConnected || wasAuthenticated {
             // Notify protocol of disconnection
             try? protocolInstance.internetStatusChanged(isConnected: false)
         }
         
         emitDiagnostic("warning", "WebSocket disconnected", context: [
             "error": error?.localizedDescription ?? "none",
-            "wasConnected": wasConnected
+            "wasConnected": wasConnected,
+            "wasAuthenticated": wasAuthenticated
         ])
         
         // Attempt reconnection if enabled
@@ -315,32 +359,82 @@ public class InternetManager: NSObject, TransportManager {
     
     private func processReceivedData(_ data: Data) {
         bytesReceived += UInt64(data.count)
-        messagesReceived += 1
         
-        // Try to extract sender ID from the message
-        // Assuming JSON format with "sender" field
-        var senderId = "relay-server"
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let sender = json["sender"] as? String {
-            senderId = sender
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let messageType = json["type"] as? String else {
+            emitDiagnostic("warning", "Received non-JSON or invalid message", context: [
+                "size": data.count
+            ])
+            return
         }
         
-        messageQueue.async { [weak self] in
-            guard let self = self else { return }
+        switch messageType {
+        case "Authenticated":
+            // Handle authentication success
+            let userId = json["user_id"] as? String ?? deviceId
+            let username = json["username"] as? String ?? deviceId
+            handleAuthenticated(userId: userId, username: username)
             
-            do {
-                let bytes = [UInt8](data)
-                try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
-                
-                self.emitDiagnostic("debug", "Internet message received", context: [
-                    "senderId": senderId,
-                    "size": data.count
-                ])
-            } catch {
-                self.emitDiagnostic("error", "Error processing internet message", context: [
-                    "error": error.localizedDescription
-                ])
+        case "AuthError":
+            // Handle authentication error
+            let reason = json["reason"] as? String ?? "Unknown error"
+            emitDiagnostic("error", "Authentication failed", context: [
+                "reason": reason
+            ])
+            handleConnectionClosed(error: nil)
+            
+        case "MessageReceived":
+            // Handle incoming direct message
+            guard let senderId = json["sender"] as? String,
+                  let content = json["content"] as? String else {
+                emitDiagnostic("warning", "Invalid MessageReceived format")
+                return
             }
+            
+            messagesReceived += 1
+            
+            messageQueue.async { [weak self] in
+                guard let self = self else { return }
+                
+                do {
+                    // Convert content string to bytes for the protocol
+                    let contentData = content.data(using: .utf8) ?? Data()
+                    let bytes = [UInt8](contentData)
+                    try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
+                    
+                    self.emitDiagnostic("debug", "Message received from relay", context: [
+                        "senderId": senderId,
+                        "contentLength": content.count
+                    ])
+                } catch {
+                    self.emitDiagnostic("error", "Error processing relay message", context: [
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+            
+        case "DeliveryError":
+            // Handle delivery error
+            let recipient = json["recipient"] as? String ?? "unknown"
+            let reason = json["reason"] as? String ?? "Unknown error"
+            emitDiagnostic("warning", "Message delivery failed", context: [
+                "recipient": recipient,
+                "reason": reason
+            ])
+            
+        case "PresenceStatus", "PresenceStatusWithLastSeen":
+            // Handle presence updates (optional logging)
+            let userId = json["user_id"] as? String ?? "unknown"
+            let online = json["online"] as? Bool ?? false
+            emitDiagnostic("debug", "Presence update", context: [
+                "userId": userId,
+                "online": online
+            ])
+            
+        default:
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": messageType
+            ])
         }
     }
     
@@ -363,7 +457,7 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func pollAndSendMessages() {
-        guard isConnected else { return }
+        guard isConnected, isAuthenticated else { return }
         
         messageQueue.async { [weak self] in
             guard let self = self else { return }
@@ -376,14 +470,28 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func sendMessage(recipientId: String, data: Data) {
-        guard isConnected, let task = webSocketTask else {
-            emitDiagnostic("warning", "Cannot send message - not connected")
+        guard isConnected, isAuthenticated, let task = webSocketTask else {
+            emitDiagnostic("warning", "Cannot send message - not connected or not authenticated")
             return
         }
         
-        let message = URLSessionWebSocketTask.Message.data(data)
+        // Convert data to string content for the relay protocol
+        let content = String(data: data, encoding: .utf8) ?? data.base64EncodedString()
         
-        task.send(message) { [weak self] error in
+        // Wrap in relay server protocol format
+        let relayMessage: [String: Any] = [
+            "type": "SendMessage",
+            "recipient": recipientId,
+            "content": content
+        ]
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: relayMessage),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            emitDiagnostic("error", "Failed to create relay message")
+            return
+        }
+        
+        task.send(.string(jsonString)) { [weak self] error in
             guard let self = self else { return }
             
             if let error = error {
@@ -392,12 +500,12 @@ public class InternetManager: NSObject, TransportManager {
                     "recipientId": recipientId
                 ])
             } else {
-                self.bytesSent += UInt64(data.count)
+                self.bytesSent += UInt64(jsonData.count)
                 self.messagesSent += 1
                 
-                self.emitDiagnostic("debug", "Message sent via WebSocket", context: [
+                self.emitDiagnostic("debug", "Message sent via relay", context: [
                     "recipientId": recipientId,
-                    "size": data.count
+                    "contentLength": content.count
                 ])
             }
         }

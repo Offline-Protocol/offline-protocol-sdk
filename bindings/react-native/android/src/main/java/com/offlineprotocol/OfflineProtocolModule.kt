@@ -581,20 +581,33 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             wsUrl = "wss://$wsUrl"
         }
         
-        // Append port if specified
-        val port = config?.getDouble("port")?.toInt()
-            ?: config?.getDouble("serverPort")?.toInt()
+        // Append port if specified (safely check for key existence first)
+        val port = when {
+            config?.hasKey("port") == true -> config.getDouble("port").toInt()
+            config?.hasKey("serverPort") == true -> config.getDouble("serverPort").toInt()
+            else -> null
+        }
         if (port != null && port > 0) {
             // Check if URL already has a port
-            val url = java.net.URI(wsUrl)
-            if (url.port == -1) {
+            val uri = java.net.URI(wsUrl)
+            if (uri.port == -1) {
                 wsUrl = "$wsUrl:$port"
             }
         }
         
-        val autoReconnect = config?.getBoolean("autoReconnect") ?: true
-        val maxRetries = config?.getDouble("maxReconnectAttempts")?.toInt() ?: 0
+        val autoReconnect = if (config?.hasKey("autoReconnect") == true) {
+            config.getBoolean("autoReconnect")
+        } else {
+            true
+        }
+        val maxRetries = if (config?.hasKey("maxReconnectAttempts") == true) {
+            config.getDouble("maxReconnectAttempts").toInt()
+        } else {
+            0
+        }
         
+        // Internet transport is already registered during protocol initialization
+        // Just configure and start the WebSocket manager
         manager.configure(wsUrl, autoReconnect, maxRetries)
         manager.start()
         
@@ -622,6 +635,52 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
         } catch (e: Exception) {
             promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun isBluetoothEnabled(promise: Promise) {
+        try {
+            val bluetoothManager = reactApplicationContext.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+            val adapter = bluetoothManager?.adapter
+            val enabled = adapter?.isEnabled == true
+            promise.resolve(enabled)
+        } catch (e: Exception) {
+            // If we can't check, assume enabled and let the protocol handle it
+            promise.resolve(true)
+        }
+    }
+
+    @ReactMethod
+    fun requestEnableBluetooth(promise: Promise) {
+        try {
+            val bluetoothManager = reactApplicationContext.getSystemService(android.content.Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
+            val adapter = bluetoothManager?.adapter
+            
+            if (adapter == null) {
+                promise.reject("ERROR_BLUETOOTH", "Bluetooth not available on this device", null)
+                return
+            }
+            
+            if (adapter.isEnabled) {
+                promise.resolve(true)
+                return
+            }
+            
+            // Request to enable Bluetooth via intent
+            val enableBtIntent = android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)
+            val activity = reactApplicationContext.currentActivity
+            if (activity != null) {
+                @Suppress("DEPRECATION")
+                activity.startActivityForResult(enableBtIntent, 1001)
+                // Note: We can't wait for the result in a synchronous way
+                // The user will need to re-try after enabling
+                promise.resolve(false)
+            } else {
+                promise.reject("ERROR_BLUETOOTH", "No activity available to show Bluetooth enable dialog", null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_BLUETOOTH", "Failed to request Bluetooth enable: ${e.message}", e)
         }
     }
 

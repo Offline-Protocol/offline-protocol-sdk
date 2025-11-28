@@ -53,10 +53,10 @@ target 'OfflineProtocolExample' do
       # Configure module map for OfflineProtocol pod
       if target.name == 'OfflineProtocol'
         target.build_configurations.each do |build_config|
-          # Use CocoaPods generated module map
+          # Let CocoaPods generate its own module map
           build_config.build_settings['DEFINES_MODULE'] = 'YES'
-          # Ensure module map is properly referenced
-          build_config.build_settings['MODULEMAP_FILE'] = '$(PODS_TARGET_SRCROOT)/../Target Support Files/OfflineProtocol/OfflineProtocol.modulemap'
+          # Add path to the FFI module map so Swift can import offline_protocolFFI
+          build_config.build_settings['SWIFT_INCLUDE_PATHS'] = '$(PODS_TARGET_SRCROOT)/Generated'
         end
       end
     end

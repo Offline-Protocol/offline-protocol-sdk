@@ -3,6 +3,11 @@
  */
 
 /**
+ * Default WebSocket relay server URL for internet transport.
+ */
+export const DEFAULT_RELAY_SERVER_URL = 'wss://relay-server-production-31c7.up.railway.app/ws';
+
+/**
  * Presence message prefix used to identify presence/status messages.
  */
 export const PRESENCE_MESSAGE_PREFIX = '__presence__::';

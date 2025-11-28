@@ -604,6 +604,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         let autoReconnect = (config?["autoReconnect"] as? Bool) ?? true
         let maxRetries = (config?["maxReconnectAttempts"] as? Int) ?? 0
         
+        // Internet transport is already registered during protocol initialization
+        // Just configure and start the WebSocket manager
         try manager.configure(serverUrl: wsUrl, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries)
         try manager.start()
         
@@ -634,6 +636,33 @@ class OfflineProtocolModule: RCTEventEmitter {
         } catch {
             rejecter("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: \(error.localizedDescription)", error)
         }
+    }
+    
+    @objc func isBluetoothEnabled(_ resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        // On iOS, we can check the CBCentralManager state
+        // However, checking state requires instantiation and authorization
+        // For simplicity, return true as iOS will prompt when BLE is actually used
+        let state = bleManager?.bluetoothState ?? .unknown
+        switch state {
+        case .poweredOn:
+            resolver(true)
+        case .poweredOff:
+            resolver(false)
+        case .unauthorized, .unsupported:
+            resolver(false)
+        default:
+            // Unknown or resetting - assume enabled
+            resolver(true)
+        }
+    }
+    
+    @objc func requestEnableBluetooth(_ resolver: @escaping RCTPromiseResolveBlock,
+                                      rejecter: @escaping RCTPromiseRejectBlock) {
+        // iOS doesn't allow programmatic Bluetooth enabling
+        // The system will prompt when BLE is used
+        // Return false to indicate the app should show a manual prompt
+        resolver(false)
     }
     
     @objc func getTopology(_ resolver: @escaping RCTPromiseResolveBlock,
