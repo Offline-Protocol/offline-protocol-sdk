@@ -499,13 +499,25 @@ This provides:
 - **Collision Resistance**: SHA-256 provides strong distribution
 - **Determinism**: Same input always produces same hash
 
-## Rust Core: Gradient Routing Table
+## Rust Core: Path Selection and Routing
 
-The Rust `offline-protocol-router` crate includes a `GradientRoutingTable` designed for multi-hop directed message delivery. This routing table is exposed to native mesh implementations (iOS/Android) via UniFFI bindings, enabling gradient-based routing decisions in the native layer.
+The Rust `offline-protocol-router` crate implements path selection using gossip-based probabilistic forwarding to prevent broadcast storms in large networks. The system also includes a gradient routing table for directed message delivery when routes are known.
 
-### Design Overview
+### Path Selection Overview
 
-The gradient routing table learns routes from incoming messages. When a message arrives from a neighbor, we record that neighbor as a route to the message's original sender. Over time, this builds a map of how to reach known destinations.
+The router uses a multi-factor scoring system to select the best neighbors for message forwarding:
+
+1. **Gossip-Based Forwarding**: In large networks, messages are forwarded probabilistically to a subset of neighbors to prevent broadcast storms
+2. **Top-K Selection**: Selects the top K neighbors (default: configurable via `forwardToTopK`) based on path scores
+3. **Gradient Routing**: When routes are known, uses directed delivery; otherwise falls back to flooding
+
+### Path Scoring
+
+Each neighbor is scored based on:
+- **RSSI**: Signal strength to the neighbor
+- **Link Quality**: Historical connection reliability
+- **Relay Information**: Congestion level and capacity if the neighbor is a relay
+- **Hop Count**: Distance to destination (if known via gradient routing)
 
 ### Data Structures
 
@@ -637,6 +649,12 @@ protocol.cleanupExpiredRoutes()
 
 - **removeNeighborRoutes()**: Called on disconnect, removes all routes through that neighbor
 - **cleanupExpiredRoutes()**: Periodic cleanup of stale routes (recommended: every 30 seconds)
+
+### Gradient Routing Table
+
+The gradient routing table learns routes from incoming messages. When a message arrives from a neighbor, we record that neighbor as a route to the message's original sender. Over time, this builds a map of how to reach known destinations.
+
+**Current Status**: The gradient routing table is available via UniFFI bindings and can be used by native implementations for directed delivery when routes are known. The Rust router supports both gradient routing (when routes exist) and gossip-based flooding (when routes are unknown).
 
 ### Monitoring
 

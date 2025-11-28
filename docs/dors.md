@@ -113,7 +113,7 @@ Optimized for server connectivity when available, with optional preference boost
 | Energy | 10% |
 | Load | 10% |
 
-The Internet transport also receives a baseline bonus (10 points, or 25 points if "prefer online" is enabled) to ensure it's competitive when connected.
+The Internet transport receives a baseline bonus (10 points by default, or 25 points if `preferOnline` is enabled) to ensure it's competitive when connected. The total score is clamped to 0-100.
 
 ## Switching Safeguards
 

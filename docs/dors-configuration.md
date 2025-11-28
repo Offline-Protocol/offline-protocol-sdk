@@ -40,13 +40,14 @@ Total Score = (Bandwidth × 0.35) + (Proximity × 0.20) + (Congestion × 0.20)
 
 **Internet Transport:**
 ```
-Baseline Score = preferOnline ? 20 : 0
+Baseline Score = preferOnline ? 25.0 : 10.0
 Total Score = clamp(
   Baseline
-  + (Bandwidth × 0.40)
+  + (Bandwidth × 0.35)
   + (Reliability × 0.30)
-  + (Congestion × 0.20)
-  + (Energy × 0.10),
+  + (Congestion × 0.15)
+  + (Energy × 0.10)
+  + (Load × 0.10),
   0, 100
 )
 ```

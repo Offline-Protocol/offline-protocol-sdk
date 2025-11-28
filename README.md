@@ -100,7 +100,7 @@ Each factor is scored 0-100, then weighted according to the transport type's cha
 **Internet Transport:**
 - Prioritizes server connectivity while considering reliability and congestion
 - Best for: Hybrid apps with server infrastructure
-- Scoring: Baseline score based on `preferOnline` setting, plus bandwidth (40%), reliability (30%), congestion (20%), energy (10%)
+- Scoring: Baseline score (10 points, or 25 points if `preferOnline` is enabled), plus bandwidth (35%), reliability (30%), congestion (15%), energy (10%), load (10%)
 
 ### Escalation Logic
 
