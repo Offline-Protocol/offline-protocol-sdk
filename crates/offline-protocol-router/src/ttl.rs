@@ -150,7 +150,8 @@ impl AdaptiveTtlCalculator {
         // Add TTL based on network size
         if estimated_size > self.config.small_network_threshold {
             let extra_hundreds = (estimated_size - self.config.small_network_threshold) / 100;
-            let additional_ttl = (extra_hundreds as u8).saturating_mul(self.config.ttl_per_100_devices);
+            let additional_ttl =
+                (extra_hundreds as u8).saturating_mul(self.config.ttl_per_100_devices);
             ttl = ttl.saturating_add(additional_ttl);
         }
 
@@ -182,7 +183,11 @@ impl AdaptiveTtlCalculator {
     ///
     /// Reply TTL should match the hop count of the incoming message
     /// to ensure the reply can reach the original sender.
-    pub fn compute_reply_ttl(&self, incoming_hop_count: u8, network_estimate: &NetworkSizeEstimate) -> u8 {
+    pub fn compute_reply_ttl(
+        &self,
+        incoming_hop_count: u8,
+        network_estimate: &NetworkSizeEstimate,
+    ) -> u8 {
         // Reply needs at least as many hops as it took to get here
         let min_reply_ttl = incoming_hop_count.saturating_add(2); // +2 for safety margin
 
@@ -196,9 +201,13 @@ impl AdaptiveTtlCalculator {
     /// Checks if a message's TTL is sufficient for the current network.
     ///
     /// Returns the recommended boost if TTL seems too low, or 0 if sufficient.
-    pub fn recommend_ttl_boost(&self, current_ttl: u8, network_estimate: &NetworkSizeEstimate) -> u8 {
+    pub fn recommend_ttl_boost(
+        &self,
+        current_ttl: u8,
+        network_estimate: &NetworkSizeEstimate,
+    ) -> u8 {
         let optimal_ttl = self.compute_ttl(network_estimate, false, false);
-        
+
         if current_ttl >= optimal_ttl {
             0
         } else {
@@ -288,8 +297,10 @@ mod tests {
 
     #[test]
     fn test_ttl_clamped_to_min() {
-        let mut config = AdaptiveTtlConfig::default();
-        config.base_ttl = 2; // Very low base
+        let config = AdaptiveTtlConfig {
+            base_ttl: 2, // Very low base
+            ..Default::default()
+        };
         let calc = AdaptiveTtlCalculator::with_config(config);
         let estimate = NetworkSizeEstimate::new(2, 5).with_congestion(0.9);
 
@@ -309,9 +320,11 @@ mod tests {
 
     #[test]
     fn test_disabled_adaptive_ttl() {
-        let mut config = AdaptiveTtlConfig::default();
-        config.enabled = false;
-        config.base_ttl = 10;
+        let config = AdaptiveTtlConfig {
+            enabled: false,
+            base_ttl: 10,
+            ..Default::default()
+        };
         let calc = AdaptiveTtlCalculator::with_config(config);
 
         let estimate = NetworkSizeEstimate::new(4, 1000).with_estimated_total(5000);
@@ -324,10 +337,9 @@ mod tests {
     fn test_network_size_estimation_heuristic() {
         let estimate = NetworkSizeEstimate::new(4, 50);
         let size = estimate.estimated_size();
-        
+
         // Should estimate between visible_peers and visible_peers * 4
         assert!(size >= 50);
         assert!(size <= 200);
     }
 }
-

@@ -247,7 +247,8 @@ impl CongestionController {
 
         // Calculate success ratio
         let total = self.delivery_events.len() as f32;
-        let successes = self.delivery_events
+        let successes = self
+            .delivery_events
             .iter()
             .filter(|e| e.outcome == DeliveryOutcome::Success)
             .count() as f32;
@@ -290,7 +291,8 @@ impl CongestionController {
         }
 
         let total = self.delivery_events.len() as f32;
-        let successes = self.delivery_events
+        let successes = self
+            .delivery_events
             .iter()
             .filter(|e| e.outcome == DeliveryOutcome::Success)
             .count() as f32;
@@ -352,8 +354,10 @@ mod tests {
 
     #[test]
     fn test_reject_when_queue_full() {
-        let mut config = CongestionConfig::default();
-        config.max_queue_depth = 5;
+        let config = CongestionConfig {
+            max_queue_depth: 5,
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         // Fill the queue
@@ -367,10 +371,12 @@ mod tests {
 
     #[test]
     fn test_backpressure_at_threshold() {
-        let mut config = CongestionConfig::default();
-        config.backpressure_threshold = 3;
-        config.max_queue_depth = 10;
-        config.max_messages_per_second = 1000.0; // High rate to avoid token depletion
+        let config = CongestionConfig {
+            backpressure_threshold: 3,
+            max_queue_depth: 10,
+            max_messages_per_second: 1000.0, // High rate to avoid token depletion
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         // Ensure we have tokens
@@ -387,8 +393,10 @@ mod tests {
 
     #[test]
     fn test_rate_limiting_delay() {
-        let mut config = CongestionConfig::default();
-        config.max_messages_per_second = 2.0;
+        let config = CongestionConfig {
+            max_messages_per_second: 2.0,
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         // Consume tokens quickly
@@ -405,17 +413,22 @@ mod tests {
 
     #[test]
     fn test_fair_queuing_per_sender() {
-        let mut config = CongestionConfig::default();
-        config.max_per_sender = 2;
-        config.max_queue_depth = 100;
-        config.max_messages_per_second = 1000.0; // High rate to avoid token depletion
+        let config = CongestionConfig {
+            max_per_sender: 2,
+            max_queue_depth: 100,
+            max_messages_per_second: 1000.0, // High rate to avoid token depletion
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         // Ensure we have tokens
         controller.tokens = 10.0;
 
         // Fill sender's quota (use queue_depth directly to avoid token consumption)
-        let alice_state = controller.sender_states.entry("alice".to_string()).or_default();
+        let alice_state = controller
+            .sender_states
+            .entry("alice".to_string())
+            .or_default();
         alice_state.queued_count = 2;
         controller.queue_depth = 2;
 
@@ -444,8 +457,10 @@ mod tests {
 
     #[test]
     fn test_rate_increase_on_success() {
-        let mut config = CongestionConfig::default();
-        config.max_messages_per_second = 100.0;
+        let config = CongestionConfig {
+            max_messages_per_second: 100.0,
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         // Start at lower rate
@@ -462,8 +477,10 @@ mod tests {
 
     #[test]
     fn test_congestion_level() {
-        let mut config = CongestionConfig::default();
-        config.max_queue_depth = 100;
+        let config = CongestionConfig {
+            max_queue_depth: 100,
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         assert_eq!(controller.congestion_level(), 0.0);
@@ -477,9 +494,11 @@ mod tests {
 
     #[test]
     fn test_disabled_congestion_control() {
-        let mut config = CongestionConfig::default();
-        config.enabled = false;
-        config.max_queue_depth = 1;
+        let config = CongestionConfig {
+            enabled: false,
+            max_queue_depth: 1,
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         // Fill the queue beyond limit
@@ -494,8 +513,10 @@ mod tests {
 
     #[test]
     fn test_token_bucket_refill() {
-        let mut config = CongestionConfig::default();
-        config.max_messages_per_second = 10.0;
+        let config = CongestionConfig {
+            max_messages_per_second: 10.0,
+            ..Default::default()
+        };
         let mut controller = CongestionController::with_config(config);
 
         // Consume tokens
@@ -511,4 +532,3 @@ mod tests {
         assert_eq!(decision, SendDecision::Allow);
     }
 }
-

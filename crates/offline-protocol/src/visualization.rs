@@ -162,8 +162,8 @@ impl NetworkVisualizer {
         NetworkTopology {
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
             local_user_id: self.local_user_id.clone(),
             nodes: self.nodes.values().cloned().collect(),
             links: self.links.clone(),

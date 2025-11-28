@@ -178,9 +178,9 @@ impl RetryQueue {
     /// Returns `Some(RetryEntry)` if a message is ready, `None` otherwise.
     pub fn dequeue_ready(&mut self) -> Option<RetryEntry> {
         // Peek at the top entry
-        if let Some(entry) = self.queue.peek() {
-            if entry.is_ready() {
-                let entry = self.queue.pop().unwrap();
+        let is_ready = self.queue.peek().is_some_and(|entry| entry.is_ready());
+        if is_ready {
+            if let Some(entry) = self.queue.pop() {
                 self.index.remove(&entry.message.id.as_str());
                 return Some(entry);
             }

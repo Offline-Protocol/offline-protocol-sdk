@@ -5,6 +5,9 @@
 //! - ACK aggregation: batch multiple ACKs into single messages
 //! - Piggyback ACKs: attach ACKs to data messages going the same direction
 
+use crate::constants::{
+    ESTIMATED_ACK_SIZE_BYTES, RELAY_DENSITY_FACTOR_NUMERATOR, SMALL_NETWORK_RELAY_THRESHOLD,
+};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::MessageId;
 use std::collections::hash_map::DefaultHasher;
@@ -36,13 +39,13 @@ impl Default for AckOptimizationConfig {
     fn default() -> Self {
         Self {
             probabilistic_relay_enabled: true,
-            base_relay_probability: 0.5,    // Only 50% of nodes relay each ACK
-            min_relay_probability: 0.2,     // At least 20% always relay
+            base_relay_probability: 0.5, // Only 50% of nodes relay each ACK
+            min_relay_probability: 0.2,  // At least 20% always relay
             aggregation_enabled: true,
             max_aggregation_batch: 10,
             aggregation_timeout_ms: 500,
             piggyback_enabled: true,
-            max_piggyback_size: 64,         // Keep piggyback data small
+            max_piggyback_size: 64, // Keep piggyback data small
         }
     }
 }
@@ -129,17 +132,19 @@ impl AckOptimizer {
 
     /// Computes the relay probability based on network density.
     fn compute_relay_probability(&self, visible_peer_count: usize) -> f32 {
-        if visible_peer_count <= 5 {
+        if visible_peer_count <= SMALL_NETWORK_RELAY_THRESHOLD {
             return 1.0; // Small network: always relay
         }
 
         // As network grows, reduce probability
         // At 50 peers: ~25% probability
         // At 100 peers: ~15% probability
-        let density_factor = 5.0 / (visible_peer_count as f32);
+        let density_factor = RELAY_DENSITY_FACTOR_NUMERATOR / (visible_peer_count as f32);
         let raw_probability = self.config.base_relay_probability * density_factor;
 
-        raw_probability.max(self.config.min_relay_probability).min(1.0)
+        raw_probability
+            .max(self.config.min_relay_probability)
+            .min(1.0)
     }
 
     /// Adds an ACK to the pending aggregation buffer.
@@ -175,7 +180,10 @@ impl AckOptimizer {
             received_at: now,
         };
 
-        let pending = self.pending_acks.entry(destination.to_string()).or_default();
+        let pending = self
+            .pending_acks
+            .entry(destination.to_string())
+            .or_default();
         pending.push(ack);
 
         // Record when we started collecting for this destination
@@ -273,9 +281,7 @@ impl AckOptimizer {
 
     /// Estimates how many ACKs can be piggybacked within size limit.
     fn estimate_piggyback_limit(&self) -> usize {
-        // Rough estimate: each ACK takes ~40 bytes (message ID + metadata)
-        let ack_size = 40;
-        (self.config.max_piggyback_size / ack_size).max(1)
+        (self.config.max_piggyback_size / ESTIMATED_ACK_SIZE_BYTES).max(1)
     }
 
     /// Returns the number of pending ACK destinations.
@@ -354,8 +360,10 @@ mod tests {
 
     #[test]
     fn test_aggregation_batch_full() {
-        let mut config = AckOptimizationConfig::default();
-        config.max_aggregation_batch = 3;
+        let config = AckOptimizationConfig {
+            max_aggregation_batch: 3,
+            ..Default::default()
+        };
         let mut optimizer = AckOptimizer::with_config("device1", config);
 
         // Add ACKs until batch is full
@@ -371,8 +379,10 @@ mod tests {
 
     #[test]
     fn test_aggregation_disabled() {
-        let mut config = AckOptimizationConfig::default();
-        config.aggregation_enabled = false;
+        let config = AckOptimizationConfig {
+            aggregation_enabled: false,
+            ..Default::default()
+        };
         let mut optimizer = AckOptimizer::with_config("device1", config);
 
         let result = optimizer.add_ack_for_aggregation("alice", MessageId::new(), 3);
@@ -409,8 +419,10 @@ mod tests {
 
     #[test]
     fn test_drain_timed_out() {
-        let mut config = AckOptimizationConfig::default();
-        config.aggregation_timeout_ms = 0; // Immediate timeout for testing
+        let config = AckOptimizationConfig {
+            aggregation_timeout_ms: 0, // Immediate timeout for testing
+            ..Default::default()
+        };
         let mut optimizer = AckOptimizer::with_config("device1", config);
 
         optimizer.add_ack_for_aggregation("alice", MessageId::new(), 1);
@@ -421,4 +433,3 @@ mod tests {
         assert_eq!(timed_out.len(), 2);
     }
 }
-

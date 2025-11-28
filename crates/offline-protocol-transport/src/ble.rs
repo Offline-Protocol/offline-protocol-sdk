@@ -7,16 +7,15 @@
 //! - Message transmission over BLE characteristics
 //! - Message fragmentation for large payloads
 
+use crate::constants::{
+    BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES, BLE_MAX_FRAGMENT_COUNT,
+    BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC, FRAGMENT_VERSION,
+};
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
-use crate::constants::{
-    BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES,
-    BLE_MAX_FRAGMENT_COUNT, BLE_MAX_FRAGMENT_SIZE,
-    FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC, FRAGMENT_VERSION,
-};
 use std::time::{Duration as StdDuration, SystemTime};
 
 /// Peer device information
@@ -33,7 +32,6 @@ pub struct PeerDevice {
     /// Connection status
     pub connected: bool,
 }
-
 
 #[derive(Debug, Clone)]
 struct DecodedFragment {
@@ -67,14 +65,14 @@ impl FragmentAssembly {
     /// Prioritizes keeping near-complete assemblies.
     fn eviction_priority(&self, now: SystemTime) -> f32 {
         let completion = self.completion_ratio();
-        
+
         // Age factor: older assemblies are slightly less valuable
         let age_secs = now
             .duration_since(self.started_at)
             .unwrap_or(StdDuration::from_secs(0))
             .as_secs_f32();
         let age_penalty = (age_secs / 60.0).min(1.0) * 0.2; // Max 20% penalty for age
-        
+
         // Priority = completion ratio (0-1) minus age penalty
         // Higher value = more valuable = less likely to evict
         completion - age_penalty
@@ -385,7 +383,9 @@ impl BleTransport {
                     .min_by(|(_, a), (_, b)| {
                         let priority_a = a.eviction_priority(now);
                         let priority_b = b.eviction_priority(now);
-                        priority_a.partial_cmp(&priority_b).unwrap_or(std::cmp::Ordering::Equal)
+                        priority_a
+                            .partial_cmp(&priority_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(id, _)| id.clone())
                 {

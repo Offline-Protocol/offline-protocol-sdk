@@ -200,7 +200,9 @@ impl RotatingBloomFilter {
     }
 
     fn average_false_positive_rate(&self) -> f64 {
-        let rates: Vec<f64> = self.filters.iter()
+        let rates: Vec<f64> = self
+            .filters
+            .iter()
             .map(|f| f.estimated_false_positive_rate())
             .collect();
         if rates.is_empty() {
@@ -404,8 +406,8 @@ impl Deduplicator {
             let total = bloom.total_items();
             // Estimate "capacity" based on expected items before FP rate gets too high
             let estimated_capacity = self.config.bloom_filter_bits / self.config.bloom_hash_count;
-            let capacity_percent = ((total as f32 / estimated_capacity as f32) * 100.0)
-                .min(100.0) as u8;
+            let capacity_percent =
+                ((total as f32 / estimated_capacity as f32) * 100.0).min(100.0) as u8;
 
             DeduplicatorStats {
                 total_tracked: total,
@@ -441,7 +443,8 @@ impl Deduplicator {
         if self.bloom_filter.is_some() {
             // Each filter uses bit_count/8 bytes, times number of filters
             let filter_bytes = (self.config.bloom_filter_bits + 7) / 8;
-            filter_bytes * self.config.bloom_filter_count + std::mem::size_of::<RotatingBloomFilter>()
+            filter_bytes * self.config.bloom_filter_count
+                + std::mem::size_of::<RotatingBloomFilter>()
         } else {
             // Rough estimate: each entry is ~50 bytes (String + DateTime)
             self.seen_messages.len() * 50 + std::mem::size_of::<HashMap<String, SeenEntry>>()

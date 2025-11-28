@@ -273,7 +273,11 @@ impl TransportSelector {
         }
 
         // Sort by total score (descending)
-        scored_transports.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap());
+        scored_transports.sort_by(|a, b| {
+            b.1.total
+                .partial_cmp(&a.1.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Get the best transport
         let best = scored_transports.first()?;
@@ -326,7 +330,11 @@ impl TransportSelector {
                 // Internet prioritises bandwidth and reliability.
                 // Give Internet a baseline advantage when connected to ensure it's competitive.
                 // Additional boost when prefer_online is enabled.
-                let baseline = if self.config.prefer_online { 25.0 } else { 10.0 };
+                let baseline = if self.config.prefer_online {
+                    25.0
+                } else {
+                    10.0
+                };
                 baseline
                     + (bandwidth_score * 0.35)
                     + (reliability_score * 0.3)
@@ -432,10 +440,12 @@ impl TransportSelector {
                 if let Some(rssi) = metrics.rssi {
                     // Very poor signal for extended period
                     if rssi < -90 {
-                        let poor_duration = self.ble_poor_signal_since.map(|since| {
-                            Utc::now().signed_duration_since(since).num_seconds()
-                        });
-                        if poor_duration.unwrap_or(0) >= self.config.poor_signal_duration_secs as i64 * 2 {
+                        let poor_duration = self
+                            .ble_poor_signal_since
+                            .map(|since| Utc::now().signed_duration_since(since).num_seconds());
+                        if poor_duration.unwrap_or(0)
+                            >= self.config.poor_signal_duration_secs as i64 * 2
+                        {
                             return true;
                         }
                     }
@@ -686,10 +696,7 @@ impl TransportSelector {
 
     fn update_history(&mut self, transport_type: TransportType, metrics: &TransportMetrics) {
         let window = self.history_window();
-        let history = self
-            .transport_history
-            .entry(transport_type)
-            .or_default();
+        let history = self.transport_history.entry(transport_type).or_default();
 
         history.push_queue_depth(metrics.queue_depth, window);
         history.push_congestion(metrics.congestion.clamp(0.0, 1.0), window);
@@ -924,7 +931,7 @@ impl TransportSelector {
     }
 
     /// Checks if WiFi escalation is appropriate for a message with given priority.
-    /// 
+    ///
     /// For Critical priority messages, battery constraints are bypassed since
     /// message delivery is more important than battery preservation.
     ///

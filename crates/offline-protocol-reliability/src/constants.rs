@@ -21,3 +21,11 @@ pub const DEFAULT_BACKOFF_MULTIPLIER: f32 = 2.0;
 /// Maximum lifetime for messages in outbox (milliseconds).
 pub const DEFAULT_OUTBOX_LIFETIME_MS: u64 = 3600000;
 
+/// Estimated size of an ACK entry in bytes (message ID + metadata).
+pub const ESTIMATED_ACK_SIZE_BYTES: usize = 40;
+
+/// Network size threshold below which all ACKs are relayed.
+pub const SMALL_NETWORK_RELAY_THRESHOLD: usize = 5;
+
+/// Density factor numerator for relay probability calculation.
+pub const RELAY_DENSITY_FACTOR_NUMERATOR: f32 = 5.0;

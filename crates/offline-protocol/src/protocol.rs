@@ -1,8 +1,6 @@
 //! Main protocol engine.
 
-use crate::constants::{
-    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES,
-};
+use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
@@ -56,7 +54,9 @@ impl SharedState {
 fn lock_shared_state(
     state: &Arc<Mutex<SharedState>>,
 ) -> std::result::Result<std::sync::MutexGuard<'_, SharedState>, Error> {
-    state.lock().map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
+    state
+        .lock()
+        .map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
 }
 
 #[derive(Clone)]
@@ -67,7 +67,6 @@ struct OutboxEntry {
     last_sent_at: DateTime<Utc>,
     last_transport: Option<TransportType>,
 }
-
 
 /// Main entry point for the Offline Protocol SDK.
 ///
@@ -250,7 +249,9 @@ impl OfflineProtocol {
                         ));
                         drop(state);
                     } else {
-                        error!("Failed to lock shared state for ACK event, skipping event emission");
+                        error!(
+                            "Failed to lock shared state for ACK event, skipping event emission"
+                        );
                     }
 
                     self.transport_manager.reset_retry_count(transport);
@@ -336,7 +337,7 @@ impl OfflineProtocol {
     }
 
     /// Handles failed message send by persisting to outbox and scheduling retry.
-    /// 
+    ///
     /// EDGE CASE HANDLING:
     /// - Ensures message is persisted to outbox for recovery
     /// - Schedules retry with exponential backoff
@@ -349,7 +350,7 @@ impl OfflineProtocol {
     ) -> Result<()> {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
-        
+
         // Schedule retry - if this fails (max retries exceeded), the message
         // will still be in the outbox and can be recovered
         if let Err(e) = self.retry_queue.enqueue(message.clone(), 0) {
@@ -380,11 +381,13 @@ impl OfflineProtocol {
     ) -> Result<()> {
         if current_transport != previous_transport {
             if let Some(new_transport) = current_transport {
-                let state = lock_shared_state(&self.shared_state)
-                    .map_err(|e| {
-                        error!("Failed to lock shared state for transport switch event: {}", e);
+                let state = lock_shared_state(&self.shared_state).map_err(|e| {
+                    error!(
+                        "Failed to lock shared state for transport switch event: {}",
                         e
-                    })?;
+                    );
+                    e
+                })?;
                 state.emit_event(Event::transport_switched(
                     previous_transport,
                     new_transport,
@@ -398,11 +401,10 @@ impl OfflineProtocol {
 
     /// Emits a message sent event.
     fn emit_message_sent_event(&self, message: &Message) -> Result<()> {
-        let state = lock_shared_state(&self.shared_state)
-            .map_err(|e| {
-                error!("Failed to lock shared state for message sent event: {}", e);
-                e
-            })?;
+        let state = lock_shared_state(&self.shared_state).map_err(|e| {
+            error!("Failed to lock shared state for message sent event: {}", e);
+            e
+        })?;
         state.emit_event(Event::message_sent(message));
         drop(state);
         Ok(())
@@ -517,7 +519,9 @@ impl OfflineProtocol {
         let previous_transport = self.transport_manager.current_transport();
 
         // Attempt to send via the specified transport (bypassing DORS)
-        let send_result = self.transport_manager.send_via_transport(&message, transport);
+        let send_result = self
+            .transport_manager
+            .send_via_transport(&message, transport);
         let current_transport = Some(transport);
 
         // Handle send result
@@ -648,7 +652,7 @@ impl OfflineProtocol {
     }
 
     /// Processes messages ready for retry from the retry queue.
-    /// 
+    ///
     /// EDGE CASE HANDLING:
     /// - Checks transport availability before each retry attempt
     /// - Handles transport switch mid-retry
@@ -657,13 +661,13 @@ impl OfflineProtocol {
         // Limit batch size to prevent blocking on large queues
         let max_batch_size = 20;
         let mut processed = 0;
-        
+
         while processed < max_batch_size {
             let entry = match self.retry_queue.dequeue_ready() {
                 Some(e) => e,
                 None => break,
             };
-            
+
             processed += 1;
             let previous_transport = self.transport_manager.current_transport();
             self.ensure_outbox_entry(&entry.message);
@@ -686,7 +690,7 @@ impl OfflineProtocol {
                     if let Some(transport) = current_transport {
                         self.transport_manager.reset_retry_count(transport);
                     }
-                    
+
                     debug!(
                         message_id = %entry.message.id,
                         retry_count = entry.retry_count,
@@ -697,7 +701,11 @@ impl OfflineProtocol {
                 Err(e) => {
                     // Re-enqueue with incremented retry count
                     // If this fails (max retries), the message remains in outbox
-                    if self.retry_queue.enqueue(entry.message.clone(), entry.retry_count + 1).is_err() {
+                    if self
+                        .retry_queue
+                        .enqueue(entry.message.clone(), entry.retry_count + 1)
+                        .is_err()
+                    {
                         warn!(
                             message_id = %entry.message.id,
                             retry_count = entry.retry_count,
@@ -708,7 +716,7 @@ impl OfflineProtocol {
                     if let Some(transport) = previous_transport {
                         self.transport_manager.record_retry_failure(transport);
                     }
-                    
+
                     debug!(
                         message_id = %entry.message.id,
                         retry_count = entry.retry_count,
@@ -718,11 +726,11 @@ impl OfflineProtocol {
                 }
             }
         }
-        
+
         if processed > 0 {
             debug!(processed = processed, "Processed retry queue entries");
         }
-        
+
         Ok(())
     }
 
@@ -748,11 +756,13 @@ impl OfflineProtocol {
         message_id: &MessageId,
         retry_count: u32,
     ) -> Result<()> {
-        let state = lock_shared_state(&self.shared_state)
-            .map_err(|e| {
-                error!("Failed to lock shared state for message failed event: {}", e);
+        let state = lock_shared_state(&self.shared_state).map_err(|e| {
+            error!(
+                "Failed to lock shared state for message failed event: {}",
                 e
-            })?;
+            );
+            e
+        })?;
         state.emit_event(Event::message_failed(
             message_id.clone(),
             "Max retries exceeded".to_string(),
@@ -770,11 +780,7 @@ impl OfflineProtocol {
     }
 
     /// Handles retry logic for a timed out ACK.
-    fn handle_ack_timeout_retry(
-        &mut self,
-        message_id: &MessageId,
-        retry_count: u32,
-    ) -> Result<()> {
+    fn handle_ack_timeout_retry(&mut self, message_id: &MessageId, retry_count: u32) -> Result<()> {
         if let Some(entry) = self.outbox.get(message_id) {
             let message_clone = entry.message.clone();
             let last_transport = entry.last_transport;
@@ -801,11 +807,13 @@ impl OfflineProtocol {
         message_id: &MessageId,
         retry_count: u32,
     ) -> Result<()> {
-        let state = lock_shared_state(&self.shared_state)
-            .map_err(|e| {
-                error!("Failed to lock shared state for retry queue error event: {}", e);
+        let state = lock_shared_state(&self.shared_state).map_err(|e| {
+            error!(
+                "Failed to lock shared state for retry queue error event: {}",
                 e
-            })?;
+            );
+            e
+        })?;
         state.emit_event(Event::message_failed(
             message_id.clone(),
             "Retry queue unavailable".to_string(),
@@ -828,11 +836,13 @@ impl OfflineProtocol {
         message_id: &MessageId,
         retry_count: u32,
     ) -> Result<()> {
-        let state = lock_shared_state(&self.shared_state)
-            .map_err(|e| {
-                error!("Failed to lock shared state for missing outbox entry event: {}", e);
+        let state = lock_shared_state(&self.shared_state).map_err(|e| {
+            error!(
+                "Failed to lock shared state for missing outbox entry event: {}",
                 e
-            })?;
+            );
+            e
+        })?;
         state.emit_event(Event::message_failed(
             message_id.clone(),
             "Message missing from outbox (cannot retry)".to_string(),
@@ -864,11 +874,13 @@ impl OfflineProtocol {
         let active_transports = self.transport_manager.get_active_transports();
 
         if !active_transports.contains(&TransportType::WiFiDirect) {
-            let state = lock_shared_state(&self.shared_state)
-                .map_err(|e| {
-                    error!("Failed to lock shared state for WiFi escalation event: {}", e);
+            let state = lock_shared_state(&self.shared_state).map_err(|e| {
+                error!(
+                    "Failed to lock shared state for WiFi escalation event: {}",
                     e
-                })?;
+                );
+                e
+            })?;
             state.emit_event(Event::transport_switched(
                 Some(TransportType::BLE),
                 TransportType::WiFiDirect,

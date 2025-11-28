@@ -78,4 +78,3 @@ pub const NON_RELAY_ASSUMED_BATTERY: f32 = 70.0;
 
 /// Battery score for charging devices.
 pub const CHARGING_BATTERY_SCORE: f32 = 100.0;
-

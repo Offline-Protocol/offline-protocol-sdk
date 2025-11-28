@@ -4,9 +4,7 @@
 //! and uses DORS (Dynamic Offline Relay Switch) to select the optimal transport
 //! for each message.
 
-use crate::constants::{
-    HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD,
-};
+use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD};
 use crate::{Error, Result};
 use offline_protocol_core::Message;
 use offline_protocol_router::{DorsConfig, TransportSelector};
@@ -31,7 +29,6 @@ pub struct TransportManager {
     observations: HashMap<TransportType, ObservedStats>,
 }
 
-
 #[derive(Debug, Default, Clone)]
 struct ObservedStats {
     success_count: u32,
@@ -44,8 +41,16 @@ struct ObservedStats {
 impl ObservedStats {
     fn record_success(&mut self, latency_ms: u32, hop_count: u8) {
         self.success_count = self.success_count.saturating_add(1);
-        self.latency_ema = Some(update_ema(self.latency_ema, latency_ms as f32, LATENCY_EMA_ALPHA));
-        self.hop_ema = Some(update_ema(self.hop_ema, hop_count as f32, HOP_COUNT_EMA_ALPHA));
+        self.latency_ema = Some(update_ema(
+            self.latency_ema,
+            latency_ms as f32,
+            LATENCY_EMA_ALPHA,
+        ));
+        self.hop_ema = Some(update_ema(
+            self.hop_ema,
+            hop_count as f32,
+            HOP_COUNT_EMA_ALPHA,
+        ));
         self.last_success_at = Some(Instant::now());
         self.compact();
     }
@@ -303,9 +308,12 @@ impl TransportManager {
             let mut transport_lock = transport.lock().map_err(|_| {
                 Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
             })?;
-            transport_lock
-                .start()
-                .map_err(|e| Error::Other(format!("Failed to start transport {:?}: {}", transport_type, e)))?;
+            transport_lock.start().map_err(|e| {
+                Error::Other(format!(
+                    "Failed to start transport {:?}: {}",
+                    transport_type, e
+                ))
+            })?;
         }
         Ok(())
     }
@@ -316,9 +324,12 @@ impl TransportManager {
             let mut transport_lock = transport.lock().map_err(|_| {
                 Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
             })?;
-            transport_lock
-                .stop()
-                .map_err(|e| Error::Other(format!("Failed to stop transport {:?}: {}", transport_type, e)))?;
+            transport_lock.stop().map_err(|e| {
+                Error::Other(format!(
+                    "Failed to stop transport {:?}: {}",
+                    transport_type, e
+                ))
+            })?;
         }
         Ok(())
     }

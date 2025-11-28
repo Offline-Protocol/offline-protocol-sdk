@@ -151,7 +151,11 @@ impl GradientRoutingTable {
             // Add new route
             if routes.len() >= self.config.max_routes_per_destination {
                 // Remove worst route
-                routes.sort_by(|a, b| b.quality.partial_cmp(&a.quality).unwrap());
+                routes.sort_by(|a, b| {
+                    b.quality
+                        .partial_cmp(&a.quality)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 routes.pop();
             }
 
@@ -187,7 +191,11 @@ impl GradientRoutingTable {
         routes
             .iter()
             .filter(|r| now.duration_since(r.last_seen) < ttl)
-            .max_by(|a, b| a.quality.partial_cmp(&b.quality).unwrap())
+            .max_by(|a, b| {
+                a.quality
+                    .partial_cmp(&b.quality)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     }
 
     /// Gets all valid routes to a destination.
@@ -403,12 +411,7 @@ impl PathSelector {
     ///
     /// This ensures that the same message-peer pair always produces the same
     /// decision across all nodes, preventing duplicate forwarding.
-    fn should_forward_to_peer(
-        &self,
-        message_id: &str,
-        peer_id: &str,
-        probability: f32,
-    ) -> bool {
+    fn should_forward_to_peer(&self, message_id: &str, peer_id: &str, probability: f32) -> bool {
         if probability >= 1.0 {
             return true;
         }
@@ -493,7 +496,11 @@ impl PathSelector {
         });
 
         // Sort by total score (descending)
-        scored_neighbors.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap());
+        scored_neighbors.sort_by(|a, b| {
+            b.1.total
+                .partial_cmp(&a.1.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Take top K candidates
         let candidates: Vec<String> = scored_neighbors
@@ -564,7 +571,11 @@ impl PathSelector {
         });
 
         // Sort by total score (descending)
-        scored_neighbors.sort_by(|a, b| b.1.total.partial_cmp(&a.1.total).unwrap());
+        scored_neighbors.sort_by(|a, b| {
+            b.1.total
+                .partial_cmp(&a.1.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Select top K neighbors for redundancy
         scored_neighbors
@@ -692,10 +703,16 @@ impl PathSelector {
     /// Learns a route from an incoming message.
     /// Call this when receiving a message from a neighbor to learn
     /// that the neighbor can reach the message's sender.
-    pub fn learn_route_from_message(&mut self, message: &Message, from_neighbor: &str, quality: f32) {
+    pub fn learn_route_from_message(
+        &mut self,
+        message: &Message,
+        from_neighbor: &str,
+        quality: f32,
+    ) {
         let sender = message.sender.as_str();
         let hop_count = message.hop_count.value();
-        self.routing_table.learn_route(sender, from_neighbor, hop_count, quality);
+        self.routing_table
+            .learn_route(sender, from_neighbor, hop_count, quality);
     }
 
     /// Gets the best route to a destination, if known.
@@ -748,7 +765,10 @@ impl PathSelector {
 
     /// Returns routing table statistics.
     pub fn routing_stats(&self) -> (usize, usize) {
-        (self.routing_table.destination_count(), self.routing_table.route_count())
+        (
+            self.routing_table.destination_count(),
+            self.routing_table.route_count(),
+        )
     }
 
     /// Gets a mutable reference to the routing table for advanced operations.

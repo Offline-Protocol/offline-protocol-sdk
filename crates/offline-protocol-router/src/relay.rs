@@ -233,7 +233,9 @@ impl RelayManager {
         candidates.sort_by(|a, b| {
             let score_a = self.calculate_relay_score(a);
             let score_b = self.calculate_relay_score(b);
-            score_b.partial_cmp(&score_a).unwrap()
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Take top N

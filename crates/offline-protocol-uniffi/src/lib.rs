@@ -12,12 +12,11 @@ use offline_protocol::{
 };
 use offline_protocol_core::MessagePriority as CorePriority;
 use offline_protocol_router::{
-    DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig,
-    PathSelector,
+    DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
 };
 use offline_protocol_transport::{
-    ble::BleTransport, internet::InternetTransport, wifi_direct::WifiDirectTransport,
-    Transport, TransportType as CoreTransportType,
+    ble::BleTransport, internet::InternetTransport, wifi_direct::WifiDirectTransport, Transport,
+    TransportType as CoreTransportType,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -640,7 +639,12 @@ impl OfflineProtocol {
                 TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
             };
             protocol
-                .send_message_via_transport(&recipient, &content, Some(priority.into()), core_transport)
+                .send_message_via_transport(
+                    &recipient,
+                    &content,
+                    Some(priority.into()),
+                    core_transport,
+                )
                 .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
         } else {
             protocol
@@ -681,8 +685,8 @@ impl OfflineProtocol {
             rssi,
             last_seen_ms: SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
         };
         ble_state.peers.insert(peer_id.clone(), peer);
         ble_state.peer_count = ble_state.peers.len() as u32;
@@ -836,7 +840,7 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Internet: Status changed (connected/disconnected to relay server)
-    /// 
+    ///
     /// EDGE CASE HANDLING:
     /// - When internet reconnects, triggers immediate flush of pending outbox messages
     /// - Handles race conditions between transport switching and message sending
@@ -847,7 +851,7 @@ impl OfflineProtocol {
             let internet_state = self.internet_state.lock().unwrap();
             internet_state.is_connected
         };
-        
+
         // Update internal state
         {
             let mut internet_state = self.internet_state.lock().unwrap();
@@ -862,9 +866,10 @@ impl OfflineProtocol {
                 .get_transport(CoreTransportType::Internet)
             {
                 let transport = transport_arc.lock().unwrap();
-                if let Some(internet_transport) = transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+                if let Some(internet_transport) =
+                    transport
+                        .as_any()
+                        .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
                 {
                     let new_status = if is_connected {
                         offline_protocol_transport::TransportStatus::Available
@@ -919,9 +924,10 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::Internet)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(internet_transport) = transport
-                .as_any()
-                .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            if let Some(internet_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
                 // Pass raw data to the transport for processing
                 if let Err(e) = internet_transport.on_data_received(data.clone()) {
@@ -968,9 +974,10 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::Internet)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(internet_transport) = transport
-                .as_any()
-                .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            if let Some(internet_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
                 if let Ok(Some(data)) = internet_transport.get_next_message() {
                     // Deserialize to get recipient
@@ -1023,10 +1030,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(wifi_transport) = transport
-                .as_any()
-                .downcast_ref::<WifiDirectTransport>()
-            {
+            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 let new_status = if is_connected {
                     offline_protocol_transport::TransportStatus::Available
                 } else {
@@ -1068,10 +1072,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(wifi_transport) = transport
-                .as_any()
-                .downcast_ref::<WifiDirectTransport>()
-            {
+            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 // Pass raw data to the transport for processing
                 if let Err(e) = wifi_transport.on_data_received(data.clone()) {
                     return Err(ProtocolError::Other(format!(
@@ -1117,10 +1118,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(wifi_transport) = transport
-                .as_any()
-                .downcast_ref::<WifiDirectTransport>()
-            {
+            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 if let Ok(Some((recipient, data))) = wifi_transport.get_next_message() {
                     return Some(WifiDirectMessage {
                         recipient_id: recipient,
@@ -1172,9 +1170,7 @@ impl OfflineProtocol {
         }
 
         // Emit NeighborLost event
-        let event = CoreEvent::NeighborLost {
-            peer_id,
-        };
+        let event = CoreEvent::NeighborLost { peer_id };
         self.emit_event(event);
 
         Ok(())
@@ -1268,8 +1264,8 @@ impl OfflineProtocol {
             "file_{}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
             file_name
         );
 
@@ -1585,9 +1581,9 @@ impl OfflineProtocol {
             let elapsed = entry.last_seen.elapsed();
             let last_seen_ms = SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-                - elapsed.as_millis() as u64;
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+                .saturating_sub(elapsed.as_millis() as u64);
 
             RouteEntry {
                 next_hop: entry.next_hop.clone(),
@@ -1604,8 +1600,8 @@ impl OfflineProtocol {
         let mut path_selector = self.path_selector.lock().unwrap();
         let now = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
         path_selector
             .routing_table_mut()
@@ -1669,10 +1665,8 @@ impl OfflineProtocol {
         let mut path_selector = self.path_selector.lock().unwrap();
         let mut path_config = path_selector.config().clone();
         path_config.gradient_routing = core_config;
-        *path_selector = PathSelector::with_config(
-            path_config,
-            offline_protocol_router::RelayManager::new(),
-        );
+        *path_selector =
+            PathSelector::with_config(path_config, offline_protocol_router::RelayManager::new());
     }
 }
 
@@ -1828,13 +1822,13 @@ mod tests {
         protocol.learn_route(
             "alice".to_string(),
             "peer1".to_string(),
-            2,  // hop count
-            0.8 // quality
+            2,   // hop count
+            0.8, // quality
         );
 
         // Should now have a route
         assert!(protocol.has_route("alice".to_string()));
-        
+
         let route = protocol.get_best_route("alice".to_string());
         assert!(route.is_some());
         let route = route.unwrap();
@@ -1889,7 +1883,7 @@ mod tests {
         // Learn routes through peer1
         protocol.learn_route("alice".to_string(), "peer1".to_string(), 2, 0.8);
         protocol.learn_route("bob".to_string(), "peer1".to_string(), 3, 0.7);
-        
+
         // Learn route through peer2
         protocol.learn_route("charlie".to_string(), "peer2".to_string(), 1, 0.9);
 
@@ -1904,7 +1898,7 @@ mod tests {
         // Routes through peer1 should be gone
         assert!(!protocol.has_route("alice".to_string()));
         assert!(!protocol.has_route("bob".to_string()));
-        
+
         // Route through peer2 should remain
         assert!(protocol.has_route("charlie".to_string()));
     }

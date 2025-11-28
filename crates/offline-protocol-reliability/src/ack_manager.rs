@@ -132,12 +132,13 @@ impl AckManager {
             self.cleanup_timed_out();
 
             // If still at limit, try priority-based eviction
-            if self.pending_acks.len() >= self.config.max_pending_acks {
-                if !self.evict_lowest_priority(priority) {
-                    return Err(crate::Error::Other(
-                        "Maximum pending ACKs limit reached (no lower priority ACKs to evict)".to_string(),
-                    ));
-                }
+            if self.pending_acks.len() >= self.config.max_pending_acks
+                && !self.evict_lowest_priority(priority)
+            {
+                return Err(crate::Error::Other(
+                    "Maximum pending ACKs limit reached (no lower priority ACKs to evict)"
+                        .to_string(),
+                ));
             }
         }
 
@@ -164,7 +165,8 @@ impl AckManager {
             .filter(|(_, ack)| ack.status == AckStatus::Pending)
             .min_by(|(_, a), (_, b)| {
                 // Compare by priority first (lower priority = evict first)
-                let priority_cmp = Self::priority_rank(a.priority).cmp(&Self::priority_rank(b.priority));
+                let priority_cmp =
+                    Self::priority_rank(a.priority).cmp(&Self::priority_rank(b.priority));
                 if priority_cmp != std::cmp::Ordering::Equal {
                     return priority_cmp;
                 }
@@ -284,7 +286,8 @@ impl AckManager {
     /// This helps prevent unbounded memory growth.
     pub fn prune_old_timeouts(&mut self, older_than: Duration) {
         let now = Utc::now();
-        let cutoff = now - chrono::Duration::from_std(older_than).unwrap();
+        let cutoff = now
+            - chrono::Duration::from_std(older_than).unwrap_or_else(|_| chrono::Duration::zero());
 
         self.pending_acks
             .retain(|_, ack| ack.status != AckStatus::TimedOut || ack.sent_at > cutoff);
@@ -446,7 +449,11 @@ mod tests {
         // Critical should evict medium
         let critical_id = MessageId::new();
         manager
-            .register_pending_ack_with_priority(critical_id.clone(), None, MessagePriority::Critical)
+            .register_pending_ack_with_priority(
+                critical_id.clone(),
+                None,
+                MessagePriority::Critical,
+            )
             .unwrap();
 
         assert_eq!(manager.pending_count(), 1);

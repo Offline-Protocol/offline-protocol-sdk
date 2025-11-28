@@ -107,7 +107,7 @@ impl InternetTransport {
     }
 
     /// Called when connection status changes.
-    /// 
+    ///
     /// EDGE CASE HANDLING:
     /// - Messages in send_queue are preserved during disconnection
     /// - They will be sent when transport becomes available again
@@ -119,7 +119,7 @@ impl InternetTransport {
         // Reset reconnect counter on successful connection
         if status == TransportStatus::Available {
             *self.reconnect_attempts.lock().unwrap() = 0;
-            
+
             // Log if we have pending messages to send after reconnection
             let queue_len = self.send_queue.lock().unwrap().len();
             if queue_len > 0 {
@@ -129,7 +129,9 @@ impl InternetTransport {
                     queue_len
                 );
             }
-        } else if previous_status == TransportStatus::Available && status != TransportStatus::Available {
+        } else if previous_status == TransportStatus::Available
+            && status != TransportStatus::Available
+        {
             // Log disconnection with pending messages
             let queue_len = self.send_queue.lock().unwrap().len();
             if queue_len > 0 {
@@ -223,7 +225,9 @@ impl InternetTransport {
     pub fn needs_heartbeat(&self) -> bool {
         let last = *self.last_heartbeat.lock().unwrap();
         match last {
-            Some(instant) => instant.elapsed() >= Duration::from_secs(INTERNET_HEARTBEAT_INTERVAL_SECS),
+            Some(instant) => {
+                instant.elapsed() >= Duration::from_secs(INTERNET_HEARTBEAT_INTERVAL_SECS)
+            }
             None => true,
         }
     }
