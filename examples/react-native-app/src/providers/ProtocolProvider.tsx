@@ -169,18 +169,18 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         enabled: true,
       },
       internet: {
-        enabled: true,
+        enabled: false,
         serverAddress: DEFAULT_RELAY_SERVER_URL,
         autoReconnect: true,
       },
       wifiDirect: {
-        enabled: Platform.OS === 'android',
+        enabled: false,
         deviceName: currentUserName,
         autoAccept: false,
       },
     },
     dors: {
-      preferOnline: true,
+      preferOnline: false,
       switchHysteresis: 15.0,
       switchCooldownSecs: 20,
       bleToWifiRetryThreshold: 2,

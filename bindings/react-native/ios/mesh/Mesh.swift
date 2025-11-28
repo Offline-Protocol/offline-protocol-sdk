@@ -908,11 +908,12 @@ final class MeshController: @unchecked Sendable {
     /// Called periodically and when caches exceed their limits.
     private func prunePeerCaches(now: Date) {
         // Check if we need to prune based on interval
-        guard now.timeIntervalSince(lastCachePruneAt) >= config.cachePruneInterval else {
-            // Still check for hard limits even if interval not passed
-            if peersById.count <= config.maxPeerCacheSize && candidatesByHash.count <= config.maxCandidateCacheSize {
-                return
-            }
+        let intervalPassed = now.timeIntervalSince(lastCachePruneAt) >= config.cachePruneInterval
+        let cachesUnderLimit = peersById.count <= config.maxPeerCacheSize && candidatesByHash.count <= config.maxCandidateCacheSize
+        
+        // Skip pruning if interval hasn't passed and caches are under limits
+        guard intervalPassed || !cachesUnderLimit else {
+            return
         }
 
         lastCachePruneAt = now
