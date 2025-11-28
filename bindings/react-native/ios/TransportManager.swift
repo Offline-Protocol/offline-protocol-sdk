@@ -1,8 +1,8 @@
 //
-//  TransportManager.swift
-//  OfflineProtocol
+// TransportManager.swift
+// OfflineProtocol
 //
-//  Transport manager protocol for extensible transport implementations
+// Transport manager protocol for extensible transport implementations
 //
 
 import Foundation

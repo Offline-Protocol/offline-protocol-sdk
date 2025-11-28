@@ -1,8 +1,8 @@
 //
-//  OfflineProtocolModule.m
-//  OfflineProtocol
+// OfflineProtocolModule.m
+// OfflineProtocol
 //
-//  Objective-C bridge for React Native module
+// Objective-C bridge for React Native module
 //
 
 #import <React/RCTBridgeModule.h>

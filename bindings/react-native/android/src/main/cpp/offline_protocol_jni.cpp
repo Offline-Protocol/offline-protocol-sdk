@@ -1,6 +1,6 @@
 //
-//  offline_protocol_jni.cpp
-//  OfflineProtocol JNI wrapper
+// offline_protocol_jni.cpp
+// OfflineProtocol JNI wrapper
 //
 
 #include <jni.h>

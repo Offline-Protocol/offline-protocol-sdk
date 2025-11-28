@@ -1,8 +1,8 @@
 //
-//  OfflineProtocolModule.swift
-//  OfflineProtocol
+// OfflineProtocolModule.swift
+// OfflineProtocol
 //
-//  UniFFI-based implementation
+// UniFFI-based implementation
 //
 
 import Foundation

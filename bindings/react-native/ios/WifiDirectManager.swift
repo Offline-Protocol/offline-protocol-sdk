@@ -1,10 +1,10 @@
 //
-//  WifiDirectManager.swift
-//  OfflineProtocol
+// WifiDirectManager.swift
+// OfflineProtocol
 //
-//  WiFi Direct transport implementation using MultipeerConnectivity
-//  Note: iOS uses MultipeerConnectivity framework which provides similar
-//  functionality to Android's WiFi Direct (Wi-Fi P2P)
+// WiFi Direct transport implementation using MultipeerConnectivity
+// Note: iOS uses MultipeerConnectivity framework which provides similar
+// functionality to Android's WiFi Direct (Wi-Fi P2P)
 //
 
 import Foundation

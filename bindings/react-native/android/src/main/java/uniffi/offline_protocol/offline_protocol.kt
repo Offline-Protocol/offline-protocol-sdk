@@ -1597,43 +1597,43 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 // struct after it has been dropped, and because we must expose a public API for freeing
 // theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
 //
-//   * Each instance holds an opaque handle to the underlying Rust struct.
-//     Method calls need to read this handle from the object's state and pass it in to
-//     the Rust FFI.
+//  * Each instance holds an opaque handle to the underlying Rust struct.
+//    Method calls need to read this handle from the object's state and pass it in to
+//    the Rust FFI.
 //
-//   * When an instance is no longer needed, its handle should be passed to a
-//     special destructor function provided by the Rust FFI, which will drop the
-//     underlying Rust struct.
+//  * When an instance is no longer needed, its handle should be passed to a
+//    special destructor function provided by the Rust FFI, which will drop the
+//    underlying Rust struct.
 //
-//   * Given an instance, calling code is expected to call the special
-//     `destroy` method in order to free it after use, either by calling it explicitly
-//     or by using a higher-level helper like the `use` method. Failing to do so risks
-//     leaking the underlying Rust struct.
+//  * Given an instance, calling code is expected to call the special
+//    `destroy` method in order to free it after use, either by calling it explicitly
+//    or by using a higher-level helper like the `use` method. Failing to do so risks
+//    leaking the underlying Rust struct.
 //
-//   * We can't assume that calling code will do the right thing, and must be prepared
-//     to handle Kotlin method calls executing concurrently with or even after a call to
-//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//  * We can't assume that calling code will do the right thing, and must be prepared
+//    to handle Kotlin method calls executing concurrently with or even after a call to
+//    `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
 //
-//   * We must never allow Rust code to operate on the underlying Rust struct after
-//     the destructor has been called, and must never call the destructor more than once.
-//     Doing so may trigger memory unsafety.
+//  * We must never allow Rust code to operate on the underlying Rust struct after
+//    the destructor has been called, and must never call the destructor more than once.
+//    Doing so may trigger memory unsafety.
 //
-//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
-//     is implemented to call the destructor when the Kotlin object becomes unreachable.
-//     This is done in a background thread. This is not a panacea, and client code should be aware that
-//      1. the thread may starve if some there are objects that have poorly performing
-//     `drop` methods or do significant work in their `drop` methods.
-//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
-//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//  * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//    is implemented to call the destructor when the Kotlin object becomes unreachable.
+//    This is done in a background thread. This is not a panacea, and client code should be aware that
+//     1. the thread may starve if some there are objects that have poorly performing
+//    `drop` methods or do significant work in their `drop` methods.
+//     2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//        or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
 //
 // If we try to implement this with mutual exclusion on access to the handle, there is the
 // possibility of a race between a method call and a concurrent call to `destroy`:
 //
-//    * Thread A starts a method call, reads the value of the handle, but is interrupted
-//      before it can pass the handle over the FFI to Rust.
-//    * Thread B calls `destroy` and frees the underlying Rust struct.
-//    * Thread A resumes, passing the already-read handle value to Rust and triggering
-//      a use-after-free.
+//   * Thread A starts a method call, reads the value of the handle, but is interrupted
+//     before it can pass the handle over the FFI to Rust.
+//   * Thread B calls `destroy` and frees the underlying Rust struct.
+//   * Thread A resumes, passing the already-read handle value to Rust and triggering
+//     a use-after-free.
 //
 // One possible solution would be to use a `ReadWriteLock`, with each method call taking
 // a read lock (and thus allowed to run concurrently) and the special `destroy` method
@@ -1645,20 +1645,20 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 // the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
 // has been called. These are updated according to the following rules:
 //
-//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
-//      The initial value for the flag is false.
+//   * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//     The initial value for the flag is false.
 //
-//    * At the start of each method call, we atomically check the counter.
-//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
-//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//   * At the start of each method call, we atomically check the counter.
+//     If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//     If it is nonzero them we atomically increment it by 1 and proceed with the method call.
 //
-//    * At the end of each method call, we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
+//   * At the end of each method call, we atomically decrement and check the counter.
+//     If it has reached zero then we destroy the underlying Rust struct.
 //
-//    * When `destroy` is called, we atomically flip the flag from false to true.
-//      If the flag was already true we silently fail.
-//      Otherwise we atomically decrement and check the counter.
-//      If it has reached zero then we destroy the underlying Rust struct.
+//   * When `destroy` is called, we atomically flip the flag from false to true.
+//     If the flag was already true we silently fail.
+//     Otherwise we atomically decrement and check the counter.
+//     If it has reached zero then we destroy the underlying Rust struct.
 //
 // Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
 // and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.

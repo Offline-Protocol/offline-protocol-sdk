@@ -333,7 +333,7 @@ class InternetManager(
             startMessagePolling()
             startPingTimer()
             
-            // EDGE CASE: Immediately poll for messages to flush outbox after reconnection
+            // Immediately poll for messages to flush outbox after reconnection
             // This ensures messages queued during disconnection are sent promptly
             pollAndSendMessages()
         }
@@ -355,7 +355,7 @@ class InternetManager(
             stopPingTimer()
         }
         
-        // EDGE CASE: Always notify protocol of disconnection
+        // Always notify protocol of disconnection
         // This ensures the protocol knows the transport is unavailable
         // even if we weren't fully authenticated
         if (wasConnected || wasAuthenticated) {
@@ -557,7 +557,7 @@ class InternetManager(
     }
     
     private fun pollAndSendMessages() {
-        // EDGE CASE: Double-check connection state to handle race conditions
+        // Double-check connection state to handle race conditions
         // This prevents sending messages right after transport disconnect
         if (!isConnected.get() || !isAuthenticated.get()) return
         
@@ -595,7 +595,7 @@ class InternetManager(
     
     private fun sendMessage(recipientId: String, data: ByteArray) {
         val ws = webSocket
-        // EDGE CASE: Re-check connection state right before sending
+        // Re-check connection state right before sending
         // This handles race conditions where connection drops between poll and send
         if (!isConnected.get() || !isAuthenticated.get() || ws == null) {
             emitDiagnostic("warning", "Cannot send message - not connected or not authenticated", mapOf(
@@ -639,7 +639,7 @@ class InternetManager(
                 "consecutiveFailures" to failures
             ))
             
-            // EDGE CASE: If send fails, the message stays in outbox and will be retried
+            // If send fails, the message stays in outbox and will be retried
             // If too many consecutive send failures, the connection is likely dead
             // Trigger disconnect so DORS can switch to another transport
             if (failures >= MAX_CONSECUTIVE_FAILURES) {

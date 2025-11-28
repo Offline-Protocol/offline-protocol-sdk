@@ -1,9 +1,9 @@
 //
-//  InternetManager.swift
-//  OfflineProtocol
+// InternetManager.swift
+// OfflineProtocol
 //
-//  Internet transport implementation using WebSocket (URLSessionWebSocketTask)
-//  Connects to a relay server for internet-based message routing
+// Internet transport implementation using WebSocket (URLSessionWebSocketTask)
+// Connects to a relay server for internet-based message routing
 //
 
 import Foundation
@@ -269,7 +269,7 @@ public class InternetManager: NSObject, TransportManager {
         startMessagePolling()
         startPingTimer()
         
-        // EDGE CASE: Immediately poll for messages to flush outbox after reconnection
+        // Immediately poll for messages to flush outbox after reconnection
         // This ensures messages queued during disconnection are sent promptly
         messageQueue.async { [weak self] in
             self?.pollAndSendMessages()
@@ -292,7 +292,7 @@ public class InternetManager: NSObject, TransportManager {
         stopMessagePolling()
         stopPingTimer()
         
-        // EDGE CASE: Always notify protocol of disconnection
+        // Always notify protocol of disconnection
         // This ensures the protocol knows the transport is unavailable
         // even if we weren't fully authenticated
         if wasConnected || wasAuthenticated {
@@ -480,7 +480,7 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func pollAndSendMessages() {
-        // EDGE CASE: Double-check connection state to handle race conditions
+        // Double-check connection state to handle race conditions
         // This prevents sending messages right after transport disconnect
         guard isConnected, isAuthenticated else {
             return
@@ -517,7 +517,7 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func sendMessage(recipientId: String, data: Data) {
-        // EDGE CASE: Re-check connection state right before sending
+        // Re-check connection state right before sending
         // This handles race conditions where connection drops between poll and send
         guard isConnected, isAuthenticated, let task = webSocketTask else {
             emitDiagnostic("warning", "Cannot send message - not connected or not authenticated", context: [
@@ -558,7 +558,7 @@ public class InternetManager: NSObject, TransportManager {
                     "consecutiveFailures": self.consecutiveSendFailures
                 ])
                 
-                // EDGE CASE: If send fails, the message stays in outbox and will be retried
+                // If send fails, the message stays in outbox and will be retried
                 // If too many consecutive send failures, the connection is likely dead
                 // Trigger disconnect so DORS can switch to another transport
                 if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {

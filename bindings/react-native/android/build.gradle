@@ -45,9 +45,9 @@ android {
 
     // UniFFI libraries are pre-built Rust .so files, no CMake needed
     // externalNativeBuild {
-    //     cmake {
-    //         path "src/main/cpp/CMakeLists.txt"
-    //     }
+    //    cmake {
+    //        path "src/main/cpp/CMakeLists.txt"
+    //    }
     // }
 
     compileOptions {

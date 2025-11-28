@@ -1,9 +1,9 @@
 //
-//  BleManager.swift
-//  OfflineProtocol
+// BleManager.swift
+// OfflineProtocol
 //
-//  BLE transport implementation using CoreBluetooth
-//  Supports iOS ↔ Android cross-platform communication
+// BLE transport implementation using CoreBluetooth
+// Supports iOS ↔ Android cross-platform communication
 //
 
 import Foundation

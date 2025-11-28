@@ -1,6 +1,6 @@
 //
-//  MeshConnectionRegistry.swift
-//  OfflineProtocol
+// MeshConnectionRegistry.swift
+// OfflineProtocol
 //
 
 import Foundation

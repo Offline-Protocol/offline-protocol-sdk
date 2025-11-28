@@ -1,11 +1,11 @@
 import React from 'react';
 import { View, StyleSheet } from 'react-native';
 // import Animated, {
-//   useSharedValue,
-//   useAnimatedStyle,
-//   withRepeat,
-//   withTiming,
-//   interpolate,
+//  useSharedValue,
+//  useAnimatedStyle,
+//  withRepeat,
+//  withTiming,
+//  interpolate,
 // } from 'react-native-reanimated';
 import { useTheme } from '../hooks/useTheme';
 

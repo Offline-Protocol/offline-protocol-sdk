@@ -847,7 +847,7 @@ impl OfflineProtocol {
             }
         }
 
-        // EDGE CASE: When reconnecting after disconnection, trigger outbox flush
+        // When reconnecting after disconnection, trigger outbox flush
         // This ensures pending messages are retried immediately
         if is_connected && !was_connected {
             // Process pending retries to flush outbox
