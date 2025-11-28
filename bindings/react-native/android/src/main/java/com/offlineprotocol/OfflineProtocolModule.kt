@@ -549,32 +549,62 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             when (type.lowercase()) {
                 "internet" -> {
                     // Configure and start Internet transport via InternetManager
-                    var manager = internetManager
-                    if (manager == null) {
+                    if (internetManager == null) {
                         // Create manager if not already created
-                        manager = InternetManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                        internetManager = InternetManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
-                        internetManager = manager
                         emitDiagnostic("info", "Internet manager created on demand")
                     }
+                    
+                    val manager = internetManager
+                        ?: throw IllegalStateException("Failed to create Internet manager")
+                    
+                    // Stop the manager first if it's running (to ensure clean restart)
+                    if (manager.state == TransportState.RUNNING) {
+                        manager.stop()
+                    }
+                    
                     configureAndStartInternet(manager, config)
+                    emitDiagnostic("info", "Internet transport enabled")
                 }
                 "wifidirect", "wifi_direct" -> {
                     // Configure and start WiFi Direct transport via WifiDirectManager
-                    var manager = wifiDirectManager
-                    if (manager == null) {
+                    if (wifiDirectManager == null) {
                         // Create manager if not already created
-                        manager = WifiDirectManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                        wifiDirectManager = WifiDirectManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
-                        wifiDirectManager = manager
                         emitDiagnostic("info", "WiFi Direct manager created on demand")
                     }
+                    
+                    val manager = wifiDirectManager
+                        ?: throw IllegalStateException("Failed to create WiFi Direct manager")
+                    
+                    // Stop the manager first if it's running (to ensure clean restart)
+                    if (manager.state == TransportState.RUNNING) {
+                        manager.stop()
+                    }
+                    
                     manager.start()
+                    emitDiagnostic("info", "WiFi Direct transport enabled")
                 }
                 "ble" -> {
-                    // BLE transport is managed automatically
+                    // Start BLE manager if stopped
+                    if (bleManager == null) {
+                        bleManager = BleManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                            emitDiagnostic(level, message, context)
+                        }
+                        emitDiagnostic("info", "BLE manager created on demand")
+                    }
+                    
+                    val manager = bleManager
+                        ?: throw IllegalStateException("Failed to create BLE manager")
+                    
+                    if (manager.state != TransportState.RUNNING) {
+                        manager.start()
+                        emitDiagnostic("info", "BLE transport enabled")
+                    }
                 }
                 else -> throw IllegalArgumentException("Unsupported transport type: $type")
             }
@@ -639,23 +669,38 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             
-            // Stop corresponding transport manager
+            // Stop corresponding transport manager and mark transport as unavailable
+            // Note: We don't remove the transport from the Rust protocol anymore
+            // because that prevents re-enabling it. Instead, we just stop the manager
+            // and the transport status will be updated to unavailable/disconnected.
             when (type.lowercase()) {
                 "internet" -> {
                     internetManager?.stop()
-                    emitDiagnostic("info", "Internet manager stopped via disableTransport")
+                    // Notify the protocol that internet is disconnected
+                    try {
+                        proto.internetStatusChanged(false)
+                    } catch (e: Exception) {
+                        android.util.Log.w(NAME, "Failed to notify internet status change: ${e.message}")
+                    }
+                    emitDiagnostic("info", "Internet transport disabled (manager stopped)")
                 }
                 "wifidirect", "wifi_direct" -> {
                     wifiDirectManager?.stop()
-                    emitDiagnostic("info", "WiFi Direct manager stopped via disableTransport")
+                    emitDiagnostic("info", "WiFi Direct transport disabled (manager stopped)")
                 }
+                "ble" -> {
+                    bleManager?.stop()
+                    try {
+                        proto.bleStatusChanged(false)
+                    } catch (e: Exception) {
+                        android.util.Log.w(NAME, "Failed to notify BLE status change: ${e.message}")
+                    }
+                    emitDiagnostic("info", "BLE transport disabled (manager stopped)")
+                }
+                else -> throw IllegalArgumentException("Unsupported transport type: $type")
             }
             
-            val transportType = mapTransportType(type)
-            proto.removeTransport(transportType)
             promise.resolve(null)
-        } catch (e: ProtocolException) {
-            promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
         } catch (e: Exception) {
             promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
         }

@@ -36,8 +36,9 @@ class InternetManager(
         private const val RECONNECT_INITIAL_DELAY_MS = 1000L
         private const val RECONNECT_MAX_DELAY_MS = 30000L
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2.0
-        private const val PING_INTERVAL_MS = 30000L
+        private const val PING_INTERVAL_MS = 10000L  // Reduced from 30s for faster failure detection
         private const val CONNECTION_TIMEOUT_MS = 10000L
+        private const val MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
     }
     
     // MARK: - Properties
@@ -81,6 +82,9 @@ class InternetManager(
     private var currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
     private var reconnectRunnable: Runnable? = null
     private var transportStartAt: Long = 0L
+    
+    // Failure tracking for DORS
+    private var consecutiveSendFailures = AtomicInteger(0)
     
     // Metrics
     private var bytesSent: Long = 0
@@ -281,6 +285,7 @@ class InternetManager(
         isAuthenticated.set(false)
         reconnectAttempts.set(0)
         currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+        consecutiveSendFailures.set(0)
         
         emitDiagnostic("info", "WebSocket connected, authenticating...", mapOf(
             "serverUrl" to (serverUrl ?: "unknown")
@@ -576,6 +581,8 @@ class InternetManager(
         val sent = ws.send(jsonString)
         
         if (sent) {
+            // Reset failure counter on successful send
+            consecutiveSendFailures.set(0)
             bytesSent += jsonString.length
             messagesSent++
             
@@ -584,9 +591,20 @@ class InternetManager(
                 "contentLength" to content.length
             ))
         } else {
+            val failures = consecutiveSendFailures.incrementAndGet()
             emitDiagnostic("error", "Failed to send WebSocket message", mapOf(
-                "recipientId" to recipientId
+                "recipientId" to recipientId,
+                "consecutiveFailures" to failures
             ))
+            
+            // If too many consecutive send failures, the connection is likely dead
+            // Trigger disconnect so DORS can switch to another transport
+            if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect for DORS", mapOf(
+                    "failures" to failures
+                ))
+                mainHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
+            }
         }
     }
     

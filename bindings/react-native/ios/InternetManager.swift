@@ -24,7 +24,7 @@ public class InternetManager: NSObject, TransportManager {
     private let RECONNECT_INITIAL_DELAY: TimeInterval = 1.0
     private let RECONNECT_MAX_DELAY: TimeInterval = 30.0
     private let RECONNECT_BACKOFF_MULTIPLIER: Double = 2.0
-    private let PING_INTERVAL: TimeInterval = 30.0
+    private let PING_INTERVAL: TimeInterval = 10.0  // Reduced from 30s for faster failure detection
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
     
     // MARK: - Properties
@@ -38,8 +38,8 @@ public class InternetManager: NSObject, TransportManager {
     private var urlSession: URLSession?
     
     // Message polling
-    private var messageTimer: Timer?
-    private var pingTimer: Timer?
+    private var messageTimer: DispatchSourceTimer?
+    private var pingTimer: DispatchSourceTimer?
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.internet.messages")
     
     // Reconnection
@@ -54,6 +54,11 @@ public class InternetManager: NSObject, TransportManager {
     private var isConnecting = false
     private var isAuthenticated = false
     private var transportStartAt: Date?
+    
+    // Failure tracking for DORS
+    private var consecutiveSendFailures: Int = 0
+    private var consecutivePingFailures: Int = 0
+    private let MAX_CONSECUTIVE_FAILURES = 2  // Trigger disconnect after 2 consecutive failures
     
     // Metrics
     private var bytesSent: UInt64 = 0
@@ -215,6 +220,8 @@ public class InternetManager: NSObject, TransportManager {
         isAuthenticated = false
         reconnectAttempts = 0
         currentReconnectDelay = RECONNECT_INITIAL_DELAY
+        consecutiveSendFailures = 0
+        consecutivePingFailures = 0
         
         emitDiagnostic("info", "WebSocket connected, authenticating...", context: [
             "serverUrl": serverUrl?.absoluteString ?? "unknown"
@@ -441,31 +448,27 @@ public class InternetManager: NSObject, TransportManager {
     private func startMessagePolling() {
         stopMessagePolling()
         
-        messageTimer = Timer.scheduledTimer(
-            withTimeInterval: MESSAGE_POLL_INTERVAL,
-            repeats: true
-        ) { [weak self] _ in
+        let timer = DispatchSource.makeTimerSource(queue: messageQueue)
+        timer.schedule(deadline: .now(), repeating: MESSAGE_POLL_INTERVAL)
+        timer.setEventHandler { [weak self] in
             self?.pollAndSendMessages()
         }
-        
-        RunLoop.current.add(messageTimer!, forMode: .common)
+        timer.resume()
+        messageTimer = timer
     }
     
     private func stopMessagePolling() {
-        messageTimer?.invalidate()
+        messageTimer?.cancel()
         messageTimer = nil
     }
     
     private func pollAndSendMessages() {
         guard isConnected, isAuthenticated else { return }
         
-        messageQueue.async { [weak self] in
-            guard let self = self else { return }
-            
-            // Poll for next message from protocol
-            if let message = self.protocolInstance.internetGetNextMessage() {
-                self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
-            }
+        // Timer already runs on messageQueue, no need for extra dispatch
+        // Poll for next message from protocol
+        if let message = self.protocolInstance.internetGetNextMessage() {
+            self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
         }
     }
     
@@ -495,11 +498,26 @@ public class InternetManager: NSObject, TransportManager {
             guard let self = self else { return }
             
             if let error = error {
+                self.consecutiveSendFailures += 1
                 self.emitDiagnostic("error", "Failed to send WebSocket message", context: [
                     "error": error.localizedDescription,
-                    "recipientId": recipientId
+                    "recipientId": recipientId,
+                    "consecutiveFailures": self.consecutiveSendFailures
                 ])
+                
+                // If too many consecutive send failures, the connection is likely dead
+                // Trigger disconnect so DORS can switch to another transport
+                if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {
+                    self.emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect for DORS", context: [
+                        "failures": self.consecutiveSendFailures
+                    ])
+                    DispatchQueue.main.async {
+                        self.handleConnectionClosed(error: error)
+                    }
+                }
             } else {
+                // Reset failure counter on successful send
+                self.consecutiveSendFailures = 0
                 self.bytesSent += UInt64(jsonData.count)
                 self.messagesSent += 1
                 
@@ -516,27 +534,44 @@ public class InternetManager: NSObject, TransportManager {
     private func startPingTimer() {
         stopPingTimer()
         
-        pingTimer = Timer.scheduledTimer(
-            withTimeInterval: PING_INTERVAL,
-            repeats: true
-        ) { [weak self] _ in
+        let timer = DispatchSource.makeTimerSource(queue: messageQueue)
+        timer.schedule(deadline: .now() + PING_INTERVAL, repeating: PING_INTERVAL)
+        timer.setEventHandler { [weak self] in
             self?.sendPing()
         }
-        
-        RunLoop.current.add(pingTimer!, forMode: .common)
+        timer.resume()
+        pingTimer = timer
     }
     
     private func stopPingTimer() {
-        pingTimer?.invalidate()
+        pingTimer?.cancel()
         pingTimer = nil
     }
     
     private func sendPing() {
         webSocketTask?.sendPing { [weak self] error in
+            guard let self = self else { return }
+            
             if let error = error {
-                self?.emitDiagnostic("warning", "Ping failed", context: [
-                    "error": error.localizedDescription
+                self.consecutivePingFailures += 1
+                self.emitDiagnostic("warning", "Ping failed", context: [
+                    "error": error.localizedDescription,
+                    "consecutiveFailures": self.consecutivePingFailures
                 ])
+                
+                // If ping fails, the connection is likely dead
+                // Trigger disconnect so DORS can switch to another transport
+                if self.consecutivePingFailures >= self.MAX_CONSECUTIVE_FAILURES {
+                    self.emitDiagnostic("warning", "Too many consecutive ping failures, triggering reconnect for DORS", context: [
+                        "failures": self.consecutivePingFailures
+                    ])
+                    DispatchQueue.main.async {
+                        self.handleConnectionClosed(error: error)
+                    }
+                }
+            } else {
+                // Reset failure counter on successful ping
+                self.consecutivePingFailures = 0
             }
         }
     }

@@ -11,7 +11,7 @@ use offline_protocol_router::{DorsConfig, PathSelector, RelayManager, TransportS
 use offline_protocol_transport::TransportType;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 /// Protocol state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,9 +285,25 @@ impl OfflineProtocol {
             .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
             .build();
 
-        self.transport_manager.send(&ack_message)?;
+        // Try sending ACK via the same transport that received the message first.
+        // This is the preferred path as it's known to work for this peer.
+        // If the inbound transport is no longer available (e.g., internet disconnected),
+        // fall back to DORS selection to try any available transport.
+        if self
+            .transport_manager
+            .send_via_transport(&ack_message, inbound_transport)
+            .is_ok()
+        {
+            return Ok(());
+        }
 
-        Ok(())
+        // Fallback: try any available transport via DORS
+        debug!(
+            message_id = %message.id,
+            inbound_transport = ?inbound_transport,
+            "Inbound transport unavailable for ACK, falling back to DORS selection"
+        );
+        self.transport_manager.send(&ack_message)
     }
 
     /// Creates a new message from the given parameters.

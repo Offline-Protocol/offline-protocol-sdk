@@ -27,6 +27,8 @@ class OfflineProtocolModule: RCTEventEmitter {
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
     private var currentConfig: ProtocolConfig?
+    private var internetServerUrl: String?
+    private var internetAutoReconnect: Bool = true
     
     override init() {
         print("[OfflineProtocolModule] init() called")
@@ -254,8 +256,18 @@ class OfflineProtocolModule: RCTEventEmitter {
                 internetManager = InternetManager(protocol: proto, deviceId: config.userId)
                 internetManager?.delegate = self
                 print("[OfflineProtocolModule] Internet Manager initialized for user: \(config.userId)")
+                
+                // Extract and store internet config for use during start()
+                if let transportsDict = parsed.raw["transports"] as? [String: Any],
+                   let internetDict = transportsDict["internet"] as? [String: Any] {
+                    internetServerUrl = (internetDict["serverAddress"] as? String) ?? (internetDict["server_address"] as? String)
+                    internetAutoReconnect = (internetDict["autoReconnect"] as? Bool) ?? (internetDict["auto_reconnect"] as? Bool) ?? true
+                    print("[OfflineProtocolModule] Internet server URL from config: \(internetServerUrl ?? "nil")")
+                }
+                
                 emitDiagnostic(level: "info", message: "Internet manager initialized", context: [
-                    "userId": config.userId
+                    "userId": config.userId,
+                    "serverUrl": internetServerUrl ?? "not configured"
                 ])
             } else {
                 emitDiagnostic(level: "info", message: "Internet disabled in configuration", context: [
@@ -427,6 +439,28 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
             }
             
+            // Start Internet manager if configured with a server URL
+            if let manager = internetManager, let serverUrl = internetServerUrl, !serverUrl.isEmpty {
+                do {
+                    try manager.configure(serverUrl: serverUrl, autoReconnect: internetAutoReconnect, maxReconnectAttempts: 0)
+                    try manager.start()
+                    print("[OfflineProtocolModule] Internet Manager started with URL: \(serverUrl)")
+                    emitDiagnostic(level: "info", message: "Internet manager started", context: [
+                        "serverUrl": serverUrl,
+                        "autoReconnect": internetAutoReconnect
+                    ])
+                } catch {
+                    print("[OfflineProtocolModule] Warning: Failed to start Internet Manager: \(error.localizedDescription)")
+                    emitDiagnostic(level: "error", message: "Failed to start Internet manager", context: [
+                        "error": error.localizedDescription,
+                        "serverUrl": serverUrl
+                    ])
+                    // Don't fail the entire start if Internet fails
+                }
+            } else if internetManager != nil {
+                emitDiagnostic(level: "warning", message: "Internet manager exists but no server URL configured")
+            }
+            
             resolver(nil)
         } catch {
             emitDiagnostic(level: "error", message: "Failed to start protocol", context: [
@@ -561,30 +595,66 @@ class OfflineProtocolModule: RCTEventEmitter {
             switch type.lowercased() {
             case "internet":
                 // Configure and start Internet transport via InternetManager
-                guard let manager = internetManager else {
+                if internetManager == nil {
                     // Create manager if not already created
                     let newManager = InternetManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
                     newManager.delegate = self
                     internetManager = newManager
                     emitDiagnostic(level: "info", message: "Internet manager created on demand")
-                    try configureAndStartInternet(manager: newManager, config: config)
-                    break
                 }
+                
+                guard let manager = internetManager else {
+                    throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create Internet manager"])
+                }
+                
+                // Stop the manager first if it's running (to ensure clean restart)
+                if manager.state == .running {
+                    manager.stop()
+                }
+                
                 try configureAndStartInternet(manager: manager, config: config)
+                emitDiagnostic(level: "info", message: "Internet transport enabled")
+                
             case "wifidirect", "wifi_direct":
                 // Configure and start WiFi Direct transport via WifiDirectManager
-                guard let manager = wifiDirectManager else {
+                if wifiDirectManager == nil {
                     // Create manager if not already created
                     let newManager = WifiDirectManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
                     newManager.delegate = self
                     wifiDirectManager = newManager
                     emitDiagnostic(level: "info", message: "WiFi Direct manager created on demand")
-                    try newManager.start()
-                    break
                 }
+                
+                guard let manager = wifiDirectManager else {
+                    throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create WiFi Direct manager"])
+                }
+                
+                // Stop the manager first if it's running (to ensure clean restart)
+                if manager.state == .running {
+                    manager.stop()
+                }
+                
                 try manager.start()
+                emitDiagnostic(level: "info", message: "WiFi Direct transport enabled")
+                
             case "ble":
-                break // BLE managed automatically
+                // Start BLE manager if stopped
+                if bleManager == nil {
+                    let newManager = BleManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    newManager.delegate = self
+                    bleManager = newManager
+                    emitDiagnostic(level: "info", message: "BLE manager created on demand")
+                }
+                
+                guard let manager = bleManager else {
+                    throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create BLE manager"])
+                }
+                
+                if manager.state != .running {
+                    try manager.start()
+                    emitDiagnostic(level: "info", message: "BLE transport enabled")
+                }
+                
             default:
                 throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
             }
@@ -636,21 +706,27 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let transport = try transportType(from: type)
-            
-            // Stop corresponding transport manager
+            // Stop corresponding transport manager and mark transport as unavailable
+            // Note: We don't remove the transport from the Rust protocol anymore
+            // because that prevents re-enabling it. Instead, we just stop the manager
+            // and the transport status will be updated to unavailable/disconnected.
             switch type.lowercased() {
             case "internet":
                 internetManager?.stop()
-                emitDiagnostic(level: "info", message: "Internet manager stopped via disableTransport")
+                // Notify the protocol that internet is disconnected
+                try? proto.internetStatusChanged(isConnected: false)
+                emitDiagnostic(level: "info", message: "Internet transport disabled (manager stopped)")
             case "wifidirect", "wifi_direct":
                 wifiDirectManager?.stop()
-                emitDiagnostic(level: "info", message: "WiFi Direct manager stopped via disableTransport")
+                emitDiagnostic(level: "info", message: "WiFi Direct transport disabled (manager stopped)")
+            case "ble":
+                bleManager?.stop()
+                try? proto.bleStatusChanged(isAvailable: false)
+                emitDiagnostic(level: "info", message: "BLE transport disabled (manager stopped)")
             default:
-                break
+                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
             }
             
-            try proto.removeTransport(transportType: transport)
             resolver(nil)
         } catch {
             rejecter("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: \(error.localizedDescription)", error)
