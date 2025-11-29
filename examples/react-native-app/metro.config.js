@@ -7,7 +7,7 @@ const defaultConfig = getDefaultConfig(__dirname);
  * Metro configuration
  * https://reactnative.dev/docs/metro
  *
- * This configuration is needed to handle the local @offlineprotocol/react-native package
+ * This configuration is needed to handle the local @offline-protocol/mesh-sdk package
  */
 const config = {
   watchFolders: [
@@ -20,7 +20,7 @@ const config = {
       path.resolve(__dirname, '../../bindings/react-native/node_modules'),
     ],
     extraNodeModules: {
-      '@offlineprotocol/react-native': path.resolve(__dirname, '../../bindings/react-native'),
+      '@offline-protocol/mesh-sdk': path.resolve(__dirname, '../../bindings/react-native'),
     },
   },
 };

@@ -13,7 +13,7 @@ import type {
   TransportType,
   InternetTransportConfig,
   WifiDirectTransportConfig,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 import type {
   DorsRuntimeConfig,
   FileTransferState,
@@ -103,6 +103,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
     (transport: TransportType) => {
       if (transport === 'internet') {
         return onEnableTransport(transport, {
+          enabled: true,
           serverAddress: DEFAULT_RELAY_SERVER_URL,
           autoReconnect: true,
         });

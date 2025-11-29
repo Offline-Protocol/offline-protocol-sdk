@@ -7,11 +7,11 @@
 ### For React Native Apps:
 
 ```bash
-npm install @offlineprotocol/react-native
+npm install @offline-protocol/mesh-sdk
 ```
 
 ```typescript
-import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
+import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',

@@ -8,7 +8,7 @@ import {
   type SendFileParams,
   type InternetTransportConfig,
   type WifiDirectTransportConfig,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
 import { generateUserId } from '../utils/user';
 import {

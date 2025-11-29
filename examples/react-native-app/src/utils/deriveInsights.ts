@@ -8,7 +8,7 @@ import type {
   NeighborLostEvent,
   ProtocolEvent,
   TransportSwitchedEvent,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 
 type TransportKey = string;
 

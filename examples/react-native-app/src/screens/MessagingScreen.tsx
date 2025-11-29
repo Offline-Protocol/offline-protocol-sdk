@@ -12,9 +12,10 @@ import {
   ScrollView,
   useWindowDimensions,
   InputAccessoryView,
+  FlatList,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { MessagePriority, type ProtocolEvent } from '@offlineprotocol/react-native';
+import { MessagePriority, type ProtocolEvent } from '@offline-protocol/mesh-sdk';
 import { MessageList } from '../components/MessageList';
 import type { FileTransferState } from '../types/runtime';
 
@@ -217,14 +218,10 @@ export function MessagingScreen({
 
     setSending(true);
     try {
-      const messageId = await onSendMessage(trimmedRecipient, trimmedMessage, priority);
-      if (messageId) {
+      await onSendMessage(trimmedRecipient, trimmedMessage, priority);
       setMessage('');
       Keyboard.dismiss();
-        console.log('Message sent successfully:', messageId);
-      } else {
-        console.warn('Failed to send message - no message ID returned');
-      }
+      console.log('Message sent successfully');
     } catch (error) {
       console.error('Error sending message:', error);
     } finally {
@@ -662,7 +659,7 @@ export function MessagingScreen({
   const mobileFooterComponent = (
     <View
       style={[
-        styles.mobileFooterSection,
+        styles.mobileComposerSection,
         { paddingBottom: Math.max(insets.bottom, 24) },
       ]}
     >
@@ -714,7 +711,7 @@ export function MessagingScreen({
                         </View>
                         
                         <View style={styles.conversationCenter}>
-                          <View style={styles.conversationHeader}>
+                          <View style={styles.conversationItemHeader}>
                             <Text style={styles.peerDisplayName} numberOfLines={1}>
                               {item.peerId.slice(-8)}
                             </Text>
@@ -1632,7 +1629,7 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 4,
   },
-  conversationHeader: {
+  conversationItemHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',

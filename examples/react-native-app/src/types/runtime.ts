@@ -1,4 +1,4 @@
-import type { OfflineProtocol } from '@offlineprotocol/react-native';
+import type { OfflineProtocol } from '@offline-protocol/mesh-sdk';
 
 export type DorsRuntimeConfig = Awaited<ReturnType<OfflineProtocol['getDorsConfig']>>;
 export type TransportMetricsSnapshot = Awaited<ReturnType<OfflineProtocol['getTransportMetrics']>>;

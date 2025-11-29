@@ -14,7 +14,7 @@ import {
   Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { MessagePriority, type ProtocolEvent } from '@offlineprotocol/react-native';
+import { MessagePriority, type ProtocolEvent } from '@offline-protocol/mesh-sdk';
 
 interface Message {
   id: string;

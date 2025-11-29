@@ -1,4 +1,4 @@
-import { Platform, PermissionsAndroid, Alert } from 'react-native';
+import { Platform, PermissionsAndroid, Alert, type Permission } from 'react-native';
 
 export interface PermissionResult {
   granted: boolean;
@@ -22,7 +22,7 @@ export async function requestBluetoothPermissions(): Promise<PermissionResult> {
 
   try {
     const androidVersion = Platform.Version as number;
-    const permissions: string[] = [];
+    const permissions: Permission[] = [];
 
     // Android 12+ (API 31+) uses new Bluetooth permissions
     if (androidVersion >= 31) {
@@ -92,7 +92,7 @@ export async function checkBluetoothPermissions(): Promise<boolean> {
 
   try {
     const androidVersion = Platform.Version as number;
-    const permissions: string[] = [];
+    const permissions: Permission[] = [];
 
     if (androidVersion >= 31) {
       permissions.push(

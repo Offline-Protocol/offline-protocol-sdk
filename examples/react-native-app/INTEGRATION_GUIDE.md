@@ -30,7 +30,7 @@ For internal development or testing unreleased SDK changes:
    ```json
    {
      "dependencies": {
-       "@offlineprotocol/react-native": "file:../../bindings/react-native"
+       "@offline-protocol/mesh-sdk": "file:../../bindings/react-native"
      }
    }
    ```
@@ -45,7 +45,7 @@ For internal development or testing unreleased SDK changes:
 For production apps:
 
 ```bash
-npm install @offlineprotocol/react-native
+npm install @offline-protocol/mesh-sdk
 ```
 
 ## iOS Configuration
@@ -203,7 +203,7 @@ import {
   MessagePriority,
   type ProtocolConfig,
   type ProtocolEvent,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 ```
 
 ### 2. Create a Custom Hook (Recommended)
@@ -217,7 +217,7 @@ import {
   ProtocolConfig,
   ProtocolEvent,
   MessagePriority,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 
 export function useOfflineProtocol(config: ProtocolConfig) {
   const [protocol, setProtocol] = useState<OfflineProtocol | null>(null);
@@ -294,7 +294,7 @@ export function useOfflineProtocol(config: ProtocolConfig) {
 ```typescript
 import React from 'react';
 import { View, Text, Button } from 'react-native';
-import { MessagePriority } from '@offlineprotocol/react-native';
+import { MessagePriority } from '@offline-protocol/mesh-sdk';
 import { useOfflineProtocol } from './hooks/useOfflineProtocol';
 
 export default function App() {
@@ -506,7 +506,7 @@ Use TypeScript for type safety:
 import type {
   MessageReceivedEvent,
   TransportSwitchedEvent,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 
 protocol.on('message_received', (event: MessageReceivedEvent) => {
   // event is fully typed

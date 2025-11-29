@@ -5,6 +5,6 @@ rootProject.name = 'OfflineProtocolExample'
 include ':app'
 includeBuild('../node_modules/@react-native/gradle-plugin')
 
-// Manually include the local OfflineProtocol SDK
-include ':offlineprotocol_react-native'
-project(':offlineprotocol_react-native').projectDir = new File(rootProject.projectDir, '../../../bindings/react-native/android')
+// Manually include the local MeshSdk
+include ':offline-protocol_mesh-sdk'
+project(':offline-protocol_mesh-sdk').projectDir = new File(rootProject.projectDir, '../../../bindings/react-native/android')

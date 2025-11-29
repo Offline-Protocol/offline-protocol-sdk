@@ -19,7 +19,7 @@ import LinearGradient from 'react-native-linear-gradient';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 import { Message } from '../providers/ProtocolProvider';
-import { MessagePriority } from '@offlineprotocol/react-native';
+import { MessagePriority } from '@offline-protocol/mesh-sdk';
 import { getUserInitials, generateAvatarColor } from '../utils/user';
 
 interface MessageBubbleProps {

@@ -9,14 +9,14 @@ Get started with the Offline Protocol SDK in 5 minutes.
 ### 1. Install
 
 ```bash
-npm install @offlineprotocol/react-native
+npm install @offline-protocol/mesh-sdk
 cd ios && pod install  # iOS only
 ```
 
 ### 2. Initialize
 
 ```typescript
-import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
+import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',

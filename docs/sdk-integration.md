@@ -17,9 +17,9 @@ This guide walks you through integrating the Offline Protocol SDK into your nati
 ### 1.2 Installation (React Native)
 
 ```bash
-yarn add @offlineprotocol/react-native
+yarn add @offline-protocol/mesh-sdk
 # or
-npm install @offlineprotocol/react-native
+npm install @offline-protocol/mesh-sdk
 ```
 
 Run the platform-specific setup:
@@ -36,7 +36,7 @@ The native bindings auto-link on both platforms. If you integrate into an existi
 Create a single `OfflineProtocol` instance at app start-up, configure transports, and register event listeners.
 
 ```ts
-import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
+import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'com.example.app',

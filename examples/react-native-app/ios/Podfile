@@ -17,9 +17,9 @@ end
 target 'OfflineProtocolExample' do
   config = use_native_modules!
 
-  # Manually add the local OfflineProtocol SDK
+  # Manually add the local MeshSdk
   # Use frameworks for this pod to support custom module maps
-  pod 'OfflineProtocol', :path => '../../../bindings/react-native/ios', :modular_headers => true
+  pod 'MeshSdk', :path => '../../../bindings/react-native/ios', :modular_headers => true
 
   use_react_native!(
     :path => config[:reactNativePath],
@@ -50,8 +50,8 @@ target 'OfflineProtocolExample' do
         build_config.build_settings['SWIFT_STRICT_CONCURRENCY'] ||= 'minimal'
       end
       
-      # Configure module map for OfflineProtocol pod
-      if target.name == 'OfflineProtocol'
+      # Configure module map for MeshSdk pod
+      if target.name == 'MeshSdk'
         target.build_configurations.each do |build_config|
           # Let CocoaPods generate its own module map
           build_config.build_settings['DEFINES_MODULE'] = 'YES'

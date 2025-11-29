@@ -6,7 +6,7 @@
  * Error message shown when the native module is not properly linked.
  */
 export const LINKING_ERROR =
-  `The package '@offlineprotocol/react-native' doesn't seem to be linked. Make sure: \n\n` +
+  `The package '@offline-protocol/mesh-sdk' doesn't seem to be linked. Make sure: \n\n` +
   '- You have run pod install (iOS)\n' +
   '- You rebuilt the app after installing the package\n' +
   '- You are not using Expo Go\n';
