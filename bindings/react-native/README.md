@@ -99,8 +99,6 @@ interface ProtocolConfig {
 - `transport_switched` - Transport changed (BLE/WiFi/Internet)
 - `neighbor_discovered` - New neighbor found
 - `neighbor_lost` - Neighbor disconnected
-- `relay_promoted` - Device became a relay
-- `relay_demoted` - Device stopped being a relay
 
 ### Message Priority
 
@@ -212,11 +210,3 @@ function ChatScreen({ userId, recipientId }) {
 - [Architecture Overview](../../docs/architecture.md)
 - [API Reference](../../docs/api-reference.md)
 - [SDK Integration Guide](../../docs/sdk-integration.md)
-
-## License
-
-Dual-licensed under MIT OR Apache-2.0
-
-## Contributing
-
-See [CONTRIBUTING.md](../../CONTRIBUTING.md)
