@@ -15,7 +15,7 @@ import LinearGradient from 'react-native-linear-gradient';
 // import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
-import { MessagePriority } from '@offlineprotocol/react-native';
+import { MessagePriority } from '@offline-protocol/mesh-sdk';
 import { getUserInitials, generateAvatarColor, formatUserId } from '../utils/user';
 
 interface InfoRowProps {

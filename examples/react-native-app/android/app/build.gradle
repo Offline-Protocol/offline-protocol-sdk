@@ -111,8 +111,8 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
-    // Local OfflineProtocol SDK
-    implementation project(':offlineprotocol_react-native')
+    // Local MeshSdk
+    implementation project(':offline-protocol_mesh-sdk')
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

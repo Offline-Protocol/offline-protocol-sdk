@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import type { ProtocolEvent } from '@offlineprotocol/react-native';
+import type { ProtocolEvent } from '@offline-protocol/mesh-sdk';
 
 interface EventLogProps {
   events: ProtocolEvent[];

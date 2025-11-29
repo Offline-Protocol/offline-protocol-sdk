@@ -9,7 +9,7 @@ import type {
   NeighborLostEvent,
   NetworkMetricsEvent,
   DiagnosticEvent,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 import type { DerivedInsights } from '../utils/deriveInsights';
 
 const TRANSPORT_THEME: Record<string, { background: string; border: string; text: string }> = {

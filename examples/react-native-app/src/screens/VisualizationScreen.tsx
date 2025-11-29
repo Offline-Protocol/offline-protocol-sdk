@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Dimensions } from 'react-native';
-import type { OfflineProtocol } from '@offlineprotocol/react-native';
-import type { NetworkTopology, NetworkNode, NetworkLink, MessageDeliveryStats } from '@offlineprotocol/react-native';
+import type { OfflineProtocol } from '@offline-protocol/mesh-sdk';
+import type { NetworkTopology, NetworkNode, NetworkLink, MessageDeliveryStats } from '@offline-protocol/mesh-sdk';
 import type { DerivedInsights } from '../utils/deriveInsights';
 
 interface VisualizationScreenProps {

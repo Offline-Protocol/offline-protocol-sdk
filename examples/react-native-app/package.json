@@ -11,7 +11,7 @@
     "test": "jest"
   },
   "dependencies": {
-    "@offlineprotocol/react-native": "file:../../bindings/react-native",
+    "@offline-protocol/mesh-sdk": "file:../../bindings/react-native",
     "@react-native/new-app-screen": "0.82.1",
     "react": "19.1.1",
     "react-native": "0.82.1",

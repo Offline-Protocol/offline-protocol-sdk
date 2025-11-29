@@ -7,7 +7,7 @@ import type {
   MessageReceivedEvent,
   MessageDeliveredEvent,
   MessageFailedEvent,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 
 interface Message {
   id: string;

@@ -10,7 +10,7 @@ import {
   FileReceivedEvent,
   MAX_EVENT_HISTORY,
   PROTOCOL_START_DELAY_MS,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 import { requestBluetoothPermissions, showPermissionRationale, getPermissionDeniedMessage } from '../utils/permissions';
 import { ensureBluetoothEnabled } from '../utils/bluetooth';
 import { deriveInsights, type DerivedInsights } from '../utils/deriveInsights';

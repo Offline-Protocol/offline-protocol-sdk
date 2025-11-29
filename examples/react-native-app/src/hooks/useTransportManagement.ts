@@ -4,7 +4,7 @@ import {
   TransportType,
   InternetTransportConfig,
   WifiDirectTransportConfig,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 
 interface UseTransportManagementReturn {
   activeTransports: TransportType[];

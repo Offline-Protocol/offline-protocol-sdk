@@ -1,6 +1,6 @@
-# @offlineprotocol/react-native
+# @offline-protocol/mesh-sdk
 
-Offline-first messaging SDK with intelligent transport switching for React Native. Built with Rust for maximum performance and reliability.
+Offline-first mesh networking SDK with intelligent transport switching for React Native. Built with Rust for maximum performance and reliability.
 
 ## Features
 
@@ -13,7 +13,7 @@ Offline-first messaging SDK with intelligent transport switching for React Nativ
 ## Installation
 
 ```bash
-npm install @offlineprotocol/react-native
+npm install @offline-protocol/mesh-sdk
 ```
 
 ### iOS Setup
@@ -29,7 +29,7 @@ No additional setup needed. Pre-built libraries are included.
 ## Quick Start
 
 ```typescript
-import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
+import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',
@@ -153,7 +153,7 @@ The SDK implements a cluster-based mesh network where devices organize into clus
 
 ```typescript
 import React, { useEffect, useState } from 'react';
-import { OfflineProtocol, MessagePriority } from '@offlineprotocol/react-native';
+import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 function ChatScreen({ userId, recipientId }) {
   const [protocol, setProtocol] = useState(null);

@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { OfflineProtocol } from '@offlineprotocol/react-native';
+import { OfflineProtocol } from '@offline-protocol/mesh-sdk';
 import {
   DorsRuntimeConfig,
   NativeRelayPriority,

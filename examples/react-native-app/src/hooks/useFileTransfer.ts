@@ -4,7 +4,7 @@ import {
   SendFileParams,
   FileProgressEvent,
   FileReceivedEvent,
-} from '@offlineprotocol/react-native';
+} from '@offline-protocol/mesh-sdk';
 import { FileTransferState } from '../types/runtime';
 
 interface UseFileTransferReturn {
