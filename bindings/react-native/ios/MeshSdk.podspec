@@ -15,7 +15,7 @@ Pod::Spec.new do |s|
 
   # Source files
   s.source_files = [
-    "OfflineProtocolModule.{h,m,swift}",
+    "OfflineProtocolModule.{m,swift}",
     "TransportManager.swift",
     "BleManager.swift",
     "InternetManager.swift",
@@ -37,11 +37,6 @@ Pod::Spec.new do |s|
   # Public headers
   s.public_header_files = [
     "Generated/offline_protocolFFI.h"
-  ]
-  
-  # Private headers that need to be accessible
-  s.private_header_files = [
-    "OfflineProtocolModule.h"
   ]
 
   # Configure library search paths and linking
