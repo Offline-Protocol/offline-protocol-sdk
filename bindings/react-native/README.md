@@ -193,20 +193,3 @@ function ChatScreen({ userId, recipientId }) {
   return (/* Your UI */);
 }
 ```
-
-## Troubleshooting
-
-**iOS Build Issues:**
-- Run `pod install` in the `ios` directory
-- Clean build folder (`Cmd+Shift+K`) and rebuild
-
-**Android Build Issues:**
-- Clean and rebuild: `cd android && ./gradlew clean`
-- Ensure NDK 21-26 is installed
-
-## Documentation
-
-- [DORS Configuration Guide](../../docs/dors-configuration.md)
-- [Architecture Overview](../../docs/architecture.md)
-- [API Reference](../../docs/api-reference.md)
-- [SDK Integration Guide](../../docs/sdk-integration.md)
