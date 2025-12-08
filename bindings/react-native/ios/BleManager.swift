@@ -177,6 +177,10 @@ public class BleManager: NSObject, TransportManager {
     private var lastProactiveScanRefresh: Date?
     /// Tracks recently seen advertisement hashes to avoid duplicate processing
     private var recentAdvertisementHashes: [UUID: (hash: Int, timestamp: Date)] = [:]
+    /// Initial aggressive discovery phase duration - more frequent scanning initially
+    private let AGGRESSIVE_DISCOVERY_PHASE: TimeInterval = 30.0
+    /// Tracks when aggressive discovery phase started
+    private var aggressiveDiscoveryStarted: Date?
 
     // MARK: - Thread helpers
     @inline(__always)
@@ -411,6 +415,7 @@ public class BleManager: NSObject, TransportManager {
         transportStartAt = nil
         lastProactiveScanRefresh = nil
         lastForcedBleRefresh = nil
+        aggressiveDiscoveryStarted = nil
         subscribedCentrals.removeAll()
         
         // Clean up managers
@@ -510,6 +515,14 @@ public class BleManager: NSObject, TransportManager {
         scanStartDate = now
         lastDiscoveryDate = scanStartDate
         lastProactiveScanRefresh = now
+        // Start aggressive discovery phase for initial faster connection
+        if aggressiveDiscoveryStarted == nil {
+            aggressiveDiscoveryStarted = now
+            print("[BleManager] Starting aggressive discovery phase (\(AGGRESSIVE_DISCOVERY_PHASE)s)")
+            emitDiagnostic("info", "Starting aggressive discovery phase", context: [
+                "duration": AGGRESSIVE_DISCOVERY_PHASE
+            ])
+        }
         startScanMonitor()
         if logThrottler.shouldLog(key: "scan_started") {
             let context: [String: Any] = [
@@ -597,6 +610,20 @@ public class BleManager: NSObject, TransportManager {
                     self?.startScanning(reason: "forced_refresh")
                 }
             }
+            
+            // After aggressive phase ends, do a targeted scan with service UUID filter
+            // This can help discover Android devices that might have been missed
+            if let started = self.aggressiveDiscoveryStarted,
+               now.timeIntervalSince(started) >= self.AGGRESSIVE_DISCOVERY_PHASE,
+               now.timeIntervalSince(started) < self.AGGRESSIVE_DISCOVERY_PHASE + self.SCAN_HEARTBEAT_INTERVAL {
+                print("[BleManager] Aggressive phase ended, performing targeted service scan")
+                self.emitDiagnostic("info", "Aggressive phase ended, performing targeted service scan", context: [
+                    "discoveredPeers": self.discoveredPeripherals.count,
+                    "connectedPeers": self.connections.connectedPeripheralCount()
+                ])
+                // Brief targeted scan with service UUID
+                self.performTargetedServiceScan()
+            }
         }
         timer.resume()
         scanStateMonitor = timer
@@ -617,6 +644,33 @@ public class BleManager: NSObject, TransportManager {
             self.scanRestartCount += 1
             self.startScanning(reason: "watchdog")
             self.evaluateCentralHealthAfterRestart()
+        }
+    }
+    
+    /// Performs a brief targeted scan with service UUID filter.
+    /// This helps discover Android devices that might not advertise our service UUID
+    /// in the main advertisement packet but include it in scan response.
+    private func performTargetedServiceScan() {
+        guard let central = centralManager, central.state == .poweredOn else { return }
+        guard isScanning else { return }
+        
+        // Brief stop and restart with service filter
+        central.stopScan()
+        
+        // Scan with service UUID filter for 5 seconds
+        central.scanForPeripherals(
+            withServices: [SERVICE_UUID],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        )
+        
+        // After 5 seconds, go back to filterless scanning
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self = self, self.isScanning else { return }
+            self.centralManager?.stopScan()
+            self.centralManager?.scanForPeripherals(
+                withServices: nil,
+                options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+            )
         }
     }
     
@@ -1337,6 +1391,13 @@ public class BleManager: NSObject, TransportManager {
     /// Checks if we should skip this peripheral based on RSSI filtering.
     /// Returns true if the signal is too weak and we're in a dense environment.
     private func shouldFilterByRssi(_ rssi: Int16) -> Bool {
+        // During aggressive discovery phase, don't apply density-based filtering
+        if let started = aggressiveDiscoveryStarted,
+           Date().timeIntervalSince(started) < AGGRESSIVE_DISCOVERY_PHASE {
+            // Only filter out extremely weak signals during aggressive phase
+            return rssi < MINIMUM_RSSI_TO_CONNECT
+        }
+        
         // In dense networks, apply stricter RSSI filtering
         let threshold: Int16
         if estimatedVisiblePeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD {
@@ -1355,17 +1416,32 @@ public class BleManager: NSObject, TransportManager {
     /// Checks if we should throttle connection attempts based on rate limits.
     /// Returns true if we should skip this connection attempt.
     private func shouldThrottleConnection(to peripheral: UUID, now: Date) -> Bool {
+        // During aggressive discovery phase, use much shorter cooldowns
+        let isAggressivePhase = aggressiveDiscoveryStarted.map { now.timeIntervalSince($0) < AGGRESSIVE_DISCOVERY_PHASE } ?? false
+        
         // Prune old entries
         let oneMinuteAgo = now.addingTimeInterval(-60.0)
         globalConnectionAttempts = globalConnectionAttempts.filter { $0 > oneMinuteAgo }
+        
+        let effectiveCooldown: TimeInterval = isAggressivePhase ? 5.0 : ADAPTIVE_COOLDOWN_PER_PERIPHERAL
         peripheralConnectionAttempts = peripheralConnectionAttempts.filter { 
-            now.timeIntervalSince($0.value) < ADAPTIVE_COOLDOWN_PER_PERIPHERAL 
+            now.timeIntervalSince($0.value) < effectiveCooldown 
         }
         
         // Check per-peripheral cooldown
         if let lastAttempt = peripheralConnectionAttempts[peripheral],
-           now.timeIntervalSince(lastAttempt) < ADAPTIVE_COOLDOWN_PER_PERIPHERAL {
+           now.timeIntervalSince(lastAttempt) < effectiveCooldown {
             return true
+        }
+        
+        // During aggressive phase, allow more connection attempts
+        if isAggressivePhase {
+            // Allow up to 3x the normal rate during aggressive phase
+            let maxAttempts = ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE * 3
+            if globalConnectionAttempts.count >= maxAttempts {
+                return true
+            }
+            return false
         }
         
         // In dense networks, apply global rate limiting
@@ -1826,11 +1902,25 @@ extension BleManager: CBCentralManagerDelegate {
         }
         
         // Adaptive scanning: rate limit connection attempts
-        if shouldThrottleConnection(to: peripheral.identifier, now: now) {
-            if logThrottler.shouldLog(key: "adaptive_throttle_\(peripheral.identifier.uuidString)", interval: 30) {
-                print("[BleManager] Adaptive: throttling connection to \(peripheral.identifier)")
+        // Skip throttling for first-time discoveries with strong signals for faster connection
+        let notSeenBefore = lastSeenMeshAdvertisements[peripheral.identifier] == nil
+        let notConnected = connections.connectedPeripheral(for: peripheral.identifier) == nil
+        let isFirstDiscovery = notSeenBefore && notConnected
+        let hasStrongSignal = rssiValue >= -70
+        
+        if !isFirstDiscovery || !hasStrongSignal {
+            if shouldThrottleConnection(to: peripheral.identifier, now: now) {
+                if logThrottler.shouldLog(key: "adaptive_throttle_\(peripheral.identifier.uuidString)", interval: 30) {
+                    print("[BleManager] Adaptive: throttling connection to \(peripheral.identifier)")
+                }
+                return
             }
-            return
+        } else if isFirstDiscovery && hasStrongSignal {
+            print("[BleManager] Fast-tracking first discovery with strong signal: \(peripheral.identifier) RSSI=\(rssiValue)")
+            emitDiagnostic("info", "Fast-tracking first discovery", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "rssi": rssiValue
+            ])
         }
 
         let desiredRole: MeshController.MeshRole = (decision.intent == .interCluster) ? .bridge : .member
@@ -2324,6 +2414,14 @@ extension BleManager: CBPeripheralManagerDelegate {
             ])
             return
         }
+        
+        // Track this central as subscribed for connection count
+        subscribedCentrals.insert(central.identifier)
+        print("[BleManager] Central subscribed: \(central.identifier)")
+        emitDiagnostic("info", "Central subscribed to characteristic", context: [
+            "central": central.identifier.uuidString,
+            "totalSubscribed": subscribedCentrals.count
+        ])
 
         if connections.centralDeviceId(for: central.identifier) == nil && connections.peripheralDeviceId(for: central.identifier) == nil {
             ensureDeviceId(for: central.identifier)
@@ -2337,9 +2435,11 @@ extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
         print("[BleManager] Central unsubscribed from characteristic: \(characteristic.uuid)")
+        subscribedCentrals.remove(central.identifier)
         emitDiagnostic("info", "Central unsubscribed", context: [
             "central": central.identifier.uuidString,
-            "characteristic": characteristic.uuid.uuidString
+            "characteristic": characteristic.uuid.uuidString,
+            "remainingSubscribed": subscribedCentrals.count
         ])
         connections.removeCentralDeviceId(for: central.identifier)
     }

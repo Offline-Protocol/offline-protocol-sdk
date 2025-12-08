@@ -1,6 +1,6 @@
 {
   "name": "@offline-protocol/mesh-sdk",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Offline-first mesh networking SDK with intelligent transport switching for React Native",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

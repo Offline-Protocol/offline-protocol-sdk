@@ -83,7 +83,9 @@ class BleManager(
         
         // Adaptive Scan Configuration
         /** Minimum RSSI to consider for connection (filter weak signals early) - matches iOS */
-        private const val ADAPTIVE_MIN_RSSI = -90
+        private const val ADAPTIVE_MIN_RSSI = -85
+        /** Absolute minimum RSSI below which we refuse to connect - matches iOS */
+        private const val MINIMUM_RSSI_TO_CONNECT = -90
         /** Peer count threshold below which we process all advertisements */
         private const val ADAPTIVE_LOW_DENSITY_THRESHOLD = 10
         /** Peer count threshold above which we apply maximum throttling */
@@ -104,6 +106,14 @@ class BleManager(
         private const val PROACTIVE_SCAN_REFRESH_MS = 60_000L
         /** Force a complete BLE stack refresh periodically even when things seem healthy (ms) */
         private const val FORCED_BLE_REFRESH_MS = 120_000L
+        /** Maximum consecutive scan restarts before resetting BLE adapter */
+        private const val MAX_CONSECUTIVE_SCAN_RESTARTS = 3
+        /** Backoff period after resetting BLE adapter (ms) */
+        private const val ADAPTER_RESET_BACKOFF_MS = 45_000L
+        /** Connection monitor interval for periodic reconnection attempts (ms) */
+        private const val CONNECTION_MONITOR_INTERVAL_MS = 5_000L
+        /** Initial aggressive discovery phase duration (ms) - more frequent scanning initially */
+        private const val AGGRESSIVE_DISCOVERY_PHASE_MS = 30_000L
     }
     
     // MARK: - Properties
@@ -167,8 +177,17 @@ class BleManager(
     @Volatile private var lastProactiveScanRefresh: Long = 0L
     /** Last time we performed a forced BLE refresh */
     @Volatile private var lastForcedBleRefresh: Long = 0L
-    /** Tracks recently seen advertisements to avoid duplicate processing */
-    private val recentAdvertisementHashes = ConcurrentHashMap<String, Long>()
+    /** Tracks recently seen advertisements to avoid duplicate processing (hash, timestamp) */
+    private data class AdvertisementCacheEntry(val hash: Int, val timestamp: Long)
+    private val recentAdvertisementHashes = ConcurrentHashMap<String, AdvertisementCacheEntry>()
+    /** Tracks connected centrals (devices that connected to our GATT server) for connection count */
+    private val connectedCentrals = ConcurrentHashMap<String, Long>()
+    /** Counter for consecutive scan restarts without discoveries */
+    @Volatile private var scanRestartCount = 0
+    /** Last time we reset the BLE adapter */
+    @Volatile private var lastAdapterReset: Long = 0L
+    /** Connection monitor runnable for periodic reconnection attempts */
+    private var connectionMonitorRunnable: Runnable? = null
     
     // Fragment polling
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -236,10 +255,55 @@ class BleManager(
                     Log.w(TAG, "Restarting BLE scan after ${idleMs}ms of inactivity")
                     emitDiagnostic("warning", "Restarting BLE scan due to inactivity", mapOf("idleMs" to idleMs))
                 }
+                scanRestartCount++
                 restartScanning("watchdog")
+                evaluateBleHealthAfterRestart()
                 return
             }
             mainHandler.postDelayed(this, SCAN_WATCHDOG_HEARTBEAT_MS)
+        }
+    }
+    
+    /**
+     * Evaluates BLE stack health after consecutive restarts and resets adapter if needed.
+     * This mirrors iOS's evaluateCentralHealthAfterRestart mechanism.
+     */
+    private fun evaluateBleHealthAfterRestart() {
+        if (scanRestartCount < MAX_CONSECUTIVE_SCAN_RESTARTS) {
+            return
+        }
+        
+        val now = System.currentTimeMillis()
+        if (lastAdapterReset > 0 && now - lastAdapterReset < ADAPTER_RESET_BACKOFF_MS) {
+            return
+        }
+        
+        Log.w(TAG, "Resetting BLE stack due to repeated scan stalls (restartCount=$scanRestartCount)")
+        emitDiagnostic("warning", "Resetting BLE stack due to repeated scan stalls", mapOf(
+            "restartCount" to scanRestartCount
+        ))
+        
+        lastAdapterReset = now
+        scanRestartCount = 0
+        
+        // Force stop and restart everything
+        mainHandler.post {
+            if (state == TransportState.RUNNING) {
+                stopScanning("ble_reset")
+                stopAdvertising()
+                
+                // Re-initialize scanner and advertiser
+                bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
+                bluetoothLeAdvertiser = bluetoothAdapter?.bluetoothLeAdvertiser
+                
+                // Restart after a brief delay
+                mainHandler.postDelayed({
+                    if (state == TransportState.RUNNING) {
+                        startScanning("ble_reset")
+                        startAdvertising("ble_reset")
+                    }
+                }, 1000)
+            }
         }
     }
     
@@ -434,6 +498,9 @@ class BleManager(
         unknownDeviceAttempts.clear()
         recentAdvertisementHashes.clear()
         connectionRetryCount.clear()
+        connectedCentrals.clear()
+        scanRestartCount = 0
+        lastAdapterReset = 0L
         transportStartAt = 0L
         lastProactiveScanRefresh = 0L
         lastForcedBleRefresh = 0L
@@ -635,7 +702,12 @@ class BleManager(
             val now = System.currentTimeMillis()
             lastDiscoveryAt = now
             lastProactiveScanRefresh = now
+            // Reset restart count on non-watchdog starts
+            if (reason != "restart_watchdog") {
+                scanRestartCount = 0
+            }
             scheduleScanWatchdog()
+            startConnectionMonitor()
             if (logThrottler.shouldLog("scan_started")) {
                 Log.i(TAG, "BLE scanning started (no filter, reason: $reason)")
                 emitDiagnostic("info", "BLE scanning started", mapOf(
@@ -683,6 +755,7 @@ class BleManager(
             scanCallback = null
             isScanning = false
             cancelScanWatchdog()
+            cancelConnectionMonitor()
             lastDiscoveryAt = 0L
             discoveryLogTimestamps.clear()
             if (logThrottler.shouldLog("scan_stopped")) {
@@ -707,6 +780,94 @@ class BleManager(
     
     private fun cancelScanWatchdog() {
         mainHandler.removeCallbacks(scanWatchdogRunnable)
+    }
+    
+    /**
+     * Starts the connection monitor that periodically attempts to reconnect to discovered devices.
+     * This mirrors iOS's startConnectionMonitor mechanism for more reliable discovery.
+     */
+    private fun startConnectionMonitor() {
+        cancelConnectionMonitor()
+        
+        connectionMonitorRunnable = object : Runnable {
+            override fun run() {
+                if (state != TransportState.RUNNING) {
+                    return
+                }
+                
+                val now = System.currentTimeMillis()
+                
+                // Check for discovered devices that aren't connected
+                for ((address, observation) in lastSeenMeshAdvertisements) {
+                    // Skip if already connected
+                    if (connections.getGatt(address) != null) {
+                        continue
+                    }
+                    
+                    // Skip if we've hit connection cap
+                    if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+                        break
+                    }
+                    
+                    // Skip if observation is too old
+                    if (now - observation.timestamp > MESH_OBSERVATION_TTL_MS) {
+                        continue
+                    }
+                    
+                    // Skip if RSSI too weak
+                    val rssi = observation.rssi ?: continue
+                    if (rssi < MINIMUM_RSSI_TO_CONNECT) {
+                        continue
+                    }
+                    
+                    // Rate limit attempts to this device
+                    val lastAttempt = deviceConnectionAttempts[address]
+                    if (lastAttempt != null && now - lastAttempt < MIN_RECONNECT_INTERVAL_MS) {
+                        continue
+                    }
+                    
+                    // Try to connect
+                    try {
+                        val device = bluetoothAdapter?.getRemoteDevice(address) ?: continue
+                        recordConnectionAttempt(address, now)
+                        connectToDevice(device)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Connection monitor: failed to get remote device $address", e)
+                    }
+                }
+                
+                // Also check for pending fragments that need device ID resolution
+                for (address in pendingFragments.keys) {
+                    if (connections.deviceIdForAddress(address) != null) {
+                        continue
+                    }
+                    
+                    val lastAttempt = deviceIdResolutionAttempts[address]
+                    if (lastAttempt != null && now - lastAttempt < MIN_RECONNECT_INTERVAL_MS) {
+                        continue
+                    }
+                    
+                    deviceIdResolutionAttempts[address] = now
+                    try {
+                        val device = bluetoothAdapter?.getRemoteDevice(address)
+                        if (device != null && connections.getGatt(address) == null) {
+                            connectToDevice(device)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Connection monitor: failed to resolve device ID for $address", e)
+                    }
+                }
+                
+                mainHandler.postDelayed(this, CONNECTION_MONITOR_INTERVAL_MS)
+            }
+        }
+        
+        mainHandler.postDelayed(connectionMonitorRunnable!!, CONNECTION_MONITOR_INTERVAL_MS)
+    }
+    
+    private fun cancelConnectionMonitor() {
+        connectionMonitorRunnable?.let { mainHandler.removeCallbacks(it) }
+        connectionMonitorRunnable = null
     }
     
     private fun startAdvertising(reason: String = "manual") {
@@ -852,17 +1013,17 @@ class BleManager(
         // This improves performance in dense networks
         val advertHash = computeAdvertisementHash(result)
         val cached = recentAdvertisementHashes[address]
-        if (cached != null && cached.first == advertHash && now - cached.second < 1000L) {
+        if (cached != null && cached.hash == advertHash && now - cached.timestamp < 1000L) {
             return // Skip duplicate advertisement
         }
-        recentAdvertisementHashes[address] = Pair(advertHash, now)
+        recentAdvertisementHashes[address] = AdvertisementCacheEntry(advertHash, now)
         
         // Prune old advertisement cache entries periodically
         if (recentAdvertisementHashes.size > 100) {
             val cutoff = now - 30_000L
             val iterator = recentAdvertisementHashes.entries.iterator()
             while (iterator.hasNext()) {
-                if (iterator.next().value.second < cutoff) {
+                if (iterator.next().value.timestamp < cutoff) {
                     iterator.remove()
                 }
             }
@@ -943,11 +1104,23 @@ class BleManager(
         }
         
         // Adaptive scanning: rate limit connection attempts
-        if (shouldThrottleConnection(address, now)) {
-            if (logThrottler.shouldLog("adaptive_throttle_$address", intervalMs = 30000)) {
-                Log.d(TAG, "Adaptive: throttling connection to $address")
+        // Skip throttling for first-time discoveries with strong signals for faster connection
+        val isFirstDiscovery = !lastSeenMeshAdvertisements.containsKey(address) && connections.getGatt(address) == null
+        val hasStrongSignal = rssi >= -70
+        
+        if (!isFirstDiscovery || !hasStrongSignal) {
+            if (shouldThrottleConnection(address, now)) {
+                if (logThrottler.shouldLog("adaptive_throttle_$address", intervalMs = 30000)) {
+                    Log.d(TAG, "Adaptive: throttling connection to $address")
+                }
+                return
             }
-            return
+        } else if (isFirstDiscovery && hasStrongSignal) {
+            Log.d(TAG, "Fast-tracking first discovery with strong signal: $address RSSI=$rssi")
+            emitDiagnostic("info", "Fast-tracking first discovery", mapOf(
+                "address" to address,
+                "rssi" to rssi
+            ))
         }
 
         if (!meshController.connectionBudgetAvailable() && decision.evictPeerId != null) {
@@ -1154,6 +1327,21 @@ class BleManager(
         try {
             // Atomic check-and-connect to prevent race conditions
             synchronized(connectionLock) {
+                // Check RSSI threshold - don't connect to devices with weak signals
+                val rssi = lastSeenRssi[device.address]?.toInt() ?: -60
+                if (rssi < MINIMUM_RSSI_TO_CONNECT) {
+                    if (logThrottler.shouldLog("rssi_skip_${device.address}", intervalMs = 10000)) {
+                        Log.d(TAG, "Skipping connection to ${device.address} due to weak RSSI ($rssi < $MINIMUM_RSSI_TO_CONNECT)")
+                        emitDiagnostic("debug", "Skipping BLE connect due to weak RSSI", mapOf(
+                            "address" to device.address,
+                            "rssi" to rssi,
+                            "threshold" to MINIMUM_RSSI_TO_CONNECT
+                        ))
+                    }
+                    connections.consumePendingRole(device.address)
+                    return
+                }
+                
                 if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
                     if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
                         Log.d(TAG, "Connection cap reached, not connecting to ${device.address}")
@@ -1183,7 +1371,7 @@ class BleManager(
         }
     }
 
-    private fun currentConnectionCount(): Int = connections.connectionCount()
+    private fun currentConnectionCount(): Int = connections.connectionCount() + connectedCentrals.size
 
     private fun refreshSelfMetrics() {
         val rssiValues = lastSeenRssi.values.map { it.toInt() }
@@ -1644,6 +1832,13 @@ class BleManager(
     
     /** Checks if we should skip this device based on RSSI filtering. */
     private fun shouldFilterByRssi(rssi: Int): Boolean {
+        // During aggressive discovery phase, don't apply density-based filtering
+        val now = System.currentTimeMillis()
+        if (transportStartAt > 0 && now - transportStartAt < AGGRESSIVE_DISCOVERY_PHASE_MS) {
+            // Only filter out extremely weak signals during aggressive phase
+            return rssi < MINIMUM_RSSI_TO_CONNECT
+        }
+        
         // In dense networks, apply stricter RSSI filtering
         val threshold = when {
             estimatedVisiblePeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD -> -70
@@ -1655,19 +1850,34 @@ class BleManager(
     
     /** Checks if we should throttle connection attempts based on rate limits. */
     private fun shouldThrottleConnection(address: String, now: Long): Boolean {
+        // During aggressive discovery phase, use much shorter cooldowns
+        val isAggressivePhase = transportStartAt > 0 && now - transportStartAt < AGGRESSIVE_DISCOVERY_PHASE_MS
+        
         // Prune old entries
         val oneMinuteAgo = now - 60_000L
         synchronized(globalConnectionAttempts) {
             globalConnectionAttempts.removeAll { it < oneMinuteAgo }
         }
+        
+        val effectiveCooldown = if (isAggressivePhase) 5_000L else ADAPTIVE_COOLDOWN_PER_DEVICE_MS
         deviceConnectionAttempts.entries.removeIf { 
-            now - it.value >= ADAPTIVE_COOLDOWN_PER_DEVICE_MS 
+            now - it.value >= effectiveCooldown 
         }
         
         // Check per-device cooldown
         val lastAttempt = deviceConnectionAttempts[address]
-        if (lastAttempt != null && now - lastAttempt < ADAPTIVE_COOLDOWN_PER_DEVICE_MS) {
+        if (lastAttempt != null && now - lastAttempt < effectiveCooldown) {
             return true
+        }
+        
+        // During aggressive phase, allow more connection attempts
+        if (isAggressivePhase) {
+            // Allow up to 3x the normal rate during aggressive phase
+            val maxAttempts = ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE * 3
+            if (globalConnectionAttempts.size >= maxAttempts) {
+                return true
+            }
+            return false
         }
         
         // In dense networks, apply global rate limiting
@@ -1800,12 +2010,19 @@ class BleManager(
                         gattServer?.cancelConnection(device)
                         return
                     }
+                    // Check connection capacity
+                    if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+                        Log.w(TAG, "Rejecting inbound connection from ${device.address}: connection cap reached")
+                        gattServer?.cancelConnection(device)
+                        return
+                    }
                     val role = when (decision.intent) {
                         ConnectionIntent.INTER_CLUSTER -> MeshRole.BRIDGE
                         ConnectionIntent.INTRA_CLUSTER, ConnectionIntent.REJECTED -> MeshRole.MEMBER
                     }
                     connections.trackServerConnection(device.address)
                     connections.setPendingRole(device.address, role)
+                    connectedCentrals[device.address] = System.currentTimeMillis()
                     Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
                     emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
                 }
@@ -1813,6 +2030,7 @@ class BleManager(
                     val address = device.address
                     connections.untrackServerConnection(address)
                     connections.consumePendingRole(address)
+                    connectedCentrals.remove(address)
                     // Don't immediately remove - connection might be re-established
                     // Only remove if it's a permanent error (status != 0)
                     if (status != 0 && status != 19) { // Not normal disconnect or connection timeout
