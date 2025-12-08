@@ -71,17 +71,19 @@ class BleManager(
         private const val FRAGMENT_POLL_INTERVAL_MS = 100L // 100ms
         private const val MAX_FRAGMENT_SIZE = 185
         private const val CONNECTION_TIMEOUT_MS = 10000L
-        private const val SCAN_WATCHDOG_INTERVAL_MS = 20000L
+        private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
         private const val MAX_CONNECTIONS_PER_DEVICE = 4
         private const val ADVERTISE_RESTART_MIN_MS = 200L
         private const val ADVERTISE_RESTART_MAX_MS = 1200L
         private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
         private const val MIN_RECONNECT_INTERVAL_MS = 5_000L // Match iOS timing
+        private const val MAX_RECONNECT_INTERVAL_MS = 60_000L
+        private const val MAX_CONNECTION_RETRIES = 5
         
         // Adaptive Scan Configuration
-        /** Minimum RSSI to consider for connection (filter weak signals early) */
-        private const val ADAPTIVE_MIN_RSSI = -85
+        /** Minimum RSSI to consider for connection (filter weak signals early) - matches iOS */
+        private const val ADAPTIVE_MIN_RSSI = -90
         /** Peer count threshold below which we process all advertisements */
         private const val ADAPTIVE_LOW_DENSITY_THRESHOLD = 10
         /** Peer count threshold above which we apply maximum throttling */
@@ -93,11 +95,15 @@ class BleManager(
         /** Interval for updating visible peer count estimate (ms) */
         private const val ADAPTIVE_PEER_COUNT_WINDOW_MS = 5_000L
         /** Rate limit for unknown device GATT verification attempts (ms) */
-        private const val UNKNOWN_DEVICE_RATE_LIMIT_MS = 10_000L
+        private const val UNKNOWN_DEVICE_RATE_LIMIT_MS = 5_000L // More aggressive for cross-platform discovery
         /** Minimum RSSI for unknown device to be considered for GATT verification */
-        private const val UNKNOWN_DEVICE_MIN_RSSI = -75
+        private const val UNKNOWN_DEVICE_MIN_RSSI = -80 // More lenient for cross-platform discovery
+        /** Maximum unknown device verification attempts per minute */
+        private const val MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE = 10
         /** Proactive scan refresh interval even when discoveries are occurring (ms) */
         private const val PROACTIVE_SCAN_REFRESH_MS = 60_000L
+        /** Force a complete BLE stack refresh periodically even when things seem healthy (ms) */
+        private const val FORCED_BLE_REFRESH_MS = 120_000L
     }
     
     // MARK: - Properties
@@ -136,6 +142,7 @@ class BleManager(
     private data class MeshObservation(val advertisement: MeshAdvertisementData, val rssi: Int?, val timestamp: Long)
     private val pendingFragments = ConcurrentHashMap<String, MutableList<PendingFragment>>()
     private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
+    private val connectionRetryCount = ConcurrentHashMap<String, Int>()
     private val LOAD_SATURATION_COUNT = 20
     private val MESH_OBSERVATION_TTL_MS = 120_000L
     private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
@@ -158,6 +165,8 @@ class BleManager(
     private val unknownDeviceAttempts = ConcurrentHashMap<String, Long>()
     /** Last time we proactively refreshed the scan */
     @Volatile private var lastProactiveScanRefresh: Long = 0L
+    /** Last time we performed a forced BLE refresh */
+    @Volatile private var lastForcedBleRefresh: Long = 0L
     /** Tracks recently seen advertisements to avoid duplicate processing */
     private val recentAdvertisementHashes = ConcurrentHashMap<String, Long>()
     
@@ -424,8 +433,10 @@ class BleManager(
         lastSeenMeshAdvertisements.clear()
         unknownDeviceAttempts.clear()
         recentAdvertisementHashes.clear()
+        connectionRetryCount.clear()
         transportStartAt = 0L
         lastProactiveScanRefresh = 0L
+        lastForcedBleRefresh = 0L
         
         // Close GATT server
         gattServer?.close()
@@ -1030,6 +1041,8 @@ class BleManager(
         
         // 6. For unknown connectable devices, allow with rate limiting
         //    These will be verified via GATT service discovery after connection
+        //    This is CRITICAL for iOS ↔ Android cross-platform discovery since
+        //    each platform may not recognize the other's service UUID format in advertisements
         if (isConnectable) {
             // Rate limit unknown device connection attempts
             val lastAttempt = unknownDeviceAttempts[address]
@@ -1037,14 +1050,30 @@ class BleManager(
                 return false
             }
             
-            // Only process strong signals for unknown devices
-            if (rssi >= UNKNOWN_DEVICE_MIN_RSSI) {
+            // Check global rate limit for unknown device attempts
+            val recentUnknownAttempts = unknownDeviceAttempts.values.count { 
+                now - it < 60_000L 
+            }
+            if (recentUnknownAttempts >= MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE) {
+                return false
+            }
+            
+            // Only process signals above minimum threshold for unknown devices
+            // Use a tiered approach: stronger signals get priority
+            val shouldAttempt = when {
+                rssi >= -70 -> true  // Strong signal - always try
+                rssi >= UNKNOWN_DEVICE_MIN_RSSI && recentUnknownAttempts < MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE / 2 -> true
+                else -> false
+            }
+            
+            if (shouldAttempt) {
                 unknownDeviceAttempts[address] = now
                 if (logThrottler.shouldLog("unknown_connectable_$address", intervalMs = 30_000)) {
                     Log.d(TAG, "Allowing unknown connectable device for GATT verification: $address RSSI=$rssi")
                     emitDiagnostic("debug", "Allowing unknown device for GATT verification", mapOf(
                         "address" to address,
-                        "rssi" to rssi
+                        "rssi" to rssi,
+                        "recentAttempts" to recentUnknownAttempts
                     ))
                 }
                 return true
@@ -1067,6 +1096,28 @@ class BleManager(
                 emitDiagnostic("info", "Proactive scan refresh")
             }
             restartScanning("proactive_refresh")
+        }
+        
+        // Forced complete BLE refresh - more aggressive than proactive refresh
+        // This helps recover from edge cases where the BLE stack becomes stuck
+        val lastForced = if (lastForcedBleRefresh == 0L) transportStartAt else lastForcedBleRefresh
+        if (now - lastForced >= FORCED_BLE_REFRESH_MS) {
+            lastForcedBleRefresh = now
+            if (logThrottler.shouldLog("forced_ble_refresh", intervalMs = FORCED_BLE_REFRESH_MS)) {
+                Log.i(TAG, "Performing forced BLE refresh for reliability")
+                emitDiagnostic("info", "Forced BLE refresh for reliability", mapOf(
+                    "connectedPeers" to connections.connectionCount(),
+                    "discoveredPeers" to connections.discoveredPeerCount()
+                ))
+            }
+            // Stop and restart both scanning and advertising
+            stopScanning("forced_refresh")
+            refreshAdvertising("forced_refresh")
+            mainHandler.postDelayed({
+                if (state == TransportState.RUNNING) {
+                    startScanning("forced_refresh")
+                }
+            }, 500)
         }
     }
     
@@ -1201,6 +1252,7 @@ class BleManager(
         pendingFragments.remove(address)
         pendingOutboundFragments.remove(peerId)
         deviceIdResolutionAttempts.remove(address)
+        connectionRetryCount.remove(address)
         meshController.registerDisconnection(peerId)
         refreshSelfMetrics()
 
@@ -1887,7 +1939,43 @@ class BleManager(
                     
                     // Try to reconnect if we were connected and state is still running
                     if (wasConnected && state == TransportState.RUNNING) {
-                        // Attempt reconnection after a delay matching iOS timing
+                        // Increment retry count and calculate backoff
+                        val retryCount = (connectionRetryCount[address] ?: 0) + 1
+                        connectionRetryCount[address] = retryCount
+                        
+                        // Give up after max retries
+                        if (retryCount > MAX_CONNECTION_RETRIES) {
+                            Log.w(TAG, "Max retries ($MAX_CONNECTION_RETRIES) exceeded for $address on disconnect, giving up")
+                            emitDiagnostic("warning", "Max connection retries exceeded", mapOf(
+                                "address" to address,
+                                "retryCount" to retryCount
+                            ))
+                            connectionRetryCount.remove(address)
+                            // Notify peer lost since we're giving up
+                            connections.deviceIdForAddress(address)?.let { peerId ->
+                                protocol.removeNeighborRoutes(peerId)
+                                try {
+                                    protocol.blePeerLost(peerId)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error notifying peer lost", e)
+                                }
+                                meshController.registerDisconnection(peerId)
+                                refreshSelfMetrics()
+                                connections.removeIdentifiersForAddress(address)
+                                connections.removeConnectionRole(peerId)
+                                mainHandler.post {
+                                    if (state == TransportState.RUNNING) {
+                                        refreshAdvertising("disconnect_max_retries")
+                                    }
+                                }
+                                maybeHandleRebalance("disconnect_max_retries")
+                            }
+                            return@onConnectionStateChange
+                        }
+                        
+                        // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped)
+                        val backoffInterval = minOf(MAX_RECONNECT_INTERVAL_MS, MIN_RECONNECT_INTERVAL_MS * (1L shl (retryCount - 1)))
+                        
                         mainHandler.postDelayed({
                             if (state == TransportState.RUNNING && connections.hasDeviceForAddress(address)) {
                                 try {
@@ -1899,7 +1987,7 @@ class BleManager(
                                     Log.e(TAG, "Error reconnecting to device", e)
                                 }
                             }
-                        }, MIN_RECONNECT_INTERVAL_MS)
+                        }, backoffInterval)
                     } else {
                         // Notify protocol of peer loss only if we're not reconnecting
                         connections.deviceIdForAddress(address)?.let { deviceId ->
@@ -1990,6 +2078,7 @@ class BleManager(
                 if (deviceIdValue != null) {
                     Log.i(TAG, "📝 Mapping ${gatt.device.address} -> $deviceIdValue")
                     connections.setDeviceIdentifier(gatt.device.address, deviceIdValue)
+                    connectionRetryCount.remove(gatt.device.address) // Reset retry count on successful connection
                     
                     val role = connections.consumePendingRole(gatt.device.address) ?: MeshRole.MEMBER
                     meshController.registerConnection(deviceIdValue, role)

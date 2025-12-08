@@ -152,10 +152,16 @@ public class BleManager: NSObject, TransportManager {
     private var lastPeerCountUpdate: Date?
     private let SCAN_HEARTBEAT_INTERVAL: TimeInterval = 10.0
     private let SCAN_RESTART_INTERVAL: TimeInterval = 30.0
+    /// Force a complete BLE stack refresh periodically even when things seem healthy
+    private let FORCED_BLE_REFRESH_INTERVAL: TimeInterval = 120.0
+    private var lastForcedBleRefresh: Date?
     private var connectionMonitor: DispatchSourceTimer?
     private var connectionAttemptTimestamps: [UUID: Date] = [:]
+    private var connectionRetryCount: [UUID: Int] = [:]
     private let CONNECTION_MONITOR_INTERVAL: TimeInterval = 5.0
     private let MIN_RECONNECT_INTERVAL: TimeInterval = 5.0
+    private let MAX_RECONNECT_INTERVAL: TimeInterval = 60.0
+    private let MAX_CONNECTION_RETRIES = 5
     private var scanRestartCount: Int = 0
     private var lastCentralReset: Date?
     private let MAX_CONSECUTIVE_SCAN_RESTARTS = 3
@@ -163,7 +169,9 @@ public class BleManager: NSObject, TransportManager {
     private let MINIMUM_RSSI_TO_CONNECT: Int16 = -90
     /// Rate limiting for unknown connectable devices that need GATT verification
     private var unknownDeviceAttempts: [UUID: Date] = [:]
-    private let UNKNOWN_DEVICE_RATE_LIMIT: TimeInterval = 10.0
+    private let UNKNOWN_DEVICE_RATE_LIMIT: TimeInterval = 5.0 // More aggressive for cross-platform discovery
+    private let UNKNOWN_DEVICE_MIN_RSSI: Int16 = -80 // More lenient for cross-platform discovery
+    private let MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE = 10
     /// Proactive scan refresh interval even when discoveries are occurring
     private let PROACTIVE_SCAN_REFRESH_INTERVAL: TimeInterval = 60.0
     private var lastProactiveScanRefresh: Date?
@@ -402,6 +410,7 @@ public class BleManager: NSObject, TransportManager {
         lastAdvertiseRestartAt = nil
         transportStartAt = nil
         lastProactiveScanRefresh = nil
+        lastForcedBleRefresh = nil
         subscribedCentrals.removeAll()
         
         // Clean up managers
@@ -529,6 +538,7 @@ public class BleManager: NSObject, TransportManager {
         scanStartDate = nil
         lastDiscoveryDate = nil
         connectionAttemptTimestamps.removeAll()
+        connectionRetryCount.removeAll()
         if logThrottler.shouldLog(key: "scan_stopped") {
             print("[BleManager] Stopped scanning (reason: \(reason))")
         }
@@ -566,6 +576,26 @@ public class BleManager: NSObject, TransportManager {
                 }
                 self.lastProactiveScanRefresh = now
                 self.restartScanningDueToInactivity()
+            }
+            
+            // Forced complete BLE refresh - more aggressive than proactive refresh
+            // This helps recover from edge cases where the BLE stack becomes stuck
+            let lastForced = self.lastForcedBleRefresh ?? self.transportStartAt ?? now
+            if now.timeIntervalSince(lastForced) >= self.FORCED_BLE_REFRESH_INTERVAL {
+                self.lastForcedBleRefresh = now
+                if self.logThrottler.shouldLog(key: "forced_ble_refresh", interval: self.FORCED_BLE_REFRESH_INTERVAL) {
+                    print("[BleManager] Performing forced BLE refresh for reliability")
+                    self.emitDiagnostic("info", "Forced BLE refresh for reliability", context: [
+                        "connectedPeers": self.connections.connectedPeripheralCount(),
+                        "discoveredPeers": self.discoveredPeripherals.count
+                    ])
+                }
+                // Stop and restart both scanning and advertising
+                self.stopScanning(reason: "forced_refresh")
+                self.refreshAdvertising(reason: "forced_refresh")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.startScanning(reason: "forced_refresh")
+                }
             }
         }
         timer.resume()
@@ -1081,6 +1111,7 @@ public class BleManager: NSObject, TransportManager {
         pendingFragments.removeValue(forKey: identifier)
         pendingOutboundFragments.removeValue(forKey: deviceId)
         connectionAttemptTimestamps.removeValue(forKey: identifier)
+        connectionRetryCount.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
         refreshSelfMetrics()
         
@@ -1409,6 +1440,21 @@ public class BleManager: NSObject, TransportManager {
             }
         }
         
+        // 2b. Check overflow service UUIDs - Android devices sometimes advertise in overflow area
+        //     when the main advertisement packet is full
+        if let overflowUUIDs = advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] {
+            if overflowUUIDs.contains(SERVICE_UUID) {
+                return true
+            }
+        }
+        
+        // 2c. Check solicited service UUIDs - some Android devices use this
+        if let solicitedUUIDs = advertisementData[CBAdvertisementDataSolicitedServiceUUIDsKey] as? [CBUUID] {
+            if solicitedUUIDs.contains(SERVICE_UUID) {
+                return true
+            }
+        }
+        
         // 3. Check if this is a previously discovered mesh device
         if lastSeenMeshAdvertisements[peripheral.identifier] != nil {
             return true
@@ -1428,6 +1474,8 @@ public class BleManager: NSObject, TransportManager {
         
         // 6. For unknown connectable devices, allow with rate limiting
         //    These will be verified via GATT service discovery after connection
+        //    This is CRITICAL for iOS ↔ Android cross-platform discovery since
+        //    each platform may not recognize the other's service UUID format in advertisements
         let isConnectable: Bool
         if #available(iOS 13.0, *) {
             isConnectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? false
@@ -1442,14 +1490,33 @@ public class BleManager: NSObject, TransportManager {
                 return false
             }
             
-            // Only process strong signals for unknown devices
-            if rssi >= -75 {
+            // Check global rate limit for unknown device attempts
+            let oneMinuteAgo = now.addingTimeInterval(-60.0)
+            let recentUnknownAttempts = unknownDeviceAttempts.values.filter { $0 > oneMinuteAgo }.count
+            if recentUnknownAttempts >= MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE {
+                return false
+            }
+            
+            // Use a tiered approach: stronger signals get priority
+            let shouldAttempt: Bool
+            if rssi >= -70 {
+                // Strong signal - always try
+                shouldAttempt = true
+            } else if rssi >= UNKNOWN_DEVICE_MIN_RSSI && recentUnknownAttempts < MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE / 2 {
+                // Moderate signal and we have budget
+                shouldAttempt = true
+            } else {
+                shouldAttempt = false
+            }
+            
+            if shouldAttempt {
                 unknownDeviceAttempts[peripheral.identifier] = now
                 if logThrottler.shouldLog(key: "unknown_connectable_\(peripheral.identifier.uuidString)", interval: 30) {
                     print("[BleManager] Allowing unknown connectable device for GATT verification: \(peripheral.identifier) RSSI=\(rssi)")
                     emitDiagnostic("debug", "Allowing unknown device for GATT verification", context: [
                         "identifier": peripheral.identifier.uuidString,
-                        "rssi": rssi
+                        "rssi": rssi,
+                        "recentAttempts": recentUnknownAttempts
                     ])
                 }
                 return true
@@ -1800,6 +1867,7 @@ extension BleManager: CBCentralManagerDelegate {
         
         connections.registerPeripheral(peripheral)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+        connectionRetryCount.removeValue(forKey: peripheral.identifier) // Reset retry count on successful connection
         
         // Discover services
         peripheral.discoverServices([SERVICE_UUID])
@@ -1807,14 +1875,36 @@ extension BleManager: CBCentralManagerDelegate {
     
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         print("[BleManager] Failed to connect to peripheral: \(error?.localizedDescription ?? "unknown")")
+        
+        // Increment retry count and calculate backoff
+        let retryCount = (connectionRetryCount[peripheral.identifier] ?? 0) + 1
+        connectionRetryCount[peripheral.identifier] = retryCount
+        
         emitDiagnostic("error", "Failed to connect to BLE peripheral", context: [
             "identifier": peripheral.identifier.uuidString,
-            "error": error?.localizedDescription ?? "unknown"
+            "error": error?.localizedDescription ?? "unknown",
+            "retryCount": retryCount
         ])
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
         _ = connections.consumePendingRole(for: peripheral.identifier)
-        DispatchQueue.main.asyncAfter(deadline: .now() + MIN_RECONNECT_INTERVAL) { [weak self] in
-            self?.attemptConnection(to: peripheral, reason: "retry_fail")
+        
+        // Give up after max retries
+        guard retryCount <= MAX_CONNECTION_RETRIES else {
+            print("[BleManager] Max retries (\(MAX_CONNECTION_RETRIES)) exceeded for \(peripheral.identifier), giving up")
+            emitDiagnostic("warning", "Max connection retries exceeded", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "retryCount": retryCount
+            ])
+            connectionRetryCount.removeValue(forKey: peripheral.identifier)
+            return
+        }
+        
+        // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped)
+        let backoffInterval = min(MAX_RECONNECT_INTERVAL, MIN_RECONNECT_INTERVAL * pow(2.0, Double(retryCount - 1)))
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + backoffInterval) { [weak self] in
+            guard let self = self, self.state == .running else { return }
+            self.attemptConnection(to: peripheral, reason: "retry_fail")
         }
     }
     
@@ -1865,8 +1955,34 @@ extension BleManager: CBCentralManagerDelegate {
                 }
             }
             
-            // Attempt reconnection after a short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + MIN_RECONNECT_INTERVAL) { [weak self] in
+            // Attempt reconnection with exponential backoff
+            let retryCount = (connectionRetryCount[peripheral.identifier] ?? 0) + 1
+            connectionRetryCount[peripheral.identifier] = retryCount
+            
+            // Give up after max retries
+            guard retryCount <= MAX_CONNECTION_RETRIES else {
+                print("[BleManager] Max retries (\(MAX_CONNECTION_RETRIES)) exceeded for \(peripheral.identifier) on disconnect, giving up")
+                connectionRetryCount.removeValue(forKey: peripheral.identifier)
+                // Notify peer lost since we're giving up
+                if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
+                    protocolInstance.removeNeighborRoutes(neighborId: deviceId)
+                    try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                    meshController.registerDisconnection(peerId: deviceId)
+                    refreshSelfMetrics()
+                    connections.removeConnectionRole(for: deviceId)
+                    connections.removePeripheralDeviceId(for: peripheral.identifier)
+                    connections.removeCentralDeviceId(for: peripheral.identifier)
+                    DispatchQueue.main.async {
+                        self.refreshAdvertising(reason: "disconnect_max_retries")
+                    }
+                    maybeHandleRebalance(reason: "disconnect_max_retries")
+                }
+                return
+            }
+            
+            let backoffInterval = min(MAX_RECONNECT_INTERVAL, MIN_RECONNECT_INTERVAL * pow(2.0, Double(retryCount - 1)))
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + backoffInterval) { [weak self] in
                 guard let self = self else { return }
                 if self.state == .running && self.discoveredPeripherals[peripheral.identifier] != nil {
                     self.attemptConnection(to: peripheral, reason: "retry_disconnect")
