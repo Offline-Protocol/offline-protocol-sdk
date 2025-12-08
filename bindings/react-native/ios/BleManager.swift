@@ -121,6 +121,8 @@ public class BleManager: NSObject, TransportManager {
     private var isAdvertising = false
     private var centralReady = false
     private var peripheralReady = false
+    private var isGattServiceReady = false
+    private var pendingAdvertiseAfterServiceReady = false
     private var subscribedCentrals: Set<UUID> = []
     private var lastMeshAdvertisement: MeshAdvertisementData?
     
@@ -397,6 +399,8 @@ public class BleManager: NSObject, TransportManager {
         
         centralReady = false
         peripheralReady = false
+        isGattServiceReady = false
+        pendingAdvertiseAfterServiceReady = false
         
         updateState(.stopped)
         emitDiagnostic("info", "BLE transport stopped")
@@ -705,6 +709,16 @@ public class BleManager: NSObject, TransportManager {
         
         setupGattServer()
         
+        // Wait for GATT service to be ready before advertising
+        guard isGattServiceReady else {
+            pendingAdvertiseAfterServiceReady = true
+            if logThrottler.shouldLog(key: "advert_waiting_gatt", interval: 5) {
+                print("[BleManager] Waiting for GATT service to be ready before advertising (reason: \(reason))")
+                emitDiagnostic("info", "Waiting for GATT service registration", context: ["reason": reason])
+            }
+            return
+        }
+        
         let meshData = meshController.advertisement()
         lastMeshAdvertisement = meshData
         var advertisementData: [String: Any] = [
@@ -763,9 +777,12 @@ public class BleManager: NSObject, TransportManager {
     
     private func setupGattServer() {
         guard let peripheral = peripheralManager else { return }
-        if messageCharacteristic != nil && deviceIdCharacteristic != nil {
+        if messageCharacteristic != nil && deviceIdCharacteristic != nil && isGattServiceReady {
             return
         }
+        
+        // Reset flag - service registration is asynchronous
+        isGattServiceReady = false
         
         // Create message characteristic (write without response + notify)
         messageCharacteristic = CBMutableCharacteristic(
@@ -788,10 +805,10 @@ public class BleManager: NSObject, TransportManager {
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
         service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!]
         
-        // Add service to peripheral manager
+        // Add service to peripheral manager (asynchronous - callback in peripheralManager(_:didAdd:error:))
         peripheral.add(service)
-        print("[BleManager] GATT server configured")
-        emitDiagnostic("info", "GATT server configured")
+        print("[BleManager] GATT server setup initiated, waiting for service registration callback...")
+        emitDiagnostic("info", "GATT server setup initiated")
     }
     
     private func startFragmentPolling() {
@@ -1523,7 +1540,20 @@ extension BleManager: CBCentralManagerDelegate {
         pruneMeshObservations(now: now)
         meshController.observeAdvertisement(meshMetadata, rssi: Int(rssiValue))
 
-        let decision = meshController.shouldInitiateOutbound(metadata: meshMetadata, rssi: Int(rssiValue))
+        // When there's no metadata (iOS/Android advertising without service data),
+        // still try to connect - metadata will be exchanged via GATT after connection
+        let decision: MeshController.MeshDecision
+        if meshMetadata == nil {
+            // No metadata in advertisement - allow basic connection to exchange info via GATT
+            decision = MeshController.MeshDecision(
+                intent: .intraCluster,
+                reason: "no_metadata_in_advert",
+                evictPeerId: nil
+            )
+        } else {
+            decision = meshController.shouldInitiateOutbound(metadata: meshMetadata, rssi: Int(rssiValue))
+        }
+        
         guard decision.intent != .rejected else {
             if logThrottler.shouldLog(key: "mesh_skip_\(peripheral.identifier.uuidString)", interval: 15) {
                 print("[BleManager] Skipping \(peripheral.identifier) due to \(decision.reason)")
@@ -1889,6 +1919,32 @@ extension BleManager: CBPeripheralManagerDelegate {
         } else {
             print("[BleManager] Advertising started successfully")
             emitDiagnostic("info", "BLE advertising started successfully")
+        }
+    }
+    
+    public func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        if let error = error {
+            print("[BleManager] ❌ Error adding GATT service: \(error)")
+            emitDiagnostic("error", "Error adding GATT service", context: [
+                "error": error.localizedDescription,
+                "serviceUUID": service.uuid.uuidString
+            ])
+            isGattServiceReady = false
+            return
+        }
+        
+        print("[BleManager] ✅ GATT service added successfully: \(service.uuid)")
+        emitDiagnostic("info", "GATT service registered successfully", context: [
+            "serviceUUID": service.uuid.uuidString
+        ])
+        
+        isGattServiceReady = true
+        
+        // Start advertising now that the service is ready
+        if pendingAdvertiseAfterServiceReady {
+            pendingAdvertiseAfterServiceReady = false
+            print("[BleManager] 📡 Starting deferred advertising after GATT service ready")
+            startAdvertising(reason: "gatt_service_ready")
         }
     }
     

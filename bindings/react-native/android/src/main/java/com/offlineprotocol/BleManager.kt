@@ -113,6 +113,8 @@ class BleManager(
     private var gattServer: BluetoothGattServer? = null
     private var messageCharacteristic: BluetoothGattCharacteristic? = null
     private var deviceIdCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile private var isGattServiceReady = false
+    @Volatile private var pendingAdvertiseReason: String? = null
     
     // Connection registry keeps track of client/server links and desired roles.
     private val connections = MeshConnectionRegistry()
@@ -412,6 +414,8 @@ class BleManager(
         // Close GATT server
         gattServer?.close()
         gattServer = null
+        isGattServiceReady = false
+        pendingAdvertiseReason = null
         
         updateState(TransportState.STOPPED)
         protocol.bleStatusChanged(false)
@@ -508,6 +512,9 @@ class BleManager(
     
     private fun setupGattServer() {
         try {
+            // Reset flag - service registration is asynchronous
+            isGattServiceReady = false
+            
             gattServer = bluetoothManager.openGattServer(context, gattServerCallback)
             
             // Create message characteristic (write without response + notify)
@@ -530,10 +537,11 @@ class BleManager(
             service.addCharacteristic(messageCharacteristic)
             service.addCharacteristic(deviceIdCharacteristic)
             
-            // Add service to GATT server
+            // Add service to GATT server (asynchronous - callback in onServiceAdded)
             gattServer?.addService(service)
             
-            Log.i(TAG, "GATT server configured")
+            Log.i(TAG, "GATT server setup initiated, waiting for service registration callback...")
+            emitDiagnostic("info", "GATT server setup initiated")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while setting up GATT server", e)
             throw e
@@ -643,6 +651,16 @@ class BleManager(
     
     private fun startAdvertising(reason: String = "manual") {
         if (isAdvertising) return
+        
+        // Wait for GATT service to be ready before advertising
+        if (!isGattServiceReady) {
+            pendingAdvertiseReason = reason
+            if (logThrottler.shouldLog("advert_waiting_gatt", intervalMs = 5000)) {
+                Log.i(TAG, "Waiting for GATT service to be ready before advertising (reason: $reason)")
+                emitDiagnostic("info", "Waiting for GATT service registration", mapOf("reason" to reason))
+            }
+            return
+        }
         
         try {
             val settings = AdvertiseSettings.Builder()
@@ -1456,6 +1474,33 @@ class BleManager(
     // MARK: - GATT Server Callback
     
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.i(TAG, "✅ GATT service added successfully: ${service?.uuid}")
+                emitDiagnostic("info", "GATT service registered successfully", mapOf(
+                    "serviceUUID" to (service?.uuid?.toString() ?: "unknown")
+                ))
+                isGattServiceReady = true
+                
+                // Start advertising now that the service is ready
+                val reason = pendingAdvertiseReason
+                if (reason != null) {
+                    pendingAdvertiseReason = null
+                    Log.i(TAG, "📡 Starting deferred advertising after GATT service ready")
+                    mainHandler.post {
+                        startAdvertising("gatt_service_ready")
+                    }
+                }
+            } else {
+                Log.e(TAG, "❌ Error adding GATT service: status=$status")
+                emitDiagnostic("error", "Error adding GATT service", mapOf(
+                    "status" to status,
+                    "serviceUUID" to (service?.uuid?.toString() ?: "unknown")
+                ))
+                isGattServiceReady = false
+            }
+        }
+        
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
