@@ -164,6 +164,11 @@ public class BleManager: NSObject, TransportManager {
     /// Rate limiting for unknown connectable devices that need GATT verification
     private var unknownDeviceAttempts: [UUID: Date] = [:]
     private let UNKNOWN_DEVICE_RATE_LIMIT: TimeInterval = 10.0
+    /// Proactive scan refresh interval even when discoveries are occurring
+    private let PROACTIVE_SCAN_REFRESH_INTERVAL: TimeInterval = 60.0
+    private var lastProactiveScanRefresh: Date?
+    /// Tracks recently seen advertisement hashes to avoid duplicate processing
+    private var recentAdvertisementHashes: [UUID: (hash: Int, timestamp: Date)] = [:]
 
     // MARK: - Thread helpers
     @inline(__always)
@@ -391,10 +396,12 @@ public class BleManager: NSObject, TransportManager {
         pendingOutboundFragments.removeAll()
         lastSeenMeshAdvertisements.removeAll()
         unknownDeviceAttempts.removeAll()
+        recentAdvertisementHashes.removeAll()
         pendingAdvertiseRestart?.cancel()
         pendingAdvertiseRestart = nil
         lastAdvertiseRestartAt = nil
         transportStartAt = nil
+        lastProactiveScanRefresh = nil
         subscribedCentrals.removeAll()
         
         // Clean up managers
@@ -490,8 +497,10 @@ public class BleManager: NSObject, TransportManager {
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         )
         isScanning = true
-        scanStartDate = Date()
+        let now = Date()
+        scanStartDate = now
         lastDiscoveryDate = scanStartDate
+        lastProactiveScanRefresh = now
         startScanMonitor()
         if logThrottler.shouldLog(key: "scan_started") {
             let context: [String: Any] = [
@@ -536,11 +545,26 @@ public class BleManager: NSObject, TransportManager {
             let now = Date()
             let lastActivity = self.lastDiscoveryDate ?? self.scanStartDate ?? now
             let idleDuration = now.timeIntervalSince(lastActivity)
+            
+            // Check for inactivity-based restart
             if idleDuration >= self.SCAN_RESTART_INTERVAL {
                 if self.logThrottler.shouldLog(key: "scan_watchdog", interval: self.SCAN_RESTART_INTERVAL) {
                     print("[BleManager] Restarting scan after \(Int(idleDuration))s of inactivity")
                     self.emitDiagnostic("warning", "Restarting BLE scan due to inactivity", context: ["idle_seconds": Int(idleDuration)])
                 }
+                self.restartScanningDueToInactivity()
+                return
+            }
+            
+            // Proactive scan refresh even when discoveries are occurring
+            // This ensures we don't miss devices due to BLE stack issues
+            let lastRefresh = self.lastProactiveScanRefresh ?? self.scanStartDate ?? now
+            if now.timeIntervalSince(lastRefresh) >= self.PROACTIVE_SCAN_REFRESH_INTERVAL {
+                if self.logThrottler.shouldLog(key: "proactive_scan_refresh", interval: self.PROACTIVE_SCAN_REFRESH_INTERVAL) {
+                    print("[BleManager] Proactively refreshing BLE scan")
+                    self.emitDiagnostic("info", "Proactive scan refresh")
+                }
+                self.lastProactiveScanRefresh = now
                 self.restartScanningDueToInactivity()
             }
         }
@@ -625,13 +649,22 @@ public class BleManager: NSObject, TransportManager {
     private func attemptConnection(to peripheral: CBPeripheral, reason: String, rssi: Int16? = nil, desiredRole: MeshController.MeshRole? = nil) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            
+            // Atomic check-and-connect: all checks must pass before proceeding
+            // This prevents race conditions when multiple discovery callbacks try to connect
+            
+            // 1. Already connected check
             if self.connections.connectedPeripheral(for: peripheral.identifier) != nil {
                 return
             }
+            
+            // 2. Recent attempt cooldown check
             let now = Date()
             if let lastAttempt = self.connectionAttemptTimestamps[peripheral.identifier], now.timeIntervalSince(lastAttempt) < self.MIN_RECONNECT_INTERVAL {
                 return
             }
+            
+            // 3. RSSI threshold check
             if let effectiveRSSI = rssi ?? self.peripheralRSSI[peripheral.identifier], effectiveRSSI < self.MINIMUM_RSSI_TO_CONNECT {
                 if self.logThrottler.shouldLog(key: "rssi_skip_\(peripheral.identifier.uuidString)", interval: 10) {
                     self.emitDiagnostic("debug", "Skipping BLE connect due to weak RSSI", context: [
@@ -642,12 +675,24 @@ public class BleManager: NSObject, TransportManager {
                 }
                 return
             }
+            
+            // 4. Connection capacity check (atomic with the connect call)
             if self.currentConnectionCount() >= self.MAX_CONNECTIONS_PER_DEVICE {
                 if self.logThrottler.shouldLog(key: "mesh_conn_cap_ios", interval: 10) {
                     print("[BleManager] Connection cap reached, not connecting to \(peripheral.identifier)")
                 }
                 return
             }
+            
+            // 5. Double-check peripheral state before connecting
+            guard peripheral.state != .connecting else {
+                if self.logThrottler.shouldLog(key: "already_connecting_\(peripheral.identifier.uuidString)", interval: 5) {
+                    print("[BleManager] Already connecting to \(peripheral.identifier)")
+                }
+                return
+            }
+            
+            // All checks passed - proceed with connection
             self.connectionAttemptTimestamps[peripheral.identifier] = now
             if let desiredRole = desiredRole {
                 self.connections.setPendingRole(desiredRole, for: peripheral.identifier)
@@ -655,6 +700,7 @@ public class BleManager: NSObject, TransportManager {
                 self.connections.setPendingRole(.member, for: peripheral.identifier)
             }
             peripheral.delegate = self
+            
             if peripheral.state == .connected {
                 self.connections.registerPeripheral(peripheral)
                 if let service = peripheral.services?.first(where: { $0.uuid == self.SERVICE_UUID }) {
@@ -664,6 +710,7 @@ public class BleManager: NSObject, TransportManager {
                 }
                 return
             }
+            
             self.centralManager?.connect(peripheral, options: nil)
             if self.logThrottler.shouldLog(key: "connect_attempt_\(peripheral.identifier.uuidString)", interval: 10) {
                 print("[BleManager] Attempting connection to \(peripheral.identifier) (reason: \(reason))")
@@ -1419,6 +1466,32 @@ public class BleManager: NSObject, TransportManager {
         }
         return nil
     }
+    
+    /// Computes a hash of the advertisement data for duplicate detection.
+    /// Uses peripheral ID, RSSI bucket, and key advertisement data.
+    private func computeAdvertisementHash(peripheral: CBPeripheral, advertisementData: [String: Any], rssi: Int16) -> Int {
+        var hasher = Hasher()
+        hasher.combine(peripheral.identifier)
+        // Use RSSI buckets of 5 dBm to avoid hash changes from minor signal fluctuations
+        hasher.combine(rssi / 5)
+        
+        // Include service UUIDs if present
+        if let serviceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] {
+            for uuid in serviceUUIDs {
+                hasher.combine(uuid.uuidString)
+            }
+        }
+        
+        // Include service data if present
+        if let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data] {
+            for (uuid, data) in serviceData {
+                hasher.combine(uuid.uuidString)
+                hasher.combine(data)
+            }
+        }
+        
+        return hasher.finalize()
+    }
 
     private func maybeHandleRebalance(reason: String) {
         pruneMeshObservations()
@@ -1591,6 +1664,23 @@ extension BleManager: CBCentralManagerDelegate {
         
         // Adaptive scanning: track discoveries for density estimation
         recordDiscoveryForDensity(now: now)
+        
+        // Duplicate advertisement detection - avoid processing identical advertisements
+        // This improves performance in dense networks where the same device may be seen many times
+        let advertHash = computeAdvertisementHash(peripheral: peripheral, advertisementData: advertisementData, rssi: rssiValue)
+        if let cached = recentAdvertisementHashes[peripheral.identifier] {
+            // If we've seen this exact advertisement recently, skip processing
+            if cached.hash == advertHash && now.timeIntervalSince(cached.timestamp) < 1.0 {
+                return
+            }
+        }
+        recentAdvertisementHashes[peripheral.identifier] = (hash: advertHash, timestamp: now)
+        
+        // Prune old advertisement cache entries periodically
+        if recentAdvertisementHashes.count > 100 {
+            let cutoff = now.addingTimeInterval(-30.0)
+            recentAdvertisementHashes = recentAdvertisementHashes.filter { $0.value.timestamp > cutoff }
+        }
         
         // Smart filtering for iOS ↔ Android interoperability
         // Since we scan without a service UUID filter (for Android compatibility),

@@ -77,6 +77,7 @@ class BleManager(
         private const val ADVERTISE_RESTART_MIN_MS = 200L
         private const val ADVERTISE_RESTART_MAX_MS = 1200L
         private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
+        private const val MIN_RECONNECT_INTERVAL_MS = 5_000L // Match iOS timing
         
         // Adaptive Scan Configuration
         /** Minimum RSSI to consider for connection (filter weak signals early) */
@@ -91,6 +92,12 @@ class BleManager(
         private const val ADAPTIVE_COOLDOWN_PER_DEVICE_MS = 30_000L
         /** Interval for updating visible peer count estimate (ms) */
         private const val ADAPTIVE_PEER_COUNT_WINDOW_MS = 5_000L
+        /** Rate limit for unknown device GATT verification attempts (ms) */
+        private const val UNKNOWN_DEVICE_RATE_LIMIT_MS = 10_000L
+        /** Minimum RSSI for unknown device to be considered for GATT verification */
+        private const val UNKNOWN_DEVICE_MIN_RSSI = -75
+        /** Proactive scan refresh interval even when discoveries are occurring (ms) */
+        private const val PROACTIVE_SCAN_REFRESH_MS = 60_000L
     }
     
     // MARK: - Properties
@@ -147,6 +154,12 @@ class BleManager(
     /** Last time we updated the peer count estimate */
     @Volatile private var lastPeerCountUpdate: Long = 0L
     @Volatile private var lastMeshAdvertisement: MeshAdvertisementData? = null
+    /** Rate limiting for unknown connectable devices that need GATT verification */
+    private val unknownDeviceAttempts = ConcurrentHashMap<String, Long>()
+    /** Last time we proactively refreshed the scan */
+    @Volatile private var lastProactiveScanRefresh: Long = 0L
+    /** Tracks recently seen advertisements to avoid duplicate processing */
+    private val recentAdvertisementHashes = ConcurrentHashMap<String, Long>()
     
     // Fragment polling
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -409,7 +422,10 @@ class BleManager(
         pendingFragments.clear()
         pendingOutboundFragments.clear()
         lastSeenMeshAdvertisements.clear()
+        unknownDeviceAttempts.clear()
+        recentAdvertisementHashes.clear()
         transportStartAt = 0L
+        lastProactiveScanRefresh = 0L
         
         // Close GATT server
         gattServer?.close()
@@ -570,9 +586,11 @@ class BleManager(
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .build()
             
-            val scanFilter = ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(SERVICE_UUID))
-                .build()
+            // CRITICAL FIX: Scan without service UUID filter for iOS ↔ Android interoperability
+            // iOS's CoreBluetooth has known issues recognizing 128-bit service UUIDs from Android
+            // advertisements, and vice versa. Scanning without filter and filtering in software
+            // ensures we discover all mesh devices regardless of platform quirks.
+            // We filter in handleScanResult using shouldProcessDiscoveredDevice().
             
             scanCallback = object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -600,18 +618,49 @@ class BleManager(
                 }
             }
             
-            scanner.startScan(listOf(scanFilter), scanSettings, scanCallback)
+            // Scan without filter - we'll filter in software for cross-platform compatibility
+            scanner.startScan(null, scanSettings, scanCallback)
             isScanning = true
-            lastDiscoveryAt = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            lastDiscoveryAt = now
+            lastProactiveScanRefresh = now
             scheduleScanWatchdog()
             if (logThrottler.shouldLog("scan_started")) {
-                Log.i(TAG, "✅ BLE scanning started successfully (reason: $reason)")
-                emitDiagnostic("info", "BLE scanning started", mapOf("reason" to reason))
+                Log.i(TAG, "BLE scanning started (no filter, reason: $reason)")
+                emitDiagnostic("info", "BLE scanning started", mapOf(
+                    "reason" to reason,
+                    "filterless" to true
+                ))
             }
+            
+            // Rehydrate previously connected devices to avoid waiting for advertisements
+            rehydratePreviouslyConnectedDevices()
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while starting scan", e)
             emitDiagnostic("error", "Permission denied while starting scan", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
             throw e
+        }
+    }
+    
+    /**
+     * Attempts to reconnect to previously known devices without waiting for advertisements.
+     * This speeds up rediscovery after app restart or Bluetooth toggle.
+     */
+    private fun rehydratePreviouslyConnectedDevices() {
+        try {
+            val bondedDevices = bluetoothAdapter?.bondedDevices ?: return
+            for (device in bondedDevices) {
+                val address = device.address
+                // Only attempt if we previously had this device in our registry
+                if (connections.hasDeviceForAddress(address) && connections.getGatt(address) == null) {
+                    if (logThrottler.shouldLog("rehydrate_$address", intervalMs = 30_000)) {
+                        Log.d(TAG, "Rehydrating connection to bonded device: $address")
+                    }
+                    connectToDevice(device)
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Cannot access bonded devices for rehydration", e)
         }
     }
     
@@ -674,7 +723,7 @@ class BleManager(
             
             advertiseCallback = object : AdvertiseCallback() {
                 override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                    Log.i(TAG, "✅ BLE advertising started successfully (reason=$reason)")
+                    Log.i(TAG, "BLE advertising started successfully (reason=$reason)")
                     isAdvertising = true
                     lastAdvertiseRestartAt = System.currentTimeMillis()
                     emitDiagnostic("info", "BLE advertising started", mapOf("reason" to reason))
@@ -788,8 +837,41 @@ class BleManager(
         val now = System.currentTimeMillis()
         lastDiscoveryAt = now
         
+        // Duplicate advertisement detection - avoid processing identical advertisements
+        // This improves performance in dense networks
+        val advertHash = computeAdvertisementHash(result)
+        val cached = recentAdvertisementHashes[address]
+        if (cached != null && cached.first == advertHash && now - cached.second < 1000L) {
+            return // Skip duplicate advertisement
+        }
+        recentAdvertisementHashes[address] = Pair(advertHash, now)
+        
+        // Prune old advertisement cache entries periodically
+        if (recentAdvertisementHashes.size > 100) {
+            val cutoff = now - 30_000L
+            val iterator = recentAdvertisementHashes.entries.iterator()
+            while (iterator.hasNext()) {
+                if (iterator.next().value.second < cutoff) {
+                    iterator.remove()
+                }
+            }
+        }
+        
         // Adaptive scanning: track discoveries for density estimation
         recordDiscoveryForDensity(now)
+        
+        // CRITICAL: Software-based filtering for iOS ↔ Android interoperability
+        // Since we scan without a service UUID filter, we filter here instead.
+        val scanRecord = result.scanRecord
+        val isConnectable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            result.isConnectable
+        } else {
+            true // Assume connectable on older Android
+        }
+        
+        if (!shouldProcessDiscoveredDevice(address, scanRecord, rssi, isConnectable, now)) {
+            return
+        }
         
         // Adaptive scanning: early RSSI filtering in dense networks
         if (shouldFilterByRssi(rssi)) {
@@ -805,11 +887,6 @@ class BleManager(
         }
         
         val lastLog = discoveryLogTimestamps[address]
-        val isConnectable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            result.isConnectable
-        } else {
-            null
-        }
         if (lastLog == null || now - lastLog > 30000) {
             discoveryLogTimestamps[address] = now
             Log.d(TAG, "Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount)")
@@ -819,14 +896,13 @@ class BleManager(
                 mapOf(
                     "address" to address,
                     "rssi" to rssi,
-                    "connectable" to (isConnectable ?: true),
+                    "connectable" to isConnectable,
                     "visiblePeers" to estimatedVisiblePeerCount
                 )
             )
         }
         lastSeenRssi[address] = rssi.toShort()
 
-        val scanRecord = result.scanRecord
         val serviceData = scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
         val meshMetadata = MeshAdvertisementData.decode(serviceData)
         meshMetadata?.let {
@@ -898,19 +974,154 @@ class BleManager(
         }
 
         maybeHandleRebalance("scan")
+        
+        // Check if we should proactively refresh the scan
+        maybeProactivelyRefreshScan(now)
     }
+    
+    /**
+     * Determines if a discovered device should be processed.
+     * Implements smart filtering since we scan without a service UUID filter
+     * (required for iOS ↔ Android interoperability).
+     *
+     * Accepts:
+     * - Devices advertising our service UUID
+     * - Devices with our service data
+     * - Previously discovered mesh devices
+     * - Unknown connectable devices (rate-limited, verified via GATT)
+     */
+    private fun shouldProcessDiscoveredDevice(
+        address: String,
+        scanRecord: android.bluetooth.le.ScanRecord?,
+        rssi: Int,
+        isConnectable: Boolean,
+        now: Long
+    ): Boolean {
+        // 1. Check if device is advertising our service UUID
+        val serviceUuids = scanRecord?.serviceUuids
+        if (serviceUuids != null) {
+            for (uuid in serviceUuids) {
+                if (uuid.uuid == SERVICE_UUID) {
+                    return true
+                }
+            }
+        }
+        
+        // 2. Check for our service data
+        val serviceData = scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
+        if (serviceData != null) {
+            return true
+        }
+        
+        // 3. Check if this is a previously discovered mesh device
+        if (lastSeenMeshAdvertisements.containsKey(address)) {
+            return true
+        }
+        
+        // 4. Check if we already have a device ID mapping for this device
+        if (connections.deviceIdForAddress(address) != null) {
+            return true
+        }
+        
+        // 5. Check if we have an active GATT connection to this device
+        if (connections.getGatt(address) != null) {
+            return true
+        }
+        
+        // 6. For unknown connectable devices, allow with rate limiting
+        //    These will be verified via GATT service discovery after connection
+        if (isConnectable) {
+            // Rate limit unknown device connection attempts
+            val lastAttempt = unknownDeviceAttempts[address]
+            if (lastAttempt != null && now - lastAttempt < UNKNOWN_DEVICE_RATE_LIMIT_MS) {
+                return false
+            }
+            
+            // Only process strong signals for unknown devices
+            if (rssi >= UNKNOWN_DEVICE_MIN_RSSI) {
+                unknownDeviceAttempts[address] = now
+                if (logThrottler.shouldLog("unknown_connectable_$address", intervalMs = 30_000)) {
+                    Log.d(TAG, "Allowing unknown connectable device for GATT verification: $address RSSI=$rssi")
+                    emitDiagnostic("debug", "Allowing unknown device for GATT verification", mapOf(
+                        "address" to address,
+                        "rssi" to rssi
+                    ))
+                }
+                return true
+            }
+        }
+        
+        // Filter out all other devices (not our mesh network)
+        return false
+    }
+    
+    /**
+     * Proactively refreshes the scan periodically to ensure we don't miss devices
+     * due to BLE stack issues or cached state.
+     */
+    private fun maybeProactivelyRefreshScan(now: Long) {
+        if (now - lastProactiveScanRefresh >= PROACTIVE_SCAN_REFRESH_MS) {
+            lastProactiveScanRefresh = now
+            if (logThrottler.shouldLog("proactive_scan_refresh", intervalMs = PROACTIVE_SCAN_REFRESH_MS)) {
+                Log.d(TAG, "Proactively refreshing BLE scan")
+                emitDiagnostic("info", "Proactive scan refresh")
+            }
+            restartScanning("proactive_refresh")
+        }
+    }
+    
+    /**
+     * Computes a hash of the advertisement data for duplicate detection.
+     * Uses device address, RSSI bucket, and key advertisement data.
+     */
+    private fun computeAdvertisementHash(result: ScanResult): Int {
+        var hash = result.device.address.hashCode()
+        // Use RSSI buckets of 5 dBm to avoid hash changes from minor signal fluctuations
+        hash = 31 * hash + (result.rssi / 5)
+        
+        val scanRecord = result.scanRecord
+        if (scanRecord != null) {
+            // Include service UUIDs
+            scanRecord.serviceUuids?.forEach { uuid ->
+                hash = 31 * hash + uuid.hashCode()
+            }
+            
+            // Include service data
+            val serviceData = scanRecord.getServiceData(ParcelUuid(SERVICE_UUID))
+            if (serviceData != null) {
+                hash = 31 * hash + serviceData.contentHashCode()
+            }
+        }
+        
+        return hash
+    }
+    
+    /** Lock for atomic connection count check and connect operations */
+    private val connectionLock = Any()
     
     private fun connectToDevice(device: BluetoothDevice) {
         try {
-            if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
-                if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
-                    Log.d(TAG, "Connection cap reached, not connecting to ${device.address}")
+            // Atomic check-and-connect to prevent race conditions
+            synchronized(connectionLock) {
+                if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+                    if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
+                        Log.d(TAG, "Connection cap reached, not connecting to ${device.address}")
+                    }
+                    connections.consumePendingRole(device.address)
+                    return
                 }
-                connections.consumePendingRole(device.address)
-                return
+                
+                // Double-check we don't already have a connection to this device
+                if (connections.getGatt(device.address) != null) {
+                    if (logThrottler.shouldLog("already_connecting_${device.address}", intervalMs = 5000)) {
+                        Log.d(TAG, "Already have GATT client for ${device.address}")
+                    }
+                    return
+                }
+                
+                val gatt = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
+                connections.registerGatt(device.address, gatt)
             }
-            val gatt = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
-            connections.registerGatt(device.address, gatt)
             
             Log.i(TAG, "Connecting to device: ${device.address}")
             emitDiagnostic("info", "Connecting to BLE device", mapOf("address" to device.address))
@@ -1676,7 +1887,7 @@ class BleManager(
                     
                     // Try to reconnect if we were connected and state is still running
                     if (wasConnected && state == TransportState.RUNNING) {
-                        // Attempt reconnection after a short delay
+                        // Attempt reconnection after a delay matching iOS timing
                         mainHandler.postDelayed({
                             if (state == TransportState.RUNNING && connections.hasDeviceForAddress(address)) {
                                 try {
@@ -1688,7 +1899,7 @@ class BleManager(
                                     Log.e(TAG, "Error reconnecting to device", e)
                                 }
                             }
-                        }, 1000)
+                        }, MIN_RECONNECT_INTERVAL_MS)
                     } else {
                         // Notify protocol of peer loss only if we're not reconnecting
                         connections.deviceIdForAddress(address)?.let { deviceId ->
