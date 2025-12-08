@@ -698,7 +698,11 @@ class BleManager(
                 }
             }
             
-            bluetoothLeAdvertiser?.startAdvertising(settings, advertiseData, advertiseCallback)
+            // Include scan response with service UUID for iOS compatibility
+            // iOS's CoreBluetooth actively queries for scan responses and has known issues
+            // recognizing 128-bit service UUIDs from Android's main advertisement packet
+            val scanResponse = buildScanResponse()
+            bluetoothLeAdvertiser?.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
             
             // Reduced logging
         } catch (e: SecurityException) {
@@ -759,6 +763,21 @@ class BleManager(
             .addServiceUuid(ParcelUuid(SERVICE_UUID))
             // Don't include service data - it often exceeds Android's 31-byte limit
             // Mesh metadata will be read via GATT characteristics after connection
+            .build()
+    }
+    
+    /**
+     * Builds the scan response data for BLE advertising.
+     * 
+     * iOS's CoreBluetooth actively queries for scan responses during BLE scanning.
+     * Including the service UUID in the scan response makes Android devices more
+     * reliably visible to iOS devices, which have known issues recognizing 128-bit
+     * service UUIDs from Android's main advertisement packet format.
+     */
+    private fun buildScanResponse(): AdvertiseData {
+        return AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
+            .addServiceUuid(ParcelUuid(SERVICE_UUID))
             .build()
     }
     

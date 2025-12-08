@@ -161,6 +161,9 @@ public class BleManager: NSObject, TransportManager {
     private let MAX_CONSECUTIVE_SCAN_RESTARTS = 3
     private let CENTRAL_RESET_BACKOFF: TimeInterval = 45.0
     private let MINIMUM_RSSI_TO_CONNECT: Int16 = -90
+    /// Rate limiting for unknown connectable devices that need GATT verification
+    private var unknownDeviceAttempts: [UUID: Date] = [:]
+    private let UNKNOWN_DEVICE_RATE_LIMIT: TimeInterval = 10.0
 
     // MARK: - Thread helpers
     @inline(__always)
@@ -387,6 +390,7 @@ public class BleManager: NSObject, TransportManager {
         pendingFragments.removeAll()
         pendingOutboundFragments.removeAll()
         lastSeenMeshAdvertisements.removeAll()
+        unknownDeviceAttempts.removeAll()
         pendingAdvertiseRestart?.cancel()
         pendingAdvertiseRestart = nil
         lastAdvertiseRestartAt = nil
@@ -477,8 +481,12 @@ public class BleManager: NSObject, TransportManager {
             scanRestartCount = 0
         }
         
+        // Scan without service UUID filter for iOS ↔ Android interoperability
+        // iOS's scanForPeripherals(withServices:) has known issues recognizing 128-bit
+        // service UUIDs from Android advertisements. Scanning with nil allows us to see
+        // all peripherals and filter in the discovery callback instead.
         central.scanForPeripherals(
-            withServices: [SERVICE_UUID],
+            withServices: nil,
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
         )
         isScanning = true
@@ -1216,6 +1224,9 @@ public class BleManager: NSObject, TransportManager {
 
     private func pruneMeshObservations(now: Date = Date()) {
         lastSeenMeshAdvertisements = lastSeenMeshAdvertisements.filter { now.timeIntervalSince($0.value.timestamp) <= MESH_OBSERVATION_TTL }
+        
+        // Also clean up stale unknown device rate limiting entries
+        unknownDeviceAttempts = unknownDeviceAttempts.filter { now.timeIntervalSince($0.value) <= UNKNOWN_DEVICE_RATE_LIMIT * 3 }
     }
     
     // MARK: - Adaptive Scan Methods
@@ -1318,6 +1329,88 @@ public class BleManager: NSObject, TransportManager {
         let normalizedHash = Double(abs(hash) % 1000) / 1000.0
         
         return normalizedHash < skipProbability
+    }
+    
+    // MARK: - Smart Filtering for iOS ↔ Android Interoperability
+    
+    /// Determines if a discovered peripheral should be processed.
+    /// This implements smart filtering since we scan without a service UUID filter
+    /// (required for iOS ↔ Android interoperability).
+    ///
+    /// Accepts:
+    /// - Devices advertising our service UUID (iOS devices)
+    /// - Devices with our service data
+    /// - Previously discovered mesh devices
+    /// - Unknown connectable devices (rate-limited, verified via GATT)
+    private func shouldProcessDiscoveredPeripheral(
+        peripheral: CBPeripheral,
+        advertisementData: [String: Any],
+        rssi: Int16,
+        now: Date
+    ) -> Bool {
+        // 1. Check if device is advertising our service UUID
+        if let serviceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] {
+            if serviceUUIDs.contains(SERVICE_UUID) {
+                return true
+            }
+        }
+        
+        // 2. Check for our service data (may come from scan response)
+        if let serviceData = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data] {
+            if serviceData[SERVICE_UUID] != nil {
+                return true
+            }
+        }
+        
+        // 3. Check if this is a previously discovered mesh device
+        if lastSeenMeshAdvertisements[peripheral.identifier] != nil {
+            return true
+        }
+        
+        // 4. Check if we already have this peripheral in our discovered list
+        //    (previously connected or successfully verified via GATT)
+        if discoveredPeripherals[peripheral.identifier] != nil {
+            return true
+        }
+        
+        // 5. Check if we already have a device ID mapping for this peripheral
+        if connections.peripheralDeviceId(for: peripheral.identifier) != nil ||
+           connections.centralDeviceId(for: peripheral.identifier) != nil {
+            return true
+        }
+        
+        // 6. For unknown connectable devices, allow with rate limiting
+        //    These will be verified via GATT service discovery after connection
+        let isConnectable: Bool
+        if #available(iOS 13.0, *) {
+            isConnectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? false
+        } else {
+            isConnectable = true
+        }
+        
+        if isConnectable {
+            // Rate limit unknown device connection attempts
+            if let lastAttempt = unknownDeviceAttempts[peripheral.identifier],
+               now.timeIntervalSince(lastAttempt) < UNKNOWN_DEVICE_RATE_LIMIT {
+                return false
+            }
+            
+            // Only process strong signals for unknown devices
+            if rssi >= -75 {
+                unknownDeviceAttempts[peripheral.identifier] = now
+                if logThrottler.shouldLog(key: "unknown_connectable_\(peripheral.identifier.uuidString)", interval: 30) {
+                    print("[BleManager] Allowing unknown connectable device for GATT verification: \(peripheral.identifier) RSSI=\(rssi)")
+                    emitDiagnostic("debug", "Allowing unknown device for GATT verification", context: [
+                        "identifier": peripheral.identifier.uuidString,
+                        "rssi": rssi
+                    ])
+                }
+                return true
+            }
+        }
+        
+        // Filter out all other devices (not our mesh network)
+        return false
     }
 
     private func identifierForNodeHash(_ nodeHash: UInt64) -> UUID? {
@@ -1498,6 +1591,20 @@ extension BleManager: CBCentralManagerDelegate {
         
         // Adaptive scanning: track discoveries for density estimation
         recordDiscoveryForDensity(now: now)
+        
+        // Smart filtering for iOS ↔ Android interoperability
+        // Since we scan without a service UUID filter (for Android compatibility),
+        // we need to filter discovered peripherals here instead.
+        let shouldProcess = shouldProcessDiscoveredPeripheral(
+            peripheral: peripheral,
+            advertisementData: advertisementData,
+            rssi: rssiValue,
+            now: now
+        )
+        
+        if !shouldProcess {
+            return
+        }
         
         // Adaptive scanning: early RSSI filtering in dense networks
         if shouldFilterByRssi(rssiValue) {
