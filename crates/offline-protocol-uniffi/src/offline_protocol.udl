@@ -1,6 +1,79 @@
 namespace offline_protocol {
 };
 
+// ========================================================================
+// MLS (Message Layer Security) TYPES
+// ========================================================================
+
+// Error type for MLS storage operations
+[Error]
+enum MlsStorageError {
+    "StoreFailed",
+    "LoadFailed",
+    "DeleteFailed",
+    "KeyNotFound",
+    "CorruptedData",
+};
+
+// MLS Storage callback interface - apps implement this for platform-native secure storage
+callback interface MlsStorageProvider {
+    // Store data with the given key type and ID
+    [Throws=MlsStorageError]
+    void store(string key_type, string key_id, sequence<u8> data);
+    
+    // Load data for the given key type and ID (returns null if not found)
+    [Throws=MlsStorageError]
+    sequence<u8>? load(string key_type, string key_id);
+    
+    // Delete data for the given key type and ID
+    [Throws=MlsStorageError]
+    void delete(string key_type, string key_id);
+    
+    // List all key IDs for a given key type
+    [Throws=MlsStorageError]
+    sequence<string> list_keys(string key_type);
+};
+
+// Key package bundle for distribution
+dictionary MlsKeyPackageBundle {
+    string package_id;
+    string user_id;
+    sequence<u8> key_package_data;
+    u64 created_at_ms;
+    u64 expires_at_ms;
+    boolean synced;
+};
+
+// Welcome message for inviting users to a group
+dictionary MlsWelcomeMessage {
+    string group_id;
+    sequence<u8> welcome_data;
+    string inviter_id;
+    string? group_name;
+    u64 timestamp_ms;
+};
+
+// Encrypted message for transport
+dictionary MlsEncryptedMessage {
+    string group_id;
+    string message_type;
+    u64 epoch;
+    sequence<u8> ciphertext;
+    string sender_id;
+    u64 timestamp_ms;
+};
+
+// Group information
+dictionary MlsGroupInfo {
+    string group_id;
+    string? name;
+    sequence<string> members;
+    u64 epoch;
+    boolean is_session;
+    u64 created_at_ms;
+    u64 last_activity_ms;
+};
+
 // Error types
 [Error]
 enum ProtocolError {
@@ -9,6 +82,8 @@ enum ProtocolError {
     "InvalidConfiguration",
     "SendFailed",
     "InvalidState",
+    "MlsNotInitialized",
+    "MlsError",
     "Other",
 };
 
@@ -413,6 +488,111 @@ interface OfflineProtocol {
     DedupStats get_dedup_stats();
     u64 get_pending_ack_count();
     u64 get_retry_queue_size();
+    
+    // ========================================================================
+    // MLS (END-TO-END ENCRYPTION) OPERATIONS
+    // ========================================================================
+    
+    // Initialize MLS with a storage provider - MUST be called before using encryption
+    [Throws=ProtocolError]
+    void initialize_mls(MlsStorageProvider storage);
+    
+    // Check if MLS is initialized
+    boolean is_mls_initialized();
+    
+    // Generate a key package for distribution to others
+    [Throws=ProtocolError]
+    MlsKeyPackageBundle mls_generate_key_package();
+    
+    // Get an existing key package or generate a new one
+    [Throws=ProtocolError]
+    MlsKeyPackageBundle mls_get_or_create_key_package();
+    
+    // Import a contact's key package (for initiating encrypted sessions)
+    [Throws=ProtocolError]
+    void mls_import_key_package(string user_id, sequence<u8> key_package_data);
+    
+    // Get pending key packages that need to be uploaded to server
+    sequence<MlsKeyPackageBundle> mls_get_pending_key_packages();
+    
+    // Mark a key package as synced to server
+    [Throws=ProtocolError]
+    void mls_mark_key_package_synced(string package_id);
+    
+    // Check if a 1:1 session exists with another user
+    boolean mls_has_session(string other_user_id);
+    
+    // Create a 1:1 session with another user (returns Welcome to send)
+    [Throws=ProtocolError]
+    MlsWelcomeMessage mls_create_session(string other_user_id);
+    
+    // Join a session using a Welcome message
+    [Throws=ProtocolError]
+    MlsGroupInfo mls_join_session(MlsWelcomeMessage welcome);
+    
+    // Encrypt a message for a 1:1 session
+    [Throws=ProtocolError]
+    MlsEncryptedMessage mls_encrypt_for_user(string other_user_id, sequence<u8> plaintext);
+    
+    // Decrypt a message from a 1:1 session
+    [Throws=ProtocolError]
+    sequence<u8>? mls_decrypt_from_user(MlsEncryptedMessage encrypted);
+    
+    // List all active 1:1 sessions
+    sequence<string> mls_list_sessions();
+    
+    // Delete a 1:1 session
+    [Throws=ProtocolError]
+    void mls_delete_session(string other_user_id);
+    
+    // Get a pending Welcome message that needs to be sent
+    MlsWelcomeMessage? mls_get_pending_welcome(string other_user_id);
+    
+    // Clear a pending Welcome message after sending
+    [Throws=ProtocolError]
+    void mls_clear_pending_welcome(string other_user_id);
+    
+    // Create a new group
+    [Throws=ProtocolError]
+    MlsGroupInfo mls_create_group(string group_name);
+    
+    // Add a member to a group (returns Welcome to send to new member)
+    [Throws=ProtocolError]
+    MlsWelcomeMessage mls_add_group_member(string group_id, sequence<u8> member_key_package);
+    
+    // Remove a member from a group
+    [Throws=ProtocolError]
+    MlsEncryptedMessage mls_remove_group_member(string group_id, string member_id);
+    
+    // Leave a group
+    [Throws=ProtocolError]
+    void mls_leave_group(string group_id);
+    
+    // Encrypt a message for a group
+    [Throws=ProtocolError]
+    MlsEncryptedMessage mls_encrypt_for_group(string group_id, sequence<u8> plaintext);
+    
+    // Decrypt a message from a group
+    [Throws=ProtocolError]
+    sequence<u8>? mls_decrypt_from_group(MlsEncryptedMessage encrypted);
+    
+    // Join a group using a Welcome message
+    [Throws=ProtocolError]
+    MlsGroupInfo mls_join_group(MlsWelcomeMessage welcome);
+    
+    // List all groups (excluding 1:1 sessions)
+    sequence<string> mls_list_groups();
+    
+    // Get information about a group
+    MlsGroupInfo? mls_get_group_info(string group_id);
+    
+    // Decrypt any encrypted message (auto-detects session vs group)
+    [Throws=ProtocolError]
+    sequence<u8>? mls_decrypt(MlsEncryptedMessage encrypted);
+    
+    // Process a Welcome message (auto-detects session vs group)
+    [Throws=ProtocolError]
+    MlsGroupInfo mls_process_welcome(MlsWelcomeMessage welcome);
 };
 
 // BLE fragment for outgoing data

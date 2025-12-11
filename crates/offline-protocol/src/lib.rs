@@ -13,6 +13,7 @@ pub mod constants;
 pub mod error;
 pub mod events;
 pub mod file_transfer;
+pub mod mls;
 pub mod protocol;
 pub mod transport_manager;
 pub mod visualization;
@@ -29,4 +30,9 @@ pub use visualization::{
 // Re-export reliability types for configuration
 pub use offline_protocol_reliability::{
     AckConfig, DeduplicatorConfig, DeduplicatorMode, DeduplicatorStats, RetryConfig,
+};
+
+// Re-export MLS types for end-to-end encryption
+pub use mls::{
+    EncryptedMessage, GroupId, GroupInfo, KeyPackageBundle, MlsManager, MlsStorage, WelcomeMessage,
 };

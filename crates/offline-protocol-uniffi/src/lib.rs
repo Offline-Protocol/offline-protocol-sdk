@@ -11,6 +11,12 @@ use offline_protocol::{
     OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
+use offline_protocol_mls::{
+    EncryptedMessage as CoreEncryptedMessage, GroupId as CoreGroupId,
+    GroupInfo as CoreGroupInfo, KeyPackageBundle as CoreKeyPackageBundle,
+    MlsManager as CoreMlsManager, MlsStorage as CoreMlsStorage,
+    StorageError as CoreStorageError, WelcomeMessage as CoreWelcomeMessage,
+};
 use offline_protocol_router::{
     DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
 };
@@ -48,9 +54,124 @@ pub enum ProtocolError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
 
+    /// MLS not initialized
+    #[error("MLS not initialized")]
+    MlsNotInitialized,
+
+    /// MLS operation failed
+    #[error("MLS error: {0}")]
+    MlsError(String),
+
     /// Other error
     #[error("{0}")]
     Other(String),
+}
+
+/// Error types for MLS storage operations
+#[derive(Debug, thiserror::Error)]
+pub enum MlsStorageError {
+    /// Failed to store data
+    #[error("Failed to store data")]
+    StoreFailed,
+
+    /// Failed to load data
+    #[error("Failed to load data")]
+    LoadFailed,
+
+    /// Failed to delete data
+    #[error("Failed to delete data")]
+    DeleteFailed,
+
+    /// Key not found
+    #[error("Key not found")]
+    KeyNotFound,
+
+    /// Data is corrupted
+    #[error("Corrupted data")]
+    CorruptedData,
+}
+
+impl From<CoreStorageError> for MlsStorageError {
+    fn from(err: CoreStorageError) -> Self {
+        match err {
+            CoreStorageError::StoreFailed(_) => MlsStorageError::StoreFailed,
+            CoreStorageError::LoadFailed(_) => MlsStorageError::LoadFailed,
+            CoreStorageError::DeleteFailed(_) => MlsStorageError::DeleteFailed,
+            CoreStorageError::KeyNotFound(_) => MlsStorageError::KeyNotFound,
+            CoreStorageError::CorruptedData(_) => MlsStorageError::CorruptedData,
+            CoreStorageError::Unavailable(_) => MlsStorageError::LoadFailed,
+        }
+    }
+}
+
+/// MLS Storage callback interface - apps implement this for platform-native secure storage
+pub trait MlsStorageProvider: Send + Sync {
+    /// Store data with the given key type and ID
+    fn store(&self, key_type: String, key_id: String, data: Vec<u8>) -> Result<(), MlsStorageError>;
+    
+    /// Load data for the given key type and ID
+    fn load(&self, key_type: String, key_id: String) -> Result<Option<Vec<u8>>, MlsStorageError>;
+    
+    /// Delete data for the given key type and ID
+    fn delete(&self, key_type: String, key_id: String) -> Result<(), MlsStorageError>;
+    
+    /// List all key IDs for a given key type
+    fn list_keys(&self, key_type: String) -> Result<Vec<String>, MlsStorageError>;
+}
+
+/// Wrapper to adapt UniFFI callback to core MlsStorage trait
+struct MlsStorageWrapper {
+    provider: Arc<dyn MlsStorageProvider>,
+}
+
+impl CoreMlsStorage for MlsStorageWrapper {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.provider
+            .store(key_type.to_string(), key_id.to_string(), data.to_vec())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => CoreStorageError::StoreFailed("Storage failed".to_string()),
+                MlsStorageError::LoadFailed => CoreStorageError::StoreFailed("Load failed".to_string()),
+                MlsStorageError::DeleteFailed => CoreStorageError::StoreFailed("Delete failed".to_string()),
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
+                MlsStorageError::CorruptedData => CoreStorageError::CorruptedData("Data corrupted".to_string()),
+            })
+    }
+
+    fn load(&self, key_type: &str, key_id: &str) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        self.provider
+            .load(key_type.to_string(), key_id.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => CoreStorageError::LoadFailed("Storage failed".to_string()),
+                MlsStorageError::LoadFailed => CoreStorageError::LoadFailed("Load failed".to_string()),
+                MlsStorageError::DeleteFailed => CoreStorageError::LoadFailed("Delete failed".to_string()),
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
+                MlsStorageError::CorruptedData => CoreStorageError::CorruptedData("Data corrupted".to_string()),
+            })
+    }
+
+    fn delete(&self, key_type: &str, key_id: &str) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.provider
+            .delete(key_type.to_string(), key_id.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => CoreStorageError::DeleteFailed("Storage failed".to_string()),
+                MlsStorageError::LoadFailed => CoreStorageError::DeleteFailed("Load failed".to_string()),
+                MlsStorageError::DeleteFailed => CoreStorageError::DeleteFailed("Delete failed".to_string()),
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
+                MlsStorageError::CorruptedData => CoreStorageError::CorruptedData("Data corrupted".to_string()),
+            })
+    }
+
+    fn list_keys(&self, key_type: &str) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.provider
+            .list_keys(key_type.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => CoreStorageError::LoadFailed("Storage failed".to_string()),
+                MlsStorageError::LoadFailed => CoreStorageError::LoadFailed("Load failed".to_string()),
+                MlsStorageError::DeleteFailed => CoreStorageError::LoadFailed("Delete failed".to_string()),
+                MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound("".to_string()),
+                MlsStorageError::CorruptedData => CoreStorageError::CorruptedData("Data corrupted".to_string()),
+            })
+    }
 }
 
 impl From<offline_protocol::Error> for ProtocolError {
@@ -174,6 +295,138 @@ pub struct NetworkTopology {
     pub nodes: Vec<NetworkNode>,
     pub links: Vec<NetworkLink>,
     pub message_stats: Vec<MessageStats>,
+}
+
+// ========================================================================
+// MLS TYPES
+// ========================================================================
+
+/// Key package bundle for distribution
+#[derive(Debug, Clone)]
+pub struct MlsKeyPackageBundle {
+    pub package_id: String,
+    pub user_id: String,
+    pub key_package_data: Vec<u8>,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub synced: bool,
+}
+
+impl From<CoreKeyPackageBundle> for MlsKeyPackageBundle {
+    fn from(bundle: CoreKeyPackageBundle) -> Self {
+        Self {
+            package_id: bundle.package_id,
+            user_id: bundle.user_id,
+            key_package_data: bundle.key_package_data,
+            created_at_ms: bundle.created_at_ms,
+            expires_at_ms: bundle.expires_at_ms,
+            synced: bundle.synced,
+        }
+    }
+}
+
+/// Welcome message for inviting users to a group
+#[derive(Debug, Clone)]
+pub struct MlsWelcomeMessage {
+    pub group_id: String,
+    pub welcome_data: Vec<u8>,
+    pub inviter_id: String,
+    pub group_name: Option<String>,
+    pub timestamp_ms: u64,
+}
+
+impl From<CoreWelcomeMessage> for MlsWelcomeMessage {
+    fn from(msg: CoreWelcomeMessage) -> Self {
+        Self {
+            group_id: msg.group_id.as_str().to_string(),
+            welcome_data: msg.welcome_data,
+            inviter_id: msg.inviter_id,
+            group_name: msg.group_name,
+            timestamp_ms: msg.timestamp_ms,
+        }
+    }
+}
+
+impl From<MlsWelcomeMessage> for CoreWelcomeMessage {
+    fn from(msg: MlsWelcomeMessage) -> Self {
+        Self {
+            group_id: CoreGroupId::new(msg.group_id),
+            welcome_data: msg.welcome_data,
+            inviter_id: msg.inviter_id,
+            group_name: msg.group_name,
+            timestamp_ms: msg.timestamp_ms,
+        }
+    }
+}
+
+/// Encrypted message for transport
+#[derive(Debug, Clone)]
+pub struct MlsEncryptedMessage {
+    pub group_id: String,
+    pub message_type: String,
+    pub epoch: u64,
+    pub ciphertext: Vec<u8>,
+    pub sender_id: String,
+    pub timestamp_ms: u64,
+}
+
+impl From<CoreEncryptedMessage> for MlsEncryptedMessage {
+    fn from(msg: CoreEncryptedMessage) -> Self {
+        Self {
+            group_id: msg.group_id.as_str().to_string(),
+            message_type: format!("{:?}", msg.message_type),
+            epoch: msg.epoch,
+            ciphertext: msg.ciphertext,
+            sender_id: msg.sender_id,
+            timestamp_ms: msg.timestamp_ms,
+        }
+    }
+}
+
+impl From<MlsEncryptedMessage> for CoreEncryptedMessage {
+    fn from(msg: MlsEncryptedMessage) -> Self {
+        use offline_protocol_mls::MlsMessageType;
+        let message_type = match msg.message_type.as_str() {
+            "Welcome" => MlsMessageType::Welcome,
+            "Commit" => MlsMessageType::Commit,
+            "Proposal" => MlsMessageType::Proposal,
+            _ => MlsMessageType::Application,
+        };
+        Self {
+            group_id: CoreGroupId::new(msg.group_id),
+            message_type,
+            epoch: msg.epoch,
+            ciphertext: msg.ciphertext,
+            sender_id: msg.sender_id,
+            timestamp_ms: msg.timestamp_ms,
+        }
+    }
+}
+
+/// Group information
+#[derive(Debug, Clone)]
+pub struct MlsGroupInfo {
+    pub group_id: String,
+    pub name: Option<String>,
+    pub members: Vec<String>,
+    pub epoch: u64,
+    pub is_session: bool,
+    pub created_at_ms: u64,
+    pub last_activity_ms: u64,
+}
+
+impl From<CoreGroupInfo> for MlsGroupInfo {
+    fn from(info: CoreGroupInfo) -> Self {
+        Self {
+            group_id: info.group_id.as_str().to_string(),
+            name: info.name,
+            members: info.members,
+            epoch: info.epoch,
+            is_session: info.is_session,
+            created_at_ms: info.created_at_ms,
+            last_activity_ms: info.last_activity_ms,
+        }
+    }
 }
 
 /// DORS configuration
@@ -391,6 +644,8 @@ pub struct OfflineProtocol {
     relay_priority: RwLock<RelayPriority>,
     forced_transport: RwLock<Option<TransportType>>,
     dors_config: RwLock<Option<DorsConfig>>,
+    /// MLS manager for end-to-end encryption
+    mls_manager: RwLock<Option<CoreMlsManager>>,
     #[allow(dead_code)]
     user_id: String,
 }
@@ -479,6 +734,7 @@ impl OfflineProtocol {
             relay_priority: RwLock::new(RelayPriority::Medium),
             forced_transport: RwLock::new(None),
             dors_config: RwLock::new(None),
+            mls_manager: RwLock::new(None),
             user_id,
         })
     }
@@ -1734,6 +1990,304 @@ impl OfflineProtocol {
     pub fn get_retry_queue_size(&self) -> u64 {
         let protocol = self.inner.lock().unwrap();
         protocol.retry_queue_size() as u64
+    }
+
+    // ========================================================================
+    // MLS (END-TO-END ENCRYPTION) OPERATIONS
+    // ========================================================================
+
+    /// Initialize MLS with a storage provider
+    pub fn initialize_mls(&self, storage: Box<dyn MlsStorageProvider>) -> Result<(), ProtocolError> {
+        let wrapper = Arc::new(MlsStorageWrapper {
+            provider: Arc::from(storage),
+        });
+
+        let user_id = {
+            let protocol = self.inner.lock().unwrap();
+            protocol.config().user_id.clone()
+        };
+
+        let manager = CoreMlsManager::new(&user_id, wrapper)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
+
+        *self.mls_manager.write().unwrap() = Some(manager);
+        Ok(())
+    }
+
+    /// Check if MLS is initialized
+    pub fn is_mls_initialized(&self) -> bool {
+        self.mls_manager.read().unwrap().is_some()
+    }
+
+    /// Helper to get MLS manager or error
+    fn get_mls_manager(&self) -> Result<std::sync::RwLockReadGuard<'_, Option<CoreMlsManager>>, ProtocolError> {
+        let guard = self.mls_manager.read().unwrap();
+        if guard.is_none() {
+            return Err(ProtocolError::MlsNotInitialized);
+        }
+        Ok(guard)
+    }
+
+    /// Generate a key package for distribution
+    pub fn mls_generate_key_package(&self) -> Result<MlsKeyPackageBundle, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .generate_key_package()
+            .map(MlsKeyPackageBundle::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Get an existing key package or generate a new one
+    pub fn mls_get_or_create_key_package(&self) -> Result<MlsKeyPackageBundle, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .get_or_create_key_package()
+            .map(MlsKeyPackageBundle::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Import a contact's key package
+    pub fn mls_import_key_package(&self, user_id: String, key_package_data: Vec<u8>) -> Result<(), ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .import_key_package(&user_id, &key_package_data)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Get pending key packages
+    pub fn mls_get_pending_key_packages(&self) -> Vec<MlsKeyPackageBundle> {
+        let guard = match self.mls_manager.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        match guard.as_ref() {
+            Some(manager) => manager
+                .get_pending_key_packages()
+                .unwrap_or_default()
+                .into_iter()
+                .map(MlsKeyPackageBundle::from)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Mark a key package as synced
+    pub fn mls_mark_key_package_synced(&self, package_id: String) -> Result<(), ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .mark_key_package_synced(&package_id)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Check if a 1:1 session exists
+    pub fn mls_has_session(&self, other_user_id: String) -> bool {
+        let guard = match self.mls_manager.read() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        match guard.as_ref() {
+            Some(manager) => manager.has_session(&other_user_id).unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// Create a 1:1 session
+    pub fn mls_create_session(&self, other_user_id: String) -> Result<MlsWelcomeMessage, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .create_session(&other_user_id)
+            .map(MlsWelcomeMessage::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Join a session using a Welcome message
+    pub fn mls_join_session(&self, welcome: MlsWelcomeMessage) -> Result<MlsGroupInfo, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .join_session(&welcome.into())
+            .map(MlsGroupInfo::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Encrypt a message for a 1:1 session
+    pub fn mls_encrypt_for_user(&self, other_user_id: String, plaintext: Vec<u8>) -> Result<MlsEncryptedMessage, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .encrypt_for_user(&other_user_id, &plaintext)
+            .map(MlsEncryptedMessage::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Decrypt a message from a 1:1 session
+    pub fn mls_decrypt_from_user(&self, encrypted: MlsEncryptedMessage) -> Result<Option<Vec<u8>>, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .decrypt_from_user(&encrypted.into())
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// List all active 1:1 sessions
+    pub fn mls_list_sessions(&self) -> Vec<String> {
+        let guard = match self.mls_manager.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        match guard.as_ref() {
+            Some(manager) => manager.list_sessions().unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Delete a 1:1 session
+    pub fn mls_delete_session(&self, other_user_id: String) -> Result<(), ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .delete_session(&other_user_id)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Get a pending Welcome message
+    pub fn mls_get_pending_welcome(&self, other_user_id: String) -> Option<MlsWelcomeMessage> {
+        let guard = self.mls_manager.read().ok()?;
+        let manager = guard.as_ref()?;
+        manager
+            .get_pending_welcome(&other_user_id)
+            .ok()
+            .flatten()
+            .map(MlsWelcomeMessage::from)
+    }
+
+    /// Clear a pending Welcome message
+    pub fn mls_clear_pending_welcome(&self, other_user_id: String) -> Result<(), ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .clear_pending_welcome(&other_user_id)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Create a new group
+    pub fn mls_create_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .create_group(&group_name)
+            .map(MlsGroupInfo::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Add a member to a group
+    pub fn mls_add_group_member(&self, group_id: String, member_key_package: Vec<u8>) -> Result<MlsWelcomeMessage, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
+            .map(MlsWelcomeMessage::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Remove a member from a group
+    pub fn mls_remove_group_member(&self, group_id: String, member_id: String) -> Result<MlsEncryptedMessage, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .remove_group_member(&CoreGroupId::new(group_id), &member_id)
+            .map(MlsEncryptedMessage::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Leave a group
+    pub fn mls_leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .leave_group(&CoreGroupId::new(group_id))
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Encrypt a message for a group
+    pub fn mls_encrypt_for_group(&self, group_id: String, plaintext: Vec<u8>) -> Result<MlsEncryptedMessage, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .encrypt_for_group(&CoreGroupId::new(group_id), &plaintext)
+            .map(MlsEncryptedMessage::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Decrypt a message from a group
+    pub fn mls_decrypt_from_group(&self, encrypted: MlsEncryptedMessage) -> Result<Option<Vec<u8>>, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .decrypt_from_group(&encrypted.into())
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Join a group using a Welcome message
+    pub fn mls_join_group(&self, welcome: MlsWelcomeMessage) -> Result<MlsGroupInfo, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .join_group(&welcome.into())
+            .map(MlsGroupInfo::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// List all groups
+    pub fn mls_list_groups(&self) -> Vec<String> {
+        let guard = match self.mls_manager.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        match guard.as_ref() {
+            Some(manager) => manager
+                .list_groups()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|g| g.as_str().to_string())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Get information about a group
+    pub fn mls_get_group_info(&self, group_id: String) -> Option<MlsGroupInfo> {
+        let guard = self.mls_manager.read().ok()?;
+        let manager = guard.as_ref()?;
+        manager
+            .get_group_info(&CoreGroupId::new(group_id))
+            .ok()
+            .flatten()
+            .map(MlsGroupInfo::from)
+    }
+
+    /// Decrypt any encrypted message
+    pub fn mls_decrypt(&self, encrypted: MlsEncryptedMessage) -> Result<Option<Vec<u8>>, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .decrypt(&encrypted.into())
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Process a Welcome message
+    pub fn mls_process_welcome(&self, welcome: MlsWelcomeMessage) -> Result<MlsGroupInfo, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .process_welcome(&welcome.into())
+            .map(MlsGroupInfo::from)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 }
 

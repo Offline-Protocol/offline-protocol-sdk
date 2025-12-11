@@ -13,12 +13,14 @@ offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-router = { workspace = true }
 offline-protocol-reliability = { workspace = true }
+offline-protocol-mls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 

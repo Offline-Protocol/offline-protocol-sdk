@@ -5,6 +5,7 @@ members = [
     "crates/offline-protocol-transport",
     "crates/offline-protocol-router",
     "crates/offline-protocol-reliability",
+    "crates/offline-protocol-mls",
     "crates/offline-protocol",
     "crates/offline-protocol-uniffi",
     "crates/offline-protocol-bench",
@@ -44,11 +45,21 @@ cbindgen = "0.26"
 # Benchmarking
 criterion = "0.5"
 
+# MLS (Message Layer Security)
+openmls = "0.7"
+openmls_rust_crypto = "0.4"
+openmls_basic_credential = "0.4"
+openmls_traits = "0.4"
+
+# Encoding
+base64 = "0.22"
+
 # Internal dependencies
 offline-protocol-core = { path = "crates/offline-protocol-core" }
 offline-protocol-transport = { path = "crates/offline-protocol-transport" }
 offline-protocol-router = { path = "crates/offline-protocol-router" }
 offline-protocol-reliability = { path = "crates/offline-protocol-reliability" }
+offline-protocol-mls = { path = "crates/offline-protocol-mls" }
 offline-protocol = { path = "crates/offline-protocol" }
 
 [profile.dev]
