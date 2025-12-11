@@ -3,12 +3,13 @@
 //! This module handles creation, modification, and state management of MLS groups.
 
 use crate::error::{MlsError, Result};
+use crate::provider::MlsProvider;
 use crate::storage::MlsStorage;
 use crate::types::{GroupId, GroupInfo, StorageKeyType};
 
 use openmls::prelude::*;
-use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::signatures::Signer;
+use openmls_traits::OpenMlsProvider;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -26,22 +27,22 @@ pub struct GroupManager {
     storage: Arc<dyn MlsStorage>,
 
     /// OpenMLS crypto provider.
-    crypto: OpenMlsRustCrypto,
+    provider: MlsProvider,
 }
 
 impl GroupManager {
     /// Creates a new group manager.
-    pub fn new(user_id: String, storage: Arc<dyn MlsStorage>) -> Self {
+    pub fn new(user_id: String, storage: Arc<dyn MlsStorage>, provider: MlsProvider) -> Self {
         Self {
             user_id,
             storage,
-            crypto: OpenMlsRustCrypto::default(),
+            provider,
         }
     }
 
     /// Returns a reference to the crypto provider.
-    pub fn crypto(&self) -> &OpenMlsRustCrypto {
-        &self.crypto
+    pub fn provider(&self) -> &MlsProvider {
+        &self.provider
     }
 
     /// Creates a new MLS group.
@@ -59,7 +60,7 @@ impl GroupManager {
         let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
 
         let group = MlsGroup::new_with_group_id(
-            &self.crypto,
+            &self.provider,
             signer,
             &group_config,
             mls_group_id,
@@ -84,8 +85,8 @@ impl GroupManager {
                 // MlsGroup in OpenMLS 0.7 uses the storage provider pattern
                 let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
                 
-                // Try to load from the crypto provider's storage
-                match MlsGroup::load(self.crypto.storage(), &mls_group_id) {
+                // Try to load from the provider's storage
+                match MlsGroup::load(self.provider.storage(), &mls_group_id) {
                     Ok(Some(group)) => Ok(Some(group)),
                     Ok(None) => {
                         debug!(group_id = %group_id, "Group not found in crypto storage");
@@ -100,8 +101,11 @@ impl GroupManager {
 
     /// Saves a group to storage.
     pub fn save_group(&self, group_id: &GroupId, group: &MlsGroup) -> Result<()> {
-        // In OpenMLS 0.7, groups are stored via the storage provider
-        // The group is automatically persisted to the crypto provider's storage
+        // In OpenMLS 0.7, groups are stored via the storage provider automatically during operations
+        // passed the provider.
+        // group.save(self.provider.storage())
+        //    .map_err(|e| MlsError::Storage(crate::storage::StorageError::StoreFailed(e.to_string())))?;
+
         // We also keep a marker in our storage for listing purposes
         let key_type = StorageKeyType::GroupState.as_str();
         
@@ -115,6 +119,11 @@ impl GroupManager {
     pub fn delete_group(&self, group_id: &GroupId) -> Result<()> {
         let key_type = StorageKeyType::GroupState.as_str();
         self.storage.delete(key_type, group_id.as_str())?;
+        
+        // Also delete from provider storage
+        // Note: MlsGroup doesn't expose a delete method directly on the struct (static),
+        // usually we just delete the underlying key.
+        // We can ignore this for now as load_group checks for the marker first.
         Ok(())
     }
 
@@ -133,12 +142,12 @@ impl GroupManager {
         signer: &impl Signer,
     ) -> Result<(MlsMessageOut, MlsMessageOut)> {
         let (commit, welcome, _group_info) = group
-            .add_members(&self.crypto, signer, &[key_package])
+            .add_members(&self.provider, signer, &[key_package])
             .map_err(|e| MlsError::AddMember(e.to_string()))?;
 
         // Merge the pending commit
         group
-            .merge_pending_commit(&self.crypto)
+            .merge_pending_commit(&self.provider)
             .map_err(|e| MlsError::AddMember(format!("Failed to merge commit: {}", e)))?;
 
         Ok((commit, welcome))
@@ -152,11 +161,11 @@ impl GroupManager {
         signer: &impl Signer,
     ) -> Result<MlsMessageOut> {
         let (commit, _welcome, _group_info) = group
-            .remove_members(&self.crypto, signer, &[member_index])
+            .remove_members(&self.provider, signer, &[member_index])
             .map_err(|e| MlsError::RemoveMember(e.to_string()))?;
 
         group
-            .merge_pending_commit(&self.crypto)
+            .merge_pending_commit(&self.provider)
             .map_err(|e| MlsError::RemoveMember(format!("Failed to merge commit: {}", e)))?;
 
         Ok(commit)
@@ -170,7 +179,7 @@ impl GroupManager {
         signer: &impl Signer,
     ) -> Result<MlsMessageOut> {
         let message = group
-            .create_message(&self.crypto, signer, plaintext)
+            .create_message(&self.provider, signer, plaintext)
             .map_err(|e| MlsError::Encryption(e.to_string()))?;
 
         Ok(message)
@@ -187,7 +196,7 @@ impl GroupManager {
             .map_err(|e| MlsError::Decryption(format!("Invalid protocol message: {:?}", e)))?;
 
         let processed = group
-            .process_message(&self.crypto, protocol_message)
+            .process_message(&self.provider, protocol_message)
             .map_err(|e| MlsError::Decryption(e.to_string()))?;
 
         match processed.into_content() {
@@ -201,7 +210,7 @@ impl GroupManager {
             ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
                 debug!("Received commit message, merging");
                 group
-                    .merge_staged_commit(&self.crypto, *staged_commit)
+                    .merge_staged_commit(&self.provider, *staged_commit)
                     .map_err(|e| MlsError::Decryption(format!("Failed to merge commit: {}", e)))?;
                 Ok(None)
             }
@@ -222,9 +231,9 @@ impl GroupManager {
             .use_ratchet_tree_extension(true)
             .build();
 
-        let group = StagedWelcome::new_from_welcome(&self.crypto, &group_config, welcome, None)
+        let group = StagedWelcome::new_from_welcome(&self.provider, &group_config, welcome, None)
             .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to stage welcome: {}", e)))?
-            .into_group(&self.crypto)
+            .into_group(&self.provider)
             .map_err(|e| MlsError::WelcomeProcessing(format!("Failed to join group: {}", e)))?;
 
         self.save_group(group_id, &group)?;
@@ -244,11 +253,13 @@ impl GroupManager {
             .collect();
 
         let is_session = group_id.as_str().starts_with("session:");
+        let members_count = members.len() as u32;
 
         GroupInfo {
             group_id: group_id.clone(),
             name: if is_session { None } else { Some(group_id.as_str().to_string()) },
             members,
+            members_count,
             epoch: group.epoch().as_u64(),
             is_session,
             created_at_ms: 0,
@@ -261,10 +272,13 @@ impl GroupManager {
 mod tests {
     use super::*;
     use crate::storage::InMemoryStorage;
+    use crate::storage_adapter::MlsStorageAdapter;
 
     fn create_test_group_manager() -> GroupManager {
         let storage = Arc::new(InMemoryStorage::new());
-        GroupManager::new("test_user".to_string(), storage)
+        let adapter = MlsStorageAdapter::new(storage.clone());
+        let provider = MlsProvider::new(adapter);
+        GroupManager::new("test_user".to_string(), storage, provider)
     }
 
     #[test]

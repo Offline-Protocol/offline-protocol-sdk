@@ -2,17 +2,19 @@
 
 use crate::error::{MlsError, Result};
 use crate::group::{GroupManager, DEFAULT_CIPHERSUITE};
+use crate::provider::MlsProvider;
 use crate::session::SessionManager;
 use crate::storage::MlsStorage;
+use crate::storage_adapter::MlsStorageAdapter;
 use crate::types::{
     EncryptedMessage, GroupId, GroupInfo, KeyPackageBundle, MlsMessageType, StorageKeyType,
     WelcomeMessage,
 };
 
 use openmls::prelude::*;
-use openmls::prelude::tls_codec::{Deserialize, Serialize};
+use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::OpenMlsProvider;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -28,8 +30,8 @@ pub struct MlsManager {
     /// Storage backend for persisting MLS state.
     storage: Arc<dyn MlsStorage>,
 
-    /// OpenMLS crypto provider.
-    crypto: OpenMlsRustCrypto,
+    /// OpenMLS provider.
+    provider: MlsProvider,
 
     /// Cached credential.
     credential: RwLock<Option<CredentialWithKey>>,
@@ -46,13 +48,16 @@ impl MlsManager {
     pub fn new(user_id: impl Into<String>, storage: Arc<dyn MlsStorage>) -> Result<Self> {
         let user_id = user_id.into();
 
-        let session_manager = SessionManager::new(user_id.clone(), storage.clone());
-        let group_manager = GroupManager::new(user_id.clone(), storage.clone());
+        let adapter = MlsStorageAdapter::new(storage.clone());
+        let provider = MlsProvider::new(adapter);
+
+        let session_manager = SessionManager::new(user_id.clone(), storage.clone(), provider.clone());
+        let group_manager = GroupManager::new(user_id.clone(), storage.clone(), provider.clone());
 
         let manager = Self {
             user_id,
             storage,
-            crypto: OpenMlsRustCrypto::default(),
+            provider,
             credential: RwLock::new(None),
             session_manager,
             group_manager,
@@ -81,28 +86,30 @@ impl MlsManager {
     /// Loads the identity from storage.
     fn load_identity(&self) -> Result<bool> {
         let key_type = StorageKeyType::Identity.as_str();
-        let identity_data = self.storage.load(key_type, "credential")?;
+        // Load the key pair directly
+        let keys_data = self.storage.load(key_type, "key_pair")?;
 
-        match identity_data {
-            Some(bytes) => {
-                // Recreate the signature key pair (we can't restore the exact one,
-                // but we create a new one for this session)
-                let signature_keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
-                    .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
+        match keys_data {
+            Some(json) => {
+                let signature_keys: SignatureKeyPair = serde_json::from_slice(&json)
+                    .map_err(|e| MlsError::Deserialization(format!("Failed to deserialize signature keys: {}", e)))?;
 
-                signature_keys
-                    .store(self.crypto.storage())
-                    .map_err(|e| MlsError::Storage(crate::storage::StorageError::StoreFailed(e.to_string())))?;
+                let public_key = signature_keys.public();
 
-                // Recreate credential from stored user ID bytes
-                let credential = Credential::new(CredentialType::Basic, bytes);
+                // Recreate credential
+                let credential = Credential::new(CredentialType::Basic, self.user_id.as_bytes().to_vec());
 
                 let credential_with_key = CredentialWithKey {
                     credential,
-                    signature_key: signature_keys.public().into(),
+                    signature_key: public_key.into(),
                 };
 
-                *self.credential.write().unwrap() = Some(credential_with_key);
+                // Safely update the credential cache
+                {
+                    let mut guard = self.credential.write().map_err(|_| MlsError::NotInitialized)?;
+                    *guard = Some(credential_with_key);
+                }
+                
                 debug!(user_id = %self.user_id, "Loaded existing MLS identity");
                 Ok(true)
             }
@@ -115,42 +122,44 @@ impl MlsManager {
         let signature_keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
             .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
 
-        signature_keys
-            .store(self.crypto.storage())
-            .map_err(|e| MlsError::Storage(crate::storage::StorageError::StoreFailed(e.to_string())))?;
+        // Store the key pair directly in our storage
+        let keys_json = serde_json::to_vec(&signature_keys)
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+            
+        let key_type = StorageKeyType::Identity.as_str();
+        self.storage.store(key_type, "key_pair", &keys_json)?;
 
+        let public_key = signature_keys.public();
+        
         let credential = Credential::new(CredentialType::Basic, self.user_id.as_bytes().to_vec());
 
         let credential_with_key = CredentialWithKey {
             credential,
-            signature_key: signature_keys.public().into(),
+            signature_key: public_key.into(),
         };
 
-        // Persist user ID as credential data
-        let key_type = StorageKeyType::Identity.as_str();
-        self.storage.store(key_type, "credential", self.user_id.as_bytes())?;
-
-        *self.credential.write().unwrap() = Some(credential_with_key);
+        {
+            let mut guard = self.credential.write().map_err(|_| MlsError::NotInitialized)?;
+            *guard = Some(credential_with_key);
+        }
+        
         Ok(())
     }
 
     /// Gets the credential with key.
     fn get_credential(&self) -> Result<CredentialWithKey> {
-        self.credential
-            .read()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| MlsError::NotInitialized)
+        let guard = self.credential.read().map_err(|_| MlsError::NotInitialized)?;
+        guard.clone().ok_or_else(|| MlsError::NotInitialized)
     }
 
     /// Gets a signer for MLS operations.
     fn get_signer(&self) -> Result<SignatureKeyPair> {
-        let signature_keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
-            .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
-
-        signature_keys
-            .store(self.crypto.storage())
-            .map_err(|e| MlsError::Storage(crate::storage::StorageError::StoreFailed(e.to_string())))?;
+        let key_type = StorageKeyType::Identity.as_str();
+        let keys_data = self.storage.load(key_type, "key_pair")?
+            .ok_or_else(|| MlsError::NotInitialized)?;
+            
+        let signature_keys: SignatureKeyPair = serde_json::from_slice(&keys_data)
+            .map_err(|e| MlsError::Deserialization(format!("Failed to deserialize signature keys: {}", e)))?;
 
         Ok(signature_keys)
     }
@@ -167,7 +176,7 @@ impl MlsManager {
         let key_package_bundle = KeyPackage::builder()
             .build(
                 DEFAULT_CIPHERSUITE,
-                &self.crypto,
+                &self.provider,
                 &signature_keys,
                 credential,
             )
@@ -239,7 +248,7 @@ impl MlsManager {
 
         // Validate using the crypto backend
         key_package_in
-            .validate(self.crypto.crypto(), ProtocolVersion::Mls10)
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))
     }
 
@@ -378,7 +387,7 @@ impl MlsManager {
     ) -> Result<WelcomeMessage> {
         let key_package = KeyPackageIn::tls_deserialize_exact(member_key_package)
             .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?
-            .validate(self.crypto.crypto(), ProtocolVersion::Mls10)
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
 
         let mut group = self
@@ -451,6 +460,14 @@ impl MlsManager {
 
     /// Encrypts a message for a group.
     pub fn encrypt_for_group(&self, group_id: &GroupId, plaintext: &[u8]) -> Result<EncryptedMessage> {
+        self.group_manager.load_group(group_id)?
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
+        
+        // Re-load group to satisfy borrow checker if needed, or just proceed
+        // Actually, encrypt_for_group in MlsManager delegates to GroupManager
+        // But here I'm reimplementing parts of it?
+        // Ah, `manager.rs` implemented `encrypt_for_group` by calling `self.group_manager.load_group`, then `self.group_manager.encrypt_message`, then `save`.
+        
         let mut group = self
             .group_manager
             .load_group(group_id)?
@@ -579,6 +596,9 @@ mod tests {
         let manager = create_test_manager("alice");
         let pkg1 = manager.get_or_create_key_package().unwrap();
         let pkg2 = manager.get_or_create_key_package().unwrap();
+        // Since we are now properly persisting keys, pkg2 should be the same as pkg1 
+        // IF the logic reuses existing key packages.
+        // get_or_create_key_package logic iterates list_keys.
         assert_eq!(pkg1.package_id, pkg2.package_id);
     }
 

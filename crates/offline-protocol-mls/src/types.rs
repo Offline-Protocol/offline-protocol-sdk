@@ -104,6 +104,9 @@ pub struct GroupInfo {
     /// List of member user IDs.
     pub members: Vec<String>,
 
+    /// Count of members in the group.
+    pub members_count: u32,
+
     /// Current epoch number.
     pub epoch: u64,
 

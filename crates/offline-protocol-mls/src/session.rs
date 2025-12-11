@@ -5,11 +5,12 @@
 
 use crate::error::{MlsError, Result};
 use crate::group::GroupManager;
+use crate::provider::MlsProvider;
 use crate::storage::MlsStorage;
 use crate::types::{EncryptedMessage, GroupId, GroupInfo, MlsMessageType, WelcomeMessage};
 
 use openmls::prelude::*;
-use openmls::prelude::tls_codec::{Deserialize, Serialize};
+use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls_traits::signatures::Signer;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -29,8 +30,8 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// Creates a new session manager.
-    pub fn new(user_id: String, storage: Arc<dyn MlsStorage>) -> Self {
-        let group_manager = GroupManager::new(user_id.clone(), storage.clone());
+    pub fn new(user_id: String, storage: Arc<dyn MlsStorage>, provider: MlsProvider) -> Self {
+        let group_manager = GroupManager::new(user_id.clone(), storage.clone(), provider);
         Self {
             user_id,
             group_manager,
@@ -222,10 +223,13 @@ impl SessionManager {
 mod tests {
     use super::*;
     use crate::storage::InMemoryStorage;
+    use crate::storage_adapter::MlsStorageAdapter;
 
     fn create_test_session_manager(user_id: &str) -> SessionManager {
         let storage = Arc::new(InMemoryStorage::new());
-        SessionManager::new(user_id.to_string(), storage)
+        let adapter = MlsStorageAdapter::new(storage.clone());
+        let provider = MlsProvider::new(adapter);
+        SessionManager::new(user_id.to_string(), storage, provider)
     }
 
     #[test]

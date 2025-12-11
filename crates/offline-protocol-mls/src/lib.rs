@@ -34,8 +34,10 @@
 pub mod error;
 pub mod group;
 pub mod manager;
+pub mod provider;
 pub mod session;
 pub mod storage;
+mod storage_adapter;
 pub mod types;
 
 pub use error::{MlsError, Result};
