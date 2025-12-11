@@ -1745,6 +1745,182 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
+    /// Get existing or generate new key package
+    @objc func mlsGetOrCreateKeyPackage(_ resolver: @escaping RCTPromiseResolveBlock,
+                                        rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let bundle = try proto.mlsGetOrCreateKeyPackage()
+            let result: [String: Any] = [
+                "packageId": bundle.packageId,
+                "userId": bundle.userId,
+                "keyPackageData": bundle.keyPackageData.map { NSNumber(value: $0) },
+                "createdAtMs": NSNumber(value: bundle.createdAtMs),
+                "expiresAtMs": NSNumber(value: bundle.expiresAtMs),
+                "synced": bundle.synced
+            ]
+            resolver(result)
+        } catch {
+            rejecter("ERROR_MLS", "Failed to get key package: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Get pending key packages to upload
+    @objc func mlsGetPendingKeyPackages(_ resolver: @escaping RCTPromiseResolveBlock,
+                                        rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        let bundles = proto.mlsGetPendingKeyPackages()
+        let results = bundles.map { bundle -> [String: Any] in
+            return [
+                "packageId": bundle.packageId,
+                "userId": bundle.userId,
+                "keyPackageData": bundle.keyPackageData.map { NSNumber(value: $0) },
+                "createdAtMs": NSNumber(value: bundle.createdAtMs),
+                "expiresAtMs": NSNumber(value: bundle.expiresAtMs),
+                "synced": bundle.synced
+            ]
+        }
+        resolver(results)
+    }
+
+    /// Mark key package as synced (uploaded)
+    @objc func mlsMarkKeyPackageSynced(_ packageId: String,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.mlsMarkKeyPackageSynced(packageId: packageId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_MLS", "Failed to mark key package synced: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Create a 1:1 session (returns Welcome message)
+    @objc func mlsCreateSession(_ otherUserId: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let welcome = try proto.mlsCreateSession(otherUserId: otherUserId)
+            let result: [String: Any] = [
+                "groupId": welcome.groupId,
+                "welcomeData": welcome.welcomeData.map { NSNumber(value: $0) },
+                "inviterId": welcome.inviterId,
+                "groupName": welcome.groupName ?? NSNull(),
+                "timestampMs": NSNumber(value: welcome.timestampMs)
+            ]
+            resolver(result)
+        } catch {
+            rejecter("ERROR_MLS", "Failed to create session: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Join a session from Welcome message
+    @objc func mlsJoinSession(_ welcomeJson: String,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let jsonData = welcomeJson.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
+            }
+            
+            let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
+            let welcomeData = welcomeDataNumbers.map { UInt8($0.intValue) }
+            
+            let welcome = MlsWelcomeMessage(
+                groupId: json["groupId"] as? String ?? "",
+                welcomeData: welcomeData,
+                inviterId: json["inviterId"] as? String ?? "",
+                groupName: json["groupName"] as? String,
+                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
+            )
+            
+            let info = try proto.mlsJoinSession(welcome: welcome)
+            let result: [String: Any] = [
+                "groupId": info.groupId,
+                "name": info.name ?? NSNull(),
+                "members": info.members,
+                "epoch": NSNumber(value: info.epoch),
+                "isSession": info.isSession,
+                "createdAtMs": NSNumber(value: info.createdAtMs),
+                "lastActivityMs": NSNumber(value: info.lastActivityMs)
+            ]
+            resolver(result)
+        } catch {
+            rejecter("ERROR_MLS", "Failed to join session: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Decrypt a message from a user
+    @objc func mlsDecryptFromUser(_ encryptedJson: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let jsonData = encryptedJson.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
+            }
+            
+            let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
+            let ciphertext = ciphertextNumbers.map { UInt8($0.intValue) }
+            
+            let encrypted = MlsEncryptedMessage(
+                groupId: json["groupId"] as? String ?? "",
+                messageType: json["messageType"] as? String ?? "Application",
+                epoch: (json["epoch"] as? NSNumber)?.uint64Value ?? 0,
+                ciphertext: ciphertext,
+                senderId: json["senderId"] as? String ?? "",
+                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
+            )
+            
+            if let plaintext = try proto.mlsDecryptFromUser(encrypted: encrypted) {
+                resolver(plaintext.map { NSNumber(value: $0) })
+            } else {
+                resolver(NSNull())
+            }
+        } catch {
+            rejecter("ERROR_MLS", "Failed to decrypt message from user: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Delete a session
+    @objc func mlsDeleteSession(_ otherUserId: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.mlsDeleteSession(otherUserId: otherUserId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_MLS", "Failed to delete session: \(error.localizedDescription)", error)
+        }
+    }
+    
     /// Import a contact's key package
     @objc func mlsImportKeyPackage(_ userId: String,
                                    keyPackageData: [NSNumber],

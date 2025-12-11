@@ -1611,6 +1611,189 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Get existing or generate new key package
+     */
+    @ReactMethod
+    fun mlsGetOrCreateKeyPackage(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bundle = proto.mlsGetOrCreateKeyPackage()
+            val result = Arguments.createMap().apply {
+                putString("packageId", bundle.packageId)
+                putString("userId", bundle.userId)
+                val dataArray = Arguments.createArray()
+                bundle.keyPackageData.forEach { dataArray.pushInt(it.toInt()) }
+                putArray("keyPackageData", dataArray)
+                putDouble("createdAtMs", bundle.createdAtMs.toDouble())
+                putDouble("expiresAtMs", bundle.expiresAtMs.toDouble())
+                putBoolean("synced", bundle.synced)
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to get key package: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Get pending key packages to upload
+     */
+    @ReactMethod
+    fun mlsGetPendingKeyPackages(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bundles = proto.mlsGetPendingKeyPackages()
+            val resultArray = Arguments.createArray()
+            
+            bundles.forEach { bundle ->
+                val map = Arguments.createMap().apply {
+                    putString("packageId", bundle.packageId)
+                    putString("userId", bundle.userId)
+                    val dataArray = Arguments.createArray()
+                    bundle.keyPackageData.forEach { dataArray.pushInt(it.toInt()) }
+                    putArray("keyPackageData", dataArray)
+                    putDouble("createdAtMs", bundle.createdAtMs.toDouble())
+                    putDouble("expiresAtMs", bundle.expiresAtMs.toDouble())
+                    putBoolean("synced", bundle.synced)
+                }
+                resultArray.pushMap(map)
+            }
+            
+            promise.resolve(resultArray)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to get pending key packages: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Mark key package as synced (uploaded)
+     */
+    @ReactMethod
+    fun mlsMarkKeyPackageSynced(packageId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.mlsMarkKeyPackageSynced(packageId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to mark key package synced: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Create a 1:1 session (returns Welcome message)
+     */
+    @ReactMethod
+    fun mlsCreateSession(otherUserId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val welcome = proto.mlsCreateSession(otherUserId)
+            val result = Arguments.createMap().apply {
+                putString("groupId", welcome.groupId)
+                val welcomeDataArray = Arguments.createArray()
+                welcome.welcomeData.forEach { welcomeDataArray.pushInt(it.toInt()) }
+                putArray("welcomeData", welcomeDataArray)
+                putString("inviterId", welcome.inviterId)
+                putString("groupName", welcome.groupName)
+                putDouble("timestampMs", welcome.timestampMs.toDouble())
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to create session: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Join a session from Welcome message
+     */
+    @ReactMethod
+    fun mlsJoinSession(welcomeJson: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val json = JSONObject(welcomeJson)
+            
+            val welcomeDataArray = json.optJSONArray("welcomeData") ?: JSONArray()
+            val welcomeData = mutableListOf<UByte>()
+            for (i in 0 until welcomeDataArray.length()) {
+                welcomeData.add(welcomeDataArray.getInt(i).toUByte())
+            }
+            
+            val welcome = MlsWelcomeMessage(
+                groupId = json.optString("groupId", ""),
+                welcomeData = welcomeData,
+                inviterId = json.optString("inviterId", ""),
+                groupName = json.optString("groupName", null),
+                timestampMs = json.optLong("timestampMs", 0).toULong()
+            )
+            
+            val info = proto.mlsJoinSession(welcome)
+            val result = Arguments.createMap().apply {
+                putString("groupId", info.groupId)
+                putString("name", info.name)
+                val members = Arguments.createArray()
+                info.members.forEach { members.pushString(it) }
+                putArray("members", members)
+                putDouble("epoch", info.epoch.toDouble())
+                putBoolean("isSession", info.isSession)
+                putDouble("createdAtMs", info.createdAtMs.toDouble())
+                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to join session: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Decrypt a message from a user
+     */
+    @ReactMethod
+    fun mlsDecryptFromUser(encryptedJson: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val json = JSONObject(encryptedJson)
+            
+            val ciphertextArray = json.optJSONArray("ciphertext") ?: JSONArray()
+            val ciphertext = mutableListOf<UByte>()
+            for (i in 0 until ciphertextArray.length()) {
+                ciphertext.add(ciphertextArray.getInt(i).toUByte())
+            }
+            
+            val encrypted = MlsEncryptedMessage(
+                groupId = json.optString("groupId", ""),
+                messageType = json.optString("messageType", "Application"),
+                epoch = json.optLong("epoch", 0).toULong(),
+                ciphertext = ciphertext,
+                senderId = json.optString("senderId", ""),
+                timestampMs = json.optLong("timestampMs", 0).toULong()
+            )
+            
+            val plaintext = proto.mlsDecryptFromUser(encrypted)
+            if (plaintext != null) {
+                val result = Arguments.createArray()
+                plaintext.forEach { result.pushInt(it.toInt()) }
+                promise.resolve(result)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to decrypt message from user: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Delete a session
+     */
+    @ReactMethod
+    fun mlsDeleteSession(otherUserId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.mlsDeleteSession(otherUserId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to delete session: ${e.message}", e)
+        }
+    }
+
+    /**
      * Import a contact's key package
      */
     @ReactMethod
