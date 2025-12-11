@@ -1550,6 +1550,176 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // ========================================================================
+    // MLS (END-TO-END ENCRYPTION)
+    // ========================================================================
+
+    /**
+     * Initialize MLS with built-in secure storage (EncryptedSharedPreferences)
+     */
+    @ReactMethod
+    fun initializeMlsWithSecureStorage(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val storage = MlsSecureStorage(reactApplicationContext)
+            proto.initializeMls(storage)
+            emitDiagnostic("info", "MLS initialized with EncryptedSharedPreferences storage")
+            promise.resolve(null)
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Failed to initialize MLS", mapOf(
+                "message" to (e.message ?: "unknown")
+            ))
+            promise.reject("ERROR_MLS", "Failed to initialize MLS: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Check if MLS is initialized
+     */
+    @ReactMethod
+    fun isMlsInitialized(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.resolve(false)
+            return
+        }
+        promise.resolve(proto.isMlsInitialized())
+    }
+
+    /**
+     * Generate a new MLS key package
+     */
+    @ReactMethod
+    fun mlsGenerateKeyPackage(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bundle = proto.mlsGenerateKeyPackage()
+            val result = Arguments.createMap().apply {
+                putString("packageId", bundle.packageId)
+                putString("userId", bundle.userId)
+                val dataArray = Arguments.createArray()
+                bundle.keyPackageData.forEach { dataArray.pushInt(it.toInt()) }
+                putArray("keyPackageData", dataArray)
+                putDouble("createdAtMs", bundle.createdAtMs.toDouble())
+                putDouble("expiresAtMs", bundle.expiresAtMs.toDouble())
+                putBoolean("synced", bundle.synced)
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to generate key package: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Import a contact's key package
+     */
+    @ReactMethod
+    fun mlsImportKeyPackage(userId: String, keyPackageData: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val data = mutableListOf<UByte>()
+            for (i in 0 until keyPackageData.size()) {
+                data.add(keyPackageData.getInt(i).toUByte())
+            }
+            proto.mlsImportKeyPackage(userId, data)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to import key package: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Check if a session exists with a user
+     */
+    @ReactMethod
+    fun mlsHasSession(otherUserId: String, promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.resolve(false)
+            return
+        }
+        promise.resolve(proto.mlsHasSession(otherUserId))
+    }
+
+    /**
+     * Encrypt a message for a user
+     */
+    @ReactMethod
+    fun mlsEncryptForUser(otherUserId: String, plaintext: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val data = mutableListOf<UByte>()
+            for (i in 0 until plaintext.size()) {
+                data.add(plaintext.getInt(i).toUByte())
+            }
+            val encrypted = proto.mlsEncryptForUser(otherUserId, data)
+            val result = Arguments.createMap().apply {
+                putString("groupId", encrypted.groupId)
+                putString("messageType", encrypted.messageType)
+                putDouble("epoch", encrypted.epoch.toDouble())
+                val ciphertextArray = Arguments.createArray()
+                encrypted.ciphertext.forEach { ciphertextArray.pushInt(it.toInt()) }
+                putArray("ciphertext", ciphertextArray)
+                putString("senderId", encrypted.senderId)
+                putDouble("timestampMs", encrypted.timestampMs.toDouble())
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to encrypt message: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Decrypt a message
+     */
+    @ReactMethod
+    fun mlsDecrypt(encryptedJson: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val json = JSONObject(encryptedJson)
+            
+            val ciphertextArray = json.optJSONArray("ciphertext") ?: JSONArray()
+            val ciphertext = mutableListOf<UByte>()
+            for (i in 0 until ciphertextArray.length()) {
+                ciphertext.add(ciphertextArray.getInt(i).toUByte())
+            }
+            
+            val encrypted = MlsEncryptedMessage(
+                groupId = json.optString("groupId", ""),
+                messageType = json.optString("messageType", "Application"),
+                epoch = json.optLong("epoch", 0).toULong(),
+                ciphertext = ciphertext,
+                senderId = json.optString("senderId", ""),
+                timestampMs = json.optLong("timestampMs", 0).toULong()
+            )
+            
+            val plaintext = proto.mlsDecrypt(encrypted)
+            if (plaintext != null) {
+                val result = Arguments.createArray()
+                plaintext.forEach { result.pushInt(it.toInt()) }
+                promise.resolve(result)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to decrypt message: ${e.message}", e)
+        }
+    }
+
+    /**
+     * List all active sessions
+     */
+    @ReactMethod
+    fun mlsListSessions(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.resolve(Arguments.createArray())
+            return
+        }
+        val sessions = proto.mlsListSessions()
+        promise.resolve(Arguments.fromList(sessions))
+    }
+
     /**
      * Start background process scheduler
      */

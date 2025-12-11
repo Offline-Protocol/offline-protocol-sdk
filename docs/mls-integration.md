@@ -16,10 +16,6 @@ The SDK provides end-to-end encryption via the MLS protocol (RFC 9420). MLS prov
 ```
 ┌─────────────────────────────────────────────┐
 │              Your App                       │
-│  ┌────────────────────────────────────────┐ │
-│  │   MlsStorageProvider Implementation    │ │
-│  │   (iOS: Keychain, Android: Keystore)   │ │
-│  └────────────────────────────────────────┘ │
 │                     │                       │
 │                     ▼                       │
 │  ┌────────────────────────────────────────┐ │
@@ -31,26 +27,29 @@ The SDK provides end-to-end encryption via the MLS protocol (RFC 9420). MLS prov
 │  │  │  - Session management            │  │ │
 │  │  │  - Group management              │  │ │
 │  │  └──────────────────────────────────┘  │ │
+│  │  ┌──────────────────────────────────┐  │ │
+│  │  │     Built-in Secure Storage      │  │ │
+│  │  │  - iOS: Keychain                 │  │ │
+│  │  │  - Android: EncryptedPrefs       │  │ │
+│  │  └──────────────────────────────────┘  │ │
 │  └────────────────────────────────────────┘ │
 └─────────────────────────────────────────────┘
 ```
 
 ## Quick Start
 
-### 1. Initialize MLS with Storage
+### 1. Initialize MLS
 
-Before using encryption, you must initialize MLS with a storage provider:
+The SDK includes built-in secure storage using platform-native APIs (iOS Keychain, Android EncryptedSharedPreferences). Just call initialize:
 
 ```swift
-// iOS
-let storage = KeychainMlsStorage()
-try protocol.initializeMls(storage: storage)
+// iOS - uses Keychain automatically
+try protocol.initializeMlsWithSecureStorage()
 ```
 
 ```kotlin
-// Android
-val storage = KeystoreMlsStorage(context)
-protocol.initializeMls(storage)
+// Android - uses EncryptedSharedPreferences automatically
+protocol.initializeMlsWithSecureStorage()
 ```
 
 ### 2. Generate and Share Key Packages
@@ -134,217 +133,78 @@ if let welcomeData = message.metadata["mls_welcome"] {
 
 ---
 
-## Implementing MlsStorageProvider
+## Custom Storage (Advanced)
 
-You must implement the `MlsStorageProvider` protocol to provide secure key storage.
+The SDK includes built-in secure storage, but you can provide a custom implementation if needed (e.g., for custom backup strategies, additional encryption layers, or testing).
 
-### iOS Implementation (Keychain)
+### Using Custom Storage
 
 ```swift
-import Security
-import Foundation
+// iOS - custom storage
+let customStorage = MyCustomMlsStorage()
+try protocol.initializeMls(storage: customStorage)
+```
 
-class KeychainMlsStorage: MlsStorageProvider {
-    private let service = "com.yourapp.mls"
-    
+```kotlin
+// Android - custom storage
+val customStorage = MyCustomMlsStorage()
+protocol.initializeMls(customStorage)
+```
+
+### Implementing MlsStorageProvider
+
+To create a custom storage provider, implement the `MlsStorageProvider` protocol:
+
+```swift
+// iOS Custom Implementation
+class MyCustomMlsStorage: MlsStorageProvider {
     func store(keyType: String, keyId: String, data: Data) throws {
-        let key = "\(keyType):\(keyId)"
-        
-        // Delete any existing item
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-        
-        // Add new item
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-        
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw MlsStorageError.storeFailed
-        }
+        // Store data securely
     }
     
     func load(keyType: String, keyId: String) throws -> Data? {
-        let key = "\(keyType):\(keyId)"
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        switch status {
-        case errSecSuccess:
-            return result as? Data
-        case errSecItemNotFound:
-            return nil
-        default:
-            throw MlsStorageError.loadFailed
-        }
+        // Load data, return nil if not found
     }
     
     func delete(keyType: String, keyId: String) throws {
-        let key = "\(keyType):\(keyId)"
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key
-        ]
-        
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw MlsStorageError.deleteFailed
-        }
+        // Delete data
     }
     
     func listKeys(keyType: String) throws -> [String] {
-        let prefix = "\(keyType):"
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        switch status {
-        case errSecSuccess:
-            guard let items = result as? [[String: Any]] else {
-                return []
-            }
-            return items.compactMap { item -> String? in
-                guard let account = item[kSecAttrAccount as String] as? String,
-                      account.hasPrefix(prefix) else {
-                    return nil
-                }
-                return String(account.dropFirst(prefix.count))
-            }
-        case errSecItemNotFound:
-            return []
-        default:
-            throw MlsStorageError.loadFailed
-        }
+        // Return all key IDs for the given type
     }
 }
 ```
-
-### Android Implementation (EncryptedSharedPreferences)
 
 ```kotlin
-import android.content.Context
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
-import android.util.Base64
-
-class KeystoreMlsStorage(context: Context) : MlsStorageProvider {
-    
-    private val masterKey = MasterKey.Builder(context)
-        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-        .build()
-    
-    private val sharedPreferences = EncryptedSharedPreferences.create(
-        context,
-        "mls_secure_storage",
-        masterKey,
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
-    
-    private fun makeKey(keyType: String, keyId: String): String = "$keyType:$keyId"
-    
-    @Throws(MlsStorageError::class)
+// Android Custom Implementation
+class MyCustomMlsStorage : MlsStorageProvider {
     override fun store(keyType: String, keyId: String, data: ByteArray) {
-        try {
-            val key = makeKey(keyType, keyId)
-            val encoded = Base64.encodeToString(data, Base64.NO_WRAP)
-            sharedPreferences.edit().putString(key, encoded).apply()
-            
-            // Also track the key in the index
-            val indexKey = "index:$keyType"
-            val existingKeys = sharedPreferences.getStringSet(indexKey, mutableSetOf()) ?: mutableSetOf()
-            val updatedKeys = existingKeys.toMutableSet().apply { add(keyId) }
-            sharedPreferences.edit().putStringSet(indexKey, updatedKeys).apply()
-        } catch (e: Exception) {
-            throw MlsStorageError.StoreFailed()
-        }
+        // Store data securely
     }
     
-    @Throws(MlsStorageError::class)
     override fun load(keyType: String, keyId: String): ByteArray? {
-        return try {
-            val key = makeKey(keyType, keyId)
-            val encoded = sharedPreferences.getString(key, null) ?: return null
-            Base64.decode(encoded, Base64.NO_WRAP)
-        } catch (e: Exception) {
-            throw MlsStorageError.LoadFailed()
-        }
+        // Load data, return null if not found
     }
     
-    @Throws(MlsStorageError::class)
     override fun delete(keyType: String, keyId: String) {
-        try {
-            val key = makeKey(keyType, keyId)
-            sharedPreferences.edit().remove(key).apply()
-            
-            // Remove from index
-            val indexKey = "index:$keyType"
-            val existingKeys = sharedPreferences.getStringSet(indexKey, mutableSetOf()) ?: mutableSetOf()
-            val updatedKeys = existingKeys.toMutableSet().apply { remove(keyId) }
-            sharedPreferences.edit().putStringSet(indexKey, updatedKeys).apply()
-        } catch (e: Exception) {
-            throw MlsStorageError.DeleteFailed()
-        }
+        // Delete data
     }
     
-    @Throws(MlsStorageError::class)
     override fun listKeys(keyType: String): List<String> {
-        return try {
-            val indexKey = "index:$keyType"
-            sharedPreferences.getStringSet(indexKey, emptySet())?.toList() ?: emptyList()
-        } catch (e: Exception) {
-            throw MlsStorageError.LoadFailed()
-        }
+        // Return all key IDs for the given type
     }
 }
 ```
 
-### React Native Implementation
-
-For React Native, implement the storage in native code and expose it via the native module:
+### React Native
 
 ```typescript
-// TypeScript types
-interface MlsStorageProvider {
-  store(keyType: string, keyId: string, data: Uint8Array): Promise<void>;
-  load(keyType: string, keyId: string): Promise<Uint8Array | null>;
-  delete(keyType: string, keyId: string): Promise<void>;
-  listKeys(keyType: string): Promise<string[]>;
-}
-
-// Usage in React Native
 import { NativeModules } from 'react-native';
 
 const { OfflineProtocolModule } = NativeModules;
 
-// The native module handles storage internally using platform-native secure storage
+// Initialize with built-in secure storage (recommended)
 await OfflineProtocolModule.initializeMlsWithSecureStorage();
 
 // Generate key package
@@ -443,7 +303,8 @@ Encrypted messages use the existing `Message` structure with metadata:
 
 | Method | Description |
 |--------|-------------|
-| `initializeMls(storage)` | Initialize MLS with storage provider |
+| `initializeMlsWithSecureStorage()` | Initialize MLS with built-in platform secure storage (recommended) |
+| `initializeMls(storage)` | Initialize MLS with custom storage provider |
 | `isMlsInitialized()` | Check if MLS is initialized |
 
 ### Key Packages
