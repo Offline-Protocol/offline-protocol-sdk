@@ -68,6 +68,9 @@ dependencies {
     // OkHttp for WebSocket support in InternetManager
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     
+    // AndroidX Security Crypto for MlsSecureStorage
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    
     if (reactNativeExists) {
         implementation 'com.facebook.react:react-android'
     } else {

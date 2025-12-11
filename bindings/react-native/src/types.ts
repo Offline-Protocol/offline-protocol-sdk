@@ -611,3 +611,101 @@ export interface InternetMessage {
   /** Message data as array of bytes */
   data: number[];
 }
+
+// ============================================================================
+// MLS (MESSAGE LAYER SECURITY) TYPES
+// ============================================================================
+
+/**
+ * MLS key package for session establishment.
+ * Key packages are used to establish encrypted sessions with peers.
+ */
+export interface MlsKeyPackage {
+  /** Unique identifier for this key package */
+  packageId: string;
+  /** User ID that owns this key package */
+  userId: string;
+  /** Raw key package data (bytes) */
+  keyPackageData: number[];
+  /** Timestamp when this package was created */
+  createdAt: number;
+  /** Whether this package has been synced to a server */
+  isSynced: boolean;
+}
+
+/**
+ * MLS encrypted message structure.
+ * Contains the ciphertext and metadata needed for decryption.
+ */
+export interface MlsEncryptedMessage {
+  /** Group ID (for 1:1 this is "session:userId") */
+  groupId: string;
+  /** MLS message type (e.g., "Application", "Proposal", "Commit") */
+  messageType: string;
+  /** MLS epoch number */
+  epoch: number;
+  /** Encrypted ciphertext (bytes) */
+  ciphertext: number[];
+  /** Sender's user ID */
+  senderId: string;
+  /** Timestamp in milliseconds */
+  timestampMs: number;
+}
+
+/**
+ * MLS welcome message for joining a session or group.
+ * Sent to new members to allow them to join an encrypted session.
+ */
+export interface MlsWelcome {
+  /** Group ID being joined */
+  groupId: string;
+  /** Raw welcome message data (bytes) */
+  welcomeData: number[];
+  /** User ID of the inviter */
+  inviterId: string;
+  /** Timestamp in milliseconds */
+  timestampMs: number;
+}
+
+/**
+ * MLS session information for 1:1 encrypted conversations.
+ */
+export interface MlsSessionInfo {
+  /** Other user's ID in this session */
+  otherUserId: string;
+  /** Group ID for this session */
+  groupId: string;
+  /** Current epoch number */
+  epoch: number;
+  /** Timestamp when session was created */
+  createdAt: number;
+}
+
+/**
+ * MLS group information for group encrypted conversations.
+ */
+export interface MlsGroupInfo {
+  /** Unique group identifier */
+  groupId: string;
+  /** Human-readable group name */
+  groupName: string;
+  /** List of member user IDs */
+  memberIds: string[];
+  /** Current epoch number */
+  epoch: number;
+  /** Timestamp when group was created */
+  createdAt: number;
+}
+
+/**
+ * MLS commit message for group state updates.
+ * Used when members are added or removed from a group.
+ */
+export interface MlsCommit {
+  /** Group ID being updated */
+  groupId: string;
+  /** Raw commit data (bytes) */
+  commitData: number[];
+  /** New epoch after commit */
+  newEpoch: number;
+}

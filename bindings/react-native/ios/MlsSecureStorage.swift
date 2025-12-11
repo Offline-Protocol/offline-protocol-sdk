@@ -15,7 +15,7 @@ import Security
 /// - Uses kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly for security
 /// - Stores data device-bound (not synced to iCloud Keychain)
 /// - Provides atomic operations for thread safety
-class MlsSecureStorage: MlsStorageProvider {
+final class MlsSecureStorage: MlsStorageProvider {
     private let service: String
     private let accessGroup: String?
     
@@ -30,26 +30,27 @@ class MlsSecureStorage: MlsStorageProvider {
     }
     
     /// Stores data securely in the Keychain.
-    func store(keyType: String, keyId: String, data: Data) throws {
+    func store(keyType: String, keyId: String, data: [UInt8]) throws {
         let key = makeKey(keyType: keyType, keyId: keyId)
+        let dataToStore = Data(data)
         
         // Delete any existing item first
-        var deleteQuery = baseQuery(for: key)
+        let deleteQuery = baseQuery(for: key)
         SecItemDelete(deleteQuery as CFDictionary)
         
         // Add new item
         var addQuery = baseQuery(for: key)
-        addQuery[kSecValueData as String] = data
+        addQuery[kSecValueData as String] = dataToStore
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         guard status == errSecSuccess else {
-            throw MlsStorageError.storeFailed
+            throw MlsStorageError.StoreFailed(message: "Keychain store failed with status: \(status)")
         }
     }
     
     /// Loads data from the Keychain.
-    func load(keyType: String, keyId: String) throws -> Data? {
+    func load(keyType: String, keyId: String) throws -> [UInt8]? {
         let key = makeKey(keyType: keyType, keyId: keyId)
         
         var query = baseQuery(for: key)
@@ -61,11 +62,14 @@ class MlsSecureStorage: MlsStorageProvider {
         
         switch status {
         case errSecSuccess:
-            return result as? Data
+            guard let data = result as? Data else {
+                return nil
+            }
+            return [UInt8](data)
         case errSecItemNotFound:
             return nil
         default:
-            throw MlsStorageError.loadFailed
+            throw MlsStorageError.LoadFailed(message: "Keychain load failed with status: \(status)")
         }
     }
     
@@ -77,7 +81,7 @@ class MlsSecureStorage: MlsStorageProvider {
         let status = SecItemDelete(query as CFDictionary)
         
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw MlsStorageError.deleteFailed
+            throw MlsStorageError.DeleteFailed(message: "Keychain delete failed with status: \(status)")
         }
     }
     
@@ -114,7 +118,7 @@ class MlsSecureStorage: MlsStorageProvider {
         case errSecItemNotFound:
             return []
         default:
-            throw MlsStorageError.loadFailed
+            throw MlsStorageError.LoadFailed(message: "Keychain listKeys failed with status: \(status)")
         }
     }
     

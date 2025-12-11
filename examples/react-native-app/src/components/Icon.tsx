@@ -49,6 +49,9 @@ const ICON_MAP: Record<string, string> = {
   'pencil': '✏️',
   'close-circle': '✕',
   'search': '🔍',
+  'lock-closed': '🔒',
+  'lock-open': '🔓',
+  'alert-circle': '⚠️',
   
   // Actions
   'play-circle': '▶️',

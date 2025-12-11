@@ -654,6 +654,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func hasRoute(destination: String)  -> Bool
     
+    func initializeMls(storage: MlsStorageProvider) throws 
+    
     func internetGetNextMessage()  -> InternetMessage?
     
     func internetMessageReceived(senderId: String, data: [UInt8]) throws 
@@ -662,9 +664,61 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func internetStatusChanged(isConnected: Bool) throws 
     
+    func isMlsInitialized()  -> Bool
+    
     func isRelay()  -> Bool
     
     func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float) 
+    
+    func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8]) throws  -> MlsWelcomeMessage
+    
+    func mlsClearPendingWelcome(otherUserId: String) throws 
+    
+    func mlsCreateGroup(groupName: String) throws  -> MlsGroupInfo
+    
+    func mlsCreateSession(otherUserId: String) throws  -> MlsWelcomeMessage
+    
+    func mlsDecrypt(encrypted: MlsEncryptedMessage) throws  -> [UInt8]?
+    
+    func mlsDecryptFromGroup(encrypted: MlsEncryptedMessage) throws  -> [UInt8]?
+    
+    func mlsDecryptFromUser(encrypted: MlsEncryptedMessage) throws  -> [UInt8]?
+    
+    func mlsDeleteSession(otherUserId: String) throws 
+    
+    func mlsEncryptForGroup(groupId: String, plaintext: [UInt8]) throws  -> MlsEncryptedMessage
+    
+    func mlsEncryptForUser(otherUserId: String, plaintext: [UInt8]) throws  -> MlsEncryptedMessage
+    
+    func mlsGenerateKeyPackage() throws  -> MlsKeyPackageBundle
+    
+    func mlsGetGroupInfo(groupId: String)  -> MlsGroupInfo?
+    
+    func mlsGetOrCreateKeyPackage() throws  -> MlsKeyPackageBundle
+    
+    func mlsGetPendingKeyPackages()  -> [MlsKeyPackageBundle]
+    
+    func mlsGetPendingWelcome(otherUserId: String)  -> MlsWelcomeMessage?
+    
+    func mlsHasSession(otherUserId: String)  -> Bool
+    
+    func mlsImportKeyPackage(userId: String, keyPackageData: [UInt8]) throws 
+    
+    func mlsJoinGroup(welcome: MlsWelcomeMessage) throws  -> MlsGroupInfo
+    
+    func mlsJoinSession(welcome: MlsWelcomeMessage) throws  -> MlsGroupInfo
+    
+    func mlsLeaveGroup(groupId: String) throws 
+    
+    func mlsListGroups()  -> [String]
+    
+    func mlsListSessions()  -> [String]
+    
+    func mlsMarkKeyPackageSynced(packageId: String) throws 
+    
+    func mlsProcessWelcome(welcome: MlsWelcomeMessage) throws  -> MlsGroupInfo
+    
+    func mlsRemoveGroupMember(groupId: String, memberId: String) throws  -> MlsEncryptedMessage
     
     func pause() throws 
     
@@ -1047,6 +1101,14 @@ open func hasRoute(destination: String) -> Bool  {
 })
 }
     
+open func initializeMls(storage: MlsStorageProvider)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceMlsStorageProvider_lower(storage),$0
+    )
+}
+}
+    
 open func internetGetNextMessage() -> InternetMessage?  {
     return try!  FfiConverterOptionTypeInternetMessage.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(
@@ -1079,6 +1141,14 @@ open func internetStatusChanged(isConnected: Bool)throws   {try rustCallWithErro
 }
 }
     
+open func isMlsInitialized() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_mls_initialized(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
 open func isRelay() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(
@@ -1096,6 +1166,226 @@ open func learnRoute(destination: String, nextHop: String, hopCount: UInt8, qual
         FfiConverterFloat.lower(quality),$0
     )
 }
+}
+    
+open func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8])throws  -> MlsWelcomeMessage  {
+    return try  FfiConverterTypeMlsWelcomeMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_add_group_member(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterSequenceUInt8.lower(memberKeyPackage),$0
+    )
+})
+}
+    
+open func mlsClearPendingWelcome(otherUserId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(otherUserId),$0
+    )
+}
+}
+    
+open func mlsCreateGroup(groupName: String)throws  -> MlsGroupInfo  {
+    return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupName),$0
+    )
+})
+}
+    
+open func mlsCreateSession(otherUserId: String)throws  -> MlsWelcomeMessage  {
+    return try  FfiConverterTypeMlsWelcomeMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(otherUserId),$0
+    )
+})
+}
+    
+open func mlsDecrypt(encrypted: MlsEncryptedMessage)throws  -> [UInt8]?  {
+    return try  FfiConverterOptionSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),$0
+    )
+})
+}
+    
+open func mlsDecryptFromGroup(encrypted: MlsEncryptedMessage)throws  -> [UInt8]?  {
+    return try  FfiConverterOptionSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_group(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),$0
+    )
+})
+}
+    
+open func mlsDecryptFromUser(encrypted: MlsEncryptedMessage)throws  -> [UInt8]?  {
+    return try  FfiConverterOptionSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_user(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),$0
+    )
+})
+}
+    
+open func mlsDeleteSession(otherUserId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_delete_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(otherUserId),$0
+    )
+}
+}
+    
+open func mlsEncryptForGroup(groupId: String, plaintext: [UInt8])throws  -> MlsEncryptedMessage  {
+    return try  FfiConverterTypeMlsEncryptedMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterSequenceUInt8.lower(plaintext),$0
+    )
+})
+}
+    
+open func mlsEncryptForUser(otherUserId: String, plaintext: [UInt8])throws  -> MlsEncryptedMessage  {
+    return try  FfiConverterTypeMlsEncryptedMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_user(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(otherUserId),
+        FfiConverterSequenceUInt8.lower(plaintext),$0
+    )
+})
+}
+    
+open func mlsGenerateKeyPackage()throws  -> MlsKeyPackageBundle  {
+    return try  FfiConverterTypeMlsKeyPackageBundle_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_generate_key_package(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func mlsGetGroupInfo(groupId: String) -> MlsGroupInfo?  {
+    return try!  FfiConverterOptionTypeMlsGroupInfo.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_group_info(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func mlsGetOrCreateKeyPackage()throws  -> MlsKeyPackageBundle  {
+    return try  FfiConverterTypeMlsKeyPackageBundle_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_or_create_key_package(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func mlsGetPendingKeyPackages() -> [MlsKeyPackageBundle]  {
+    return try!  FfiConverterSequenceTypeMlsKeyPackageBundle.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_key_packages(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func mlsGetPendingWelcome(otherUserId: String) -> MlsWelcomeMessage?  {
+    return try!  FfiConverterOptionTypeMlsWelcomeMessage.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_welcome(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(otherUserId),$0
+    )
+})
+}
+    
+open func mlsHasSession(otherUserId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_has_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(otherUserId),$0
+    )
+})
+}
+    
+open func mlsImportKeyPackage(userId: String, keyPackageData: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_import_key_package(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(userId),
+        FfiConverterSequenceUInt8.lower(keyPackageData),$0
+    )
+}
+}
+    
+open func mlsJoinGroup(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  {
+    return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_group(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
+    )
+})
+}
+    
+open func mlsJoinSession(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  {
+    return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
+    )
+})
+}
+    
+open func mlsLeaveGroup(groupId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_leave_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+}
+}
+    
+open func mlsListGroups() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_groups(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func mlsListSessions() -> [String]  {
+    return try!  FfiConverterSequenceString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_sessions(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func mlsMarkKeyPackageSynced(packageId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_mark_key_package_synced(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(packageId),$0
+    )
+}
+}
+    
+open func mlsProcessWelcome(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  {
+    return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
+    )
+})
+}
+    
+open func mlsRemoveGroupMember(groupId: String, memberId: String)throws  -> MlsEncryptedMessage  {
+    return try  FfiConverterTypeMlsEncryptedMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_remove_group_member(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(memberId),$0
+    )
+})
 }
     
 open func pause()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
@@ -1915,6 +2205,278 @@ public func FfiConverterTypeMessageStats_lift(_ buf: RustBuffer) throws -> Messa
 #endif
 public func FfiConverterTypeMessageStats_lower(_ value: MessageStats) -> RustBuffer {
     return FfiConverterTypeMessageStats.lower(value)
+}
+
+
+public struct MlsEncryptedMessage: Equatable, Hashable {
+    public var groupId: String
+    public var messageType: String
+    public var epoch: UInt64
+    public var ciphertext: [UInt8]
+    public var senderId: String
+    public var timestampMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(groupId: String, messageType: String, epoch: UInt64, ciphertext: [UInt8], senderId: String, timestampMs: UInt64) {
+        self.groupId = groupId
+        self.messageType = messageType
+        self.epoch = epoch
+        self.ciphertext = ciphertext
+        self.senderId = senderId
+        self.timestampMs = timestampMs
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MlsEncryptedMessage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMlsEncryptedMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsEncryptedMessage {
+        return
+            try MlsEncryptedMessage(
+                groupId: FfiConverterString.read(from: &buf), 
+                messageType: FfiConverterString.read(from: &buf), 
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                ciphertext: FfiConverterSequenceUInt8.read(from: &buf), 
+                senderId: FfiConverterString.read(from: &buf), 
+                timestampMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MlsEncryptedMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.groupId, into: &buf)
+        FfiConverterString.write(value.messageType, into: &buf)
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterSequenceUInt8.write(value.ciphertext, into: &buf)
+        FfiConverterString.write(value.senderId, into: &buf)
+        FfiConverterUInt64.write(value.timestampMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsEncryptedMessage_lift(_ buf: RustBuffer) throws -> MlsEncryptedMessage {
+    return try FfiConverterTypeMlsEncryptedMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsEncryptedMessage_lower(_ value: MlsEncryptedMessage) -> RustBuffer {
+    return FfiConverterTypeMlsEncryptedMessage.lower(value)
+}
+
+
+public struct MlsGroupInfo: Equatable, Hashable {
+    public var groupId: String
+    public var name: String?
+    public var members: [String]
+    public var epoch: UInt64
+    public var isSession: Bool
+    public var createdAtMs: UInt64
+    public var lastActivityMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(groupId: String, name: String?, members: [String], epoch: UInt64, isSession: Bool, createdAtMs: UInt64, lastActivityMs: UInt64) {
+        self.groupId = groupId
+        self.name = name
+        self.members = members
+        self.epoch = epoch
+        self.isSession = isSession
+        self.createdAtMs = createdAtMs
+        self.lastActivityMs = lastActivityMs
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MlsGroupInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMlsGroupInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsGroupInfo {
+        return
+            try MlsGroupInfo(
+                groupId: FfiConverterString.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                members: FfiConverterSequenceString.read(from: &buf), 
+                epoch: FfiConverterUInt64.read(from: &buf), 
+                isSession: FfiConverterBool.read(from: &buf), 
+                createdAtMs: FfiConverterUInt64.read(from: &buf), 
+                lastActivityMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MlsGroupInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.groupId, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterSequenceString.write(value.members, into: &buf)
+        FfiConverterUInt64.write(value.epoch, into: &buf)
+        FfiConverterBool.write(value.isSession, into: &buf)
+        FfiConverterUInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterUInt64.write(value.lastActivityMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsGroupInfo_lift(_ buf: RustBuffer) throws -> MlsGroupInfo {
+    return try FfiConverterTypeMlsGroupInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsGroupInfo_lower(_ value: MlsGroupInfo) -> RustBuffer {
+    return FfiConverterTypeMlsGroupInfo.lower(value)
+}
+
+
+public struct MlsKeyPackageBundle: Equatable, Hashable {
+    public var packageId: String
+    public var userId: String
+    public var keyPackageData: [UInt8]
+    public var createdAtMs: UInt64
+    public var expiresAtMs: UInt64
+    public var synced: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(packageId: String, userId: String, keyPackageData: [UInt8], createdAtMs: UInt64, expiresAtMs: UInt64, synced: Bool) {
+        self.packageId = packageId
+        self.userId = userId
+        self.keyPackageData = keyPackageData
+        self.createdAtMs = createdAtMs
+        self.expiresAtMs = expiresAtMs
+        self.synced = synced
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MlsKeyPackageBundle: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMlsKeyPackageBundle: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsKeyPackageBundle {
+        return
+            try MlsKeyPackageBundle(
+                packageId: FfiConverterString.read(from: &buf), 
+                userId: FfiConverterString.read(from: &buf), 
+                keyPackageData: FfiConverterSequenceUInt8.read(from: &buf), 
+                createdAtMs: FfiConverterUInt64.read(from: &buf), 
+                expiresAtMs: FfiConverterUInt64.read(from: &buf), 
+                synced: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MlsKeyPackageBundle, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.packageId, into: &buf)
+        FfiConverterString.write(value.userId, into: &buf)
+        FfiConverterSequenceUInt8.write(value.keyPackageData, into: &buf)
+        FfiConverterUInt64.write(value.createdAtMs, into: &buf)
+        FfiConverterUInt64.write(value.expiresAtMs, into: &buf)
+        FfiConverterBool.write(value.synced, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsKeyPackageBundle_lift(_ buf: RustBuffer) throws -> MlsKeyPackageBundle {
+    return try FfiConverterTypeMlsKeyPackageBundle.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsKeyPackageBundle_lower(_ value: MlsKeyPackageBundle) -> RustBuffer {
+    return FfiConverterTypeMlsKeyPackageBundle.lower(value)
+}
+
+
+public struct MlsWelcomeMessage: Equatable, Hashable {
+    public var groupId: String
+    public var welcomeData: [UInt8]
+    public var inviterId: String
+    public var groupName: String?
+    public var timestampMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(groupId: String, welcomeData: [UInt8], inviterId: String, groupName: String?, timestampMs: UInt64) {
+        self.groupId = groupId
+        self.welcomeData = welcomeData
+        self.inviterId = inviterId
+        self.groupName = groupName
+        self.timestampMs = timestampMs
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MlsWelcomeMessage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMlsWelcomeMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsWelcomeMessage {
+        return
+            try MlsWelcomeMessage(
+                groupId: FfiConverterString.read(from: &buf), 
+                welcomeData: FfiConverterSequenceUInt8.read(from: &buf), 
+                inviterId: FfiConverterString.read(from: &buf), 
+                groupName: FfiConverterOptionString.read(from: &buf), 
+                timestampMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MlsWelcomeMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.groupId, into: &buf)
+        FfiConverterSequenceUInt8.write(value.welcomeData, into: &buf)
+        FfiConverterString.write(value.inviterId, into: &buf)
+        FfiConverterOptionString.write(value.groupName, into: &buf)
+        FfiConverterUInt64.write(value.timestampMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsWelcomeMessage_lift(_ buf: RustBuffer) throws -> MlsWelcomeMessage {
+    return try FfiConverterTypeMlsWelcomeMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsWelcomeMessage_lower(_ value: MlsWelcomeMessage) -> RustBuffer {
+    return FfiConverterTypeMlsWelcomeMessage.lower(value)
 }
 
 
@@ -2897,6 +3459,110 @@ public func FfiConverterTypeMessagePriority_lower(_ value: MessagePriority) -> R
 
 
 
+public enum MlsStorageError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    case StoreFailed(message: String)
+    
+    case LoadFailed(message: String)
+    
+    case DeleteFailed(message: String)
+    
+    case KeyNotFound(message: String)
+    
+    case CorruptedData(message: String)
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension MlsStorageError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMlsStorageError: FfiConverterRustBuffer {
+    typealias SwiftType = MlsStorageError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsStorageError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .StoreFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .LoadFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 3: return .DeleteFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 4: return .KeyNotFound(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 5: return .CorruptedData(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MlsStorageError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        case .StoreFailed(_ /* message is ignored*/):
+            writeInt(&buf, Int32(1))
+        case .LoadFailed(_ /* message is ignored*/):
+            writeInt(&buf, Int32(2))
+        case .DeleteFailed(_ /* message is ignored*/):
+            writeInt(&buf, Int32(3))
+        case .KeyNotFound(_ /* message is ignored*/):
+            writeInt(&buf, Int32(4))
+        case .CorruptedData(_ /* message is ignored*/):
+            writeInt(&buf, Int32(5))
+
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsStorageError_lift(_ buf: RustBuffer) throws -> MlsStorageError {
+    return try FfiConverterTypeMlsStorageError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsStorageError_lower(_ value: MlsStorageError) -> RustBuffer {
+    return FfiConverterTypeMlsStorageError.lower(value)
+}
+
+
 public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
     
@@ -2910,6 +3576,10 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     case SendFailed(message: String)
     
     case InvalidState(message: String)
+    
+    case MlsNotInitialized(message: String)
+    
+    case MlsError(message: String)
     
     case Other(message: String)
     
@@ -2960,7 +3630,15 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .Other(
+        case 6: return .MlsNotInitialized(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 7: return .MlsError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 8: return .Other(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -2985,8 +3663,12 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
         case .InvalidState(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .Other(_ /* message is ignored*/):
+        case .MlsNotInitialized(_ /* message is ignored*/):
             writeInt(&buf, Int32(6))
+        case .MlsError(_ /* message is ignored*/):
+            writeInt(&buf, Int32(7))
+        case .Other(_ /* message is ignored*/):
+            writeInt(&buf, Int32(8))
 
         
         }
@@ -3362,6 +4044,220 @@ public func FfiConverterCallbackInterfaceEventCallback_lower(_ v: EventCallback)
     return FfiConverterCallbackInterfaceEventCallback.lower(v)
 }
 
+
+
+
+public protocol MlsStorageProvider: AnyObject, Sendable {
+    
+    func store(keyType: String, keyId: String, data: [UInt8]) throws 
+    
+    func load(keyType: String, keyId: String) throws  -> [UInt8]?
+    
+    func delete(keyType: String, keyId: String) throws 
+    
+    func listKeys(keyType: String) throws  -> [String]
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceMlsStorageProvider {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceMlsStorageProvider] = [UniffiVTableCallbackInterfaceMlsStorageProvider(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceMlsStorageProvider.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface MlsStorageProvider: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceMlsStorageProvider.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface MlsStorageProvider: handle missing in uniffiClone")
+            }
+        },
+        store: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            keyId: RustBuffer,
+            data: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceMlsStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.store(
+                     keyType: try FfiConverterString.lift(keyType),
+                     keyId: try FfiConverterString.lift(keyId),
+                     data: try FfiConverterSequenceUInt8.lift(data)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        },
+        load: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            keyId: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [UInt8]? in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceMlsStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.load(
+                     keyType: try FfiConverterString.lift(keyType),
+                     keyId: try FfiConverterString.lift(keyId)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionSequenceUInt8.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        },
+        delete: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            keyId: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceMlsStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.delete(
+                     keyType: try FfiConverterString.lift(keyType),
+                     keyId: try FfiConverterString.lift(keyId)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        },
+        listKeys: { (
+            uniffiHandle: UInt64,
+            keyType: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> [String] in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceMlsStorageProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.listKeys(
+                     keyType: try FfiConverterString.lift(keyType)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterSequenceString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMlsStorageError_lower
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitMlsStorageProvider() {
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(UniffiCallbackInterfaceMlsStorageProvider.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceMlsStorageProvider {
+    fileprivate static let handleMap = UniffiHandleMap<MlsStorageProvider>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceMlsStorageProvider : FfiConverter {
+    typealias SwiftType = MlsStorageProvider
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceMlsStorageProvider_lift(_ handle: UInt64) throws -> MlsStorageProvider {
+    return try FfiConverterCallbackInterfaceMlsStorageProvider.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceMlsStorageProvider_lower(_ v: MlsStorageProvider) -> UInt64 {
+    return FfiConverterCallbackInterfaceMlsStorageProvider.lower(v)
+}
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -3533,6 +4429,54 @@ fileprivate struct FfiConverterOptionTypeInternetMessage: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeMlsGroupInfo: FfiConverterRustBuffer {
+    typealias SwiftType = MlsGroupInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMlsGroupInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMlsGroupInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMlsWelcomeMessage: FfiConverterRustBuffer {
+    typealias SwiftType = MlsWelcomeMessage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMlsWelcomeMessage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMlsWelcomeMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeRouteEntry: FfiConverterRustBuffer {
     typealias SwiftType = RouteEntry?
 
@@ -3597,6 +4541,30 @@ fileprivate struct FfiConverterOptionTypeWifiDirectMessage: FfiConverterRustBuff
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeWifiDirectMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionSequenceUInt8: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt8]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceUInt8.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceUInt8.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3672,6 +4640,31 @@ fileprivate struct FfiConverterSequenceTypeMessageStats: FfiConverterRustBuffer 
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeMessageStats.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeMlsKeyPackageBundle: FfiConverterRustBuffer {
+    typealias SwiftType = [MlsKeyPackageBundle]
+
+    public static func write(_ value: [MlsKeyPackageBundle], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMlsKeyPackageBundle.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MlsKeyPackageBundle] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MlsKeyPackageBundle]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMlsKeyPackageBundle.read(from: &buf))
         }
         return seq
     }
@@ -3866,6 +4859,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 44869) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 29008) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3878,10 +4874,88 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() != 21230) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 38824) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member() != 22947) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_group() != 33552) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 13910) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 52691) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_group() != 58575) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 30590) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 59813) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_group() != 21857) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 4753) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 29747) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_group_info() != 41) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 16795) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages() != 4278) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome() != 26978) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session() != 39479) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 47052) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_group() != 22372) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 32375) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_leave_group() != 62572) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_groups() != 49898) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 9128) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced() != 49511) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 44299) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_remove_group_member() != 60202) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362) {
@@ -3974,8 +5048,21 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event() != 4769) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store() != 4704) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_load() != 41626) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete() != 64734) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 24837) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
     uniffiCallbackInitEventCallback()
+    uniffiCallbackInitMlsStorageProvider()
     return InitializationResult.ok
 }()
 

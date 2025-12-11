@@ -4,7 +4,7 @@ import android.content.Context
 import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import uniffi.offline_protocol.MlsStorageError
+import uniffi.offline_protocol.MlsStorageException
 import uniffi.offline_protocol.MlsStorageProvider
 
 /**
@@ -66,7 +66,7 @@ class MlsSecureStorage(context: Context) : MlsStorageProvider {
                     apply() 
                 }
             } catch (e: Exception) {
-                throw MlsStorageError.StoreFailed()
+                throw MlsStorageException.StoreFailed("EncryptedSharedPreferences store failed: ${e.message}")
             }
         }
     }
@@ -82,7 +82,7 @@ class MlsSecureStorage(context: Context) : MlsStorageProvider {
             val decoded = Base64.decode(encoded, Base64.NO_WRAP)
             decoded.map { it.toUByte() }
         } catch (e: Exception) {
-            throw MlsStorageError.LoadFailed()
+            throw MlsStorageException.LoadFailed("EncryptedSharedPreferences load failed: ${e.message}")
         }
     }
     
@@ -109,7 +109,7 @@ class MlsSecureStorage(context: Context) : MlsStorageProvider {
                     apply()
                 }
             } catch (e: Exception) {
-                throw MlsStorageError.DeleteFailed()
+                throw MlsStorageException.DeleteFailed("EncryptedSharedPreferences delete failed: ${e.message}")
             }
         }
     }
@@ -123,7 +123,7 @@ class MlsSecureStorage(context: Context) : MlsStorageProvider {
                 val indexKey = "$INDEX_PREFIX$keyType"
                 sharedPreferences.getStringSet(indexKey, emptySet())?.toList() ?: emptyList()
             } catch (e: Exception) {
-                throw MlsStorageError.LoadFailed()
+                throw MlsStorageException.LoadFailed("EncryptedSharedPreferences listKeys failed: ${e.message}")
             }
         }
     }

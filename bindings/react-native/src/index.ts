@@ -25,6 +25,11 @@ import type {
   RetryConfig,
   DedupConfig,
   DedupStats,
+  MlsKeyPackage,
+  MlsEncryptedMessage,
+  MlsWelcome,
+  MlsSessionInfo,
+  MlsGroupInfo,
 } from './types';
 import { MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
@@ -1246,6 +1251,396 @@ export class OfflineProtocol {
    */
   async internetReturnMessage(): Promise<void> {
     return await OfflineProtocolNativeModule.internetReturnMessage();
+  }
+
+  // ============================================================================
+  // MLS (END-TO-END ENCRYPTION) METHODS
+  // ============================================================================
+
+  /**
+   * Initializes MLS with built-in secure storage.
+   * Uses iOS Keychain or Android EncryptedSharedPreferences.
+   *
+   * @throws Error if initialization fails
+   */
+  async initializeMlsWithSecureStorage(): Promise<void> {
+    return await OfflineProtocolNativeModule.initializeMlsWithSecureStorage();
+  }
+
+  /**
+   * Checks if MLS is initialized.
+   *
+   * @returns True if MLS is ready for use
+   */
+  async isMlsInitialized(): Promise<boolean> {
+    return await OfflineProtocolNativeModule.isMlsInitialized();
+  }
+
+  /**
+   * Generates a new MLS key package.
+   * Key packages are used by others to establish encrypted sessions with you.
+   *
+   * @returns Generated key package
+   * @throws Error if generation fails
+   */
+  async mlsGenerateKeyPackage(): Promise<MlsKeyPackage> {
+    const result = await OfflineProtocolNativeModule.mlsGenerateKeyPackage();
+    return {
+      packageId: result.packageId,
+      userId: result.userId,
+      keyPackageData: result.keyPackageData,
+      createdAt: result.createdAt,
+      isSynced: result.isSynced,
+    };
+  }
+
+  /**
+   * Gets an existing key package or creates a new one.
+   *
+   * @returns Key package
+   * @throws Error if operation fails
+   */
+  async mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage> {
+    const result = await OfflineProtocolNativeModule.mlsGetOrCreateKeyPackage();
+    return {
+      packageId: result.packageId,
+      userId: result.userId,
+      keyPackageData: result.keyPackageData,
+      createdAt: result.createdAt,
+      isSynced: result.isSynced,
+    };
+  }
+
+  /**
+   * Gets pending key packages that haven't been synced yet.
+   *
+   * @returns Array of pending key packages
+   */
+  async mlsGetPendingKeyPackages(): Promise<MlsKeyPackage[]> {
+    const results = await OfflineProtocolNativeModule.mlsGetPendingKeyPackages();
+    return results.map((r: any) => ({
+      packageId: r.packageId,
+      userId: r.userId,
+      keyPackageData: r.keyPackageData,
+      createdAt: r.createdAt,
+      isSynced: r.isSynced,
+    }));
+  }
+
+  /**
+   * Marks a key package as synced.
+   *
+   * @param packageId - Key package ID to mark
+   * @throws Error if operation fails
+   */
+  async mlsMarkKeyPackageSynced(packageId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.mlsMarkKeyPackageSynced(packageId);
+  }
+
+  /**
+   * Imports another user's key package.
+   * Required before you can send encrypted messages to them.
+   *
+   * @param userId - User ID that owns the key package
+   * @param keyPackageData - Raw key package data
+   * @throws Error if import fails
+   */
+  async mlsImportKeyPackage(userId: string, keyPackageData: number[]): Promise<void> {
+    return await OfflineProtocolNativeModule.mlsImportKeyPackage(userId, keyPackageData);
+  }
+
+  /**
+   * Checks if an MLS session exists with another user.
+   *
+   * @param otherUserId - Other user's ID
+   * @returns True if session exists
+   */
+  async mlsHasSession(otherUserId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.mlsHasSession(otherUserId);
+  }
+
+  /**
+   * Creates an MLS session with another user.
+   * Returns a Welcome message that must be sent to the other user.
+   *
+   * @param otherUserId - Other user's ID
+   * @returns Welcome message to send to the other user
+   * @throws Error if session creation fails
+   */
+  async mlsCreateSession(otherUserId: string): Promise<MlsWelcome> {
+    const result = await OfflineProtocolNativeModule.mlsCreateSession(otherUserId);
+    return {
+      groupId: result.groupId,
+      welcomeData: result.welcomeData,
+      inviterId: result.inviterId,
+      timestampMs: result.timestampMs,
+    };
+  }
+
+  /**
+   * Joins an MLS session from a Welcome message.
+   *
+   * @param welcome - Welcome message received from session creator
+   * @returns Session info
+   * @throws Error if joining fails
+   */
+  async mlsJoinSession(welcome: MlsWelcome): Promise<MlsSessionInfo> {
+    const welcomeJson = JSON.stringify({
+      groupId: welcome.groupId,
+      welcomeData: welcome.welcomeData,
+      inviterId: welcome.inviterId,
+      timestampMs: welcome.timestampMs,
+    });
+    const result = await OfflineProtocolNativeModule.mlsJoinSession(welcomeJson);
+    return {
+      otherUserId: result.otherUserId,
+      groupId: result.groupId,
+      epoch: result.epoch,
+      createdAt: result.createdAt,
+    };
+  }
+
+  /**
+   * Encrypts a message for another user.
+   * Creates a session automatically if one doesn't exist.
+   *
+   * @param otherUserId - Recipient's user ID
+   * @param plaintext - Message content as bytes
+   * @returns Encrypted message
+   * @throws Error if encryption fails
+   */
+  async mlsEncryptForUser(otherUserId: string, plaintext: number[]): Promise<MlsEncryptedMessage> {
+    const result = await OfflineProtocolNativeModule.mlsEncryptForUser(otherUserId, plaintext);
+    return {
+      groupId: result.groupId,
+      messageType: result.messageType,
+      epoch: result.epoch,
+      ciphertext: result.ciphertext,
+      senderId: result.senderId,
+      timestampMs: result.timestampMs,
+    };
+  }
+
+  /**
+   * Decrypts a message from another user.
+   *
+   * @param encrypted - Encrypted message
+   * @returns Decrypted plaintext as bytes, or null if decryption fails
+   */
+  async mlsDecryptFromUser(encrypted: MlsEncryptedMessage): Promise<number[] | null> {
+    const encryptedJson = JSON.stringify({
+      groupId: encrypted.groupId,
+      messageType: encrypted.messageType,
+      epoch: encrypted.epoch,
+      ciphertext: encrypted.ciphertext,
+      senderId: encrypted.senderId,
+      timestampMs: encrypted.timestampMs,
+    });
+    return await OfflineProtocolNativeModule.mlsDecryptFromUser(encryptedJson);
+  }
+
+  /**
+   * Decrypts any MLS message (1:1 or group).
+   *
+   * @param encrypted - Encrypted message
+   * @returns Decrypted plaintext as bytes, or null if decryption fails
+   */
+  async mlsDecrypt(encrypted: MlsEncryptedMessage): Promise<number[] | null> {
+    const encryptedJson = JSON.stringify({
+      groupId: encrypted.groupId,
+      messageType: encrypted.messageType,
+      epoch: encrypted.epoch,
+      ciphertext: encrypted.ciphertext,
+      senderId: encrypted.senderId,
+      timestampMs: encrypted.timestampMs,
+    });
+    return await OfflineProtocolNativeModule.mlsDecrypt(encryptedJson);
+  }
+
+  /**
+   * Lists all active MLS sessions.
+   *
+   * @returns Array of user IDs with active sessions
+   */
+  async mlsListSessions(): Promise<string[]> {
+    return await OfflineProtocolNativeModule.mlsListSessions();
+  }
+
+  /**
+   * Deletes an MLS session with another user.
+   *
+   * @param otherUserId - Other user's ID
+   * @throws Error if deletion fails
+   */
+  async mlsDeleteSession(otherUserId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.mlsDeleteSession(otherUserId);
+  }
+
+  /**
+   * Processes a Welcome message (auto-detects session vs group).
+   *
+   * @param welcome - Welcome message
+   * @returns Session or group info
+   * @throws Error if processing fails
+   */
+  async mlsProcessWelcome(welcome: MlsWelcome): Promise<MlsSessionInfo | MlsGroupInfo> {
+    const welcomeJson = JSON.stringify({
+      groupId: welcome.groupId,
+      welcomeData: welcome.welcomeData,
+      inviterId: welcome.inviterId,
+      timestampMs: welcome.timestampMs,
+    });
+    return await OfflineProtocolNativeModule.mlsProcessWelcome(welcomeJson);
+  }
+
+  // ============================================================================
+  // MLS GROUP METHODS
+  // ============================================================================
+
+  /**
+   * Creates a new MLS group.
+   *
+   * @param groupName - Human-readable group name
+   * @returns Group info
+   * @throws Error if creation fails
+   */
+  async mlsCreateGroup(groupName: string): Promise<MlsGroupInfo> {
+    const result = await OfflineProtocolNativeModule.mlsCreateGroup(groupName);
+    return {
+      groupId: result.groupId,
+      groupName: result.groupName,
+      memberIds: result.memberIds,
+      epoch: result.epoch,
+      createdAt: result.createdAt,
+    };
+  }
+
+  /**
+   * Adds a member to an MLS group.
+   *
+   * @param groupId - Group ID
+   * @param memberKeyPackage - New member's key package data
+   * @returns Welcome message to send to the new member
+   * @throws Error if addition fails
+   */
+  async mlsAddGroupMember(groupId: string, memberKeyPackage: number[]): Promise<MlsWelcome> {
+    const result = await OfflineProtocolNativeModule.mlsAddGroupMember(groupId, memberKeyPackage);
+    return {
+      groupId: result.groupId,
+      welcomeData: result.welcomeData,
+      inviterId: result.inviterId,
+      timestampMs: result.timestampMs,
+    };
+  }
+
+  /**
+   * Removes a member from an MLS group.
+   *
+   * @param groupId - Group ID
+   * @param memberId - Member to remove
+   * @throws Error if removal fails
+   */
+  async mlsRemoveGroupMember(groupId: string, memberId: string): Promise<void> {
+    await OfflineProtocolNativeModule.mlsRemoveGroupMember(groupId, memberId);
+  }
+
+  /**
+   * Leaves an MLS group.
+   *
+   * @param groupId - Group ID to leave
+   * @throws Error if leaving fails
+   */
+  async mlsLeaveGroup(groupId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.mlsLeaveGroup(groupId);
+  }
+
+  /**
+   * Encrypts a message for an MLS group.
+   *
+   * @param groupId - Group ID
+   * @param plaintext - Message content as bytes
+   * @returns Encrypted message
+   * @throws Error if encryption fails
+   */
+  async mlsEncryptForGroup(groupId: string, plaintext: number[]): Promise<MlsEncryptedMessage> {
+    const result = await OfflineProtocolNativeModule.mlsEncryptForGroup(groupId, plaintext);
+    return {
+      groupId: result.groupId,
+      messageType: result.messageType,
+      epoch: result.epoch,
+      ciphertext: result.ciphertext,
+      senderId: result.senderId,
+      timestampMs: result.timestampMs,
+    };
+  }
+
+  /**
+   * Decrypts a message from an MLS group.
+   *
+   * @param encrypted - Encrypted message
+   * @returns Decrypted plaintext as bytes, or null if decryption fails
+   */
+  async mlsDecryptFromGroup(encrypted: MlsEncryptedMessage): Promise<number[] | null> {
+    const encryptedJson = JSON.stringify({
+      groupId: encrypted.groupId,
+      messageType: encrypted.messageType,
+      epoch: encrypted.epoch,
+      ciphertext: encrypted.ciphertext,
+      senderId: encrypted.senderId,
+      timestampMs: encrypted.timestampMs,
+    });
+    return await OfflineProtocolNativeModule.mlsDecryptFromGroup(encryptedJson);
+  }
+
+  /**
+   * Joins an MLS group from a Welcome message.
+   *
+   * @param welcome - Welcome message from group admin
+   * @returns Group info
+   * @throws Error if joining fails
+   */
+  async mlsJoinGroup(welcome: MlsWelcome): Promise<MlsGroupInfo> {
+    const welcomeJson = JSON.stringify({
+      groupId: welcome.groupId,
+      welcomeData: welcome.welcomeData,
+      inviterId: welcome.inviterId,
+      timestampMs: welcome.timestampMs,
+    });
+    const result = await OfflineProtocolNativeModule.mlsJoinGroup(welcomeJson);
+    return {
+      groupId: result.groupId,
+      groupName: result.groupName,
+      memberIds: result.memberIds,
+      epoch: result.epoch,
+      createdAt: result.createdAt,
+    };
+  }
+
+  /**
+   * Lists all MLS groups.
+   *
+   * @returns Array of group IDs
+   */
+  async mlsListGroups(): Promise<string[]> {
+    return await OfflineProtocolNativeModule.mlsListGroups();
+  }
+
+  /**
+   * Gets information about an MLS group.
+   *
+   * @param groupId - Group ID
+   * @returns Group info or null if not found
+   */
+  async mlsGetGroupInfo(groupId: string): Promise<MlsGroupInfo | null> {
+    const result = await OfflineProtocolNativeModule.mlsGetGroupInfo(groupId);
+    if (!result) return null;
+    return {
+      groupId: result.groupId,
+      groupName: result.groupName,
+      memberIds: result.memberIds,
+      epoch: result.epoch,
+      createdAt: result.createdAt,
+    };
   }
 
   /**

@@ -13,6 +13,21 @@ export const DEFAULT_RELAY_SERVER_URL = 'wss://relay-server-production-31c7.up.r
 export const PRESENCE_MESSAGE_PREFIX = '__presence__::';
 
 /**
+ * Key package message prefix used for MLS key exchange.
+ */
+export const KEY_PACKAGE_MESSAGE_PREFIX = '__keypackage__::';
+
+/**
+ * MLS welcome message prefix for session establishment.
+ */
+export const MLS_WELCOME_MESSAGE_PREFIX = '__mlswelcome__::';
+
+/**
+ * Encrypted message prefix indicating MLS-encrypted content.
+ */
+export const ENCRYPTED_MESSAGE_PREFIX = '__encrypted__::';
+
+/**
  * Interval in milliseconds for rebroadcasting presence messages.
  * This ensures other devices know this device is still online.
  */

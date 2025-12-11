@@ -20,6 +20,7 @@ Pod::Spec.new do |s|
     "BleManager.swift",
     "InternetManager.swift",
     "WifiDirectManager.swift",
+    "MlsSecureStorage.swift",
     "ble/**/*.swift",
     "mesh/**/*.swift",
     "Generated/offline_protocol.swift",  # UniFFI generated Swift file

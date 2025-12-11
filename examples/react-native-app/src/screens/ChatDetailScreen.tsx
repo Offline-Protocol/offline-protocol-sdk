@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,11 +11,8 @@ import {
   Alert,
   Keyboard,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-// import { useRoute, useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon } from '../components/Icon';
-import LinearGradient from 'react-native-linear-gradient';
-// import Animated, { FadeInUp, FadeInDown, SlideInRight } from 'react-native-reanimated';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 import { Message } from '../providers/ProtocolProvider';
@@ -31,6 +28,7 @@ interface MessageBubbleProps {
 function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubbleProps) {
   const { theme } = useTheme();
   const isFromMe = message.isFromMe;
+  const isEncrypted = message.isEncrypted ?? false;
   
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString([], { 
@@ -96,6 +94,14 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubble
         </Text>
         
         <View style={styles.messageFooter}>
+          {isEncrypted && (
+            <Icon
+              name="lock-closed"
+              size={10}
+              color={isFromMe ? theme.colors.textInverse : theme.colors.textSecondary}
+              style={{ marginRight: 4, opacity: 0.7 }}
+            />
+          )}
           <Text
             style={[
               styles.messageTime,
@@ -138,18 +144,23 @@ interface ChatDetailScreenProps {
 export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile }: ChatDetailScreenProps) {
   const { theme } = useTheme();
   
-  const { chats, contacts, sendMessage, currentUserId, isOnline, connectedPeersCount } = useProtocol();
+  const { chats, contacts, sendMessage, currentUserId, isOnline, connectedPeersCount, isMlsInitialized, encryptedPeers } = useProtocol();
+  const insets = useSafeAreaInsets();
   const [inputText, setInputText] = useState('');
   const [priority, setPriority] = useState<MessagePriority>(MessagePriority.Medium);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [showPriorityPicker, setShowPriorityPicker] = useState(false);
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const [inputHeight, setInputHeight] = useState(44);
   
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const chat = chats.find(c => c.peerId === peerId);
   const contact = contacts.find(c => c.id === peerId);
   const messages = chat?.messages || [];
   const isPeerOnline = contact?.isOnline ?? false;
+  const isEncryptedChat = chat?.isEncrypted || encryptedPeers.has(peerId);
   
   const avatarColor = generateAvatarColor(peerId);
   const initials = getUserInitials(peerName);
@@ -179,11 +190,19 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
           )}
         </View>
         <View style={styles.headerInfo}>
-          <Text style={[styles.headerName, { color: theme.colors.text }]}>
-            {peerName}
-          </Text>
+          <View style={styles.headerNameRow}>
+            <Text style={[styles.headerName, { color: theme.colors.text }]}>
+              {peerName}
+            </Text>
+            {isEncryptedChat && (
+              <View style={[styles.encryptedBadge, { backgroundColor: theme.colors.success + '20' }]}>
+                <Icon name="lock-closed" size={10} color={theme.colors.success} />
+              </View>
+            )}
+          </View>
           <Text style={[styles.headerStatus, { color: theme.colors.textSecondary }]}>
             {contact?.isOnline ? 'Online' : 'Offline'}
+            {isEncryptedChat ? ' • Encrypted' : ''}
           </Text>
         </View>
       </TouchableOpacity>
@@ -195,17 +214,32 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   useEffect(() => {
     const keyboardWillShow = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      (e) => setKeyboardHeight(e.endCoordinates.height)
+      () => {
+        setIsKeyboardVisible(true);
+        // Scroll to end with a slight delay to ensure layout is updated
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current);
+        }
+        scrollTimeoutRef.current = setTimeout(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }, 100);
+      }
     );
     
     const keyboardWillHide = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      () => setKeyboardHeight(0)
+      () => {
+        setIsKeyboardVisible(false);
+        setShowPriorityPicker(false);
+      }
     );
 
     return () => {
       keyboardWillShow.remove();
       keyboardWillHide.remove();
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -218,18 +252,36 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     }
   }, [messages.length]);
 
-  const handleSend = async () => {
+  const handleSend = useCallback(async () => {
     const text = inputText.trim();
     if (!text) return;
 
     try {
       await sendMessage(peerId, text, priority);
       setInputText('');
-      inputRef.current?.blur();
+      setInputHeight(44);
+      // Keep keyboard open for quick follow-up messages
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 50);
     } catch (error) {
       Alert.alert('Send Failed', 'Failed to send message. Please try again.');
     }
-  };
+  }, [inputText, peerId, priority, sendMessage]);
+
+  const handleContentSizeChange = useCallback((event: any) => {
+    const newHeight = Math.min(Math.max(44, event.nativeEvent.contentSize.height + 20), 120);
+    setInputHeight(newHeight);
+  }, []);
+
+  const togglePriorityPicker = useCallback(() => {
+    setShowPriorityPicker(prev => !prev);
+  }, []);
+
+  const selectPriority = useCallback((p: MessagePriority) => {
+    setPriority(p);
+    setShowPriorityPicker(false);
+  }, []);
 
   const groupMessages = (messages: Message[]) => {
     const grouped: (Message & { isFirstInGroup: boolean; isLastInGroup: boolean })[] = [];
@@ -355,117 +407,197 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     return null;
   };
 
+  const renderPriorityPicker = () => {
+    if (!showPriorityPicker) return null;
+    
+    return (
+      <View style={[styles.priorityPickerContainer, { backgroundColor: theme.colors.surface }]}>
+        <Text style={[styles.priorityPickerTitle, { color: theme.colors.textSecondary }]}>
+          Message Priority
+        </Text>
+        <View style={styles.priorityPickerOptions}>
+          {[
+            { p: MessagePriority.Low, label: 'Low', desc: 'Delivered when convenient' },
+            { p: MessagePriority.Medium, label: 'Normal', desc: 'Standard delivery' },
+            { p: MessagePriority.High, label: 'Urgent', desc: 'Prioritized delivery' },
+          ].map(({ p, label, desc }) => (
+            <TouchableOpacity
+              key={p}
+              style={[
+                styles.priorityPickerOption,
+                {
+                  backgroundColor: priority === p ? getPriorityColor(p) + '15' : 'transparent',
+                  borderColor: priority === p ? getPriorityColor(p) : theme.colors.border,
+                },
+              ]}
+              onPress={() => selectPriority(p)}
+              activeOpacity={0.7}
+            >
+              <View style={[styles.priorityPickerIcon, { backgroundColor: getPriorityColor(p) }]}>
+                <Icon name={getPriorityIcon(p)} size={14} color={theme.colors.textInverse} />
+              </View>
+              <View style={styles.priorityPickerText}>
+                <Text style={[styles.priorityPickerLabel, { color: theme.colors.text }]}>
+                  {label}
+                </Text>
+                <Text style={[styles.priorityPickerDesc, { color: theme.colors.textSecondary }]}>
+                  {desc}
+                </Text>
+              </View>
+              {priority === p && (
+                <Icon name="checkmark" size={18} color={getPriorityColor(p)} />
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+    );
+  };
+
+  const renderInputArea = () => (
+    <View 
+      style={[
+        styles.inputContainer,
+        { 
+          backgroundColor: theme.colors.surface,
+          borderTopColor: theme.colors.border,
+          paddingBottom: Platform.OS === 'ios' ? Math.max(insets.bottom, 8) : 12,
+        },
+      ]}
+    >
+      {renderPriorityPicker()}
+      
+      {/* Input Row */}
+      <View style={styles.inputRow}>
+        {/* Priority Toggle Button */}
+        <TouchableOpacity
+          style={[
+            styles.priorityToggle,
+            {
+              backgroundColor: showPriorityPicker ? getPriorityColor(priority) : theme.colors.background,
+            },
+          ]}
+          onPress={togglePriorityPicker}
+          activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Icon
+            name={getPriorityIcon(priority)}
+            size={18}
+            color={showPriorityPicker ? theme.colors.textInverse : getPriorityColor(priority)}
+          />
+        </TouchableOpacity>
+
+        {/* Text Input */}
+        <View style={[styles.inputWrapper, { backgroundColor: theme.colors.background }]}>
+          <TextInput
+            ref={inputRef}
+            style={[
+              styles.textInput,
+              { 
+                color: theme.colors.text,
+                minHeight: 24,
+                maxHeight: 100,
+              },
+            ]}
+            value={inputText}
+            onChangeText={setInputText}
+            placeholder="Type a message..."
+            placeholderTextColor={theme.colors.textSecondary}
+            multiline
+            maxLength={500}
+            textAlignVertical="center"
+            onContentSizeChange={handleContentSizeChange}
+            onFocus={() => {
+              setTimeout(() => {
+                flatListRef.current?.scrollToEnd({ animated: true });
+              }, 150);
+            }}
+          />
+          {isEncryptedChat && (
+            <View style={styles.encryptedIndicator}>
+              <Icon name="lock-closed" size={12} color={theme.colors.success} />
+            </View>
+          )}
+        </View>
+        
+        {/* Send Button */}
+        <TouchableOpacity
+          style={[
+            styles.sendButton,
+            {
+              backgroundColor: !isOnline
+                ? theme.colors.border
+                : inputText.trim()
+                  ? theme.colors.primary
+                  : theme.colors.border,
+            },
+          ]}
+          onPress={handleSend}
+          disabled={!inputText.trim() || !isOnline}
+          activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Icon
+            name="send"
+            size={18}
+            color={
+              !isOnline
+                ? theme.colors.textSecondary
+                : inputText.trim()
+                  ? theme.colors.textInverse
+                  : theme.colors.textSecondary
+            }
+          />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
   return (
     <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
       {renderHeader()}
       <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+        style={styles.keyboardAvoidingView}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
-        {renderStatusBanner()}
-        {/* Messages */}
-        <FlatList
-          ref={flatListRef}
-          data={groupedMessages}
-          keyExtractor={(item) => item.id}
-          renderItem={renderMessage}
-          contentContainerStyle={[
-            styles.messagesList,
-            groupedMessages.length === 0 && { flex: 1 },
-          ]}
-          showsVerticalScrollIndicator={false}
-          ListEmptyComponent={renderEmptyState}
-          onContentSizeChange={() => {
-            if (groupedMessages.length > 0) {
-              flatListRef.current?.scrollToEnd({ animated: false });
-            }
-          }}
-        />
+        <View style={styles.contentContainer}>
+          {renderStatusBanner()}
+          
+          {/* Messages List */}
+          <FlatList
+            ref={flatListRef}
+            data={groupedMessages}
+            keyExtractor={(item) => item.id}
+            renderItem={renderMessage}
+            contentContainerStyle={[
+              styles.messagesList,
+              groupedMessages.length === 0 && styles.emptyMessagesList,
+            ]}
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={renderEmptyState}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            onContentSizeChange={() => {
+              if (groupedMessages.length > 0) {
+                flatListRef.current?.scrollToEnd({ animated: false });
+              }
+            }}
+            onLayout={() => {
+              if (groupedMessages.length > 0) {
+                flatListRef.current?.scrollToEnd({ animated: false });
+              }
+            }}
+            maintainVisibleContentPosition={{
+              minIndexForVisible: 0,
+              autoscrollToTopThreshold: 100,
+            }}
+          />
+        </View>
 
         {/* Input Area */}
-        <View 
-          style={[
-            styles.inputContainer,
-            { 
-              backgroundColor: theme.colors.surface,
-              borderTopColor: theme.colors.border,
-              marginBottom: keyboardHeight > 0 ? keyboardHeight - 20 : 0,
-            },
-          ]}
-        >
-          {/* Priority Selector */}
-          <View style={styles.priorityContainer}>
-            {[MessagePriority.Low, MessagePriority.Medium, MessagePriority.High].map((p) => (
-              <TouchableOpacity
-                key={p}
-                style={[
-                  styles.priorityButton,
-                  {
-                    backgroundColor: priority === p 
-                      ? getPriorityColor(p) 
-                      : theme.colors.background,
-                  },
-                ]}
-                onPress={() => setPriority(p)}
-                activeOpacity={0.7}
-              >
-                <Icon
-                  name={getPriorityIcon(p)}
-                  size={16}
-                  color={priority === p ? theme.colors.textInverse : getPriorityColor(p)}
-                />
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* Input Row */}
-          <View style={styles.inputRow}>
-            <View style={[styles.inputWrapper, { backgroundColor: theme.colors.background }]}>
-              <TextInput
-                ref={inputRef}
-                style={[styles.textInput, { color: theme.colors.text }]}
-                value={inputText}
-                onChangeText={setInputText}
-                placeholder="Type a message..."
-                placeholderTextColor={theme.colors.textSecondary}
-                multiline
-                maxLength={500}
-                returnKeyType="send"
-                onSubmitEditing={handleSend}
-                blurOnSubmit={false}
-              />
-            </View>
-            
-            <TouchableOpacity
-              style={[
-                styles.sendButton,
-                {
-                  backgroundColor: !isOnline
-                    ? theme.colors.border
-                    : inputText.trim()
-                      ? theme.colors.primary
-                      : theme.colors.border,
-                },
-              ]}
-              onPress={handleSend}
-              disabled={!inputText.trim() || !isOnline}
-              activeOpacity={0.8}
-            >
-              <Icon
-                name="send"
-                size={20}
-                color={
-                  !isOnline
-                    ? theme.colors.textSecondary
-                    : inputText.trim()
-                      ? theme.colors.textInverse
-                      : theme.colors.textSecondary
-                }
-              />
-            </TouchableOpacity>
-          </View>
-        </View>
+        {renderInputArea()}
       </KeyboardAvoidingView>
     </View>
   );
@@ -475,31 +607,41 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
+  keyboardAvoidingView: {
+    flex: 1,
+  },
+  contentContainer: {
+    flex: 1,
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: 'rgba(0,0,0,0.1)',
   },
   backButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 8,
-    paddingRight: 12,
+    justifyContent: 'center',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    marginRight: 4,
   },
   headerTitle: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
   },
   headerAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
+    marginRight: 10,
     position: 'relative',
   },
   headerAvatarText: {
@@ -508,32 +650,50 @@ const styles = StyleSheet.create({
   },
   headerOnlineIndicator: {
     position: 'absolute',
-    bottom: -1,
-    right: -1,
-    width: 12,
-    height: 12,
+    bottom: 0,
+    right: 0,
+    width: 11,
+    height: 11,
     borderRadius: 6,
     borderWidth: 2,
     borderColor: 'white',
   },
   headerInfo: {
     flex: 1,
+    justifyContent: 'center',
+  },
+  headerNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   headerName: {
     fontSize: 16,
     fontWeight: '600',
   },
+  encryptedBadge: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   headerStatus: {
     fontSize: 12,
     fontWeight: '500',
+    marginTop: 1,
   },
   messagesList: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  emptyMessagesList: {
+    flex: 1,
   },
   messageContainer: {
-    marginVertical: 2,
-    maxWidth: '80%',
+    marginVertical: 1,
+    maxWidth: '78%',
   },
   myMessageContainer: {
     alignSelf: 'flex-end',
@@ -542,21 +702,21 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   messageBubble: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 18,
     position: 'relative',
   },
   myMessageBubble: {
-    borderBottomRightRadius: 6,
+    borderBottomRightRadius: 4,
   },
   theirMessageBubble: {
-    borderBottomLeftRadius: 6,
+    borderBottomLeftRadius: 4,
     ...Platform.select({
       ios: {
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.05,
+        shadowOpacity: 0.04,
         shadowRadius: 2,
       },
       android: {
@@ -565,24 +725,25 @@ const styles = StyleSheet.create({
     }),
   },
   firstInGroup: {
-    marginTop: 8,
+    marginTop: 6,
   },
   lastInGroup: {
-    marginBottom: 8,
+    marginBottom: 6,
   },
   messageText: {
     fontSize: 16,
-    lineHeight: 20,
-    marginBottom: 4,
+    lineHeight: 21,
+    marginBottom: 3,
   },
   messageFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
+    marginTop: -1,
   },
   messageTime: {
     fontSize: 11,
-    fontWeight: '500',
+    fontWeight: '400',
   },
   priorityIndicator: {
     position: 'absolute',
@@ -599,41 +760,41 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
   },
   emptyAvatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 24,
+    marginBottom: 20,
   },
   emptyAvatarText: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: '600',
   },
   emptyTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '600',
     marginBottom: 8,
     textAlign: 'center',
   },
   emptySubtitle: {
-    fontSize: 16,
+    fontSize: 15,
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: 21,
   },
   statusBanner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 12,
+    marginHorizontal: 12,
+    marginTop: 8,
+    marginBottom: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
     borderWidth: 1,
   },
   statusBannerTitle: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     marginBottom: 2,
   },
@@ -642,67 +803,93 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
   inputContainer: {
-    borderTopWidth: 1,
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 20,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 12,
+    paddingTop: 10,
   },
-  priorityContainer: {
-    flexDirection: 'row',
-    marginBottom: 12,
+  priorityPickerContainer: {
+    marginBottom: 10,
+    paddingBottom: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(0,0,0,0.08)',
+  },
+  priorityPickerTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 10,
+  },
+  priorityPickerOptions: {
     gap: 8,
   },
-  priorityButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+  priorityPickerOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  priorityPickerIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 12,
+  },
+  priorityPickerText: {
+    flex: 1,
+  },
+  priorityPickerLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  priorityPickerDesc: {
+    fontSize: 12,
+    marginTop: 1,
   },
   inputRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 12,
+    gap: 8,
+  },
+  priorityToggle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
   },
   inputWrapper: {
     flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
     borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    maxHeight: 100,
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.05,
-        shadowRadius: 2,
-      },
-      android: {
-        elevation: 1,
-      },
-    }),
+    paddingHorizontal: 14,
+    paddingVertical: Platform.OS === 'ios' ? 10 : 6,
+    minHeight: 40,
+    maxHeight: 120,
   },
   textInput: {
+    flex: 1,
     fontSize: 16,
     lineHeight: 20,
-    maxHeight: 76,
+    paddingTop: 0,
+    paddingBottom: 0,
+  },
+  encryptedIndicator: {
+    marginLeft: 6,
+    opacity: 0.8,
   },
   sendButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 4,
-      },
-      android: {
-        elevation: 2,
-      },
-    }),
+    marginBottom: 2,
   },
 });
