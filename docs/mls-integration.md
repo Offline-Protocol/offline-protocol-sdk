@@ -15,13 +15,13 @@ The SDK provides end-to-end encryption via the MLS protocol (RFC 9420). MLS prov
 
 ```
 ┌─────────────────────────────────────────────┐
-│              Your App                        │
+│              Your App                       │
 │  ┌────────────────────────────────────────┐ │
 │  │   MlsStorageProvider Implementation    │ │
 │  │   (iOS: Keychain, Android: Keystore)   │ │
 │  └────────────────────────────────────────┘ │
-│                     │                        │
-│                     ▼                        │
+│                     │                       │
+│                     ▼                       │
 │  ┌────────────────────────────────────────┐ │
 │  │       OfflineProtocol SDK              │ │
 │  │  ┌──────────────────────────────────┐  │ │
