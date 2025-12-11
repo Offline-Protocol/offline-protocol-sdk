@@ -4,7 +4,7 @@
 
 use crate::error::{MlsError, Result};
 use crate::provider::MlsProvider;
-use crate::storage::MlsStorage;
+use crate::storage::{MlsStorage, StorageError};
 use crate::types::{GroupId, GroupInfo, StorageKeyType};
 
 use openmls::prelude::*;
@@ -101,17 +101,22 @@ impl GroupManager {
 
     /// Saves a group to storage.
     pub fn save_group(&self, group_id: &GroupId, group: &MlsGroup) -> Result<()> {
-        // In OpenMLS 0.7, groups are stored via the storage provider automatically during operations
-        // passed the provider.
-        // group.save(self.provider.storage())
-        //    .map_err(|e| MlsError::Storage(crate::storage::StorageError::StoreFailed(e.to_string())))?;
-
         // We also keep a marker in our storage for listing purposes
         let key_type = StorageKeyType::GroupState.as_str();
         
         // Serialize the group epoch as a marker
         let marker = group.epoch().as_u64().to_le_bytes();
         self.storage.store(key_type, group_id.as_str(), &marker)?;
+
+        // Verify that the OpenMLS storage backend has a persisted copy of the group.
+        let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
+        if MlsGroup::load(self.provider.storage(), &mls_group_id)?
+            .is_none()
+        {
+            return Err(MlsError::Storage(StorageError::StoreFailed(
+                "Failed to persist MLS group state".to_string(),
+            )));
+        }
         Ok(())
     }
 

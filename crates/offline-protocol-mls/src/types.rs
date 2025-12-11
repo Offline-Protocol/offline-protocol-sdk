@@ -217,6 +217,41 @@ impl WelcomeMessage {
     }
 }
 
+/// Metadata about an MLS group (stored separately from MLS state).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupMetadata {
+    /// Human-readable group name.
+    pub name: Option<String>,
+
+    /// Timestamp when the group was created (milliseconds since epoch).
+    pub created_at_ms: u64,
+
+    /// Timestamp of the last activity (milliseconds since epoch).
+    pub last_activity_ms: u64,
+
+    /// Custom application-specific metadata.
+    #[serde(default)]
+    pub custom: std::collections::HashMap<String, String>,
+}
+
+impl GroupMetadata {
+    /// Creates new group metadata with the given name.
+    pub fn new(name: Option<String>) -> Self {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        Self {
+            name,
+            created_at_ms: now_ms,
+            last_activity_ms: now_ms,
+            custom: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Updates the last activity timestamp to now.
+    pub fn touch(&mut self) {
+        self.last_activity_ms = chrono::Utc::now().timestamp_millis() as u64;
+    }
+}
+
 /// Storage key types for organizing MLS data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageKeyType {
@@ -237,6 +272,9 @@ pub enum StorageKeyType {
 
     /// Contact's key packages.
     ContactKeyPackage,
+
+    /// Group metadata (name, timestamps).
+    GroupMetadata,
 }
 
 impl StorageKeyType {
@@ -249,6 +287,7 @@ impl StorageKeyType {
             Self::EpochSecrets => "epoch_secrets",
             Self::Credential => "credential",
             Self::ContactKeyPackage => "contact_key_package",
+            Self::GroupMetadata => "group_metadata",
         }
     }
 }

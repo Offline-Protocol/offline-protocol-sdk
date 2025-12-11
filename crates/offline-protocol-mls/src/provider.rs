@@ -1,3 +1,8 @@
+//! Custom OpenMLS provider implementation.
+//!
+//! This module provides [`MlsProvider`], which combines the OpenMLS Rust crypto
+//! backend with our custom storage adapter.
+
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 use crate::storage_adapter::MlsStorageAdapter;
@@ -11,6 +16,7 @@ pub struct MlsProvider {
 }
 
 impl MlsProvider {
+    /// Creates a new MLS provider with the given storage adapter.
     pub fn new(storage: MlsStorageAdapter) -> Self {
         Self {
             inner: Arc::new(OpenMlsRustCrypto::default()),

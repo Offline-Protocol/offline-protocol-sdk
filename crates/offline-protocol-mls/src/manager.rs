@@ -7,8 +7,8 @@ use crate::session::SessionManager;
 use crate::storage::MlsStorage;
 use crate::storage_adapter::MlsStorageAdapter;
 use crate::types::{
-    EncryptedMessage, GroupId, GroupInfo, KeyPackageBundle, MlsMessageType, StorageKeyType,
-    WelcomeMessage,
+    EncryptedMessage, GroupId, GroupInfo, GroupMetadata, KeyPackageBundle, MlsMessageType,
+    StorageKeyType, WelcomeMessage,
 };
 
 use openmls::prelude::*;
@@ -190,14 +190,15 @@ impl MlsManager {
         let package_id = Uuid::new_v4().to_string();
 
         let key_type = StorageKeyType::KeyPackage.as_str();
-        self.storage.store(key_type, &package_id, &key_package_data)?;
-
         let bundle = KeyPackageBundle::new(
             package_id,
             self.user_id.clone(),
             key_package_data,
             DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
         );
+        let serialized = serde_json::to_vec(&bundle)
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+        self.storage.store(key_type, &bundle.package_id, &serialized)?;
 
         debug!(package_id = %bundle.package_id, "Generated new key package");
         Ok(bundle)
@@ -209,13 +210,8 @@ impl MlsManager {
         let packages = self.storage.list_keys(key_type)?;
 
         for package_id in packages {
-            if let Some(data) = self.storage.load(key_type, &package_id)? {
-                return Ok(KeyPackageBundle::new(
-                    package_id,
-                    self.user_id.clone(),
-                    data,
-                    DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
-                ));
+            if let Some(bundle) = self.load_stored_key_package(&package_id)? {
+                return Ok(bundle);
             }
         }
 
@@ -259,13 +255,8 @@ impl MlsManager {
 
         let mut bundles = Vec::new();
         for package_id in package_ids {
-            if let Some(data) = self.storage.load(key_type, &package_id)? {
-                bundles.push(KeyPackageBundle::new(
-                    package_id,
-                    self.user_id.clone(),
-                    data,
-                    DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
-                ));
+            if let Some(bundle) = self.load_stored_key_package(&package_id)? {
+                bundles.push(bundle);
             }
         }
 
@@ -295,12 +286,17 @@ impl MlsManager {
         let credential = self.get_credential()?;
         let signature_keys = self.get_signer()?;
 
-        self.session_manager.create_session(
+        let welcome = self.session_manager.create_session(
             other_user_id,
             their_key_package,
             &credential,
             &signature_keys,
-        )
+        )?;
+
+        let key_type = StorageKeyType::ContactKeyPackage.as_str();
+        self.storage.delete(key_type, other_user_id)?;
+
+        Ok(welcome)
     }
 
     /// Joins a session using a Welcome message.
@@ -372,8 +368,15 @@ impl MlsManager {
         let signature_keys = self.get_signer()?;
 
         let group = self.group_manager.create_group(&group_id, &credential, &signature_keys)?;
+
+        // Store group metadata
+        let metadata = GroupMetadata::new(Some(group_name.to_string()));
+        self.save_group_metadata(&group_id, &metadata)?;
+
         let mut info = self.group_manager.get_group_info(&group, &group_id);
-        info.name = Some(group_name.to_string());
+        info.name = metadata.name;
+        info.created_at_ms = metadata.created_at_ms;
+        info.last_activity_ms = metadata.last_activity_ms;
 
         info!(group_id = %group_id, name = %group_name, "Created new group");
         Ok(info)
@@ -404,11 +407,15 @@ impl MlsManager {
             .tls_serialize_detached()
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
 
+        // Include group name in welcome for the invitee
+        let group_name = self.load_group_metadata(group_id)?
+            .and_then(|m| m.name);
+
         Ok(WelcomeMessage {
             group_id: group_id.clone(),
             welcome_data: welcome_bytes,
             inviter_id: self.user_id.clone(),
-            group_name: None,
+            group_name,
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         })
     }
@@ -538,8 +545,49 @@ impl MlsManager {
 
     /// Gets information about a group.
     pub fn get_group_info(&self, group_id: &GroupId) -> Result<Option<GroupInfo>> {
-        let group = self.group_manager.load_group(group_id)?;
-        Ok(group.map(|g| self.group_manager.get_group_info(&g, group_id)))
+        let group = match self.group_manager.load_group(group_id)? {
+            Some(g) => g,
+            None => return Ok(None),
+        };
+
+        let mut info = self.group_manager.get_group_info(&group, group_id);
+
+        // Merge stored metadata
+        if let Some(metadata) = self.load_group_metadata(group_id)? {
+            info.name = metadata.name;
+            info.created_at_ms = metadata.created_at_ms;
+            info.last_activity_ms = metadata.last_activity_ms;
+        }
+
+        Ok(Some(info))
+    }
+
+    /// Updates the group name.
+    pub fn set_group_name(&self, group_id: &GroupId, name: &str) -> Result<()> {
+        let mut metadata = self.load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.name = Some(name.to_string());
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
+    /// Gets group metadata.
+    pub fn get_group_metadata(&self, group_id: &GroupId) -> Result<Option<GroupMetadata>> {
+        self.load_group_metadata(group_id)
+    }
+
+    /// Sets custom metadata for a group.
+    pub fn set_group_custom_metadata(
+        &self,
+        group_id: &GroupId,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        let mut metadata = self.load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.custom.insert(key.to_string(), value.to_string());
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
     }
 
     // ========================================================================
@@ -562,6 +610,181 @@ impl MlsManager {
         } else {
             self.join_group(welcome)
         }
+    }
+}
+
+
+impl MlsManager {
+    /// Loads a stored key package bundle, handling legacy raw storage and expiration.
+    fn load_stored_key_package(&self, package_id: &str) -> Result<Option<KeyPackageBundle>> {
+        let key_type = StorageKeyType::KeyPackage.as_str();
+        let data = match self.storage.load(key_type, package_id)? {
+            Some(data) => data,
+            None => return Ok(None),
+        };
+
+        let bundle = match serde_json::from_slice::<KeyPackageBundle>(&data) {
+            Ok(bundle) => bundle,
+            Err(_) => {
+                let legacy_bundle = KeyPackageBundle::new(
+                    package_id.to_string(),
+                    self.user_id.clone(),
+                    data,
+                    DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
+                );
+                let serialized = serde_json::to_vec(&legacy_bundle)
+                    .map_err(|e| MlsError::Serialization(e.to_string()))?;
+                self.storage.store(key_type, package_id, &serialized)?;
+                legacy_bundle
+            }
+        };
+
+        if bundle.is_expired() {
+            self.storage.delete(key_type, package_id)?;
+            return Ok(None);
+        }
+
+        let serialized = serde_json::to_vec(&bundle)
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+        self.storage.store(key_type, package_id, &serialized)?;
+
+        Ok(Some(bundle))
+    }
+
+    /// Loads group metadata from storage.
+    fn load_group_metadata(&self, group_id: &GroupId) -> Result<Option<GroupMetadata>> {
+        let key_type = StorageKeyType::GroupMetadata.as_str();
+        match self.storage.load(key_type, group_id.as_str())? {
+            Some(data) => {
+                let metadata: GroupMetadata = serde_json::from_slice(&data)
+                    .map_err(|e| MlsError::Deserialization(e.to_string()))?;
+                Ok(Some(metadata))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Saves group metadata to storage.
+    fn save_group_metadata(&self, group_id: &GroupId, metadata: &GroupMetadata) -> Result<()> {
+        let key_type = StorageKeyType::GroupMetadata.as_str();
+        let data = serde_json::to_vec(metadata)
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+        self.storage.store(key_type, group_id.as_str(), &data)?;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// KEY ROTATION AND KEY PACKAGE MANAGEMENT
+// ============================================================================
+
+impl MlsManager {
+    /// Updates the cryptographic keys for a group (triggers MLS self-update).
+    ///
+    /// This provides post-compromise security by rotating keys. The returned
+    /// commit message must be sent to all other group members.
+    ///
+    /// # Returns
+    ///
+    /// Returns the commit message that must be distributed to all group members.
+    pub fn update_keys(&self, group_id: &GroupId) -> Result<EncryptedMessage> {
+        use openmls::treesync::LeafNodeParameters;
+
+        let mut group = self
+            .group_manager
+            .load_group(group_id)?
+            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
+
+        let signature_keys = self.get_signer()?;
+
+        let bundle = group
+            .self_update(&self.provider, &signature_keys, LeafNodeParameters::default())
+            .map_err(|e| MlsError::OpenMls(format!("Self-update failed: {}", e)))?;
+
+        let (commit, _welcome, _group_info) = bundle.into_contents();
+
+        group
+            .merge_pending_commit(&self.provider)
+            .map_err(|e| MlsError::OpenMls(format!("Failed to merge self-update commit: {}", e)))?;
+
+        self.group_manager.save_group(group_id, &group)?;
+
+        // Update metadata last activity
+        if let Some(mut metadata) = self.load_group_metadata(group_id)? {
+            metadata.touch();
+            self.save_group_metadata(group_id, &metadata)?;
+        }
+
+        let ciphertext = commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+
+        debug!(group_id = %group_id, epoch = %group.epoch().as_u64(), "Updated group keys");
+
+        Ok(EncryptedMessage {
+            group_id: group_id.clone(),
+            message_type: MlsMessageType::Commit,
+            epoch: group.epoch().as_u64(),
+            ciphertext,
+            sender_id: self.user_id.clone(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+        })
+    }
+
+    /// Ensures at least `min` valid key packages are available.
+    ///
+    /// Generates new key packages if the current count is below the minimum.
+    /// This is useful for offline scenarios where multiple key packages should
+    /// be pre-generated for distribution.
+    ///
+    /// # Arguments
+    ///
+    /// * `min` - Minimum number of key packages to maintain
+    ///
+    /// # Returns
+    ///
+    /// Returns the total number of valid key packages after ensuring minimum.
+    pub fn ensure_min_key_packages(&self, min: usize) -> Result<usize> {
+        let key_type = StorageKeyType::KeyPackage.as_str();
+        let package_ids = self.storage.list_keys(key_type)?;
+
+        // Count valid (non-expired) packages
+        let mut valid_count = 0;
+        for package_id in &package_ids {
+            if self.load_stored_key_package(package_id)?.is_some() {
+                valid_count += 1;
+            }
+        }
+
+        // Generate more if needed
+        let to_generate = min.saturating_sub(valid_count);
+        for _ in 0..to_generate {
+            self.generate_key_package()?;
+            valid_count += 1;
+        }
+
+        debug!(
+            valid_count = valid_count,
+            generated = to_generate,
+            "Ensured minimum key packages"
+        );
+
+        Ok(valid_count)
+    }
+
+    /// Returns the number of valid (non-expired) key packages available.
+    pub fn count_valid_key_packages(&self) -> Result<usize> {
+        let key_type = StorageKeyType::KeyPackage.as_str();
+        let package_ids = self.storage.list_keys(key_type)?;
+
+        let mut count = 0;
+        for package_id in package_ids {
+            if self.load_stored_key_package(&package_id)?.is_some() {
+                count += 1;
+            }
+        }
+
+        Ok(count)
     }
 }
 
