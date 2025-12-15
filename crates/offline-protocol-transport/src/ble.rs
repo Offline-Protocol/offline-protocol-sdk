@@ -467,10 +467,9 @@ impl BleTransport {
                 // Message complete - queue it
                 let mut queue = self.receive_queue.lock().unwrap();
                 queue.push_back(message.clone());
+                // Note: sender/recipient are intentionally not logged to protect user privacy
                 tracing::debug!(
                     message_id = %message.id,
-                    sender = %message.sender,
-                    recipient = %message.recipient,
                     "Complete message assembled from fragments"
                 );
                 Ok(())

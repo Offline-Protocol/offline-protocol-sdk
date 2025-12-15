@@ -18,7 +18,6 @@ impl MlsStorageAdapter {
     fn write_generic<K: Serialize, V: Serialize + ?Sized>(&self, label: &str, key: &K, value: &V) -> Result<(), MlsError> {
         let key_bytes = serde_json::to_vec(key).map_err(|e| MlsError::Serialization(e.to_string()))?;
         let key_id = hex::encode(key_bytes);
-        // println!("DEBUG: write_generic label={} key_id={}", label, key_id);
         let value_bytes = serde_json::to_vec(value).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage.store(label, &key_id, &value_bytes)?;
         Ok(())
@@ -27,7 +26,6 @@ impl MlsStorageAdapter {
     fn read_generic<K: Serialize, V: DeserializeOwned>(&self, label: &str, key: &K) -> Result<Option<V>, MlsError> {
         let key_bytes = serde_json::to_vec(key).map_err(|e| MlsError::Serialization(e.to_string()))?;
         let key_id = hex::encode(key_bytes);
-        // println!("DEBUG: read_generic label={} key_id={}", label, key_id);
         let data = self.storage.load(label, &key_id)?;
         match data {
              Some(bytes) => {

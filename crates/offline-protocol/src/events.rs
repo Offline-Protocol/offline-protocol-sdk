@@ -3,13 +3,17 @@
 use offline_protocol_core::{Message, MessageId};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 
 /// Event callback type for handling protocol events.
 pub type EventCallback = Arc<dyn Fn(Event) + Send + Sync>;
 
 /// Events that can occur in the protocol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Note: This type implements a custom Debug that redacts sensitive fields
+/// (message content) to prevent accidental logging of sensitive data.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// A message was sent (queued for delivery).
@@ -378,6 +382,181 @@ impl Event {
     /// Parses an event from JSON.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+}
+
+/// Custom Debug implementation that redacts sensitive fields to prevent
+/// accidental logging of message content and other potentially sensitive data.
+impl fmt::Debug for Event {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MessageSent {
+                message_id,
+                sender: _,
+                recipient: _,
+                content,
+                priority,
+                requires_ack,
+                timestamp,
+            } => f
+                .debug_struct("MessageSent")
+                .field("message_id", message_id)
+                .field("sender", &"[REDACTED]")
+                .field("recipient", &"[REDACTED]")
+                .field("content", &format!("[REDACTED {} bytes]", content.len()))
+                .field("priority", priority)
+                .field("requires_ack", requires_ack)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::MessageReceived {
+                message_id,
+                sender: _,
+                recipient: _,
+                content,
+                hop_count,
+                transport,
+                timestamp,
+            } => f
+                .debug_struct("MessageReceived")
+                .field("message_id", message_id)
+                .field("sender", &"[REDACTED]")
+                .field("recipient", &"[REDACTED]")
+                .field("content", &format!("[REDACTED {} bytes]", content.len()))
+                .field("hop_count", hop_count)
+                .field("transport", transport)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::MessageDelivered {
+                message_id,
+                latency_ms,
+                hop_count,
+                transport,
+            } => f
+                .debug_struct("MessageDelivered")
+                .field("message_id", message_id)
+                .field("latency_ms", latency_ms)
+                .field("hop_count", hop_count)
+                .field("transport", transport)
+                .finish(),
+            Self::MessageFailed {
+                message_id,
+                reason,
+                retry_count,
+            } => f
+                .debug_struct("MessageFailed")
+                .field("message_id", message_id)
+                .field("reason", reason)
+                .field("retry_count", retry_count)
+                .finish(),
+            Self::TransportSwitched { from, to, reason } => f
+                .debug_struct("TransportSwitched")
+                .field("from", from)
+                .field("to", to)
+                .field("reason", reason)
+                .finish(),
+            Self::RelayPromoted {
+                connection_count,
+                battery_level,
+            } => f
+                .debug_struct("RelayPromoted")
+                .field("connection_count", connection_count)
+                .field("battery_level", battery_level)
+                .finish(),
+            Self::RelayDemoted { reason } => f
+                .debug_struct("RelayDemoted")
+                .field("reason", reason)
+                .finish(),
+            Self::NeighborDiscovered {
+                peer_id: _,
+                transport,
+                rssi,
+            } => f
+                .debug_struct("NeighborDiscovered")
+                .field("peer_id", &"[REDACTED]")
+                .field("transport", transport)
+                .field("rssi", rssi)
+                .finish(),
+            Self::NeighborLost { peer_id: _ } => f
+                .debug_struct("NeighborLost")
+                .field("peer_id", &"[REDACTED]")
+                .finish(),
+            Self::NetworkMetrics {
+                neighbor_count,
+                relay_count,
+                delivery_ratio,
+                avg_latency_ms,
+            } => f
+                .debug_struct("NetworkMetrics")
+                .field("neighbor_count", neighbor_count)
+                .field("relay_count", relay_count)
+                .field("delivery_ratio", delivery_ratio)
+                .field("avg_latency_ms", avg_latency_ms)
+                .finish(),
+            Self::FileProgress {
+                file_id,
+                chunks_sent,
+                total_chunks,
+                percentage,
+            } => f
+                .debug_struct("FileProgress")
+                .field("file_id", file_id)
+                .field("chunks_sent", chunks_sent)
+                .field("total_chunks", total_chunks)
+                .field("percentage", percentage)
+                .finish(),
+            Self::FileReceived {
+                file_id,
+                file_name,
+                file_size,
+                sender: _,
+            } => f
+                .debug_struct("FileReceived")
+                .field("file_id", file_id)
+                .field("file_name", file_name)
+                .field("file_size", file_size)
+                .field("sender", &"[REDACTED]")
+                .finish(),
+            Self::MessageDeferred {
+                message_id,
+                reason,
+                retry_count,
+                next_retry_at,
+            } => f
+                .debug_struct("MessageDeferred")
+                .field("message_id", message_id)
+                .field("reason", reason)
+                .field("retry_count", retry_count)
+                .field("next_retry_at", next_retry_at)
+                .finish(),
+            Self::AckEvicted {
+                message_id,
+                priority,
+                reason,
+            } => f
+                .debug_struct("AckEvicted")
+                .field("message_id", message_id)
+                .field("priority", priority)
+                .field("reason", reason)
+                .finish(),
+            Self::FragmentAssemblyEvicted {
+                message_id,
+                completion_percent,
+                reason,
+            } => f
+                .debug_struct("FragmentAssemblyEvicted")
+                .field("message_id", message_id)
+                .field("completion_percent", completion_percent)
+                .field("reason", reason)
+                .finish(),
+            Self::RelayDemotedBattery {
+                battery_level,
+                min_required,
+            } => f
+                .debug_struct("RelayDemotedBattery")
+                .field("battery_level", battery_level)
+                .field("min_required", min_required)
+                .finish(),
+        }
     }
 }
 
