@@ -105,6 +105,7 @@ interface SettingsScreenProps {
   onOpenNetwork?: () => void;
   onOpenVisualization?: () => void;
   onOpenOnline?: () => void;
+  onOpenMlsDiagnostics?: () => void;
 }
 
 export function SettingsScreen({
@@ -112,6 +113,7 @@ export function SettingsScreen({
   onOpenNetwork = () => {},
   onOpenVisualization = () => {},
   onOpenOnline = () => {},
+  onOpenMlsDiagnostics = () => {},
 }: SettingsScreenProps) {
   const { theme, isDark, toggleTheme, setTheme } = useTheme();
   const { 
@@ -448,12 +450,21 @@ export function SettingsScreen({
           />
 
           <SettingItem
+            title="MLS Encryption"
+            subtitle="View end-to-end encryption status"
+            icon="lock-closed"
+            onPress={onOpenMlsDiagnostics}
+            showChevron
+            index={11}
+          />
+
+          <SettingItem
             title="Runtime Control Center"
             subtitle="Tune transports, relays, and DORS heuristics"
             icon="options"
             onPress={onOpenControlCenter}
             showChevron
-            index={11}
+            index={12}
           />
 
           <SettingItem
@@ -462,7 +473,7 @@ export function SettingsScreen({
             icon="pulse"
             onPress={onOpenNetwork}
             showChevron
-            index={12}
+            index={13}
           />
 
           <SettingItem
@@ -471,7 +482,7 @@ export function SettingsScreen({
             icon="planet"
             onPress={onOpenVisualization}
             showChevron
-            index={13}
+            index={14}
           />
         </SettingSection>
       </ScrollView>

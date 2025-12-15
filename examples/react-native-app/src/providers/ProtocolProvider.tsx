@@ -265,7 +265,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       },
     },
     dors: {
-      preferOnline: false,
+      preferOnline: true,
       switchHysteresis: 15.0,
       switchCooldownSecs: 20,
       bleToWifiRetryThreshold: 2,
