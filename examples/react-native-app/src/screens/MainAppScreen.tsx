@@ -21,6 +21,7 @@ import { ControlCenterScreen } from './ControlCenterScreen';
 import { VisualizationScreen } from './VisualizationScreen';
 import { NetworkScreen } from './NetworkScreen';
 import { OnlineScreen } from './OnlineScreen';
+import { MlsDiagnosticsScreen } from './MlsDiagnosticsScreen';
 
 // Components
 import { Icon } from '../components/Icon';
@@ -30,7 +31,7 @@ import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 
 type Tab = 'chats' | 'contacts' | 'analytics' | 'settings';
-type Screen = 'main' | 'chatDetail' | 'profile' | 'controlCenter' | 'visualization' | 'network' | 'online';
+type Screen = 'main' | 'chatDetail' | 'profile' | 'controlCenter' | 'visualization' | 'network' | 'online' | 'mlsDiagnostics';
 
 interface ChatDetailParams {
   peerId: string;
@@ -101,6 +102,10 @@ export function MainAppScreen() {
 
   const navigateToOnline = () => {
     setCurrentScreen('online');
+  };
+
+  const navigateToMlsDiagnostics = () => {
+    setCurrentScreen('mlsDiagnostics');
   };
 
   const navigateBack = () => {
@@ -252,6 +257,10 @@ export function MainAppScreen() {
       return <OnlineScreen />;
     }
 
+    if (currentScreen === 'mlsDiagnostics') {
+      return <MlsDiagnosticsScreen onBack={navigateBack} />;
+    }
+
     // Main tabs
     switch (activeTab) {
       case 'chats':
@@ -277,6 +286,7 @@ export function MainAppScreen() {
             onOpenNetwork={navigateToNetwork}
             onOpenVisualization={navigateToVisualization}
             onOpenOnline={navigateToOnline}
+            onOpenMlsDiagnostics={navigateToMlsDiagnostics}
           />
         );
       default:
