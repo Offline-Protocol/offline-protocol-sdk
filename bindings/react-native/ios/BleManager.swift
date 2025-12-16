@@ -104,8 +104,10 @@ public class BleManager: NSObject, TransportManager {
     
     // Pending fragments waiting for device ID
     private var pendingFragments: [UUID: [(Data, Date)]] = [:]
-    private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0
-    private var pendingOutboundFragments: [String: [Data]] = [:]
+    private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0 // For incoming fragments waiting for device ID
+    private let PENDING_OUTBOUND_FRAGMENT_TIMEOUT: TimeInterval = 30.0 // For outbound fragments that failed to send
+    // Track outbound fragments with timestamps for timeout handling
+    private var pendingOutboundFragments: [String: [(data: Data, timestamp: Date)]] = [:]
     private struct MeshObservation {
         let advertisement: MeshAdvertisementData
         let rssi: Int?
@@ -1054,10 +1056,13 @@ public class BleManager: NSObject, TransportManager {
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
             
-            if self.flushPendingOutboundFragments() {
-                return
-            }
+            // CRITICAL FIX: Always try to flush pending fragments first, but don't block new fragment polling
+            // The old logic would return early if there were unsent fragments, preventing new fragments
+            // from being polled. This caused messages to get stuck when connections weren't ready.
+            let hasUnsentFragments = self.flushPendingOutboundFragments()
             
+            // CRITICAL: Still poll for new fragments even if there are unsent pending ones
+            // This prevents deadlock where old fragments block new ones
             // Poll for next fragment from protocol
             if let fragment = self.protocolInstance.bleGetNextFragment() {
                 print("[BleManager] Got fragment for recipient: \(fragment.recipientId), size: \(fragment.data.count)")
@@ -1066,6 +1071,17 @@ public class BleManager: NSObject, TransportManager {
                     "fragmentSize": fragment.data.count
                 ])
                 self.sendFragment(fragment)
+            } else if hasUnsentFragments {
+                // Log when we have unsent fragments but no new ones to poll
+                // This helps diagnose connection issues
+                if self.logThrottler.shouldLog(key: "unsent_fragments_no_new", interval: 5.0) {
+                    let recipientCount = self.pendingOutboundFragments.count
+                    print("[BleManager] ⚠️ Have \(recipientCount) recipients with unsent fragments, but no new fragments to poll")
+                    self.emitDiagnostic("warning", "Unsent fragments blocking", context: [
+                        "recipientCount": recipientCount,
+                        "recipients": Array(self.pendingOutboundFragments.keys)
+                    ])
+                }
             }
         }
     }
@@ -1088,14 +1104,34 @@ public class BleManager: NSObject, TransportManager {
 
     private func flushPendingOutboundFragments() -> Bool {
         var hasUnsentFragments = false
+        let now = Date()
         let recipients = Array(pendingOutboundFragments.keys)
         
         for recipientId in recipients {
             guard var queue = pendingOutboundFragments[recipientId] else { continue }
+            
+            // CRITICAL FIX: Remove expired fragments to prevent indefinite queuing
+            queue = queue.filter { now.timeIntervalSince($0.timestamp) < PENDING_OUTBOUND_FRAGMENT_TIMEOUT }
+            
+            if queue.isEmpty {
+                pendingOutboundFragments.removeValue(forKey: recipientId)
+                if logThrottler.shouldLog(key: "fragments_expired_\(recipientId)", interval: 10) {
+                    print("[BleManager] ⚠️ Removed expired outbound fragments for \(recipientId)")
+                    emitDiagnostic("warning", "Outbound fragments expired", context: ["recipientId": recipientId])
+                }
+                continue
+            }
+            
             var sentAllForRecipient = true
             
             while !queue.isEmpty {
-                let data = queue.first!
+                let (data, timestamp) = queue.first!
+                // Skip if fragment is too old
+                if now.timeIntervalSince(timestamp) >= PENDING_OUTBOUND_FRAGMENT_TIMEOUT {
+                    queue.removeFirst()
+                    continue
+                }
+                
                 if sendFragmentData(recipientId: recipientId, data: data) {
                     queue.removeFirst()
                 } else {
@@ -1119,7 +1155,7 @@ public class BleManager: NSObject, TransportManager {
     
     private func enqueuePendingOutboundFragment(recipientId: String, data: Data) {
         var queue = pendingOutboundFragments[recipientId] ?? []
-        queue.append(data)
+        queue.append((data: data, timestamp: Date()))
         pendingOutboundFragments[recipientId] = queue
     }
 
@@ -1201,17 +1237,49 @@ public class BleManager: NSObject, TransportManager {
     
     private func sendFragmentData(recipientId: String, data: Data) -> Bool {
         guard let peripheral = findPeripheral(for: recipientId) else {
-            if logThrottler.shouldLog(key: "missing_peripheral_\(recipientId)") {
-                print("[BleManager] No connected peripheral for recipient: \(recipientId)")
-                emitDiagnostic("warning", "No connected peripheral for BLE fragment", context: ["recipientId": recipientId])
+            // CRITICAL FIX: Proactively try to connect if we don't have a connection
+            // This helps resolve cases where fragments are queued but connection isn't established
+            if logThrottler.shouldLog(key: "missing_peripheral_\(recipientId)", interval: 5.0) {
+                print("[BleManager] ⚠️ No connected peripheral for recipient: \(recipientId) - attempting to find and connect")
+                emitDiagnostic("warning", "No connected peripheral for BLE fragment - attempting connection", context: ["recipientId": recipientId])
+            }
+            
+            // Try to find the peripheral and connect
+            if let identifier = connections.peripheralIdentifier(for: recipientId) {
+                // We know the UUID but don't have a connection - try to reconnect
+                if let peripheral = discoveredPeripherals[identifier] {
+                    attemptConnection(to: peripheral, reason: "fragment_send")
+                }
+            } else {
+                // We don't even know the UUID - this is a more serious issue
+                // The device ID might not be resolved yet
+                print("[BleManager] ⚠️ Cannot find peripheral UUID for recipient: \(recipientId)")
             }
             return false
         }
         
+        // CRITICAL FIX: Validate connection state before attempting to send
+        guard peripheral.state == .connected else {
+            if logThrottler.shouldLog(key: "peripheral_not_connected_\(recipientId)", interval: 5.0) {
+                print("[BleManager] ⚠️ Peripheral for \(recipientId) is not connected (state: \(peripheral.state.rawValue))")
+                emitDiagnostic("warning", "Peripheral not connected", context: [
+                    "recipientId": recipientId,
+                    "state": peripheral.state.rawValue
+                ])
+            }
+            // Try to reconnect
+            attemptConnection(to: peripheral, reason: "fragment_send_reconnect")
+            return false
+        }
+        
         guard let (service, characteristic) = findMessageCharacteristic(on: peripheral) else {
-            if logThrottler.shouldLog(key: "missing_char_\(recipientId)") {
-                print("[BleManager] Message characteristic not found for recipient: \(recipientId)")
-                emitDiagnostic("warning", "Message characteristic not found", context: ["recipientId": recipientId])
+            if logThrottler.shouldLog(key: "missing_char_\(recipientId)", interval: 5.0) {
+                print("[BleManager] ⚠️ Message characteristic not found for recipient: \(recipientId) - may need to discover services")
+                emitDiagnostic("warning", "Message characteristic not found - discovering services", context: ["recipientId": recipientId])
+            }
+            // Try to discover services if not already discovered
+            if peripheral.services == nil || peripheral.services?.isEmpty == true {
+                peripheral.discoverServices([SERVICE_UUID])
             }
             return false
         }
@@ -1303,19 +1371,27 @@ public class BleManager: NSObject, TransportManager {
                 try self.protocolInstance.bleFragmentReceived(senderId: senderId, fragment: bytes)
                 print("[BleManager] ✅ Fragment processed successfully for sender: \(senderId)")
                 
-                // CRITICAL FIX: Immediately check if this completed a message
-                if let completedMessage = self.protocolInstance.receiveMessage() {
-                    print("[BleManager] 🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
+                // CRITICAL FIX: Check for ALL completed messages (not just one)
+                // The protocol may have queued multiple messages, so we need to drain the queue
+                var messageCount = 0
+                while let completedMessage = self.protocolInstance.receiveMessage() {
+                    messageCount += 1
+                    print("[BleManager] 🎉 COMPLETE MESSAGE #\(messageCount) ASSEMBLED FROM FRAGMENTS!")
                     print("[BleManager] 📬 Received message: \(completedMessage)")
                     self.emitDiagnostic("info", "Complete message assembled from fragments", context: [
                         "senderId": senderId,
-                        "messageContent": completedMessage
+                        "messageContent": completedMessage,
+                        "messageNumber": messageCount
                     ])
                     
                     // Learn route from the message sender through the delivering neighbor
                     self.learnRouteFromMessage(completedMessage, deliveredBy: senderId, neighborUUID: centralId)
-                } else {
+                }
+                
+                if messageCount == 0 {
                     print("[BleManager] 📦 Fragment processed, waiting for more fragments to complete message")
+                } else {
+                    print("[BleManager] ✅ Processed \(messageCount) complete message(s) from fragments")
                 }
                 
                 self.bytesReceived += UInt64(data.count)
@@ -1371,14 +1447,21 @@ public class BleManager: NSObject, TransportManager {
                     self.meshController.markPeerActive(deviceId)
                     self.meshController.markPeerActive(self.deviceId)
                     
-                    // CRITICAL: Check if this fragment completed a message
-                    if let completedMessage = self.protocolInstance.receiveMessage() {
-                        print("[BleManager] 🎉 COMPLETE MESSAGE ASSEMBLED FROM QUEUED FRAGMENTS!")
+                    // CRITICAL: Check for ALL completed messages (not just one)
+                    // The protocol may have queued multiple messages
+                    var messageCount = 0
+                    while let completedMessage = self.protocolInstance.receiveMessage() {
+                        messageCount += 1
+                        print("[BleManager] 🎉 COMPLETE MESSAGE #\(messageCount) ASSEMBLED FROM QUEUED FRAGMENTS!")
                         print("[BleManager] 📬 Received message: \(completedMessage)")
                         self.emitDiagnostic("info", "Complete message assembled from queued fragments", context: [
                             "senderId": deviceId,
-                            "messageContent": completedMessage
+                            "messageContent": completedMessage,
+                            "messageNumber": messageCount
                         ])
+                    }
+                    if messageCount > 0 {
+                        print("[BleManager] ✅ Processed \(messageCount) complete message(s) from queued fragments")
                     }
                 } catch {
                     print("[BleManager] ❌ Error processing pending fragment from \(deviceId): \(error)")

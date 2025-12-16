@@ -1,4 +1,11 @@
-import React, { createContext, useContext, useCallback, useState, useEffect, useRef } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useCallback,
+  useState,
+  useEffect,
+  useRef,
+} from 'react';
 import { Alert, Platform } from 'react-native';
 import {
   MessagePriority,
@@ -31,12 +38,28 @@ interface MlsWelcome {
 interface OfflineProtocolWithMls extends OfflineProtocol {
   initializeMlsWithSecureStorage(): Promise<void>;
   isMlsInitialized(): Promise<boolean>;
-  mlsGetOrCreateKeyPackage(): Promise<{ packageId: string; userId: string; keyPackageData: number[]; createdAt: number; isSynced: boolean }>;
+  mlsGetOrCreateKeyPackage(): Promise<{
+    packageId: string;
+    userId: string;
+    keyPackageData: number[];
+    createdAt: number;
+    isSynced: boolean;
+  }>;
   mlsImportKeyPackage(userId: string, keyPackageData: number[]): Promise<void>;
   mlsHasSession(otherUserId: string): Promise<boolean>;
   mlsCreateSession(otherUserId: string): Promise<MlsWelcome>;
-  mlsJoinSession(welcome: MlsWelcome): Promise<{ otherUserId: string; groupId: string; epoch: number; createdAt: number }>;
-  mlsEncryptForUser(otherUserId: string, plaintext: number[]): Promise<MlsEncryptedMessage>;
+  mlsJoinSession(
+    welcome: MlsWelcome,
+  ): Promise<{
+    otherUserId: string;
+    groupId: string;
+    epoch: number;
+    createdAt: number;
+  }>;
+  mlsEncryptForUser(
+    otherUserId: string,
+    plaintext: number[],
+  ): Promise<MlsEncryptedMessage>;
   mlsDecrypt(encrypted: MlsEncryptedMessage): Promise<number[] | null>;
 }
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
@@ -102,12 +125,12 @@ interface ProtocolContextType {
   isOnline: boolean;
   currentUserId: string;
   currentUserName: string;
-  
+
   // Contacts and chats
   contacts: Contact[];
   chats: Chat[];
   connectedPeersCount: number;
-  
+
   // Protocol state
   events: ProtocolEvent[];
   insights: any;
@@ -118,24 +141,28 @@ interface ProtocolContextType {
   relayPriority: NativeRelayPriority;
   dorsConfig: DorsRuntimeConfig;
   fileTransfers: FileTransferState[];
-  
+
   // MLS encryption state
   isMlsInitialized: boolean;
   encryptedPeers: Set<string>;
-  
+
   // Actions
   initialize: () => Promise<boolean>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
-  sendMessage: (recipientId: string, content: string, priority?: MessagePriority) => Promise<void>;
+  sendMessage: (
+    recipientId: string,
+    content: string,
+    priority?: MessagePriority,
+  ) => Promise<void>;
   markAsRead: (chatId: string) => void;
   updateUserName: (name: string) => void;
-  
+
   // Runtime controls
   refreshRuntimeState: () => Promise<void>;
   enableTransport: (
     type: TransportType,
-    config?: InternetTransportConfig | WifiDirectTransportConfig
+    config?: InternetTransportConfig | WifiDirectTransportConfig,
   ) => Promise<boolean>;
   disableTransport: (type: TransportType) => Promise<boolean>;
   forceTransport: (type: TransportType) => Promise<boolean>;
@@ -143,7 +170,9 @@ interface ProtocolContextType {
   setBatteryLevel: (level: number) => Promise<boolean>;
   setRelayPriority: (priority: RelayPriorityInput) => Promise<boolean>;
   updateDorsConfig: (partial: Partial<DorsRuntimeConfig>) => Promise<boolean>;
-  getTransportMetrics: (type: TransportType) => Promise<TransportMetricsSnapshot | null>;
+  getTransportMetrics: (
+    type: TransportType,
+  ) => Promise<TransportMetricsSnapshot | null>;
   sendFile: (params: SendFileParams) => Promise<string | null>;
   cancelFileTransfer: (fileId: string) => Promise<boolean>;
 
@@ -156,7 +185,9 @@ interface ProtocolContextType {
   };
 }
 
-const ProtocolContext = createContext<ProtocolContextType | undefined>(undefined);
+const ProtocolContext = createContext<ProtocolContextType | undefined>(
+  undefined,
+);
 
 interface ProtocolProviderProps {
   children: React.ReactNode;
@@ -168,10 +199,14 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [chats, setChats] = useState<Chat[]>([]);
   const [isInitialized, setIsInitialized] = useState(false);
-  const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>({});
-  const [presenceSentPeers, setPresenceSentPeers] = useState<Record<string, number>>({});
+  const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>(
+    {},
+  );
+  const [presenceSentPeers, setPresenceSentPeers] = useState<
+    Record<string, number>
+  >({});
   const processedIncomingMessageIdsRef = useRef<Map<string, number>>(new Map());
-  
+
   // MLS encryption state
   const [isMlsInitialized, setIsMlsInitialized] = useState(false);
   const [encryptedPeers, setEncryptedPeers] = useState<Set<string>>(new Set());
@@ -188,7 +223,11 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       } else if (code < 0x800) {
         bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
       } else if (code < 0x10000) {
-        bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+        bytes.push(
+          0xe0 | (code >> 12),
+          0x80 | ((code >> 6) & 0x3f),
+          0x80 | (code & 0x3f),
+        );
       }
     }
     return bytes;
@@ -204,11 +243,15 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         result += String.fromCharCode(byte);
         i++;
       } else if ((byte & 0xe0) === 0xc0) {
-        result += String.fromCharCode(((byte & 0x1f) << 6) | (bytes[i + 1] & 0x3f));
+        result += String.fromCharCode(
+          ((byte & 0x1f) << 6) | (bytes[i + 1] & 0x3f),
+        );
         i += 2;
       } else if ((byte & 0xf0) === 0xe0) {
         result += String.fromCharCode(
-          ((byte & 0x0f) << 12) | ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f)
+          ((byte & 0x0f) << 12) |
+            ((bytes[i + 1] & 0x3f) << 6) |
+            (bytes[i + 2] & 0x3f),
         );
         i += 3;
       } else {
@@ -293,7 +336,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       }
       return peerId.length > 4 ? `User ${peerId.slice(-4)}` : `User ${peerId}`;
     },
-    [peerProfiles]
+    [peerProfiles],
   );
 
   // Send key package to a peer for MLS session establishment
@@ -321,16 +364,20 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         await protocolSendMessage(
           peerId,
           `${KEY_PACKAGE_MESSAGE_PREFIX}${JSON.stringify(payload)}`,
-          MessagePriority.Low
+          MessagePriority.Low,
         );
 
         keyPackageSentPeersRef.current.add(peerId);
         console.log(`[ProtocolProvider] Sent key package to ${peerId}`);
       } catch (err) {
-        console.warn('[ProtocolProvider] Failed to send key package', peerId, err);
+        console.warn(
+          '[ProtocolProvider] Failed to send key package',
+          peerId,
+          err,
+        );
       }
     },
-    [protocol, isMlsInitialized, currentUserId, protocolSendMessage]
+    [protocol, isMlsInitialized, currentUserId, protocolSendMessage],
   );
 
   const sendPresenceToPeer = useCallback(
@@ -351,11 +398,11 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         const result = await protocolSendMessage(
           peerId,
           `${PRESENCE_MESSAGE_PREFIX}${JSON.stringify(payload)}`,
-          MessagePriority.Low
+          MessagePriority.Low,
         );
 
         if (result) {
-          setPresenceSentPeers((prev) => {
+          setPresenceSentPeers(prev => {
             const lastSent = prev[peerId];
             if (lastSent && timestamp - lastSent < 500) {
               return prev;
@@ -365,15 +412,19 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               [peerId]: timestamp,
             };
           });
-          
+
           // Also send key package for MLS encryption
           void sendKeyPackageToPeer(peerId);
         }
       } catch (err) {
-        console.warn('[ProtocolProvider] Failed to send presence message', peerId, err);
+        console.warn(
+          '[ProtocolProvider] Failed to send presence message',
+          peerId,
+          err,
+        );
       }
     },
-    [protocolSendMessage, currentUserId, currentUserName, sendKeyPackageToPeer]
+    [protocolSendMessage, currentUserId, currentUserName, sendKeyPackageToPeer],
   );
 
   // Initialize protocol
@@ -387,7 +438,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       if (!granted) {
         Alert.alert(
           'Permissions Required',
-          'Bluetooth and location permissions are needed to communicate with nearby devices.'
+          'Bluetooth and location permissions are needed to communicate with nearby devices.',
         );
         setIsInitialized(false);
         return false;
@@ -399,7 +450,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       console.error('Failed to initialize protocol:', err);
       Alert.alert(
         'Initialization Error',
-        'Failed to initialize the messaging protocol. Please check permissions.'
+        'Failed to initialize the messaging protocol. Please check permissions.',
       );
       setIsInitialized(false);
       return false;
@@ -410,7 +461,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const start = useCallback(async () => {
     try {
       await protocolStart();
-      
+
       // Initialize MLS encryption after protocol starts
       if (protocol && !isMlsInitialized) {
         try {
@@ -418,9 +469,14 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           const mlsProtocol = protocol as OfflineProtocolWithMls;
           await mlsProtocol.initializeMlsWithSecureStorage();
           setIsMlsInitialized(true);
-          console.log('[ProtocolProvider] MLS encryption initialized successfully');
+          console.log(
+            '[ProtocolProvider] MLS encryption initialized successfully',
+          );
         } catch (mlsError) {
-          console.warn('[ProtocolProvider] MLS initialization failed, continuing without encryption:', mlsError);
+          console.warn(
+            '[ProtocolProvider] MLS initialization failed, continuing without encryption:',
+            mlsError,
+          );
         }
       }
     } catch (err) {
@@ -439,153 +495,192 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   }, [protocolStop]);
 
   // Send message with optional encryption
-  const sendMessage = useCallback(async (
-    recipientId: string, 
-    content: string, 
-    priority: MessagePriority = MessagePriority.Medium
-  ) => {
-    try {
-      console.log(`[ProtocolProvider] Sending message to ${recipientId}: "${content}" (priority: ${priority})`);
-      
-      let messageToSend = content;
-      let isEncrypted = false;
-      
-      // Try to encrypt the message if MLS is initialized
-      if (protocol && isMlsInitialized) {
-        try {
-          const mlsProtocol = protocol as OfflineProtocolWithMls;
-          // Check if we have a session or can create one
-          const hasSession = await mlsProtocol.mlsHasSession(recipientId);
-          
-          if (!hasSession) {
-            // Check if we have the peer's key package
-            const peerKeyPackage = peerKeyPackagesRef.current.get(recipientId);
-            if (peerKeyPackage) {
-              console.log(`[ProtocolProvider] Importing key package for ${recipientId}`);
-              await mlsProtocol.mlsImportKeyPackage(recipientId, peerKeyPackage);
-              
-              // Create session and get welcome message
-              const welcome = await mlsProtocol.mlsCreateSession(recipientId);
-              
-              // Send welcome message to recipient
-              const welcomePayload = {
-                groupId: welcome.groupId,
-                welcomeData: welcome.welcomeData,
-                inviterId: welcome.inviterId,
-                timestampMs: welcome.timestampMs,
-              };
-              await protocolSendMessage(
-                recipientId,
-                `${MLS_WELCOME_MESSAGE_PREFIX}${JSON.stringify(welcomePayload)}`,
-                MessagePriority.High
-              );
-              console.log(`[ProtocolProvider] Sent MLS welcome to ${recipientId}`);
+  const sendMessage = useCallback(
+    async (
+      recipientId: string,
+      content: string,
+      priority: MessagePriority = MessagePriority.Medium,
+    ) => {
+      try {
+        console.log(
+          `[ProtocolProvider] Sending message to ${recipientId}: "${content}" (priority: ${priority})`,
+        );
+
+        let messageToSend = content;
+        let isEncrypted = false;
+
+        // Try to encrypt the message if MLS is initialized
+        if (protocol && isMlsInitialized) {
+          try {
+            const mlsProtocol = protocol as OfflineProtocolWithMls;
+            // Check if we have a session or can create one
+            const hasSession = await mlsProtocol.mlsHasSession(recipientId);
+
+            if (!hasSession) {
+              // Check if we have the peer's key package
+              const peerKeyPackage =
+                peerKeyPackagesRef.current.get(recipientId);
+              if (peerKeyPackage) {
+                console.log(
+                  `[ProtocolProvider] Importing key package for ${recipientId}`,
+                );
+                await mlsProtocol.mlsImportKeyPackage(
+                  recipientId,
+                  peerKeyPackage,
+                );
+
+                // Create session and get welcome message
+                const welcome = await mlsProtocol.mlsCreateSession(recipientId);
+
+                // Send welcome message to recipient
+                const welcomePayload = {
+                  groupId: welcome.groupId,
+                  welcomeData: welcome.welcomeData,
+                  inviterId: welcome.inviterId,
+                  timestampMs: welcome.timestampMs,
+                };
+                await protocolSendMessage(
+                  recipientId,
+                  `${MLS_WELCOME_MESSAGE_PREFIX}${JSON.stringify(
+                    welcomePayload,
+                  )}`,
+                  MessagePriority.High,
+                );
+                console.log(
+                  `[ProtocolProvider] Sent MLS welcome to ${recipientId}`,
+                );
+              }
             }
-          }
-          
-          // Try to encrypt if we now have a session
-          const canEncrypt = await mlsProtocol.mlsHasSession(recipientId);
-          if (canEncrypt) {
-            const plainBytes = stringToBytes(content);
-            const encrypted = await mlsProtocol.mlsEncryptForUser(recipientId, plainBytes);
-            
-            // Wrap encrypted message with prefix
-            const encryptedPayload = {
-              groupId: encrypted.groupId,
-              messageType: encrypted.messageType,
-              epoch: encrypted.epoch,
-              ciphertext: encrypted.ciphertext,
-              senderId: encrypted.senderId,
-              timestampMs: encrypted.timestampMs,
-            };
-            messageToSend = `${ENCRYPTED_MESSAGE_PREFIX}${JSON.stringify(encryptedPayload)}`;
-            isEncrypted = true;
-            
-            // Track this peer as encrypted
-            setEncryptedPeers(prev => new Set(prev).add(recipientId));
-            console.log(`[ProtocolProvider] Message encrypted for ${recipientId}`);
-          }
-        } catch (encryptError) {
-          console.warn('[ProtocolProvider] Encryption failed, sending plaintext:', encryptError);
-        }
-      }
-      
-      const messageId = await protocolSendMessage(recipientId, messageToSend, priority);
-      if (!messageId) {
-        throw new Error('Message ID not returned');
-      }
-      console.log(`[ProtocolProvider] Message queued successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`);
 
-      const now = Date.now();
-      const newMessage: Message = {
-        id: messageId,
-        senderId: currentUserId,
-        recipientId,
-        content, // Store the original plaintext content for display
-        timestamp: now,
-        priority,
-        status: 'sending',
-        isFromMe: true,
-        isEncrypted,
-      };
+            // Try to encrypt if we now have a session
+            const canEncrypt = await mlsProtocol.mlsHasSession(recipientId);
+            if (canEncrypt) {
+              const plainBytes = stringToBytes(content);
+              const encrypted = await mlsProtocol.mlsEncryptForUser(
+                recipientId,
+                plainBytes,
+              );
 
-      setChats(prevChats => {
-        const existingChatIndex = prevChats.findIndex(chat => chat.peerId === recipientId);
-        
-        if (existingChatIndex >= 0) {
-          const updatedChats = [...prevChats];
-          const existingChat = updatedChats[existingChatIndex];
-          updatedChats[existingChatIndex] = {
-            ...existingChat,
-            peerName: getPeerDisplayName(recipientId),
-            lastMessage: newMessage,
-            messages: [...existingChat.messages, newMessage],
-            isEncrypted: isEncrypted || existingChat.isEncrypted,
-          };
-          return updatedChats;
+              // Wrap encrypted message with prefix
+              const encryptedPayload = {
+                groupId: encrypted.groupId,
+                messageType: encrypted.messageType,
+                epoch: encrypted.epoch,
+                ciphertext: encrypted.ciphertext,
+                senderId: encrypted.senderId,
+                timestampMs: encrypted.timestampMs,
+              };
+              messageToSend = `${ENCRYPTED_MESSAGE_PREFIX}${JSON.stringify(
+                encryptedPayload,
+              )}`;
+              isEncrypted = true;
+
+              // Track this peer as encrypted
+              setEncryptedPeers(prev => new Set(prev).add(recipientId));
+              console.log(
+                `[ProtocolProvider] Message encrypted for ${recipientId}`,
+              );
+            }
+          } catch (encryptError) {
+            console.warn(
+              '[ProtocolProvider] Encryption failed, sending plaintext:',
+              encryptError,
+            );
+          }
         }
 
-        // Create new chat
-        const newChat: Chat = {
-          id: recipientId,
-          peerId: recipientId,
-          peerName: getPeerDisplayName(recipientId),
-          lastMessage: newMessage,
-          unreadCount: 0,
-          isOnline: false,
-          messages: [newMessage],
+        const messageId = await protocolSendMessage(
+          recipientId,
+          messageToSend,
+          priority,
+        );
+        if (!messageId) {
+          throw new Error('Message ID not returned');
+        }
+        console.log(
+          `[ProtocolProvider] Message queued successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`,
+        );
+
+        const now = Date.now();
+        const newMessage: Message = {
+          id: messageId,
+          senderId: currentUserId,
+          recipientId,
+          content, // Store the original plaintext content for display
+          timestamp: now,
+          priority,
+          status: 'sending',
+          isFromMe: true,
           isEncrypted,
         };
-        return [...prevChats, newChat];
-      });
 
-      setContacts((prevContacts) => {
-        if (prevContacts.some((contact) => contact.id === recipientId)) {
-          return prevContacts;
-        }
-        return [
-          ...prevContacts,
-          {
+        setChats(prevChats => {
+          const existingChatIndex = prevChats.findIndex(
+            chat => chat.peerId === recipientId,
+          );
+
+          if (existingChatIndex >= 0) {
+            const updatedChats = [...prevChats];
+            const existingChat = updatedChats[existingChatIndex];
+            updatedChats[existingChatIndex] = {
+              ...existingChat,
+              peerName: getPeerDisplayName(recipientId),
+              lastMessage: newMessage,
+              messages: [...existingChat.messages, newMessage],
+              isEncrypted: isEncrypted || existingChat.isEncrypted,
+            };
+            return updatedChats;
+          }
+
+          // Create new chat
+          const newChat: Chat = {
             id: recipientId,
-            name: getPeerDisplayName(recipientId),
-            avatar: undefined,
+            peerId: recipientId,
+            peerName: getPeerDisplayName(recipientId),
+            lastMessage: newMessage,
+            unreadCount: 0,
             isOnline: false,
-            lastSeen: now,
-          },
-        ];
-      });
-    } catch (err) {
-      console.error('Failed to send message:', err);
-      Alert.alert('Send Error', 'Failed to send message. Please try again.');
-    }
-  }, [protocolSendMessage, currentUserId, getPeerDisplayName, protocol, isMlsInitialized]);
+            messages: [newMessage],
+            isEncrypted,
+          };
+          return [...prevChats, newChat];
+        });
+
+        setContacts(prevContacts => {
+          if (prevContacts.some(contact => contact.id === recipientId)) {
+            return prevContacts;
+          }
+          return [
+            ...prevContacts,
+            {
+              id: recipientId,
+              name: getPeerDisplayName(recipientId),
+              avatar: undefined,
+              isOnline: false,
+              lastSeen: now,
+            },
+          ];
+        });
+      } catch (err) {
+        console.error('Failed to send message:', err);
+        Alert.alert('Send Error', 'Failed to send message. Please try again.');
+      }
+    },
+    [
+      protocolSendMessage,
+      currentUserId,
+      getPeerDisplayName,
+      protocol,
+      isMlsInitialized,
+    ],
+  );
 
   // Mark chat as read
   const markAsRead = useCallback((chatId: string) => {
-    setChats(prevChats => 
-      prevChats.map(chat => 
-        chat.id === chatId ? { ...chat, unreadCount: 0 } : chat
-      )
+    setChats(prevChats =>
+      prevChats.map(chat =>
+        chat.id === chatId ? { ...chat, unreadCount: 0 } : chat,
+      ),
     );
   }, []);
 
@@ -613,393 +708,516 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     const processEventsAsync = async () => {
       const chronologicalEvents = [...events].reverse();
       const discoveredPeers = new Set<string>();
+      const newlyDiscoveredPeers = new Set<string>(); // Track peers discovered in this batch
       const receivedMessages: Message[] = [];
       const messageSenders = new Set<string>();
       const sentMessageIds = new Set<string>();
       const deliveredMessageIds = new Set<string>();
       const failedMessageIds = new Set<string>();
-      const presenceUpdates = new Map<string, { name: string; timestamp: number }>();
+      const presenceUpdates = new Map<
+        string,
+        { name: string; timestamp: number }
+      >();
+      
+      // CRITICAL FIX: Get current timestamp early to use for presence throttling
+      const now = Date.now();
 
       for (const event of chronologicalEvents) {
-      switch (event.type) {
-        case 'neighbor_discovered': {
-          const peerId = (event as any).peer_id;
-          if (peerId) {
-            discoveredPeers.add(peerId);
-          }
-          break;
-        }
-        case 'neighbor_lost': {
-          const peerId = (event as any).peer_id;
-          if (peerId) {
-            discoveredPeers.delete(peerId);
-          }
-          break;
-        }
-        case 'message_sent': {
-          const sentEvent = event as any;
-          if (sentEvent.sender === currentUserId && sentEvent.message_id) {
-            sentMessageIds.add(sentEvent.message_id);
-          }
-          break;
-        }
-        case 'message_delivered': {
-          const deliveredEvent = event as any;
-          if (deliveredEvent.message_id) {
-            deliveredMessageIds.add(deliveredEvent.message_id);
-          }
-          break;
-        }
-        case 'message_failed': {
-          const failedEvent = event as any;
-          if (failedEvent.message_id) {
-            failedMessageIds.add(failedEvent.message_id);
-          }
-          break;
-        }
-        case 'message_received': {
-          const msgEvent = event as any;
-          if (!msgEvent) {
-            break;
-          }
-
-          const messageId: string =
-            msgEvent.message_id || `inbound_${msgEvent.sender}_${msgEvent.timestamp ?? Date.now()}`;
-
-          if (processedIncomingMessageIdsRef.current.has(messageId)) {
-            break;
-          }
-          processedIncomingMessageIdsRef.current.set(messageId, Date.now());
-
-          const rawContent = typeof msgEvent.content === 'string' ? msgEvent.content : '';
-          messageSenders.add(msgEvent.sender);
-
-          // Handle presence messages
-          if (rawContent.startsWith(PRESENCE_MESSAGE_PREFIX)) {
-            try {
-              const payload = JSON.parse(rawContent.slice(PRESENCE_MESSAGE_PREFIX.length));
-              if (payload?.name && typeof payload.name === 'string') {
-                const presenceTimestamp = Number(payload.timestamp) || msgEvent.timestamp || Date.now();
-                presenceUpdates.set(msgEvent.sender, {
-                  name: payload.name,
-                  timestamp: presenceTimestamp,
-                });
-              }
-            } catch (err) {
-              console.warn('[ProtocolProvider] Failed to parse presence payload', err);
+        switch (event.type) {
+          case 'neighbor_discovered': {
+            const peerId = (event as any).peer_id;
+            if (peerId && peerId !== currentUserId) {
+              discoveredPeers.add(peerId);
+              // CRITICAL FIX: Track newly discovered peers to send presence after event processing
+              newlyDiscoveredPeers.add(peerId);
             }
             break;
           }
-          
-          // Handle key package messages for MLS
-          if (rawContent.startsWith(KEY_PACKAGE_MESSAGE_PREFIX)) {
-            try {
-              const payload = JSON.parse(rawContent.slice(KEY_PACKAGE_MESSAGE_PREFIX.length));
-              if (payload?.keyPackageData && Array.isArray(payload.keyPackageData)) {
-                peerKeyPackagesRef.current.set(msgEvent.sender, payload.keyPackageData);
-                console.log(`[ProtocolProvider] Received key package from ${msgEvent.sender}`);
-              }
-            } catch (err) {
-              console.warn('[ProtocolProvider] Failed to parse key package payload', err);
+          case 'neighbor_lost': {
+            const peerId = (event as any).peer_id;
+            if (peerId) {
+              discoveredPeers.delete(peerId);
             }
             break;
           }
-          
-          // Handle MLS welcome messages
-          if (rawContent.startsWith(MLS_WELCOME_MESSAGE_PREFIX)) {
-            try {
-              const payload = JSON.parse(rawContent.slice(MLS_WELCOME_MESSAGE_PREFIX.length));
-              if (protocol && isMlsInitialized && payload?.welcomeData) {
-                const mlsProtocol = protocol as OfflineProtocolWithMls;
-                const welcome: MlsWelcome = {
-                  groupId: payload.groupId,
-                  welcomeData: payload.welcomeData,
-                  inviterId: payload.inviterId,
-                  timestampMs: payload.timestampMs,
-                };
-                await mlsProtocol.mlsJoinSession(welcome);
-                setEncryptedPeers(prev => new Set(prev).add(msgEvent.sender));
-                console.log(`[ProtocolProvider] Joined MLS session with ${msgEvent.sender}`);
-              }
-            } catch (err) {
-              console.warn('[ProtocolProvider] Failed to join MLS session', err);
+          case 'message_sent': {
+            const sentEvent = event as any;
+            if (sentEvent.sender === currentUserId && sentEvent.message_id) {
+              sentMessageIds.add(sentEvent.message_id);
             }
             break;
           }
-
-          const normalizePriority = (value: unknown): MessagePriority => {
-            if (typeof value === 'number') {
-              switch (value) {
-                case MessagePriority.Low:
-                  return MessagePriority.Low;
-                case MessagePriority.High:
-                  return MessagePriority.High;
-                case MessagePriority.Critical:
-                  return MessagePriority.Critical;
-                case MessagePriority.Medium:
-                default:
-                  return MessagePriority.Medium;
-              }
+          case 'message_delivered': {
+            const deliveredEvent = event as any;
+            if (deliveredEvent.message_id) {
+              deliveredMessageIds.add(deliveredEvent.message_id);
             }
-            if (typeof value === 'string') {
-              switch (value.toLowerCase()) {
-                case 'low':
-                  return MessagePriority.Low;
-                case 'high':
-                  return MessagePriority.High;
-                case 'critical':
-                  return MessagePriority.Critical;
-                case 'medium':
-                default:
-                  return MessagePriority.Medium;
-              }
+            break;
+          }
+          case 'message_failed': {
+            const failedEvent = event as any;
+            if (failedEvent.message_id) {
+              failedMessageIds.add(failedEvent.message_id);
             }
-            return MessagePriority.Medium;
-          };
+            break;
+          }
+          case 'message_received': {
+            const msgEvent = event as any;
+            if (!msgEvent) {
+              break;
+            }
 
-          // Check if message is encrypted and try to decrypt
-          let displayContent = rawContent;
-          let isEncrypted = false;
-          
-          if (rawContent.startsWith(ENCRYPTED_MESSAGE_PREFIX)) {
-            isEncrypted = true;
-            try {
-              const encryptedPayload = JSON.parse(rawContent.slice(ENCRYPTED_MESSAGE_PREFIX.length));
-              if (protocol && isMlsInitialized) {
-                const mlsProtocol = protocol as OfflineProtocolWithMls;
-                const encrypted: MlsEncryptedMessage = {
-                  groupId: encryptedPayload.groupId,
-                  messageType: encryptedPayload.messageType,
-                  epoch: encryptedPayload.epoch,
-                  ciphertext: encryptedPayload.ciphertext,
-                  senderId: encryptedPayload.senderId,
-                  timestampMs: encryptedPayload.timestampMs,
-                };
-                const decryptedBytes = await mlsProtocol.mlsDecrypt(encrypted);
-                if (decryptedBytes) {
-                  displayContent = bytesToString(decryptedBytes);
-                  console.log(`[ProtocolProvider] Decrypted message from ${msgEvent.sender}`);
-                } else {
-                  displayContent = '[Encrypted message - unable to decrypt]';
-                  console.warn('[ProtocolProvider] Decryption returned null');
+            const messageId: string =
+              msgEvent.message_id ||
+              `inbound_${msgEvent.sender}_${msgEvent.timestamp ?? Date.now()}`;
+
+            if (processedIncomingMessageIdsRef.current.has(messageId)) {
+              break;
+            }
+            processedIncomingMessageIdsRef.current.set(messageId, Date.now());
+
+            const rawContent =
+              typeof msgEvent.content === 'string' ? msgEvent.content : '';
+            messageSenders.add(msgEvent.sender);
+
+            // Handle presence messages
+            if (rawContent.startsWith(PRESENCE_MESSAGE_PREFIX)) {
+              try {
+                const payload = JSON.parse(
+                  rawContent.slice(PRESENCE_MESSAGE_PREFIX.length),
+                );
+                if (payload?.name && typeof payload.name === 'string') {
+                  const presenceTimestamp =
+                    Number(payload.timestamp) ||
+                    msgEvent.timestamp ||
+                    Date.now();
+                  presenceUpdates.set(msgEvent.sender, {
+                    name: payload.name,
+                    timestamp: presenceTimestamp,
+                  });
                 }
-              } else {
-                displayContent = '[Encrypted message - MLS not initialized]';
+              } catch (err) {
+                console.warn(
+                  '[ProtocolProvider] Failed to parse presence payload',
+                  err,
+                );
               }
-            } catch (decryptError) {
-              console.warn('[ProtocolProvider] Failed to decrypt message:', decryptError);
-              displayContent = '[Encrypted message - decryption failed]';
+              break;
             }
-          }
 
-          const receivedMessage: Message = {
-            id: messageId,
-            senderId: msgEvent.sender,
-            recipientId: msgEvent.recipient ?? currentUserId,
-            content: displayContent,
-            timestamp: msgEvent.timestamp || Date.now(),
-            priority: normalizePriority(msgEvent.priority),
-            status: 'delivered',
-            isFromMe: false,
-            isEncrypted,
-          };
-          receivedMessages.push(receivedMessage);
-          break;
-        }
-        default:
-          break;
-      }
-    }
+            // Handle key package messages for MLS
+            if (rawContent.startsWith(KEY_PACKAGE_MESSAGE_PREFIX)) {
+              try {
+                const payload = JSON.parse(
+                  rawContent.slice(KEY_PACKAGE_MESSAGE_PREFIX.length),
+                );
+                if (
+                  payload?.keyPackageData &&
+                  Array.isArray(payload.keyPackageData)
+                ) {
+                  peerKeyPackagesRef.current.set(
+                    msgEvent.sender,
+                    payload.keyPackageData,
+                  );
+                  console.log(
+                    `[ProtocolProvider] Received key package from ${msgEvent.sender}`,
+                  );
+                }
+              } catch (err) {
+                console.warn(
+                  '[ProtocolProvider] Failed to parse key package payload',
+                  err,
+                );
+              }
+              break;
+            }
 
-    const updatedProfiles: Record<string, PeerProfile> = { ...peerProfiles };
-    let profilesChanged = false;
-    presenceUpdates.forEach(({ name, timestamp }, peerId) => {
-      const trimmedName = name.trim();
-      if (!trimmedName) {
-        return;
-      }
-      const existing = updatedProfiles[peerId];
-      if (!existing || timestamp >= existing.updatedAt) {
-        updatedProfiles[peerId] = {
-          name: trimmedName,
-          updatedAt: timestamp,
-        };
-        profilesChanged = true;
-      }
-    });
+            // Handle MLS welcome messages
+            if (rawContent.startsWith(MLS_WELCOME_MESSAGE_PREFIX)) {
+              try {
+                const payload = JSON.parse(
+                  rawContent.slice(MLS_WELCOME_MESSAGE_PREFIX.length),
+                );
+                if (protocol && isMlsInitialized && payload?.welcomeData) {
+                  const mlsProtocol = protocol as OfflineProtocolWithMls;
+                  const welcome: MlsWelcome = {
+                    groupId: payload.groupId,
+                    welcomeData: payload.welcomeData,
+                    inviterId: payload.inviterId,
+                    timestampMs: payload.timestampMs,
+                  };
+                  await mlsProtocol.mlsJoinSession(welcome);
+                  setEncryptedPeers(prev => new Set(prev).add(msgEvent.sender));
+                  console.log(
+                    `[ProtocolProvider] Joined MLS session with ${msgEvent.sender}`,
+                  );
+                }
+              } catch (err) {
+                console.warn(
+                  '[ProtocolProvider] Failed to join MLS session',
+                  err,
+                );
+              }
+              break;
+            }
 
-    if (profilesChanged) {
-      setPeerProfiles(updatedProfiles);
-    }
-
-    const resolvePeerName = (peerId: string) => {
-      const profile = updatedProfiles[peerId];
-      if (profile && profile.name.trim().length > 0) {
-        return profile.name.trim();
-      }
-      return peerId.length > 4 ? `User ${peerId.slice(-4)}` : `User ${peerId}`;
-    };
-
-    const now = Date.now();
-
-    setContacts((prevContacts) => {
-      const contactMap = new Map<string, Contact>(prevContacts.map((contact) => [contact.id, contact]));
-      let changed = false;
-
-      discoveredPeers.forEach((peerId) => {
-        if (!contactMap.has(peerId)) {
-          contactMap.set(peerId, {
-            id: peerId,
-            name: resolvePeerName(peerId),
-            avatar: undefined,
-            isOnline: true,
-            lastSeen: now,
-            signalStrength: Math.random(),
-            distance: Math.random() > 0.6 ? 'near' : Math.random() > 0.3 ? 'medium' : 'far',
-          });
-          changed = true;
-        }
-      });
-
-      messageSenders.forEach((peerId) => {
-        if (!contactMap.has(peerId)) {
-          contactMap.set(peerId, {
-            id: peerId,
-            name: resolvePeerName(peerId),
-            avatar: undefined,
-            isOnline: discoveredPeers.has(peerId),
-            lastSeen: now,
-            signalStrength: Math.random(),
-            distance: Math.random() > 0.6 ? 'near' : Math.random() > 0.3 ? 'medium' : 'far',
-          });
-          changed = true;
-        }
-      });
-
-      const nextContacts = Array.from(contactMap.values()).map((contact) => {
-        const isOnline = discoveredPeers.has(contact.id);
-        const profile = updatedProfiles[contact.id];
-        const name = profile?.name ?? contact.name;
-        const lastSeen = isOnline ? now : contact.lastSeen;
-        if (name !== contact.name || isOnline !== contact.isOnline || lastSeen !== contact.lastSeen) {
-          changed = true;
-          return {
-            ...contact,
-            name,
-            isOnline,
-            lastSeen,
-          };
-        }
-        return contact;
-      });
-
-      return changed ? nextContacts : prevContacts;
-    });
-
-    if (receivedMessages.length > 0) {
-      setChats((prevChats) => {
-        const updatedChats = [...prevChats];
-
-        receivedMessages.forEach((message) => {
-          const existingChatIndex = updatedChats.findIndex((chat) => chat.peerId === message.senderId);
-          if (existingChatIndex >= 0) {
-            const existingChat = updatedChats[existingChatIndex];
-            const nextMessages = [...existingChat.messages, message];
-            updatedChats[existingChatIndex] = {
-              ...existingChat,
-              peerName: resolvePeerName(message.senderId),
-              lastMessage: message,
-              unreadCount: existingChat.unreadCount + 1,
-              isOnline: discoveredPeers.has(message.senderId) || existingChat.isOnline,
-              messages: nextMessages,
+            const normalizePriority = (value: unknown): MessagePriority => {
+              if (typeof value === 'number') {
+                switch (value) {
+                  case MessagePriority.Low:
+                    return MessagePriority.Low;
+                  case MessagePriority.High:
+                    return MessagePriority.High;
+                  case MessagePriority.Critical:
+                    return MessagePriority.Critical;
+                  case MessagePriority.Medium:
+                  default:
+                    return MessagePriority.Medium;
+                }
+              }
+              if (typeof value === 'string') {
+                switch (value.toLowerCase()) {
+                  case 'low':
+                    return MessagePriority.Low;
+                  case 'high':
+                    return MessagePriority.High;
+                  case 'critical':
+                    return MessagePriority.Critical;
+                  case 'medium':
+                  default:
+                    return MessagePriority.Medium;
+                }
+              }
+              return MessagePriority.Medium;
             };
-          } else {
-            updatedChats.push({
-              id: message.senderId,
-              peerId: message.senderId,
-              peerName: resolvePeerName(message.senderId),
-              lastMessage: message,
-              unreadCount: 1,
-              isOnline: discoveredPeers.has(message.senderId),
-              messages: [message],
+
+            // Check if message is encrypted and try to decrypt
+            let displayContent = rawContent;
+            let isEncrypted = false;
+
+            if (rawContent.startsWith(ENCRYPTED_MESSAGE_PREFIX)) {
+              isEncrypted = true;
+              try {
+                const encryptedPayload = JSON.parse(
+                  rawContent.slice(ENCRYPTED_MESSAGE_PREFIX.length),
+                );
+                if (protocol && isMlsInitialized) {
+                  const mlsProtocol = protocol as OfflineProtocolWithMls;
+                  const encrypted: MlsEncryptedMessage = {
+                    groupId: encryptedPayload.groupId,
+                    messageType: encryptedPayload.messageType,
+                    epoch: encryptedPayload.epoch,
+                    ciphertext: encryptedPayload.ciphertext,
+                    senderId: encryptedPayload.senderId,
+                    timestampMs: encryptedPayload.timestampMs,
+                  };
+                  const decryptedBytes = await mlsProtocol.mlsDecrypt(
+                    encrypted,
+                  );
+                  if (decryptedBytes) {
+                    displayContent = bytesToString(decryptedBytes);
+                    console.log(
+                      `[ProtocolProvider] Decrypted message from ${msgEvent.sender}`,
+                    );
+                  } else {
+                    displayContent = '[Encrypted message - unable to decrypt]';
+                    console.warn('[ProtocolProvider] Decryption returned null');
+                  }
+                } else {
+                  displayContent = '[Encrypted message - MLS not initialized]';
+                }
+              } catch (decryptError) {
+                console.warn(
+                  '[ProtocolProvider] Failed to decrypt message:',
+                  decryptError,
+                );
+                displayContent = '[Encrypted message - decryption failed]';
+              }
+            }
+
+            const receivedMessage: Message = {
+              id: messageId,
+              senderId: msgEvent.sender,
+              recipientId: msgEvent.recipient ?? currentUserId,
+              content: displayContent,
+              timestamp: msgEvent.timestamp || Date.now(),
+              priority: normalizePriority(msgEvent.priority),
+              status: 'delivered',
+              isFromMe: false,
+              isEncrypted,
+            };
+            receivedMessages.push(receivedMessage);
+            break;
+          }
+          default:
+            break;
+        }
+      }
+
+      const updatedProfiles: Record<string, PeerProfile> = { ...peerProfiles };
+      let profilesChanged = false;
+      presenceUpdates.forEach(({ name, timestamp }, peerId) => {
+        const trimmedName = name.trim();
+        if (!trimmedName) {
+          return;
+        }
+        const existing = updatedProfiles[peerId];
+        if (!existing || timestamp >= existing.updatedAt) {
+          updatedProfiles[peerId] = {
+            name: trimmedName,
+            updatedAt: timestamp,
+          };
+          profilesChanged = true;
+        }
+      });
+
+      if (profilesChanged) {
+        setPeerProfiles(updatedProfiles);
+      }
+
+       const resolvePeerName = (peerId: string) => {
+         const profile = updatedProfiles[peerId];
+         if (profile && profile.name.trim().length > 0) {
+           return profile.name.trim();
+         }
+         return peerId.length > 4
+           ? `User ${peerId.slice(-4)}`
+           : `User ${peerId}`;
+       };
+
+      setContacts(prevContacts => {
+        const contactMap = new Map<string, Contact>(
+          prevContacts.map(contact => [contact.id, contact]),
+        );
+        let changed = false;
+
+        discoveredPeers.forEach(peerId => {
+          if (!contactMap.has(peerId)) {
+            contactMap.set(peerId, {
+              id: peerId,
+              name: resolvePeerName(peerId),
+              avatar: undefined,
+              isOnline: true,
+              lastSeen: now,
+              signalStrength: Math.random(),
+              distance:
+                Math.random() > 0.6
+                  ? 'near'
+                  : Math.random() > 0.3
+                  ? 'medium'
+                  : 'far',
             });
+            changed = true;
           }
         });
 
-        return updatedChats;
-      });
-    }
-
-    if (
-      sentMessageIds.size > 0 ||
-      deliveredMessageIds.size > 0 ||
-      failedMessageIds.size > 0 ||
-      profilesChanged
-    ) {
-      setChats((prevChats) => {
-        let updated = false;
-
-        const nextChats = prevChats.map((chat) => {
-          let nextChat = chat;
-
-          const profile = updatedProfiles[chat.peerId];
-          if (profile && profile.name.trim().length > 0 && profile.name.trim() !== chat.peerName) {
-            nextChat = {
-              ...nextChat,
-              peerName: profile.name.trim(),
-            };
-            updated = true;
+        messageSenders.forEach(peerId => {
+          if (!contactMap.has(peerId)) {
+            contactMap.set(peerId, {
+              id: peerId,
+              name: resolvePeerName(peerId),
+              avatar: undefined,
+              isOnline: discoveredPeers.has(peerId),
+              lastSeen: now,
+              signalStrength: Math.random(),
+              distance:
+                Math.random() > 0.6
+                  ? 'near'
+                  : Math.random() > 0.3
+                  ? 'medium'
+                  : 'far',
+            });
+            changed = true;
           }
+        });
 
-          let messagesChanged = false;
-          const nextMessages = nextChat.messages.map((message): Message => {
-            if (failedMessageIds.has(message.id) && message.status !== 'failed') {
-              console.warn(`[ProtocolProvider] Message ${message.id} marked as failed`);
-              messagesChanged = true;
-              return { ...message, status: 'failed' };
+        const nextContacts = Array.from(contactMap.values()).map(contact => {
+          const isOnline = discoveredPeers.has(contact.id);
+          const profile = updatedProfiles[contact.id];
+          const name = profile?.name ?? contact.name;
+          const lastSeen = isOnline ? now : contact.lastSeen;
+          if (
+            name !== contact.name ||
+            isOnline !== contact.isOnline ||
+            lastSeen !== contact.lastSeen
+          ) {
+            changed = true;
+            return {
+              ...contact,
+              name,
+              isOnline,
+              lastSeen,
+            };
+          }
+          return contact;
+        });
+
+        return changed ? nextContacts : prevContacts;
+      });
+
+      if (receivedMessages.length > 0) {
+        setChats(prevChats => {
+          const updatedChats = [...prevChats];
+
+          receivedMessages.forEach(message => {
+            const existingChatIndex = updatedChats.findIndex(
+              chat => chat.peerId === message.senderId,
+            );
+            if (existingChatIndex >= 0) {
+              const existingChat = updatedChats[existingChatIndex];
+              const nextMessages = [...existingChat.messages, message];
+              updatedChats[existingChatIndex] = {
+                ...existingChat,
+                peerName: resolvePeerName(message.senderId),
+                lastMessage: message,
+                unreadCount: existingChat.unreadCount + 1,
+                isOnline:
+                  discoveredPeers.has(message.senderId) ||
+                  existingChat.isOnline,
+                messages: nextMessages,
+              };
+            } else {
+              updatedChats.push({
+                id: message.senderId,
+                peerId: message.senderId,
+                peerName: resolvePeerName(message.senderId),
+                lastMessage: message,
+                unreadCount: 1,
+                isOnline: discoveredPeers.has(message.senderId),
+                messages: [message],
+              });
             }
-            if (deliveredMessageIds.has(message.id) && message.status !== 'delivered') {
-              console.log(`[ProtocolProvider] Message ${message.id} marked as delivered`);
-              messagesChanged = true;
-              return { ...message, status: 'delivered' };
-            }
-            if (sentMessageIds.has(message.id) && message.status === 'sending') {
-              console.log(`[ProtocolProvider] Message ${message.id} marked as sent`);
-              messagesChanged = true;
-              return { ...message, status: 'sent' };
-            }
-            return message;
           });
 
-          if (messagesChanged) {
-            updated = true;
-            const lastMessage = nextMessages[nextMessages.length - 1] ?? nextChat.lastMessage;
-            return {
-              ...nextChat,
-              messages: nextMessages,
-              lastMessage,
-            };
-          }
-
-          return nextChat;
+          return updatedChats;
         });
+      }
 
-        return updated ? nextChats : prevChats;
-      });
-    }
+      if (
+        sentMessageIds.size > 0 ||
+        deliveredMessageIds.size > 0 ||
+        failedMessageIds.size > 0 ||
+        profilesChanged
+      ) {
+        setChats(prevChats => {
+          let updated = false;
+
+          const nextChats = prevChats.map(chat => {
+            let nextChat = chat;
+
+            const profile = updatedProfiles[chat.peerId];
+            if (
+              profile &&
+              profile.name.trim().length > 0 &&
+              profile.name.trim() !== chat.peerName
+            ) {
+              nextChat = {
+                ...nextChat,
+                peerName: profile.name.trim(),
+              };
+              updated = true;
+            }
+
+            let messagesChanged = false;
+            const nextMessages = nextChat.messages.map((message): Message => {
+              if (
+                failedMessageIds.has(message.id) &&
+                message.status !== 'failed'
+              ) {
+                console.warn(
+                  `[ProtocolProvider] Message ${message.id} marked as failed`,
+                );
+                messagesChanged = true;
+                return { ...message, status: 'failed' };
+              }
+              if (
+                deliveredMessageIds.has(message.id) &&
+                message.status !== 'delivered'
+              ) {
+                console.log(
+                  `[ProtocolProvider] Message ${message.id} marked as delivered`,
+                );
+                messagesChanged = true;
+                return { ...message, status: 'delivered' };
+              }
+              if (
+                sentMessageIds.has(message.id) &&
+                message.status === 'sending'
+              ) {
+                console.log(
+                  `[ProtocolProvider] Message ${message.id} marked as sent`,
+                );
+                messagesChanged = true;
+                return { ...message, status: 'sent' };
+              }
+              return message;
+            });
+
+            if (messagesChanged) {
+              updated = true;
+              const lastMessage =
+                nextMessages[nextMessages.length - 1] ?? nextChat.lastMessage;
+              return {
+                ...nextChat,
+                messages: nextMessages,
+                lastMessage,
+              };
+            }
+
+            return nextChat;
+          });
+
+          return updated ? nextChats : prevChats;
+        });
+      }
 
       pruneProcessedMessages();
+
+      // CRITICAL FIX: Send presence to newly discovered peers after event processing
+      // This ensures usernames are synced immediately when peers are discovered
+      // BUT: Only send if we haven't sent recently to prevent infinite loops
+      // Use a ref to track in-flight presence sends to avoid duplicate sends
+      newlyDiscoveredPeers.forEach(peerId => {
+        const lastSent = presenceSentPeers[peerId];
+        const timeSinceLastSent = now - (lastSent || 0);
+        // Only send if we haven't sent in the last 5 seconds to prevent loops
+        if (!lastSent || timeSinceLastSent > 5000) {
+          // Update the timestamp immediately to prevent duplicate sends
+          setPresenceSentPeers(prev => ({
+            ...prev,
+            [peerId]: now,
+          }));
+          sendPresenceToPeer(peerId).catch(err => {
+            console.warn(
+              `[ProtocolProvider] Failed to send presence to newly discovered peer ${peerId}:`,
+              err,
+            );
+          });
+        } else {
+          console.log(
+            `[ProtocolProvider] Skipping presence send to ${peerId} (sent ${timeSinceLastSent}ms ago, min interval: 5000ms)`,
+          );
+        }
+      });
     };
 
     // Run the async event processing
-    processEventsAsync().catch((err) => {
+    processEventsAsync().catch(err => {
       console.error('[ProtocolProvider] Error processing events:', err);
     });
-  }, [events, currentUserId, peerProfiles, protocol, isMlsInitialized, bytesToString]);
+  }, [
+    events,
+    currentUserId,
+    peerProfiles,
+    protocol,
+    isMlsInitialized,
+    bytesToString,
+    sendPresenceToPeer,
+  ]);
 
   // Reset presence broadcast cache when the local user name changes
   useEffect(() => {
-    setPresenceSentPeers((prev) => {
+    setPresenceSentPeers(prev => {
       if (Object.keys(prev).length === 0) {
         return prev;
       }
@@ -1009,51 +1227,77 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
   // Broadcast presence to online peers periodically
   useEffect(() => {
-    if (!isOnline || contacts.length === 0) {
+    if (!isOnline) {
       return;
     }
     const now = Date.now();
-    contacts.forEach((contact) => {
-      if (!contact.isOnline) {
-        return;
-      }
-      const lastSent = presenceSentPeers[contact.id];
-      if (!lastSent || now - lastSent > PRESENCE_REBROADCAST_INTERVAL_MS) {
-        void sendPresenceToPeer(contact.id);
+
+    // CRITICAL FIX: Send presence to all discovered peers, not just contacts
+    // This ensures newly discovered peers get presence even before they're in contacts
+    const allPeers = new Set<string>();
+
+    // Add all contacts
+    contacts.forEach(contact => {
+      if (contact.isOnline) {
+        allPeers.add(contact.id);
       }
     });
-  }, [contacts, presenceSentPeers, isOnline, sendPresenceToPeer]);
+
+    // Also send to any discovered peers that might not be in contacts yet
+    // (This will be populated from events in processEventsAsync)
+
+    allPeers.forEach(peerId => {
+      if (peerId === currentUserId) {
+        return;
+      }
+      const lastSent = presenceSentPeers[peerId];
+      if (!lastSent || now - lastSent > PRESENCE_REBROADCAST_INTERVAL_MS) {
+        void sendPresenceToPeer(peerId);
+      }
+    });
+  }, [
+    contacts,
+    presenceSentPeers,
+    isOnline,
+    sendPresenceToPeer,
+    currentUserId,
+  ]);
 
   // Get analytics data
   const getAnalytics = useCallback(() => {
-    const totalMessages = chats.reduce((sum, chat) => sum + chat.messages.length, 0);
+    const totalMessages = chats.reduce(
+      (sum, chat) => sum + chat.messages.length,
+      0,
+    );
     const totalContacts = contacts.length;
-    
+
     // Calculate average response time (simplified)
     const conversations = chats.filter(chat => chat.messages.length > 1);
     const responseTimes = conversations.map(chat => {
       const messages = chat.messages.sort((a, b) => a.timestamp - b.timestamp);
       let totalTime = 0;
       let responseCount = 0;
-      
+
       for (let i = 1; i < messages.length; i++) {
-        if (messages[i].isFromMe !== messages[i-1].isFromMe) {
-          totalTime += messages[i].timestamp - messages[i-1].timestamp;
+        if (messages[i].isFromMe !== messages[i - 1].isFromMe) {
+          totalTime += messages[i].timestamp - messages[i - 1].timestamp;
           responseCount++;
         }
       }
-      
+
       return responseCount > 0 ? totalTime / responseCount : 0;
     });
-    
-    const averageResponseTime = responseTimes.length > 0 
-      ? responseTimes.reduce((sum, time) => sum + time, 0) / responseTimes.length 
-      : 0;
+
+    const averageResponseTime =
+      responseTimes.length > 0
+        ? responseTimes.reduce((sum, time) => sum + time, 0) /
+          responseTimes.length
+        : 0;
 
     // Determine network health based on connected peers and recent activity
     const connectedPeers = contacts.filter(c => c.isOnline).length;
     let networkHealth: 'excellent' | 'good' | 'fair' | 'poor';
-    
+
     if (connectedPeers >= 5) networkHealth = 'excellent';
     else if (connectedPeers >= 3) networkHealth = 'good';
     else if (connectedPeers >= 1) networkHealth = 'fair';

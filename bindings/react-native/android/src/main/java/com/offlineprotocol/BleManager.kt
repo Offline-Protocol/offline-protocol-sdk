@@ -237,7 +237,10 @@ class BleManager(
         }
     }
     
-    private val pendingOutboundFragments = mutableMapOf<String, MutableList<ByteArray>>()
+    // Track outbound fragments with timestamps for timeout handling
+    private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
+    private val pendingOutboundFragments = mutableMapOf<String, MutableList<OutboundFragment>>()
+    private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
     private var pendingAdvertiseRestart: Runnable? = null
     private var lastAdvertiseRestartAt: Long = 0L
@@ -1459,10 +1462,13 @@ class BleManager(
     
     private fun pollAndSendFragments() {
         try {
-            if (flushPendingOutboundFragments()) {
-                return
-            }
-
+            // CRITICAL FIX: Always try to flush pending fragments first, but don't block new fragment polling
+            // The old logic would return early if there were unsent fragments, preventing new fragments
+            // from being polled. This caused messages to get stuck when connections weren't ready.
+            val hasUnsentFragments = flushPendingOutboundFragments()
+            
+            // CRITICAL: Still poll for new fragments even if there are unsent pending ones
+            // This prevents deadlock where old fragments block new ones
             // Poll for next fragment from protocol
             val fragment = try {
                 protocol.bleGetNextFragment()
@@ -1477,8 +1483,15 @@ class BleManager(
             
             if (fragment == null) {
                 // No fragment available - this is normal most of the time
-                // Only log occasionally to avoid spam
-                if (logThrottler.shouldLog("no_fragments", intervalMs = 10000)) {
+                // But log if we have unsent fragments to help diagnose connection issues
+                if (hasUnsentFragments && logThrottler.shouldLog("unsent_fragments_no_new", intervalMs = 5000)) {
+                    val recipientCount = pendingOutboundFragments.size
+                    Log.w(TAG, "⚠️ Have $recipientCount recipients with unsent fragments, but no new fragments to poll")
+                    emitDiagnostic("warning", "Unsent fragments blocking", mapOf(
+                        "recipientCount" to recipientCount,
+                        "recipients" to pendingOutboundFragments.keys.toList()
+                    ))
+                } else if (logThrottler.shouldLog("no_fragments", intervalMs = 10000)) {
                     Log.d(TAG, "No fragments available from protocol")
                 }
                 return
@@ -1511,22 +1524,47 @@ class BleManager(
 
     private fun flushPendingOutboundFragments(): Boolean {
         var hasUnsentFragments = false
+        val now = System.currentTimeMillis()
 
         val recipients = pendingOutboundFragments.keys.toList()
         for (recipientId in recipients) {
             val queue = pendingOutboundFragments[recipientId] ?: continue
-            val iterator = queue.listIterator()
+            
+            // CRITICAL FIX: Remove expired fragments to prevent indefinite queuing
+            val validFragments = queue.filter { now - it.timestamp < PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS }
+            
+            if (validFragments.isEmpty()) {
+                pendingOutboundFragments.remove(recipientId)
+                if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
+                    Log.w(TAG, "⚠️ Removed expired outbound fragments for $recipientId")
+                    emitDiagnostic("warning", "Outbound fragments expired", mapOf("recipientId" to recipientId))
+                }
+                continue
+            }
+            
+            // Update queue with only valid fragments (remove expired ones)
+            val mutableQueue = validFragments.toMutableList()
+            if (mutableQueue.size < queue.size) {
+                pendingOutboundFragments[recipientId] = mutableQueue
+            }
+            
+            // Try to send each fragment
+            val iterator = mutableQueue.iterator()
             while (iterator.hasNext()) {
-                val data = iterator.next()
-                if (sendFragmentData(recipientId, data)) {
+                val fragment = iterator.next()
+                if (sendFragmentData(recipientId, fragment.data)) {
                     iterator.remove()
                 } else {
                     hasUnsentFragments = true
                     break
                 }
             }
-            if (queue.isEmpty()) {
+            
+            // Update the queue with remaining fragments
+            if (mutableQueue.isEmpty()) {
                 pendingOutboundFragments.remove(recipientId)
+            } else {
+                pendingOutboundFragments[recipientId] = mutableQueue
             }
         }
 
@@ -1535,7 +1573,7 @@ class BleManager(
 
     private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
         val queue = pendingOutboundFragments.getOrPut(recipientId) { mutableListOf() }
-        queue.add(data)
+        queue.add(OutboundFragment(data, System.currentTimeMillis()))
     }
 
     private fun resolveTargetAddress(recipientId: String): String? {
@@ -1557,11 +1595,38 @@ class BleManager(
         val gatt = address?.let { connections.getGatt(it) }
         
         if (gatt == null) {
-            if (logThrottler.shouldLog("missing_gatt_$recipientId")) {
-                Log.w(TAG, "No connected device for recipient: $recipientId")
-                emitDiagnostic("warning", "No connected device for BLE fragment", mapOf("recipientId" to recipientId))
+            // CRITICAL FIX: Proactively try to connect if we don't have a connection
+            // This helps resolve cases where fragments are queued but connection isn't established
+            if (logThrottler.shouldLog("missing_gatt_$recipientId", intervalMs = 5000)) {
+                Log.w(TAG, "⚠️ No connected device for recipient: $recipientId - attempting to find and connect")
+                emitDiagnostic("warning", "No connected device for BLE fragment - attempting connection", mapOf("recipientId" to recipientId))
+            }
+            
+            // Try to find the device and connect
+            if (address != null) {
+                // We know the address but don't have a connection - try to reconnect
+                bluetoothAdapter?.let { adapter ->
+                    try {
+                        val device = adapter.getRemoteDevice(address)
+                        connectToDevice(device)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error attempting reconnection for $recipientId", e)
+                    }
+                }
+            } else {
+                // We don't even know the address - this is a more serious issue
+                // The device ID might not be resolved yet or route might not exist
+                Log.w(TAG, "⚠️ Cannot resolve address for recipient: $recipientId")
             }
             return false
+        }
+        
+        // CRITICAL FIX: Validate connection state before attempting to send
+        if (gatt.device.bondState == BluetoothDevice.BOND_NONE) {
+            // Device is not bonded - this might be okay for BLE, but log it
+            if (logThrottler.shouldLog("unbonded_device_$recipientId", intervalMs = 10000)) {
+                Log.d(TAG, "Device $recipientId is not bonded (this may be normal for BLE)")
+            }
         }
         
         val service = gatt.getService(SERVICE_UUID)
