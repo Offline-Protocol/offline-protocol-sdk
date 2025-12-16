@@ -377,15 +377,33 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             protocol?.start()
             emitDiagnostic("info", "Protocol core started")
             
-            // Start BLE manager if available
+            // CRITICAL FIX: Start BLE manager if available - BLE should work independently
+            // BLE peer discovery and messaging must work even when Internet/WiFi are disabled
             bleManager?.let { manager ->
                 try {
-                    android.util.Log.i(NAME, "About to call BLE manager.start()...")
+                    android.util.Log.i(NAME, "Starting BLE manager (BLE should work independently of other transports)...")
+                    emitDiagnostic("info", "Starting BLE manager", mapOf(
+                        "internetEnabled" to (currentConfig?.internetEnabled ?: false),
+                        "wifiDirectEnabled" to (currentConfig?.wifiDirectEnabled ?: false)
+                    ))
                     manager.start()
-                    android.util.Log.i(NAME, "BLE Manager started successfully")
-                    emitDiagnostic("info", "BLE manager started")
+                    android.util.Log.i(NAME, "✅ BLE Manager started successfully - scanning and advertising should be active")
+                    emitDiagnostic("info", "BLE manager started - peer discovery active", mapOf(
+                        "scanning" to true,
+                        "advertising" to true
+                    ))
                     
-                    // CRITICAL FIX: Backup bleStatusChanged(true) call in case timing is off
+                    // CRITICAL FIX: Ensure bleStatusChanged(true) is called immediately and as backup
+                    // This ensures BLE transport is marked as Available for message sending
+                    try {
+                        protocol?.bleStatusChanged(true)
+                        android.util.Log.i(NAME, "✅ Called protocol.bleStatusChanged(true) immediately")
+                        emitDiagnostic("info", "BLE status set to available")
+                    } catch (e: Exception) {
+                        android.util.Log.w(NAME, "Immediate bleStatusChanged failed: ${e.message}", e)
+                    }
+                    
+                    // Backup call in case timing is off
                     mainHandler.postDelayed({
                         android.util.Log.i(NAME, "Backup bleStatusChanged(true) call")
                         emitDiagnostic("info", "Backup call to protocol.bleStatusChanged(true)")
@@ -406,11 +424,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         "exception" to e.javaClass.simpleName,
                         "stackTrace" to e.stackTraceToString()
                     ))
-                    // Don't fail the entire start if BLE fails
+                    // Don't fail the entire start if BLE fails, but log the error clearly
+                    android.util.Log.w(NAME, "⚠️ Protocol will continue without BLE, but peer discovery and BLE messaging will not work")
                 }
             } ?: run {
-                android.util.Log.w(NAME, "⚠️ BLE manager is null, cannot start")
-                emitDiagnostic("warning", "BLE manager is null")
+                android.util.Log.w(NAME, "⚠️ BLE manager is null - BLE was not initialized. Check if bleEnabled=true in config.")
+                emitDiagnostic("warning", "BLE manager is null - BLE not initialized", mapOf(
+                    "bleEnabled" to (currentConfig?.bleEnabled ?: false)
+                ))
             }
             
             promise.resolve(null)

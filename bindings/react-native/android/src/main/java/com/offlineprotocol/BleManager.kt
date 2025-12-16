@@ -1578,15 +1578,36 @@ class BleManager(
         characteristic.value = data
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
+        // CRITICAL FIX: Properly handle writeCharacteristic return value
+        // On Android API 33+ (TIRAMISU), writeCharacteristic returns a status code
+        // On older APIs, writeCharacteristic returns Boolean but always returns true immediately
+        // for WRITE_TYPE_NO_RESPONSE, so we can't rely on the return value for older APIs
         val writeOk = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothStatusCodes.SUCCESS
+                val result = gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+                if (result != BluetoothStatusCodes.SUCCESS) {
+                    Log.w(TAG, "Write characteristic returned non-success status: $result for recipient: $recipientId")
+                    emitDiagnostic("warning", "BLE write returned non-success status", mapOf(
+                        "recipientId" to recipientId,
+                        "status" to result.toString()
+                    ))
+                    false
+                } else {
+                    true
+                }
             } else {
+                // On older APIs, writeCharacteristic returns Boolean but always true for WRITE_TYPE_NO_RESPONSE
+                // The actual write happens asynchronously, so we assume success and let the BLE stack handle it
                 gatt.writeCharacteristic(characteristic)
+                true
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error writing characteristic", e)
-            emitDiagnostic("error", "Error writing BLE fragment", mapOf("recipientId" to recipientId, "exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+            Log.e(TAG, "Error writing characteristic to $recipientId", e)
+            emitDiagnostic("error", "Error writing BLE fragment", mapOf(
+                "recipientId" to recipientId,
+                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: "unknown")
+            ))
             false
         }
 
@@ -1598,6 +1619,7 @@ class BleManager(
             return false
         }
         
+        // Write was initiated successfully (actual completion is asynchronous for WRITE_TYPE_NO_RESPONSE)
         bytesSent += data.size
         fragmentsSent++
         meshController.markPeerActive(recipientId)

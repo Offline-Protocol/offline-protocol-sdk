@@ -158,7 +158,15 @@ impl TransportManager {
         // Select transport
         let transport_type = self
             .select_transport(message)
-            .ok_or_else(|| Error::Other("No available transport".to_string()))?;
+            .ok_or_else(|| {
+                // If no transport was selected, provide a helpful error message
+                let available = self.get_available_transports();
+                if available.is_empty() {
+                    Error::Other("No available transport. Ensure at least one transport (BLE, WiFi Direct, or Internet) is enabled and available.".to_string())
+                } else {
+                    Error::Other(format!("No suitable transport selected. Available transports: {:?}", available.keys().collect::<Vec<_>>()))
+                }
+            })?;
 
         // Update current transport
         self.current_transport = Some(transport_type);
