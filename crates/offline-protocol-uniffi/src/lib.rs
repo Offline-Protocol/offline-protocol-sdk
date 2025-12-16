@@ -881,15 +881,18 @@ impl OfflineProtocol {
         let forced = *self.forced_transport.read().unwrap();
 
         // CRITICAL FIX: Ensure BLE transport is available before attempting to send
+        // This is especially important when BLE is the only transport enabled (Internet/WiFi disabled)
+        // BLE should work independently and be available for message sending
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::BLE)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available
-                {
-                    // Force status to Available if BLE is supposed to be enabled
+                let current_status = ble_transport.status();
+                if current_status != offline_protocol_transport::TransportStatus::Available {
+                    // Force status to Available if BLE transport exists
+                    // This ensures BLE is included in get_available_transports() for DORS selection
                     ble_transport
                         .on_status_changed(offline_protocol_transport::TransportStatus::Available);
                 }
@@ -897,6 +900,7 @@ impl OfflineProtocol {
         }
 
         // If a transport is forced, use it directly; otherwise use DORS selection
+        // DORS will select BLE if it's the only available transport
         let message_id = if let Some(forced_type) = forced {
             let core_transport = match forced_type {
                 TransportType::Internet => CoreTransportType::Internet,

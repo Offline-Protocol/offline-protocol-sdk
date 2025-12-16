@@ -1273,4 +1273,54 @@ mod tests {
         assert_eq!(protocol.config().app_id, config.app_id);
         assert_eq!(protocol.config().user_id, config.user_id);
     }
+
+    #[test]
+    fn test_ble_only_transport_works() {
+        // Test that BLE works independently when it's the only transport enabled
+        // This verifies the fix for BLE not working when Internet/WiFi Direct are disabled
+        let mut config = create_test_config();
+        config.transport.ble_enabled = true;
+        config.transport.wifi_direct_enabled = false;
+        config.transport.internet_enabled = false;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        // Add only BLE transport (simulating BLE-only configuration)
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        // Start protocol - BLE should be available
+        protocol.start().unwrap();
+        assert_eq!(protocol.state(), ProtocolState::Running);
+
+        // Verify BLE transport is available
+        let available_transports = protocol.transport_manager().get_available_transports();
+        assert!(
+            available_transports.contains_key(&TransportType::BLE),
+            "BLE transport should be available when it's the only transport enabled"
+        );
+        assert_eq!(
+            available_transports.len(),
+            1,
+            "Only BLE transport should be available"
+        );
+
+        // Test that we can send a message via BLE
+        let result = protocol.send_message("bob", "Hello from BLE-only!", None);
+        assert!(
+            result.is_ok(),
+            "Should be able to send message when only BLE is enabled"
+        );
+
+        // Verify the message was sent via BLE
+        let current_transport = protocol.transport_manager().current_transport();
+        assert_eq!(
+            current_transport,
+            Some(TransportType::BLE),
+            "Current transport should be BLE"
+        );
+    }
 }
