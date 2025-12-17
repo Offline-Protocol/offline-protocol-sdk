@@ -377,7 +377,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             protocol?.start()
             emitDiagnostic("info", "Protocol core started")
             
-            // CRITICAL FIX: Start BLE manager if available - BLE should work independently
+            //  Start BLE manager if available - BLE should work independently
             // BLE peer discovery and messaging must work even when Internet/WiFi are disabled
             bleManager?.let { manager ->
                 try {
@@ -393,7 +393,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         "advertising" to true
                     ))
                     
-                    // CRITICAL FIX: Ensure bleStatusChanged(true) is called immediately and as backup
+                    //  Ensure bleStatusChanged(true) is called immediately and as backup
                     // This ensures BLE transport is marked as Available for message sending
                     try {
                         protocol?.bleStatusChanged(true)

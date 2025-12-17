@@ -821,7 +821,7 @@ public class BleManager: NSObject, TransportManager {
             }
             guard let centralManager = self.centralManager else { return }
             
-            // CRITICAL FIX: Aggressively try to find and connect to the central to read device ID
+            //  Aggressively try to find and connect to the central to read device ID
             // This is essential for Android → iOS message delivery when iOS doesn't know Android's device ID yet
             var candidates = centralManager.retrievePeripherals(withIdentifiers: [centralId])
             if candidates.isEmpty {
@@ -1055,13 +1055,9 @@ public class BleManager: NSObject, TransportManager {
     private func pollAndSendFragments() {
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
-            
-            // CRITICAL FIX: Always try to flush pending fragments first, but don't block new fragment polling
-            // The old logic would return early if there were unsent fragments, preventing new fragments
-            // from being polled. This caused messages to get stuck when connections weren't ready.
             let hasUnsentFragments = self.flushPendingOutboundFragments()
             
-            // CRITICAL: Still poll for new fragments even if there are unsent pending ones
+            // Poll for new fragments even if there are unsent pending ones
             // This prevents deadlock where old fragments block new ones
             // Poll for next fragment from protocol
             if let fragment = self.protocolInstance.bleGetNextFragment() {
@@ -1110,7 +1106,7 @@ public class BleManager: NSObject, TransportManager {
         for recipientId in recipients {
             guard var queue = pendingOutboundFragments[recipientId] else { continue }
             
-            // CRITICAL FIX: Remove expired fragments to prevent indefinite queuing
+            //  Remove expired fragments to prevent indefinite queuing
             queue = queue.filter { now.timeIntervalSince($0.timestamp) < PENDING_OUTBOUND_FRAGMENT_TIMEOUT }
             
             if queue.isEmpty {
@@ -1237,7 +1233,7 @@ public class BleManager: NSObject, TransportManager {
     
     private func sendFragmentData(recipientId: String, data: Data) -> Bool {
         guard let peripheral = findPeripheral(for: recipientId) else {
-            // CRITICAL FIX: Proactively try to connect if we don't have a connection
+            //  Proactively try to connect if we don't have a connection
             // This helps resolve cases where fragments are queued but connection isn't established
             if logThrottler.shouldLog(key: "missing_peripheral_\(recipientId)", interval: 5.0) {
                 print("[BleManager] ⚠️ No connected peripheral for recipient: \(recipientId) - attempting to find and connect")
@@ -1258,7 +1254,7 @@ public class BleManager: NSObject, TransportManager {
             return false
         }
         
-        // CRITICAL FIX: Validate connection state before attempting to send
+        //  Validate connection state before attempting to send
         guard peripheral.state == .connected else {
             if logThrottler.shouldLog(key: "peripheral_not_connected_\(recipientId)", interval: 5.0) {
                 print("[BleManager] ⚠️ Peripheral for \(recipientId) is not connected (state: \(peripheral.state.rawValue))")
@@ -1371,7 +1367,7 @@ public class BleManager: NSObject, TransportManager {
                 try self.protocolInstance.bleFragmentReceived(senderId: senderId, fragment: bytes)
                 print("[BleManager] ✅ Fragment processed successfully for sender: \(senderId)")
                 
-                // CRITICAL FIX: Check for ALL completed messages (not just one)
+                //  Check for ALL completed messages (not just one)
                 // The protocol may have queued multiple messages, so we need to drain the queue
                 var messageCount = 0
                 while let completedMessage = self.protocolInstance.receiveMessage() {
@@ -1435,7 +1431,7 @@ public class BleManager: NSObject, TransportManager {
                 self.refreshAdvertising(reason: "membership_change")
             }
             
-            // CRITICAL FIX: Process all queued fragments and check for completed messages
+            //  Process all queued fragments and check for completed messages
             // This is essential for Android → iOS messages that were queued
             for (data, _) in fragments {
                 let bytes = [UInt8](data)
@@ -2302,7 +2298,7 @@ extension BleManager: CBPeripheralDelegate {
                     self.refreshAdvertising(reason: "membership_change")
                 }
 
-                // CRITICAL FIX: Process any pending fragments for this device immediately
+                //  Process any pending fragments for this device immediately
                 // This is essential for Android → iOS messages that were queued while waiting for device ID
                 // When Android writes to iOS, iOS receives the write with Android's central UUID
                 // When iOS connects to Android to read device ID, it uses Android's peripheral UUID
@@ -2310,7 +2306,7 @@ extension BleManager: CBPeripheralDelegate {
                 print("[BleManager] 🔄 Processing pending fragments for device ID: \(deviceId), peripheral: \(peripheral.identifier)")
                 processPendingFragments(for: peripheral.identifier, deviceId: deviceId)
                 
-                // CRITICAL FIX: Also check all pending fragments and process any that match this device ID
+                //  Also check all pending fragments and process any that match this device ID
                 // This handles the case where Android wrote to iOS before iOS connected to Android
                 // The central UUID (from write) might be the same as peripheral UUID, but we check all
                 let pendingCentralIds = Array(self.pendingFragments.keys)
@@ -2518,7 +2514,7 @@ extension BleManager: CBPeripheralManagerDelegate {
                 print("[BleManager] 📥 MESSAGE CHARACTERISTIC WRITE from \(request.central.identifier), processing...")
                 let senderId = connections.centralDeviceId(for: request.central.identifier) ?? connections.peripheralDeviceId(for: request.central.identifier)
                 
-                // CRITICAL FIX: Ensure device ID resolution happens immediately and fragments are processed
+                //  Ensure device ID resolution happens immediately and fragments are processed
                 // When Android sends to iOS, iOS might not have Android's device ID yet
                 // We must queue the fragment AND aggressively try to resolve the device ID
                 if senderId == nil {
@@ -2547,7 +2543,7 @@ extension BleManager: CBPeripheralManagerDelegate {
         }
     }
     
-    // CRITICAL FIX: When a central subscribes to notifications, try to read its device ID
+    //  When a central subscribes to notifications, try to read its device ID
     // This helps resolve device IDs for Android devices that wrote to iOS before iOS connected to them
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         // If we don't have the device ID for this central yet, try to read it
