@@ -667,7 +667,7 @@ class BleManager(
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .build()
             
-            // CRITICAL FIX: Scan without service UUID filter for iOS ↔ Android interoperability
+            // Scan without service UUID filter for iOS ↔ Android interoperability
             // iOS's CoreBluetooth has known issues recognizing 128-bit service UUIDs from Android
             // advertisements, and vice versa. Scanning without filter and filtering in software
             // ensures we discover all mesh devices regardless of platform quirks.
@@ -1462,7 +1462,6 @@ class BleManager(
     
     private fun pollAndSendFragments() {
         try {
-            // CRITICAL FIX: Always try to flush pending fragments first, but don't block new fragment polling
             // The old logic would return early if there were unsent fragments, preventing new fragments
             // from being polled. This caused messages to get stuck when connections weren't ready.
             val hasUnsentFragments = flushPendingOutboundFragments()
@@ -1530,7 +1529,7 @@ class BleManager(
         for (recipientId in recipients) {
             val queue = pendingOutboundFragments[recipientId] ?: continue
             
-            // CRITICAL FIX: Remove expired fragments to prevent indefinite queuing
+            // Remove expired fragments to prevent indefinite queuing
             val validFragments = queue.filter { now - it.timestamp < PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS }
             
             if (validFragments.isEmpty()) {
@@ -1595,7 +1594,7 @@ class BleManager(
         val gatt = address?.let { connections.getGatt(it) }
         
         if (gatt == null) {
-            // CRITICAL FIX: Proactively try to connect if we don't have a connection
+            //  Proactively try to connect if we don't have a connection
             // This helps resolve cases where fragments are queued but connection isn't established
             if (logThrottler.shouldLog("missing_gatt_$recipientId", intervalMs = 5000)) {
                 Log.w(TAG, "⚠️ No connected device for recipient: $recipientId - attempting to find and connect")
@@ -1621,7 +1620,7 @@ class BleManager(
             return false
         }
         
-        // CRITICAL FIX: Validate connection state before attempting to send
+        //  Validate connection state before attempting to send
         if (gatt.device.bondState == BluetoothDevice.BOND_NONE) {
             // Device is not bonded - this might be okay for BLE, but log it
             if (logThrottler.shouldLog("unbonded_device_$recipientId", intervalMs = 10000)) {
@@ -1643,9 +1642,7 @@ class BleManager(
         characteristic.value = data
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
-        // CRITICAL FIX: Properly handle writeCharacteristic return value
         // On Android API 33+ (TIRAMISU), writeCharacteristic returns a status code
-        // On older APIs, writeCharacteristic returns Boolean but always returns true immediately
         // for WRITE_TYPE_NO_RESPONSE, so we can't rely on the return value for older APIs
         val writeOk = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

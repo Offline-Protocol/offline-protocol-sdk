@@ -48,9 +48,7 @@ interface OfflineProtocolWithMls extends OfflineProtocol {
   mlsImportKeyPackage(userId: string, keyPackageData: number[]): Promise<void>;
   mlsHasSession(otherUserId: string): Promise<boolean>;
   mlsCreateSession(otherUserId: string): Promise<MlsWelcome>;
-  mlsJoinSession(
-    welcome: MlsWelcome,
-  ): Promise<{
+  mlsJoinSession(welcome: MlsWelcome): Promise<{
     otherUserId: string;
     groupId: string;
     epoch: number;
@@ -718,8 +716,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         string,
         { name: string; timestamp: number }
       >();
-      
-      // CRITICAL FIX: Get current timestamp early to use for presence throttling
+
+      //  Get current timestamp early to use for presence throttling
       const now = Date.now();
 
       for (const event of chronologicalEvents) {
@@ -728,7 +726,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             const peerId = (event as any).peer_id;
             if (peerId && peerId !== currentUserId) {
               discoveredPeers.add(peerId);
-              // CRITICAL FIX: Track newly discovered peers to send presence after event processing
+              //  Track newly discovered peers to send presence after event processing
               newlyDiscoveredPeers.add(peerId);
             }
             break;
@@ -975,15 +973,15 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         setPeerProfiles(updatedProfiles);
       }
 
-       const resolvePeerName = (peerId: string) => {
-         const profile = updatedProfiles[peerId];
-         if (profile && profile.name.trim().length > 0) {
-           return profile.name.trim();
-         }
-         return peerId.length > 4
-           ? `User ${peerId.slice(-4)}`
-           : `User ${peerId}`;
-       };
+      const resolvePeerName = (peerId: string) => {
+        const profile = updatedProfiles[peerId];
+        if (profile && profile.name.trim().length > 0) {
+          return profile.name.trim();
+        }
+        return peerId.length > 4
+          ? `User ${peerId.slice(-4)}`
+          : `User ${peerId}`;
+      };
 
       setContacts(prevContacts => {
         const contactMap = new Map<string, Contact>(
@@ -1173,7 +1171,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
       pruneProcessedMessages();
 
-      // CRITICAL FIX: Send presence to newly discovered peers after event processing
+      //  Send presence to newly discovered peers after event processing
       // This ensures usernames are synced immediately when peers are discovered
       // BUT: Only send if we haven't sent recently to prevent infinite loops
       // Use a ref to track in-flight presence sends to avoid duplicate sends
@@ -1232,7 +1230,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     }
     const now = Date.now();
 
-    // CRITICAL FIX: Send presence to all discovered peers, not just contacts
+    //  Send presence to all discovered peers, not just contacts
     // This ensures newly discovered peers get presence even before they're in contacts
     const allPeers = new Set<string>();
 

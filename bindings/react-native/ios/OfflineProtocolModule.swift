@@ -416,7 +416,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             try protocolInstance?.start()
             emitDiagnostic(level: "info", message: "Protocol core started")
             
-            // CRITICAL FIX: Start BLE manager if available - BLE should work independently
+            //  Start BLE manager if available - BLE should work independently
             // BLE peer discovery and messaging must work even when Internet/WiFi are disabled
             if let manager = bleManager {
                 do {
@@ -432,7 +432,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                         "advertising": true
                     ])
                     
-                    // CRITICAL FIX: Ensure bleStatusChanged(true) is called immediately and as backup
+                    //  Ensure bleStatusChanged(true) is called immediately and as backup
                     // This ensures BLE transport is marked as Available for message sending
                     do {
                         try protocolInstance?.bleStatusChanged(isAvailable: true)
