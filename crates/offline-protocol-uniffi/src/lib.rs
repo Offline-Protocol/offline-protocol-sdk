@@ -580,6 +580,27 @@ pub struct TransportConfig {
     pub internet_enabled: bool,
 }
 
+/// Encryption configuration for automatic MLS handling
+#[derive(Debug, Clone)]
+pub struct EncryptionConfig {
+    /// Whether automatic encryption is enabled (default: true)
+    pub enabled: bool,
+    /// Auto-exchange key packages on peer discovery (default: true)
+    pub auto_key_exchange: bool,
+    /// Store pending messages when no session exists (default: true)
+    pub store_pending: bool,
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_key_exchange: true,
+            store_pending: true,
+        }
+    }
+}
+
 /// Protocol configuration (simplified)
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
@@ -590,6 +611,9 @@ pub struct ProtocolConfig {
     pub internet_enabled: bool,
     pub prefer_online: bool,
     pub initial_ttl: u8,
+    pub encryption_enabled: bool,
+    pub auto_key_exchange: bool,
+    pub store_pending: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -613,6 +637,9 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.internet_enabled = config.internet_enabled;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
+        core_config.encryption.enabled = config.encryption_enabled;
+        core_config.encryption.auto_key_exchange = config.auto_key_exchange;
+        core_config.encryption.store_pending = config.store_pending;
         core_config
     }
 }
@@ -1014,6 +1041,12 @@ impl OfflineProtocol {
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
 
+        // Notify the core protocol of neighbor discovery for auto key exchange
+        {
+            let mut protocol = self.inner.lock().unwrap();
+            protocol.on_neighbor_discovered(&peer_id);
+        }
+
         // Emit NeighborDiscovered event
         let event = CoreEvent::NeighborDiscovered {
             peer_id: peer_id.clone(),
@@ -1031,6 +1064,12 @@ impl OfflineProtocol {
         ble_state.peers.remove(&peer_id);
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
+
+        // Notify the core protocol of neighbor loss
+        {
+            let mut protocol = self.inner.lock().unwrap();
+            protocol.on_neighbor_lost(&peer_id);
+        }
 
         // Emit NeighborLost event
         let event = CoreEvent::NeighborLost {
@@ -2078,6 +2117,15 @@ impl OfflineProtocol {
             provider: Arc::from(storage),
         });
 
+        // Initialize MLS in the core protocol for auto-encryption
+        {
+            let mut protocol = self.inner.lock().unwrap();
+            protocol.initialize_mls(wrapper.clone()).map_err(|e|
+                ProtocolError::MlsError(e.to_string())
+            )?;
+        }
+
+        // Also store a reference for direct MLS API access
         let user_id = {
             let protocol = self.inner.lock().unwrap();
             protocol.config().user_id.clone()
@@ -2093,7 +2141,9 @@ impl OfflineProtocol {
 
     /// Check if MLS is initialized
     pub fn is_mls_initialized(&self) -> bool {
-        self.mls_manager.read().unwrap().is_some()
+        // Check both the wrapper's MLS manager and the core protocol's
+        let protocol = self.inner.lock().unwrap();
+        protocol.is_mls_initialized() || self.mls_manager.read().unwrap().is_some()
     }
 
     /// Helper to get MLS manager or error
@@ -2413,9 +2463,8 @@ impl OfflineProtocol {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_protocol_creation() {
-        let config = ProtocolConfig {
+    fn create_test_config() -> ProtocolConfig {
+        ProtocolConfig {
             app_id: "test-app".to_string(),
             user_id: "user123".to_string(),
             ble_enabled: true,
@@ -2423,7 +2472,30 @@ mod tests {
             internet_enabled: true,
             prefer_online: false,
             initial_ttl: 8,
-        };
+            encryption_enabled: true,
+            auto_key_exchange: true,
+            store_pending: true,
+        }
+    }
+
+    fn create_ble_only_config() -> ProtocolConfig {
+        ProtocolConfig {
+            app_id: "test-app".to_string(),
+            user_id: "user123".to_string(),
+            ble_enabled: true,
+            wifi_direct_enabled: false,
+            internet_enabled: false,
+            prefer_online: false,
+            initial_ttl: 8,
+            encryption_enabled: true,
+            auto_key_exchange: true,
+            store_pending: true,
+        }
+    }
+
+    #[test]
+    fn test_protocol_creation() {
+        let config = create_test_config();
 
         let protocol = OfflineProtocol::new(config);
         assert!(protocol.is_ok());
@@ -2431,15 +2503,7 @@ mod tests {
 
     #[test]
     fn test_protocol_lifecycle() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: true,
-            internet_enabled: true,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_test_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
         assert_eq!(protocol.get_state(), ProtocolState::Stopped);
@@ -2459,15 +2523,7 @@ mod tests {
 
     #[test]
     fn test_ble_peer_management() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: true,
-            internet_enabled: true,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_test_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
 
@@ -2485,15 +2541,7 @@ mod tests {
 
     #[test]
     fn test_file_transfer_tracking() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: true,
-            internet_enabled: true,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_test_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
 
@@ -2533,15 +2581,7 @@ mod tests {
 
     #[test]
     fn test_gradient_routing_learn_and_query() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: false,
-            internet_enabled: false,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_ble_only_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
 
@@ -2570,15 +2610,7 @@ mod tests {
 
     #[test]
     fn test_gradient_routing_multiple_routes() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: false,
-            internet_enabled: false,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_ble_only_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
 
@@ -2599,15 +2631,7 @@ mod tests {
 
     #[test]
     fn test_gradient_routing_remove_neighbor() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: false,
-            internet_enabled: false,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_ble_only_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
 
@@ -2636,15 +2660,7 @@ mod tests {
 
     #[test]
     fn test_gradient_routing_stats() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: false,
-            internet_enabled: false,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_ble_only_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
 
@@ -2665,15 +2681,7 @@ mod tests {
 
     #[test]
     fn test_gradient_routing_config_update() {
-        let config = ProtocolConfig {
-            app_id: "test-app".to_string(),
-            user_id: "user123".to_string(),
-            ble_enabled: true,
-            wifi_direct_enabled: false,
-            internet_enabled: false,
-            prefer_online: false,
-            initial_ttl: 8,
-        };
+        let config = create_ble_only_config();
 
         let protocol = OfflineProtocol::new(config).unwrap();
 

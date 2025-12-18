@@ -270,6 +270,13 @@ dictionary TransportConfig {
     boolean internet_enabled;
 };
 
+// Encryption configuration for automatic MLS handling
+dictionary EncryptionConfig {
+    boolean enabled;
+    boolean auto_key_exchange;
+    boolean store_pending;
+};
+
 // Extended configuration for protocol creation
 dictionary ProtocolConfig {
     string app_id;
@@ -279,6 +286,9 @@ dictionary ProtocolConfig {
     boolean internet_enabled;
     boolean prefer_online;
     u8 initial_ttl;
+    boolean encryption_enabled;
+    boolean auto_key_exchange;
+    boolean store_pending;
 };
 
 // Extended protocol configuration with all options
