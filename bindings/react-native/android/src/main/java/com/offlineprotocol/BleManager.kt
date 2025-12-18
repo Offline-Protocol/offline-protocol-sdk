@@ -237,7 +237,10 @@ class BleManager(
         }
     }
     
-    private val pendingOutboundFragments = mutableMapOf<String, MutableList<ByteArray>>()
+    // Track outbound fragments with timestamps for timeout handling
+    private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
+    private val pendingOutboundFragments = mutableMapOf<String, MutableList<OutboundFragment>>()
+    private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
     private var pendingAdvertiseRestart: Runnable? = null
     private var lastAdvertiseRestartAt: Long = 0L
@@ -664,7 +667,7 @@ class BleManager(
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .build()
             
-            // CRITICAL FIX: Scan without service UUID filter for iOS ↔ Android interoperability
+            // Scan without service UUID filter for iOS ↔ Android interoperability
             // iOS's CoreBluetooth has known issues recognizing 128-bit service UUIDs from Android
             // advertisements, and vice versa. Scanning without filter and filtering in software
             // ensures we discover all mesh devices regardless of platform quirks.
@@ -1032,7 +1035,7 @@ class BleManager(
         // Adaptive scanning: track discoveries for density estimation
         recordDiscoveryForDensity(now)
         
-        // CRITICAL: Software-based filtering for iOS ↔ Android interoperability
+        // Software-based filtering for iOS ↔ Android interoperability
         // Since we scan without a service UUID filter, we filter here instead.
         val scanRecord = result.scanRecord
         val isConnectable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1214,7 +1217,7 @@ class BleManager(
         
         // 6. For unknown connectable devices, allow with rate limiting
         //    These will be verified via GATT service discovery after connection
-        //    This is CRITICAL for iOS ↔ Android cross-platform discovery since
+        //    This is important for iOS ↔ Android cross-platform discovery since
         //    each platform may not recognize the other's service UUID format in advertisements
         if (isConnectable) {
             // Rate limit unknown device connection attempts
@@ -1459,10 +1462,12 @@ class BleManager(
     
     private fun pollAndSendFragments() {
         try {
-            if (flushPendingOutboundFragments()) {
-                return
-            }
-
+            // The old logic would return early if there were unsent fragments, preventing new fragments
+            // from being polled. This caused messages to get stuck when connections weren't ready.
+            val hasUnsentFragments = flushPendingOutboundFragments()
+            
+            // Still poll for new fragments even if there are unsent pending ones
+            // This prevents deadlock where old fragments block new ones
             // Poll for next fragment from protocol
             val fragment = try {
                 protocol.bleGetNextFragment()
@@ -1477,8 +1482,15 @@ class BleManager(
             
             if (fragment == null) {
                 // No fragment available - this is normal most of the time
-                // Only log occasionally to avoid spam
-                if (logThrottler.shouldLog("no_fragments", intervalMs = 10000)) {
+                // But log if we have unsent fragments to help diagnose connection issues
+                if (hasUnsentFragments && logThrottler.shouldLog("unsent_fragments_no_new", intervalMs = 5000)) {
+                    val recipientCount = pendingOutboundFragments.size
+                    Log.w(TAG, "⚠️ Have $recipientCount recipients with unsent fragments, but no new fragments to poll")
+                    emitDiagnostic("warning", "Unsent fragments blocking", mapOf(
+                        "recipientCount" to recipientCount,
+                        "recipients" to pendingOutboundFragments.keys.toList()
+                    ))
+                } else if (logThrottler.shouldLog("no_fragments", intervalMs = 10000)) {
                     Log.d(TAG, "No fragments available from protocol")
                 }
                 return
@@ -1511,22 +1523,47 @@ class BleManager(
 
     private fun flushPendingOutboundFragments(): Boolean {
         var hasUnsentFragments = false
+        val now = System.currentTimeMillis()
 
         val recipients = pendingOutboundFragments.keys.toList()
         for (recipientId in recipients) {
             val queue = pendingOutboundFragments[recipientId] ?: continue
-            val iterator = queue.listIterator()
+            
+            // Remove expired fragments to prevent indefinite queuing
+            val validFragments = queue.filter { now - it.timestamp < PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS }
+            
+            if (validFragments.isEmpty()) {
+                pendingOutboundFragments.remove(recipientId)
+                if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
+                    Log.w(TAG, "⚠️ Removed expired outbound fragments for $recipientId")
+                    emitDiagnostic("warning", "Outbound fragments expired", mapOf("recipientId" to recipientId))
+                }
+                continue
+            }
+            
+            // Update queue with only valid fragments (remove expired ones)
+            val mutableQueue = validFragments.toMutableList()
+            if (mutableQueue.size < queue.size) {
+                pendingOutboundFragments[recipientId] = mutableQueue
+            }
+            
+            // Try to send each fragment
+            val iterator = mutableQueue.iterator()
             while (iterator.hasNext()) {
-                val data = iterator.next()
-                if (sendFragmentData(recipientId, data)) {
+                val fragment = iterator.next()
+                if (sendFragmentData(recipientId, fragment.data)) {
                     iterator.remove()
                 } else {
                     hasUnsentFragments = true
                     break
                 }
             }
-            if (queue.isEmpty()) {
+            
+            // Update the queue with remaining fragments
+            if (mutableQueue.isEmpty()) {
                 pendingOutboundFragments.remove(recipientId)
+            } else {
+                pendingOutboundFragments[recipientId] = mutableQueue
             }
         }
 
@@ -1535,7 +1572,7 @@ class BleManager(
 
     private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
         val queue = pendingOutboundFragments.getOrPut(recipientId) { mutableListOf() }
-        queue.add(data)
+        queue.add(OutboundFragment(data, System.currentTimeMillis()))
     }
 
     private fun resolveTargetAddress(recipientId: String): String? {
@@ -1557,11 +1594,38 @@ class BleManager(
         val gatt = address?.let { connections.getGatt(it) }
         
         if (gatt == null) {
-            if (logThrottler.shouldLog("missing_gatt_$recipientId")) {
-                Log.w(TAG, "No connected device for recipient: $recipientId")
-                emitDiagnostic("warning", "No connected device for BLE fragment", mapOf("recipientId" to recipientId))
+            //  Proactively try to connect if we don't have a connection
+            // This helps resolve cases where fragments are queued but connection isn't established
+            if (logThrottler.shouldLog("missing_gatt_$recipientId", intervalMs = 5000)) {
+                Log.w(TAG, "⚠️ No connected device for recipient: $recipientId - attempting to find and connect")
+                emitDiagnostic("warning", "No connected device for BLE fragment - attempting connection", mapOf("recipientId" to recipientId))
+            }
+            
+            // Try to find the device and connect
+            if (address != null) {
+                // We know the address but don't have a connection - try to reconnect
+                bluetoothAdapter?.let { adapter ->
+                    try {
+                        val device = adapter.getRemoteDevice(address)
+                        connectToDevice(device)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error attempting reconnection for $recipientId", e)
+                    }
+                }
+            } else {
+                // We don't even know the address - this is a more serious issue
+                // The device ID might not be resolved yet or route might not exist
+                Log.w(TAG, "⚠️ Cannot resolve address for recipient: $recipientId")
             }
             return false
+        }
+        
+        //  Validate connection state before attempting to send
+        if (gatt.device.bondState == BluetoothDevice.BOND_NONE) {
+            // Device is not bonded - this might be okay for BLE, but log it
+            if (logThrottler.shouldLog("unbonded_device_$recipientId", intervalMs = 10000)) {
+                Log.d(TAG, "Device $recipientId is not bonded (this may be normal for BLE)")
+            }
         }
         
         val service = gatt.getService(SERVICE_UUID)
@@ -1578,15 +1642,34 @@ class BleManager(
         characteristic.value = data
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
+        // On Android API 33+ (TIRAMISU), writeCharacteristic returns a status code
+        // for WRITE_TYPE_NO_RESPONSE, so we can't rely on the return value for older APIs
         val writeOk = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) == BluetoothStatusCodes.SUCCESS
+                val result = gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+                if (result != BluetoothStatusCodes.SUCCESS) {
+                    Log.w(TAG, "Write characteristic returned non-success status: $result for recipient: $recipientId")
+                    emitDiagnostic("warning", "BLE write returned non-success status", mapOf(
+                        "recipientId" to recipientId,
+                        "status" to result.toString()
+                    ))
+                    false
+                } else {
+                    true
+                }
             } else {
+                // On older APIs, writeCharacteristic returns Boolean but always true for WRITE_TYPE_NO_RESPONSE
+                // The actual write happens asynchronously, so we assume success and let the BLE stack handle it
                 gatt.writeCharacteristic(characteristic)
+                true
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error writing characteristic", e)
-            emitDiagnostic("error", "Error writing BLE fragment", mapOf("recipientId" to recipientId, "exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+            Log.e(TAG, "Error writing characteristic to $recipientId", e)
+            emitDiagnostic("error", "Error writing BLE fragment", mapOf(
+                "recipientId" to recipientId,
+                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: "unknown")
+            ))
             false
         }
 
@@ -1598,6 +1681,7 @@ class BleManager(
             return false
         }
         
+        // Write was initiated successfully (actual completion is asynchronous for WRITE_TYPE_NO_RESPONSE)
         bytesSent += data.size
         fragmentsSent++
         meshController.markPeerActive(recipientId)
@@ -1684,7 +1768,7 @@ class BleManager(
                 protocol.bleFragmentReceived(senderId, bytes)
                 Log.i(TAG, "✅ Fragment processed successfully for sender: $senderId")
                 
-                // CRITICAL: Immediately check if this completed a message
+                // Immediately check if this completed a message
                 val completedMessage = protocol.receiveMessage()
                 if (completedMessage != null) {
                     Log.i(TAG, "🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")

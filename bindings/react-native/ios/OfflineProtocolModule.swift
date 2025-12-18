@@ -416,14 +416,33 @@ class OfflineProtocolModule: RCTEventEmitter {
             try protocolInstance?.start()
             emitDiagnostic(level: "info", message: "Protocol core started")
             
-            // Start BLE manager if available
+            //  Start BLE manager if available - BLE should work independently
+            // BLE peer discovery and messaging must work even when Internet/WiFi are disabled
             if let manager = bleManager {
                 do {
+                    print("[OfflineProtocolModule] Starting BLE manager (BLE should work independently of other transports)...")
+                    emitDiagnostic(level: "info", message: "Starting BLE manager", context: [
+                        "internetEnabled": currentConfig?.internetEnabled ?? false,
+                        "wifiDirectEnabled": currentConfig?.wifiDirectEnabled ?? false
+                    ])
                     try manager.start()
-                    print("[OfflineProtocolModule] BLE Manager started")
-                    emitDiagnostic(level: "info", message: "BLE manager started")
+                    print("[OfflineProtocolModule] ✅ BLE Manager started successfully - scanning and advertising should be active")
+                    emitDiagnostic(level: "info", message: "BLE manager started - peer discovery active", context: [
+                        "scanning": true,
+                        "advertising": true
+                    ])
                     
-                    // CRITICAL FIX: Ensure bleStatusChanged(true) is called even if timing is off
+                    //  Ensure bleStatusChanged(true) is called immediately and as backup
+                    // This ensures BLE transport is marked as Available for message sending
+                    do {
+                        try protocolInstance?.bleStatusChanged(isAvailable: true)
+                        print("[OfflineProtocolModule] ✅ Called protocol.bleStatusChanged(true) immediately")
+                        emitDiagnostic(level: "info", message: "BLE status set to available")
+                    } catch {
+                        print("[OfflineProtocolModule] Immediate bleStatusChanged failed: \(error.localizedDescription)")
+                    }
+                    
+                    // Backup call in case timing is off
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                         print("[OfflineProtocolModule] Backup bleStatusChanged(true) call")
                         self?.emitDiagnostic(level: "info", message: "Backup call to protocol.bleStatusChanged(true)")
@@ -431,12 +450,18 @@ class OfflineProtocolModule: RCTEventEmitter {
                         self?.emitDiagnostic(level: "info", message: "Backup bleStatusChanged(true) completed")
                     }
                 } catch {
-                    print("[OfflineProtocolModule] Warning: Failed to start BLE Manager: \(error.localizedDescription)")
+                    print("[OfflineProtocolModule] ❌ FAILED to start BLE Manager: \(error.localizedDescription)")
                     emitDiagnostic(level: "error", message: "Failed to start BLE manager", context: [
                         "error": error.localizedDescription
                     ])
-                    // Don't fail the entire start if BLE fails
+                    // Don't fail the entire start if BLE fails, but log the error clearly
+                    print("[OfflineProtocolModule] ⚠️ Protocol will continue without BLE, but peer discovery and BLE messaging will not work")
                 }
+            } else {
+                print("[OfflineProtocolModule] ⚠️ BLE manager is null - BLE was not initialized. Check if bleEnabled=true in config.")
+                emitDiagnostic(level: "warning", message: "BLE manager is null - BLE not initialized", context: [
+                    "bleEnabled": currentConfig?.bleEnabled ?? false
+                ])
             }
             
             // Start Internet manager if configured with a server URL

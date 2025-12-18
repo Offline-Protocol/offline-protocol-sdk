@@ -11,7 +11,11 @@ import {
   MAX_EVENT_HISTORY,
   PROTOCOL_START_DELAY_MS,
 } from '@offline-protocol/mesh-sdk';
-import { requestBluetoothPermissions, showPermissionRationale, getPermissionDeniedMessage } from '../utils/permissions';
+import {
+  requestBluetoothPermissions,
+  showPermissionRationale,
+  getPermissionDeniedMessage,
+} from '../utils/permissions';
 import { ensureBluetoothEnabled } from '../utils/bluetooth';
 import { deriveInsights, type DerivedInsights } from '../utils/deriveInsights';
 import { useTransportManagement } from './useTransportManagement';
@@ -27,16 +31,26 @@ interface UseOfflineProtocolReturn {
   permissionsGranted: boolean;
   start: () => Promise<void>;
   stop: () => Promise<void>;
-  sendMessage: (recipient: string, content: string, priority: MessagePriority) => Promise<string | null>;
+  sendMessage: (
+    recipient: string,
+    content: string,
+    priority: MessagePriority,
+  ) => Promise<string | null>;
   clearEvents: () => void;
   requestPermissions: () => Promise<boolean>;
   // Re-export from useTransportManagement
-  activeTransports: ReturnType<typeof useTransportManagement>['activeTransports'];
+  activeTransports: ReturnType<
+    typeof useTransportManagement
+  >['activeTransports'];
   forcedTransport: ReturnType<typeof useTransportManagement>['forcedTransport'];
   enableTransport: ReturnType<typeof useTransportManagement>['enableTransport'];
-  disableTransport: ReturnType<typeof useTransportManagement>['disableTransport'];
+  disableTransport: ReturnType<
+    typeof useTransportManagement
+  >['disableTransport'];
   forceTransport: ReturnType<typeof useTransportManagement>['forceTransport'];
-  releaseTransportLock: ReturnType<typeof useTransportManagement>['releaseTransportLock'];
+  releaseTransportLock: ReturnType<
+    typeof useTransportManagement
+  >['releaseTransportLock'];
   // Re-export from useRuntimeState
   batteryLevel: ReturnType<typeof useRuntimeState>['batteryLevel'];
   relayPriority: ReturnType<typeof useRuntimeState>['relayPriority'];
@@ -44,20 +58,28 @@ interface UseOfflineProtocolReturn {
   setBatteryLevel: ReturnType<typeof useRuntimeState>['setBatteryLevel'];
   setRelayPriority: ReturnType<typeof useRuntimeState>['setRelayPriority'];
   updateDorsConfig: ReturnType<typeof useRuntimeState>['updateDorsConfig'];
-  getTransportMetrics: ReturnType<typeof useRuntimeState>['getTransportMetrics'];
-  refreshRuntimeState: ReturnType<typeof useRuntimeState>['refreshRuntimeState'];
+  getTransportMetrics: ReturnType<
+    typeof useRuntimeState
+  >['getTransportMetrics'];
+  refreshRuntimeState: ReturnType<
+    typeof useRuntimeState
+  >['refreshRuntimeState'];
   // Re-export from useFileTransfer
   fileTransfers: ReturnType<typeof useFileTransfer>['fileTransfers'];
   sendFile: ReturnType<typeof useFileTransfer>['sendFile'];
   cancelFileTransfer: ReturnType<typeof useFileTransfer>['cancelFileTransfer'];
 }
 
-export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolReturn {
+export function useOfflineProtocol(
+  config: ProtocolConfig,
+): UseOfflineProtocolReturn {
   const [protocol, setProtocol] = useState<OfflineProtocol | null>(null);
   const [isStarted, setIsStarted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<ProtocolEvent[]>([]);
-  const [insights, setInsights] = useState<DerivedInsights>(() => deriveInsights([]));
+  const [insights, setInsights] = useState<DerivedInsights>(() =>
+    deriveInsights([]),
+  );
   const [permissionsGranted, setPermissionsGranted] = useState(false);
   const protocolRef = useRef<OfflineProtocol | null>(null);
 
@@ -81,13 +103,16 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       return;
     }
 
-    console.log('Initializing protocol with config:', JSON.stringify(config, null, 2));
-    
+    console.log(
+      'Initializing protocol with config:',
+      JSON.stringify(config, null, 2),
+    );
+
     try {
       // First check if the native module is available
       console.log('Checking if OfflineProtocol class is available...');
       console.log('OfflineProtocol constructor:', typeof OfflineProtocol);
-      
+
       console.log('Creating OfflineProtocol instance...');
       const instance = new OfflineProtocol(config);
       console.log('Protocol instance created successfully:', instance);
@@ -96,7 +121,7 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       setError(null);
 
       // Set up event listener
-      instance.on('all', (event) => {
+      instance.on('all', event => {
         const annotatedEvent = {
           ...event,
           seenAt: Date.now(),
@@ -118,11 +143,11 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
             console.log('🔍', diagnostic.message, diagnostic.context ?? '');
           }
         } else {
-          // CRITICAL: Always log message_received events for debugging
+          // Always log message_received events for debugging
           if (annotatedEvent.type === 'message_received') {
             console.log('🎉 MESSAGE_RECEIVED EVENT:', annotatedEvent);
           }
-          
+
           // Only log important protocol events
           if (
             annotatedEvent.type === 'neighbor_discovered' ||
@@ -142,22 +167,29 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
           fileTransfer.handleFileReceived(annotatedEvent as FileReceivedEvent);
         }
 
-        setEvents((prev) => {
-          const nextEvents = [annotatedEvent, ...prev].slice(0, MAX_EVENT_HISTORY);
+        setEvents(prev => {
+          const nextEvents = [annotatedEvent, ...prev].slice(
+            0,
+            MAX_EVENT_HISTORY,
+          );
           setInsights(deriveInsights(nextEvents));
           return nextEvents;
         });
       });
 
       // Refresh runtime state after initialization
-      transportManagement.refreshTransports().catch((err) => {
+      transportManagement.refreshTransports().catch(err => {
         console.warn('Failed to refresh transports after initialization', err);
       });
-      runtimeState.refreshRuntimeState().catch((err) => {
-        console.warn('Failed to refresh runtime state after initialization', err);
+      runtimeState.refreshRuntimeState().catch(err => {
+        console.warn(
+          'Failed to refresh runtime state after initialization',
+          err,
+        );
       });
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to initialize protocol';
+      const errorMessage =
+        err instanceof Error ? err.message : 'Failed to initialize protocol';
       console.error('Failed to initialize protocol:', err);
       setError(errorMessage);
       throw err;
@@ -169,7 +201,7 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
     return () => {
       if (protocolRef.current) {
         console.log('Destroying protocol instance');
-        protocolRef.current.destroy().catch((err) => {
+        protocolRef.current.destroy().catch(err => {
           console.error('Failed to destroy protocol:', err);
         });
       }
@@ -190,7 +222,7 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       setError(null);
       return true;
     }
-    
+
     // Show rationale before requesting permissions (Android only)
     const shouldRequest = await showPermissionRationale();
     if (!shouldRequest) {
@@ -217,7 +249,7 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
 
   const start = useCallback(async () => {
     console.log('start() called');
-    
+
     try {
       // Step 1: Check and request permissions if needed
       if (!permissionsGranted) {
@@ -255,7 +287,7 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       // Step 4: Start the protocol
       console.log('Calling protocol.start()...');
       await protocolRef.current.start();
-      
+
       // Give the protocol a moment to fully initialize before refreshing state
       setTimeout(async () => {
         await refreshRuntimeState();
@@ -264,12 +296,18 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       setIsStarted(true);
       setError(null);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to start protocol';
+      const errorMessage =
+        err instanceof Error ? err.message : 'Failed to start protocol';
       console.error('Failed to start protocol:', err);
       setError(errorMessage);
       setIsStarted(false);
     }
-  }, [permissionsGranted, requestPermissions, initializeProtocol, refreshRuntimeState]);
+  }, [
+    permissionsGranted,
+    requestPermissions,
+    initializeProtocol,
+    refreshRuntimeState,
+  ]);
 
   const stop = useCallback(async () => {
     if (!protocolRef.current) {
@@ -283,13 +321,18 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
       setError(null);
       await transportManagement.refreshTransports();
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to stop protocol';
+      const errorMessage =
+        err instanceof Error ? err.message : 'Failed to stop protocol';
       setError(errorMessage);
     }
   }, []);
 
   const sendMessage = useCallback(
-    async (recipient: string, content: string, priority: MessagePriority): Promise<string | null> => {
+    async (
+      recipient: string,
+      content: string,
+      priority: MessagePriority,
+    ): Promise<string | null> => {
       if (!protocolRef.current) {
         setError('Protocol not initialized');
         return null;
@@ -309,12 +352,13 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
         setError(null);
         return messageId;
       } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Failed to send message';
+        const errorMessage =
+          err instanceof Error ? err.message : 'Failed to send message';
         setError(errorMessage);
         return null;
       }
     },
-    [isStarted]
+    [isStarted],
   );
 
   const clearEvents = useCallback(() => {
@@ -354,4 +398,3 @@ export function useOfflineProtocol(config: ProtocolConfig): UseOfflineProtocolRe
     cancelFileTransfer: fileTransfer.cancelFileTransfer,
   };
 }
-
