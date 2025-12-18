@@ -836,7 +836,7 @@ public class BleManager: NSObject, TransportManager {
             
             guard let peripheral = candidates.first else {
                 // If we can't find the peripheral, try scanning for it
-                // This is critical for Android → iOS: iOS needs to connect to Android as Central to read device ID
+                // This is imp for Android → iOS: iOS needs to connect to Android as Central to read device ID
                 if self.logThrottler.shouldLog(key: "missing_peripheral_\(centralId.uuidString)", interval: 15) {
                     print("[BleManager] ⚠️ Unable to retrieve peripheral for central \(centralId) - will try scanning")
                     self.emitDiagnostic("warning", "Unable to retrieve peripheral for central - scanning", context: [
@@ -853,7 +853,7 @@ public class BleManager: NSObject, TransportManager {
             
             self.discoveredPeripherals[peripheral.identifier] = peripheral
             // Aggressively attempt connection to read device ID
-            // This is critical for processing Android → iOS messages
+            // This is imp for processing Android → iOS messages
             self.attemptConnection(to: peripheral, reason: "ensure_device_id_android_write")
         }
     }
@@ -1443,7 +1443,7 @@ public class BleManager: NSObject, TransportManager {
                     self.meshController.markPeerActive(deviceId)
                     self.meshController.markPeerActive(self.deviceId)
                     
-                    // CRITICAL: Check for ALL completed messages (not just one)
+                    // Check for ALL completed messages (not just one)
                     // The protocol may have queued multiple messages
                     var messageCount = 0
                     while let completedMessage = self.protocolInstance.receiveMessage() {
@@ -1680,7 +1680,6 @@ public class BleManager: NSObject, TransportManager {
         
         // 6. For unknown connectable devices, allow with rate limiting
         //    These will be verified via GATT service discovery after connection
-        //    This is CRITICAL for iOS ↔ Android cross-platform discovery since
         //    each platform may not recognize the other's service UUID format in advertisements
         let isConnectable: Bool
         if #available(iOS 13.0, *) {
@@ -2525,7 +2524,7 @@ extension BleManager: CBPeripheralManagerDelegate {
                             "length": value.count
                         ])
                     }
-                    // Aggressively try to resolve device ID - this is critical for Android → iOS messages
+                    // Aggressively try to resolve device ID - this is impo for Android → iOS messages
                     ensureDeviceId(for: request.central.identifier)
                     // Queue fragment to be processed once device ID is resolved
                     // handleReceivedData will queue it if senderId is nil
