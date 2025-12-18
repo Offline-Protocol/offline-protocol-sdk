@@ -105,7 +105,7 @@ import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 const protocol = new OfflineProtocol({
   appId: 'my-app',
   userId: 'user123',
-  // Encryption is enabled by default!
+  // Encryption is enabled by default - MLS is auto-initialized on start()
 });
 
 protocol.on('message_received', (event) => {
@@ -113,10 +113,7 @@ protocol.on('message_received', (event) => {
   // event.encrypted indicates if the message was encrypted
 });
 
-await protocol.start();
-
-// Initialize MLS for end-to-end encryption (required once)
-await protocol.initializeMlsWithSecureStorage();
+await protocol.start(); // MLS auto-initialized with secure storage
 
 // Messages are automatically encrypted when possible!
 const messageId = await protocol.sendMessage({
@@ -144,8 +141,7 @@ const protocol = new OfflineProtocol({
   },
 });
 
-await protocol.start();
-await protocol.initializeMlsWithSecureStorage();
+await protocol.start(); // MLS auto-initialized when encryption.enabled is true
 
 // That's it! Messages are now automatically encrypted/decrypted.
 // Key packages are exchanged automatically when peers are discovered.

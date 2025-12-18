@@ -491,6 +491,11 @@ export class OfflineProtocol {
    * - Begins polling for fragments to send
    * - Handles incoming fragments from peers
    *
+   * **Automatic MLS Initialization:**
+   * If encryption is enabled (default: true), MLS is automatically initialized with
+   * platform-specific secure storage (iOS Keychain / Android EncryptedSharedPreferences).
+   * To disable auto-initialization, set `encryption.enabled: false` in the config.
+   *
    * **Permissions Required:**
    * - iOS: Bluetooth permissions (NSBluetoothAlwaysUsageDescription in Info.plist)
    * - Android: BLUETOOTH_SCAN, BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT (Android 12+)
@@ -508,6 +513,17 @@ export class OfflineProtocol {
     }
 
     await OfflineProtocolNativeModule.start();
+
+    // Auto-initialize MLS if encryption is enabled (default: true)
+    const encryptionEnabled = this.config.encryption?.enabled ?? true;
+    if (encryptionEnabled) {
+      try {
+        await OfflineProtocolNativeModule.initializeMlsWithSecureStorage();
+        console.log('[OfflineProtocol] MLS auto-initialized with secure storage');
+      } catch (error) {
+        console.warn('[OfflineProtocol] Failed to auto-initialize MLS:', error);
+      }
+    }
 
     // Auto-enable internet transport if configured with a server address
     const internetConfig = this.config.transports?.internet;
@@ -1260,6 +1276,9 @@ export class OfflineProtocol {
   /**
    * Initializes MLS with built-in secure storage.
    * Uses iOS Keychain or Android EncryptedSharedPreferences.
+   *
+   * **Note:** This is called automatically by `start()` when `encryption.enabled` is true (default).
+   * You only need to call this manually if you disabled encryption initially and want to enable it later.
    *
    * @throws Error if initialization fails
    */
