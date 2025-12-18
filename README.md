@@ -1,6 +1,14 @@
 # Offline Protocol SDK
 
-> Offline-first messaging protocol with intelligent multi-transport switching and mesh networking
+> Offline-first messaging protocol with intelligent multi-transport switching, mesh networking, and automatic end-to-end encryption
+
+## Features
+
+- **Multi-Transport**: Seamlessly switches between BLE, WiFi Direct, and Internet
+- **Mesh Networking**: Automatic peer discovery and message relay
+- **End-to-End Encryption**: Automatic MLS encryption with forward secrecy (RFC 9420)
+- **DORS**: Dynamic Offline Relay Switch for optimal transport selection
+- **Reliability**: ACKs, retries, and deduplication built-in
 
 ## Quick Start
 
@@ -16,16 +24,34 @@ import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 const protocol = new OfflineProtocol({
   appId: 'my-app',
   userId: 'user123',
-  bleEnabled: true,
-  preferOnline: false,
+  // Encryption is enabled by default!
 });
 
 await protocol.start();
-const messageId = await protocol.sendMessage(
-  'recipient456',
-  'Hello!',
-  MessagePriority.Medium
-);
+
+// Initialize MLS encryption (required once)
+await protocol.initializeMlsWithSecureStorage();
+
+// Messages are automatically encrypted when possible!
+const messageId = await protocol.sendMessage({
+  recipient: 'recipient456',
+  content: 'Hello!',  // Automatically encrypted
+  priority: MessagePriority.Medium,
+});
+```
+
+### Encryption Configuration
+
+```typescript
+const protocol = new OfflineProtocol({
+  appId: 'my-app',
+  userId: 'user123',
+  encryption: {
+    enabled: true,           // Auto-encrypt (default)
+    autoKeyExchange: true,   // Exchange keys on peer discovery (default)
+    storePending: true,      // Queue messages until session ready (default)
+  },
+});
 ```
 
 
@@ -61,8 +87,9 @@ The SDK consists of modular Rust crates:
 - **offline-protocol-transport** - Multi-transport abstraction (BLE, WiFi, Internet)
 - **offline-protocol-router** - DORS routing and relay management
 - **offline-protocol-reliability** - ACKs, retries, deduplication
-- **offline-protocol** - Main protocol engine
-- **offline-protocol-uniffi** - UniFFI bindings for Swift/Kotlin (NEW!)
+- **offline-protocol-mls** - End-to-end encryption using MLS (RFC 9420)
+- **offline-protocol** - Main protocol engine with auto-encryption
+- **offline-protocol-uniffi** - UniFFI bindings for Swift/Kotlin
 
 ## DORS: Dynamic Offline Relay Switch
 

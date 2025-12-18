@@ -60,6 +60,7 @@ pub struct ProtocolConfig {
     pub app_id: String,             // Application ID (required)
     pub user_id: String,            // User ID (required)
     pub transport: TransportConfig, // Transport settings
+    pub encryption: EncryptionConfig, // Encryption settings (NEW!)
     pub dors: DorsConfig,          // DORS settings
     pub relay: RelayConfig,        // Relay settings
     pub path: PathConfig,          // Path selection settings
@@ -75,7 +76,36 @@ let config = ProtocolConfig::builder("my-app", "user123")
     .wifi_direct_enabled(true)
     .online_first(false)
     .initial_ttl(10)
+    .encryption_enabled(true)      // NEW: Auto-encryption
+    .auto_key_exchange(true)       // NEW: Auto key exchange
+    .store_pending_messages(true)  // NEW: Queue pending messages
     .build()?;
+```
+
+### EncryptionConfig
+
+Configuration for automatic MLS end-to-end encryption.
+
+```rust
+pub struct EncryptionConfig {
+    /// Enable automatic encryption/decryption (default: true)
+    pub enabled: bool,
+    
+    /// Auto-exchange key packages on peer discovery (default: true)
+    pub auto_key_exchange: bool,
+    
+    /// Store pending messages when no session exists (default: true)
+    pub store_pending: bool,
+}
+```
+
+**TypeScript**:
+```typescript
+interface EncryptionConfig {
+  enabled?: boolean;        // Default: true
+  autoKeyExchange?: boolean; // Default: true
+  storePending?: boolean;    // Default: true
+}
 ```
 
 ### DorsConfig
@@ -211,6 +241,56 @@ protocol.on_event(|event| {
         }
         _ => {}
     }
+});
+```
+
+#### Encryption (Auto-Encryption)
+
+```rust
+pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()>
+```
+
+Initializes MLS encryption with the provided storage backend. Required before encryption can be used.
+
+```rust
+pub fn is_mls_initialized(&self) -> bool
+```
+
+Returns whether MLS encryption is initialized.
+
+```rust
+pub fn on_neighbor_discovered(&mut self, peer_id: &str)
+```
+
+Called when a neighbor is discovered. When `auto_key_exchange` is enabled, automatically sends our key package to the new peer.
+
+```rust
+pub fn on_neighbor_lost(&mut self, peer_id: &str)
+```
+
+Called when a neighbor is lost. Cleans up tracking state.
+
+**Note**: When `encryption.enabled` is `true` (default), `send_message` automatically:
+1. Encrypts content if MLS is initialized and a session exists
+2. Creates a session and sends Welcome if we have the recipient's key package
+3. Queues the message if `store_pending` is `true` and no session/key package exists
+
+Similarly, `receive_message` automatically:
+1. Handles incoming key packages (stores them for session creation)
+2. Handles incoming Welcome messages (joins the session)
+3. Decrypts encrypted messages
+
+**TypeScript Example**:
+```typescript
+// Initialize encryption (required once after start)
+await protocol.initializeMlsWithSecureStorage();
+
+// Messages are automatically encrypted/decrypted!
+await protocol.sendMessage({ recipient: 'bob', content: 'Hello!' });
+
+protocol.on('message_received', (event) => {
+  console.log(event.content);    // Already decrypted
+  console.log(event.encrypted);  // true if was encrypted
 });
 ```
 

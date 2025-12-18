@@ -8,6 +8,7 @@ Offline-first mesh networking SDK for React Native. Enables peer-to-peer messagi
 - [Installation](#installation)
 - [Platform Setup](#platform-setup)
 - [Quick Start](#quick-start)
+- [End-to-End Encryption](#end-to-end-encryption)
 - [Protocol Lifecycle](#protocol-lifecycle)
 - [Configuration](#configuration)
 - [API Reference](#api-reference)
@@ -104,23 +105,53 @@ import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 const protocol = new OfflineProtocol({
   appId: 'my-app',
   userId: 'user123',
+  // Encryption is enabled by default!
 });
 
 protocol.on('message_received', (event) => {
   console.log(`From ${event.sender}: ${event.content}`);
+  // event.encrypted indicates if the message was encrypted
 });
 
 await protocol.start();
 
+// Initialize MLS for end-to-end encryption (required once)
+await protocol.initializeMlsWithSecureStorage();
+
+// Messages are automatically encrypted when possible!
 const messageId = await protocol.sendMessage({
   recipient: 'user456',
-  content: 'Hello!',
+  content: 'Hello!',  // Automatically encrypted
   priority: MessagePriority.High,
 });
 
 await protocol.stop();
 await protocol.destroy();
 ```
+
+### End-to-End Encryption
+
+The SDK provides automatic end-to-end encryption using MLS (RFC 9420):
+
+```typescript
+const protocol = new OfflineProtocol({
+  appId: 'my-app',
+  userId: 'alice',
+  encryption: {
+    enabled: true,           // Auto-encrypt messages (default)
+    autoKeyExchange: true,   // Exchange keys on peer discovery (default)
+    storePending: true,      // Queue messages until session ready (default)
+  },
+});
+
+await protocol.start();
+await protocol.initializeMlsWithSecureStorage();
+
+// That's it! Messages are now automatically encrypted/decrypted.
+// Key packages are exchanged automatically when peers are discovered.
+```
+
+See the [MLS Integration Guide](../../docs/mls-integration.md) for advanced usage.
 
 ---
 

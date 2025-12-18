@@ -12,6 +12,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   
   // Optional configurations
   transport?: TransportConfig,
+  encryption?: EncryptionConfig,  // NEW: Auto-encryption settings
   dors?: DorsConfig,
   relay?: RelayConfig,
   path?: PathConfig,
@@ -70,7 +71,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 
 ### 2. Messaging App (Hybrid Mode)
 
-**Requirements**: Online-first, automatic offline fallback.
+**Requirements**: Online-first, automatic offline fallback, end-to-end encryption.
 
 ```typescript
 {
@@ -81,6 +82,13 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
     bleEnabled: true,
     wifiDirectEnabled: true,
     internetEnabled: true,
+  },
+  
+  // Auto-encryption enabled by default
+  encryption: {
+    enabled: true,           // Messages automatically encrypted
+    autoKeyExchange: true,   // Key packages exchanged on discovery
+    storePending: true,      // Queue messages until session established
   },
   
   dors: {
@@ -217,6 +225,36 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 | `bleEnabled` | boolean | true | Enable BLE mesh |
 | `wifiDirectEnabled` | boolean | true | Enable Wi-Fi Direct (Android only) |
 | `internetEnabled` | boolean | true | Enable Internet |
+
+### Encryption Configuration
+
+Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-integration.md) for details.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | boolean | true | Enable automatic encryption/decryption |
+| `autoKeyExchange` | boolean | true | Auto-exchange key packages on peer discovery |
+| `storePending` | boolean | true | Queue messages when no session exists |
+
+**Example: Disable auto-encryption (use manual MLS APIs)**:
+```typescript
+{
+  encryption: {
+    enabled: false,
+  }
+}
+```
+
+**Example: Auto-encrypt but require explicit key exchange**:
+```typescript
+{
+  encryption: {
+    enabled: true,
+    autoKeyExchange: false,  // Must manually exchange key packages
+    storePending: true,
+  }
+}
+```
 
 ### DORS Configuration
 

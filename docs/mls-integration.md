@@ -11,6 +11,115 @@ The SDK provides end-to-end encryption via the MLS protocol (RFC 9420). MLS prov
 - **Efficient group messaging**: Scalable encryption for groups of any size
 - **1:1 messaging**: Direct encrypted conversations using 2-person groups
 
+## Auto-Encryption (Recommended)
+
+**New in v0.2.0**: The SDK now supports automatic encryption/decryption. When enabled (default), messages are transparently encrypted before sending and decrypted on receive—no manual MLS API calls needed.
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Auto-Encryption Flow                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. PEER DISCOVERY                                              │
+│     ┌──────┐  neighbor_discovered   ┌──────┐                    │
+│     │ Alice│ ─────────────────────► │ Bob  │                    │
+│     └──────┘  ◄───────────────────  └──────┘                    │
+│               exchange key packages                             │
+│                                                                 │
+│  2. FIRST MESSAGE                                               │
+│     ┌──────┐  create session + welcome  ┌──────┐                │
+│     │ Alice│ ──────────────────────────► │ Bob  │               │
+│     └──────┘  encrypted "Hello!"         └──────┘               │
+│                                                                 │
+│  3. REPLY                                                       │
+│     ┌──────┐  encrypted "Hi!"    ┌──────┐                       │
+│     │ Alice│ ◄────────────────── │ Bob  │                       │
+│     └──────┘                     └──────┘                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Quick Start with Auto-Encryption
+
+```typescript
+// React Native
+import { OfflineProtocol } from '@anthropic/offline-protocol';
+
+const protocol = new OfflineProtocol({
+  appId: 'my-app',
+  userId: 'alice',
+  // Encryption is enabled by default!
+  // To disable: encryption: { enabled: false }
+});
+
+await protocol.start();
+
+// Initialize MLS with secure storage (required once)
+await protocol.initializeMlsWithSecureStorage();
+
+// Just send messages - encryption happens automatically!
+await protocol.sendMessage({
+  recipient: 'bob',
+  content: 'Hello Bob!',  // Automatically encrypted
+});
+
+// Receive messages - decryption happens automatically!
+protocol.on('message_received', (event) => {
+  console.log(event.content);       // Already decrypted
+  console.log(event.encrypted);     // true if was encrypted
+});
+```
+
+### Configuration Options
+
+```typescript
+const protocol = new OfflineProtocol({
+  appId: 'my-app',
+  userId: 'alice',
+  encryption: {
+    // Enable automatic encryption (default: true)
+    enabled: true,
+    
+    // Auto-exchange key packages when peers are discovered (default: true)
+    autoKeyExchange: true,
+    
+    // Queue messages if no session exists yet (default: true)
+    storePending: true,
+  }
+});
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Enable automatic encryption/decryption |
+| `autoKeyExchange` | `true` | Automatically exchange key packages on peer discovery |
+| `storePending` | `true` | Queue messages when no session exists (sent after session established) |
+
+### What Happens Automatically
+
+When auto-encryption is enabled:
+
+1. **On peer discovery**: Key packages are automatically exchanged via BLE/WiFi Direct
+2. **On first message**: If no session exists but we have the recipient's key package, a session is created and a Welcome message is sent automatically
+3. **On send**: Messages are encrypted before transmission
+4. **On receive**: 
+   - Key package messages → stored for future sessions
+   - Welcome messages → session is joined, pending messages are flushed
+   - Encrypted messages → decrypted and delivered to your app
+
+### When to Use Manual MLS APIs
+
+Use the manual MLS APIs (described below) when you need:
+
+- **Server-side key distribution**: Upload/download key packages from a server
+- **Custom group management**: Create and manage encrypted groups
+- **Advanced session control**: Manual session lifecycle management
+- **Offline key exchange via QR codes**: Generate key packages for QR sharing
+
+---
+
 ## Architecture
 
 ```
