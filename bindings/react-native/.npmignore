@@ -38,7 +38,7 @@ ExampleApp/
 .DS_Store
 Thumbs.db
 
-# CRITICAL: Make sure pre-built binaries ARE included
+# Make sure pre-built binaries ARE included
 # (by default they will be included, but explicitly state what to keep)
 # We DO NOT ignore:
 # - ios/libs/**/*.a

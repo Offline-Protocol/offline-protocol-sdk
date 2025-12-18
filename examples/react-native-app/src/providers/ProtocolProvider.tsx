@@ -6,7 +6,7 @@ import React, {
   useEffect,
   useRef,
 } from 'react';
-import { Alert, Platform } from 'react-native';
+import { Alert } from 'react-native';
 import {
   MessagePriority,
   type ProtocolEvent,

@@ -1035,7 +1035,7 @@ class BleManager(
         // Adaptive scanning: track discoveries for density estimation
         recordDiscoveryForDensity(now)
         
-        // CRITICAL: Software-based filtering for iOS ↔ Android interoperability
+        // Software-based filtering for iOS ↔ Android interoperability
         // Since we scan without a service UUID filter, we filter here instead.
         val scanRecord = result.scanRecord
         val isConnectable = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1217,7 +1217,7 @@ class BleManager(
         
         // 6. For unknown connectable devices, allow with rate limiting
         //    These will be verified via GATT service discovery after connection
-        //    This is CRITICAL for iOS ↔ Android cross-platform discovery since
+        //    This is important for iOS ↔ Android cross-platform discovery since
         //    each platform may not recognize the other's service UUID format in advertisements
         if (isConnectable) {
             // Rate limit unknown device connection attempts
@@ -1466,7 +1466,7 @@ class BleManager(
             // from being polled. This caused messages to get stuck when connections weren't ready.
             val hasUnsentFragments = flushPendingOutboundFragments()
             
-            // CRITICAL: Still poll for new fragments even if there are unsent pending ones
+            // Still poll for new fragments even if there are unsent pending ones
             // This prevents deadlock where old fragments block new ones
             // Poll for next fragment from protocol
             val fragment = try {
@@ -1768,7 +1768,7 @@ class BleManager(
                 protocol.bleFragmentReceived(senderId, bytes)
                 Log.i(TAG, "✅ Fragment processed successfully for sender: $senderId")
                 
-                // CRITICAL: Immediately check if this completed a message
+                // Immediately check if this completed a message
                 val completedMessage = protocol.receiveMessage()
                 if (completedMessage != null) {
                     Log.i(TAG, "🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
