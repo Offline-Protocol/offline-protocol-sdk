@@ -18,7 +18,7 @@ pub mod protocol;
 pub mod transport_manager;
 pub mod visualization;
 
-pub use config::ProtocolConfig;
+pub use config::{EncryptionConfig, ProtocolConfig};
 pub use error::{Error, Result};
 pub use events::{Event, EventCallback};
 pub use protocol::OfflineProtocol;

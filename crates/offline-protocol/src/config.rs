@@ -5,6 +5,43 @@ use offline_protocol_reliability::{AckConfig, DeduplicatorConfig, RetryConfig};
 use offline_protocol_router::{DorsConfig, PathConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
 
+/// Encryption configuration for automatic MLS handling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptionConfig {
+    /// Whether automatic encryption is enabled.
+    /// When enabled, messages are automatically encrypted/decrypted using MLS.
+    pub enabled: bool,
+
+    /// Auto-exchange key packages on peer discovery.
+    /// When enabled, key packages are automatically sent when neighbors are discovered.
+    pub auto_key_exchange: bool,
+
+    /// Store pending messages when no session exists.
+    /// Messages will be sent automatically after the session is established.
+    pub store_pending: bool,
+}
+
+impl Default for EncryptionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_key_exchange: true,
+            store_pending: true,
+        }
+    }
+}
+
+impl EncryptionConfig {
+    /// Creates a new encryption config with encryption disabled.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            auto_key_exchange: false,
+            store_pending: false,
+        }
+    }
+}
+
 /// Transport-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportConfig {
@@ -65,6 +102,9 @@ pub struct ProtocolConfig {
     /// Reliability layer configuration.
     pub reliability: ReliabilityConfig,
 
+    /// Encryption configuration for automatic MLS handling.
+    pub encryption: EncryptionConfig,
+
     /// Initial TTL (Time-To-Live) for messages.
     pub initial_ttl: u8,
 }
@@ -85,6 +125,7 @@ impl ProtocolConfig {
             relay: RelayConfig::default(),
             path: PathConfig::default(),
             reliability: ReliabilityConfig::default(),
+            encryption: EncryptionConfig::default(),
             initial_ttl: DEFAULT_INITIAL_TTL,
         }
     }
@@ -204,6 +245,30 @@ impl ProtocolConfigBuilder {
         self
     }
 
+    /// Configures encryption settings.
+    pub fn encryption(mut self, config: EncryptionConfig) -> Self {
+        self.config.encryption = config;
+        self
+    }
+
+    /// Enables or disables automatic encryption.
+    pub fn encryption_enabled(mut self, enabled: bool) -> Self {
+        self.config.encryption.enabled = enabled;
+        self
+    }
+
+    /// Enables or disables automatic key exchange on peer discovery.
+    pub fn auto_key_exchange(mut self, enabled: bool) -> Self {
+        self.config.encryption.auto_key_exchange = enabled;
+        self
+    }
+
+    /// Enables or disables storing pending messages for later encryption.
+    pub fn store_pending_messages(mut self, enabled: bool) -> Self {
+        self.config.encryption.store_pending = enabled;
+        self
+    }
+
     /// Builds and validates the configuration.
     ///
     /// # Returns
@@ -292,5 +357,35 @@ mod tests {
         assert_eq!(reliability.ack.default_timeout_ms, 5000);
         assert_eq!(reliability.retry.max_retries, 3);
         assert_eq!(reliability.dedup.max_tracked_messages, 10000);
+    }
+
+    #[test]
+    fn test_encryption_config_default() {
+        let encryption = EncryptionConfig::default();
+        assert!(encryption.enabled);
+        assert!(encryption.auto_key_exchange);
+        assert!(encryption.store_pending);
+    }
+
+    #[test]
+    fn test_encryption_config_disabled() {
+        let encryption = EncryptionConfig::disabled();
+        assert!(!encryption.enabled);
+        assert!(!encryption.auto_key_exchange);
+        assert!(!encryption.store_pending);
+    }
+
+    #[test]
+    fn test_config_builder_with_encryption() {
+        let config = ProtocolConfig::builder("test-app", "user123")
+            .encryption_enabled(true)
+            .auto_key_exchange(true)
+            .store_pending_messages(false)
+            .build()
+            .unwrap();
+
+        assert!(config.encryption.enabled);
+        assert!(config.encryption.auto_key_exchange);
+        assert!(!config.encryption.store_pending);
     }
 }

@@ -36,6 +36,26 @@ pub enum Error {
     #[error("Reliability error: {0}")]
     Reliability(#[from] offline_protocol_reliability::Error),
 
+    /// MLS error.
+    #[error("MLS error: {0}")]
+    Mls(#[from] offline_protocol_mls::MlsError),
+
+    /// MLS not initialized.
+    #[error("MLS encryption not initialized")]
+    MlsNotInitialized,
+
+    /// No key package available for recipient.
+    #[error("No key package available for recipient: {0}")]
+    NoKeyPackage(String),
+
+    /// Session pending - message queued for later.
+    #[error("Session pending, message queued")]
+    SessionPending,
+
+    /// Serialization error.
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),
