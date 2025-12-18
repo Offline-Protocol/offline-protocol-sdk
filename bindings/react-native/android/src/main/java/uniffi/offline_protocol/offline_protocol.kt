@@ -3844,6 +3844,47 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
 
 
 
+data class EncryptionConfig (
+    var `enabled`: kotlin.Boolean
+    , 
+    var `autoKeyExchange`: kotlin.Boolean
+    , 
+    var `storePending`: kotlin.Boolean
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer<EncryptionConfig> {
+    override fun read(buf: ByteBuffer): EncryptionConfig {
+        return EncryptionConfig(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EncryptionConfig) = (
+            FfiConverterBoolean.allocationSize(value.`enabled`) +
+            FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
+            FfiConverterBoolean.allocationSize(value.`storePending`)
+    )
+
+    override fun write(value: EncryptionConfig, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`enabled`, buf)
+            FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
+            FfiConverterBoolean.write(value.`storePending`, buf)
+    }
+}
+
+
+
 data class FileProgress (
     var `fileId`: kotlin.String
     , 
@@ -4466,6 +4507,12 @@ data class ProtocolConfig (
     var `preferOnline`: kotlin.Boolean
     , 
     var `initialTtl`: kotlin.UByte
+    , 
+    var `encryptionEnabled`: kotlin.Boolean
+    , 
+    var `autoKeyExchange`: kotlin.Boolean
+    , 
+    var `storePending`: kotlin.Boolean
     
 ){
     
@@ -4487,6 +4534,9 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterUByte.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -4497,7 +4547,10 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
             FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
             FfiConverterBoolean.allocationSize(value.`preferOnline`) +
-            FfiConverterUByte.allocationSize(value.`initialTtl`)
+            FfiConverterUByte.allocationSize(value.`initialTtl`) +
+            FfiConverterBoolean.allocationSize(value.`encryptionEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
+            FfiConverterBoolean.allocationSize(value.`storePending`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -4508,6 +4561,9 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
             FfiConverterBoolean.write(value.`preferOnline`, buf)
             FfiConverterUByte.write(value.`initialTtl`, buf)
+            FfiConverterBoolean.write(value.`encryptionEnabled`, buf)
+            FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
+            FfiConverterBoolean.write(value.`storePending`, buf)
     }
 }
 

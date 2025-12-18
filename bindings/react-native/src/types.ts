@@ -173,6 +173,28 @@ export interface TransportsConfig {
 }
 
 /**
+ * Encryption configuration for automatic MLS handling.
+ * When enabled, messages are automatically encrypted/decrypted using MLS.
+ */
+export interface EncryptionConfig {
+  /**
+   * Enable automatic encryption (default: true).
+   * When enabled, messages are automatically encrypted/decrypted.
+   */
+  enabled?: boolean;
+  /**
+   * Auto-exchange key packages on peer discovery (default: true).
+   * When enabled, key packages are automatically sent when neighbors are discovered.
+   */
+  autoKeyExchange?: boolean;
+  /**
+   * Store pending messages when no session exists (default: true).
+   * Messages will be sent automatically after the session is established.
+   */
+  storePending?: boolean;
+}
+
+/**
  * Protocol configuration
  */
 export interface ProtocolConfig {
@@ -184,6 +206,11 @@ export interface ProtocolConfig {
   transports?: TransportsConfig;
   /** File transfer configuration (optional) */
   fileTransfer?: FileTransferConfig;
+  /**
+   * Encryption configuration (optional).
+   * Defaults to encryption enabled with auto key exchange.
+   */
+  encryption?: EncryptionConfig;
   /** DORS configuration (optional) */
   dors?: {
     /** Prefer online mode (default: false) */
@@ -291,6 +318,8 @@ export interface MessageReceivedEvent extends BaseEvent {
   hop_count: number;
   transport: string;
   timestamp: number;
+  /** Whether the message was encrypted (auto-decrypted) */
+  encrypted?: boolean;
 }
 
 /**

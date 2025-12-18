@@ -80,6 +80,14 @@ class OfflineProtocolModule: RCTEventEmitter {
                          userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
         }
         
+        // Parse encryption config with defaults (enabled by default)
+        let encryptionDict = raw["encryption"] as? [String: Any] ?? [:]
+        let encryptionEnabled = encryptionDict["enabled"] as? Bool ?? true
+        let autoKeyExchange = encryptionDict["autoKeyExchange"] as? Bool 
+                              ?? encryptionDict["auto_key_exchange"] as? Bool ?? true
+        let storePending = encryptionDict["storePending"] as? Bool 
+                           ?? encryptionDict["store_pending"] as? Bool ?? true
+        
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
             userId: raw["userId"] as? String ?? raw["user_id"] as? String ?? "",
@@ -87,7 +95,10 @@ class OfflineProtocolModule: RCTEventEmitter {
             wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,
             internetEnabled: raw["internetEnabled"] as? Bool ?? raw["internet_enabled"] as? Bool ?? true,
             preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
-            initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8)
+            initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
+            encryptionEnabled: encryptionEnabled,
+            autoKeyExchange: autoKeyExchange,
+            storePending: storePending
         )
 
         return (config, raw)

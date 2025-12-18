@@ -1976,6 +1976,62 @@ public func FfiConverterTypeDorsConfig_lower(_ value: DorsConfig) -> RustBuffer 
 }
 
 
+public struct EncryptionConfig: Equatable, Hashable {
+    public var enabled: Bool
+    public var autoKeyExchange: Bool
+    public var storePending: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool) {
+        self.enabled = enabled
+        self.autoKeyExchange = autoKeyExchange
+        self.storePending = storePending
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension EncryptionConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EncryptionConfig {
+        return
+            try EncryptionConfig(
+                enabled: FfiConverterBool.read(from: &buf), 
+                autoKeyExchange: FfiConverterBool.read(from: &buf), 
+                storePending: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: EncryptionConfig, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterBool.write(value.autoKeyExchange, into: &buf)
+        FfiConverterBool.write(value.storePending, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEncryptionConfig_lift(_ buf: RustBuffer) throws -> EncryptionConfig {
+    return try FfiConverterTypeEncryptionConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEncryptionConfig_lower(_ value: EncryptionConfig) -> RustBuffer {
+    return FfiConverterTypeEncryptionConfig.lower(value)
+}
+
+
 public struct FileProgress: Equatable, Hashable {
     public var fileId: String
     public var chunksSent: UInt32
@@ -2772,10 +2828,13 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var internetEnabled: Bool
     public var preferOnline: Bool
     public var initialTtl: UInt8
+    public var encryptionEnabled: Bool
+    public var autoKeyExchange: Bool
+    public var storePending: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -2783,6 +2842,9 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.internetEnabled = internetEnabled
         self.preferOnline = preferOnline
         self.initialTtl = initialTtl
+        self.encryptionEnabled = encryptionEnabled
+        self.autoKeyExchange = autoKeyExchange
+        self.storePending = storePending
     }
 
     
@@ -2805,7 +2867,10 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
                 internetEnabled: FfiConverterBool.read(from: &buf), 
                 preferOnline: FfiConverterBool.read(from: &buf), 
-                initialTtl: FfiConverterUInt8.read(from: &buf)
+                initialTtl: FfiConverterUInt8.read(from: &buf), 
+                encryptionEnabled: FfiConverterBool.read(from: &buf), 
+                autoKeyExchange: FfiConverterBool.read(from: &buf), 
+                storePending: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -2817,6 +2882,9 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.internetEnabled, into: &buf)
         FfiConverterBool.write(value.preferOnline, into: &buf)
         FfiConverterUInt8.write(value.initialTtl, into: &buf)
+        FfiConverterBool.write(value.encryptionEnabled, into: &buf)
+        FfiConverterBool.write(value.autoKeyExchange, into: &buf)
+        FfiConverterBool.write(value.storePending, into: &buf)
     }
 }
 

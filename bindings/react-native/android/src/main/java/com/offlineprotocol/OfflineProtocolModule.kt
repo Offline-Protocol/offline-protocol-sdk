@@ -88,6 +88,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun parseConfig(configJson: String): ParsedConfig {
         val json = JSONObject(configJson)
 
+        // Parse encryption config with defaults (enabled by default)
+        val encryptionJson = json.optJSONObject("encryption")
+        val encryptionEnabled = encryptionJson?.optBoolean("enabled", true) ?: true
+        val autoKeyExchange = encryptionJson?.let {
+            it.optBooleanCompat("autoKeyExchange", "auto_key_exchange") ?: true
+        } ?: true
+        val storePending = encryptionJson?.let {
+            it.optBooleanCompat("storePending", "store_pending") ?: true
+        } ?: true
+
         val config = ProtocolConfig(
             appId = json.optString("appId", json.optString("app_id", "")),
             userId = json.optString("userId", json.optString("user_id", "")),
@@ -95,7 +105,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
             preferOnline = json.optBoolean("preferOnline", json.optBoolean("prefer_online", false)),
-            initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte()
+            initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte(),
+            encryptionEnabled = encryptionEnabled,
+            autoKeyExchange = autoKeyExchange,
+            storePending = storePending
         )
 
         return ParsedConfig(config, json)
