@@ -1074,7 +1074,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`pt
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1461,7 +1461,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 33006.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 36955.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320.toShort()) {
@@ -2190,7 +2190,7 @@ public interface OfflineProtocolInterface {
     
     fun `sendFile`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String
     
-    fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority): kotlin.String
+    fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String
     
     fun `setBatteryLevel`(`level`: kotlin.UByte)
     
@@ -3331,13 +3331,13 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority): kotlin.String {
+    @Throws(ProtocolException::class)override fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`content`),FfiConverterTypeMessagePriority.lower(`priority`),_status)
+        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`content`),FfiConverterTypeMessagePriority.lower(`priority`),FfiConverterOptionalString.lower(`replyToMsg`),_status)
 }
     }
     )

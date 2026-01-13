@@ -612,11 +612,41 @@ class InternetManager(
         // Convert data to string content for the relay protocol
         val content = String(data, Charsets.UTF_8)
         
+        // Try to parse the message JSON to extract reply_to_msg if present
+        var replyToMsg: String? = null
+        try {
+            val messageJson = org.json.JSONObject(content)
+            if (messageJson.has("reply_to_msg") && !messageJson.isNull("reply_to_msg")) {
+                // reply_to_msg is stored as a MessageId object with a string representation
+                // Try to extract it as a string first
+                val replyToMsgValue = messageJson.opt("reply_to_msg")
+                if (replyToMsgValue is String) {
+                    replyToMsg = replyToMsgValue
+                } else if (replyToMsgValue is org.json.JSONObject) {
+                    // If it's an object, it might be a MessageId with nested structure
+                    // Try to get a string representation
+                    replyToMsg = replyToMsgValue.toString()
+                } else {
+                    // Try as string
+                    replyToMsg = messageJson.optString("reply_to_msg", null)
+                    if (replyToMsg.isNullOrEmpty()) {
+                        replyToMsg = null
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // If parsing fails, message might not be JSON or might be plain text
+            // Continue without reply_to_msg
+        }
+        
         // Wrap in relay server protocol format
         val relayMessage = org.json.JSONObject().apply {
             put("type", "SendMessage")
             put("recipient", recipientId)
             put("content", content)
+            if (replyToMsg != null) {
+                put("reply_to_msg", replyToMsg)
+            }
         }
         
         val jsonString = relayMessage.toString()

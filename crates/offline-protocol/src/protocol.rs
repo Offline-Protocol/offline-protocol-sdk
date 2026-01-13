@@ -394,16 +394,22 @@ impl OfflineProtocol {
         recipient: impl Into<String>,
         content: impl Into<String>,
         priority: Option<MessagePriority>,
+        reply_to_msg: Option<MessageId>,
     ) -> Result<Message> {
         let sender = UserId::new(&self.config.user_id)?;
         let recipient = UserId::new(recipient)?;
         let app_id = AppId::new(&self.config.app_id)?;
 
-        Ok(Message::builder(sender, recipient, app_id)
+        let mut builder = Message::builder(sender, recipient, app_id)
             .content(content)
             .priority(priority.unwrap_or(MessagePriority::Medium))
-            .ttl(TTL::new(self.config.initial_ttl)?)
-            .build())
+            .ttl(TTL::new(self.config.initial_ttl)?);
+        
+        if let Some(reply_to) = reply_to_msg {
+            builder = builder.reply_to_msg(reply_to);
+        }
+
+        Ok(builder.build())
     }
 
     /// Handles successful message send.
@@ -498,6 +504,7 @@ impl OfflineProtocol {
     /// * `recipient` - Recipient's user ID
     /// * `content` - Message content
     /// * `priority` - Message priority (optional, defaults to Medium)
+    /// * `reply_to_msg` - ID of the message this is replying to (optional)
     ///
     /// # Returns
     ///
@@ -515,6 +522,7 @@ impl OfflineProtocol {
         recipient: impl Into<String>,
         content: impl Into<String>,
         priority: Option<MessagePriority>,
+        reply_to_msg: Option<impl Into<String>>,
     ) -> Result<MessageId> {
         // Check if protocol is running
         {
@@ -527,6 +535,12 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
+
+        // Parse reply_to_msg if provided
+        let reply_to_msg_id = reply_to_msg
+            .map(|r| MessageId::from_str(&r.into()))
+            .transpose()
+            .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
 
         // Auto-encrypt if enabled
         let final_content = if self.should_auto_encrypt() {
@@ -552,7 +566,7 @@ impl OfflineProtocol {
         };
 
         // Create message with potentially encrypted content
-        let message = self.create_message(&recipient_str, final_content, Some(priority))?;
+        let message = self.create_message(&recipient_str, final_content, Some(priority), reply_to_msg_id)?;
         let message_id = message.id.clone();
 
         // Check for duplicates
@@ -656,7 +670,7 @@ impl OfflineProtocol {
         let content = format!("{}{}", internal_prefixes::WELCOME, serialized);
         
         // Create and send internal message with high priority
-        let message = self.create_message(recipient, content, Some(MessagePriority::High))?;
+        let message = self.create_message(recipient, content, Some(MessagePriority::High), None)?;
         let _ = self.transport_manager.send(&message);
         
         Ok(())
@@ -685,7 +699,7 @@ impl OfflineProtocol {
             
             for msg in pending {
                 // Re-attempt to send each pending message
-                match self.send_message(recipient, msg.content, Some(msg.priority)) {
+                match self.send_message(recipient, msg.content, Some(msg.priority), None::<String>) {
                     Ok(id) => debug!(message_id = %id, "Sent pending message"),
                     Err(e) => warn!(error = %e, "Failed to send pending message"),
                 }
@@ -714,7 +728,7 @@ impl OfflineProtocol {
         let content = format!("{}{}", internal_prefixes::KEY_PACKAGE, serialized);
         
         // Send as low priority internal message
-        let message = self.create_message(peer_id, content, Some(MessagePriority::Low))?;
+        let message = self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
         let _ = self.transport_manager.send(&message);
         
         self.key_package_sent_to.insert(peer_id.to_string());
@@ -784,6 +798,7 @@ impl OfflineProtocol {
     /// * `content` - Message content
     /// * `priority` - Message priority (optional, defaults to Medium)
     /// * `transport` - The transport to use
+    /// * `reply_to_msg` - ID of the message this is replying to (optional)
     ///
     /// # Returns
     ///
@@ -794,6 +809,7 @@ impl OfflineProtocol {
         content: impl Into<String>,
         priority: Option<MessagePriority>,
         transport: TransportType,
+        reply_to_msg: Option<impl Into<String>>,
     ) -> Result<MessageId> {
         // Check if protocol is running
         {
@@ -803,8 +819,14 @@ impl OfflineProtocol {
             }
         }
 
+        // Parse reply_to_msg if provided
+        let reply_to_msg_id = reply_to_msg
+            .map(|r| MessageId::from_str(&r.into()))
+            .transpose()
+            .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
+
         // Create message
-        let message = self.create_message(recipient, content, priority)?;
+        let message = self.create_message(recipient, content, priority, reply_to_msg_id)?;
         let message_id = message.id.clone();
 
         // Check for duplicates

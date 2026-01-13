@@ -342,7 +342,7 @@ interface OfflineProtocol {
     
     // Messaging
     [Throws=ProtocolError]
-    string send_message(string recipient, string content, MessagePriority priority);
+    string send_message(string recipient, string content, MessagePriority priority, string? reply_to_msg);
     
     string? receive_message();
     

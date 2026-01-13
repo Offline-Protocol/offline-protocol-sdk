@@ -740,7 +740,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendFile(recipient: String, filePath: String, fileName: String) throws  -> String
     
-    func sendMessage(recipient: String, content: String, priority: MessagePriority) throws  -> String
+    func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
     
     func setBatteryLevel(level: UInt8) 
     
@@ -1469,13 +1469,14 @@ open func sendFile(recipient: String, filePath: String, fileName: String)throws 
 })
 }
     
-open func sendMessage(recipient: String, content: String, priority: MessagePriority)throws  -> String  {
+open func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(content),
-        FfiConverterTypeMessagePriority_lower(priority),$0
+        FfiConverterTypeMessagePriority_lower(priority),
+        FfiConverterOptionString.lower(replyToMsg),$0
     )
 })
 }
@@ -5056,7 +5057,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 33006) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 36955) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320) {

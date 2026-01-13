@@ -534,12 +534,36 @@ public class InternetManager: NSObject, TransportManager {
         // Convert data to string content for the relay protocol
         let content = String(data: data, encoding: .utf8) ?? data.base64EncodedString()
         
+        // Try to parse the message JSON to extract reply_to_msg if present
+        var replyToMsg: String? = nil
+        if let contentData = content.data(using: .utf8),
+           let messageJson = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any] {
+            if let replyToMsgValue = messageJson["reply_to_msg"] {
+                // reply_to_msg can be a string (MessageId as string) or an object
+                if let replyToMsgString = replyToMsgValue as? String {
+                    replyToMsg = replyToMsgString
+                } else if let replyToMsgDict = replyToMsgValue as? [String: Any] {
+                    // If it's an object, try to extract a string representation
+                    // MessageId might be serialized as an object with nested fields
+                    if let stringValue = replyToMsgDict.values.first as? String {
+                        replyToMsg = stringValue
+                    } else if let replyToMsgData = try? JSONSerialization.data(withJSONObject: replyToMsgDict),
+                                let replyToMsgString = String(data: replyToMsgData, encoding: .utf8) {
+                        replyToMsg = replyToMsgString
+                    }
+                }
+            }
+        }
+        
         // Wrap in relay server protocol format
-        let relayMessage: [String: Any] = [
+        var relayMessage: [String: Any] = [
             "type": "SendMessage",
             "recipient": recipientId,
             "content": content
         ]
+        if let replyToMsg = replyToMsg {
+            relayMessage["reply_to_msg"] = replyToMsg
+        }
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: relayMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {

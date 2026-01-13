@@ -154,7 +154,7 @@ pub fn distribute_commit(
             continue;
         }
 
-        match protocol.send_message(member_id, &encoded, Some(MessagePriority::High)) {
+        match protocol.send_message(member_id, &encoded, Some(MessagePriority::High), None::<String>) {
             Ok(_) => sent_count += 1,
             Err(_) => failed_recipients.push(member_id.clone()),
         }
@@ -182,7 +182,7 @@ pub fn send_welcome(
         .to_base64()
         .map_err(|e| Error::Other(format!("Failed to encode welcome: {}", e)))?;
 
-    protocol.send_message(recipient, &encoded, Some(MessagePriority::High))?;
+    protocol.send_message(recipient, &encoded, Some(MessagePriority::High), None::<String>)?;
     Ok(())
 }
 

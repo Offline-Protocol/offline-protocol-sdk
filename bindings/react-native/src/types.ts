@@ -265,6 +265,8 @@ export interface SendMessageParams {
   content: string;
   /** Message priority (optional, defaults to Medium) */
   priority?: MessagePriority;
+  /** ID of the message this is replying to (optional) */
+  replyToMsg?: string;
 }
 
 /**

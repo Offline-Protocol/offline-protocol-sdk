@@ -332,6 +332,7 @@ export function useOfflineProtocol(
       recipient: string,
       content: string,
       priority: MessagePriority,
+      replyToMsg?: string,
     ): Promise<string | null> => {
       if (!protocolRef.current) {
         setError('Protocol not initialized');
@@ -348,6 +349,7 @@ export function useOfflineProtocol(
           recipient,
           content,
           priority,
+          replyToMsg,
         });
         setError(null);
         return messageId;

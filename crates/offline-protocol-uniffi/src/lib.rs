@@ -946,7 +946,8 @@ impl OfflineProtocol {
         &self,
         recipient: String,
         content: String,
-        priority: MessagePriority
+        priority: MessagePriority,
+        reply_to_msg: Option<String>,
     ) -> Result<String, ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
 
@@ -987,12 +988,13 @@ impl OfflineProtocol {
                     &recipient,
                     &content,
                     Some(priority.into()),
-                    core_transport
+                    core_transport,
+                    reply_to_msg
                 )
                 .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
         } else {
             protocol
-                .send_message(&recipient, &content, Some(priority.into()))
+                .send_message(&recipient, &content, Some(priority.into()), reply_to_msg)
                 .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
         };
 
