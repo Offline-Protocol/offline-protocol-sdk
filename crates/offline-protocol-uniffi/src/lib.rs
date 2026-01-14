@@ -661,6 +661,7 @@ pub struct BleFragment {
 pub struct InternetMessage {
     pub recipient_id: String,
     pub data: Vec<u8>,
+    pub reply_to_msg: Option<String>,
 }
 
 /// WiFi Direct message for outgoing data
@@ -1352,11 +1353,12 @@ impl OfflineProtocol {
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
                 if let Ok(Some(data)) = internet_transport.get_next_message() {
-                    // Deserialize to get recipient
+                    // Deserialize to get recipient and reply_to_msg
                     if let Ok(message) = internet_transport.deserialize_message(&data) {
                         return Some(InternetMessage {
                             recipient_id: message.recipient.as_str().to_string(),
                             data,
+                            reply_to_msg: message.reply_to_msg.as_ref().map(|id| id.as_str().to_string()),
                         });
                     }
                 }
@@ -1366,9 +1368,30 @@ impl OfflineProtocol {
         // Fallback to local queue
         let mut internet_state = self.internet_state.lock().unwrap();
         if let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
+            // Try to deserialize to extract reply_to_msg
+            let reply_to_msg = if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::Internet)
+            {
+                let transport = transport_arc.lock().unwrap();
+                if let Some(internet_transport) = transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+                {
+                    internet_transport.deserialize_message(&data)
+                        .ok()
+                        .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
             return Some(InternetMessage {
                 recipient_id: recipient,
                 data,
+                reply_to_msg,
             });
         }
 

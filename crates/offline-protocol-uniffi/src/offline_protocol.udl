@@ -615,6 +615,7 @@ dictionary BleFragment {
 dictionary InternetMessage {
     string recipient_id;
     sequence<u8> data;
+    string? reply_to_msg;
 };
 
 // WiFi Direct message for outgoing data

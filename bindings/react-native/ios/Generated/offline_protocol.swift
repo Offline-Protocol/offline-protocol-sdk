@@ -2152,12 +2152,14 @@ public func FfiConverterTypeGradientRoutingConfig_lower(_ value: GradientRouting
 public struct InternetMessage: Equatable, Hashable {
     public var recipientId: String
     public var data: [UInt8]
+    public var replyToMsg: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recipientId: String, data: [UInt8]) {
+    public init(recipientId: String, data: [UInt8], replyToMsg: String?) {
         self.recipientId = recipientId
         self.data = data
+        self.replyToMsg = replyToMsg
     }
 
     
@@ -2175,13 +2177,15 @@ public struct FfiConverterTypeInternetMessage: FfiConverterRustBuffer {
         return
             try InternetMessage(
                 recipientId: FfiConverterString.read(from: &buf), 
-                data: FfiConverterSequenceUInt8.read(from: &buf)
+                data: FfiConverterSequenceUInt8.read(from: &buf), 
+                replyToMsg: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: InternetMessage, into buf: inout [UInt8]) {
         FfiConverterString.write(value.recipientId, into: &buf)
         FfiConverterSequenceUInt8.write(value.data, into: &buf)
+        FfiConverterOptionString.write(value.replyToMsg, into: &buf)
     }
 }
 

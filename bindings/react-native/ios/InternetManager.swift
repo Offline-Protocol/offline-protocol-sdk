@@ -407,6 +407,26 @@ public class InternetManager: NSObject, TransportManager {
             ])
             handleConnectionClosed(error: nil)
             
+        case "MessageSent":
+            // Handle MessageSent event from WebSocket server
+            // This contains the server-generated message_id that we should use
+            if let messageId = json["message_id"] as? String,
+               !messageId.isEmpty {
+                let recipient = json["recipient"] as? String ?? ""
+                let timestamp = json["timestamp"] as? String ?? ""
+                
+                // The server has confirmed the message was sent with this message_id
+                // We need to notify the protocol so it can update the message ID
+                // The protocol will emit a message_sent event with this server-generated ID
+                emitDiagnostic("debug", "MessageSent from relay server", context: [
+                    "messageId": messageId,
+                    "recipient": recipient,
+                    "timestamp": timestamp
+                ])
+                // Note: The protocol SDK will handle the message_sent event internally
+                // The frontend will receive it via the normal event stream
+            }
+            
         case "MessageReceived":
             // Handle incoming direct message
             guard let senderId = json["sender"] as? String,
@@ -415,20 +435,69 @@ public class InternetManager: NSObject, TransportManager {
                 return
             }
             
+            let replyToMsg = json["reply_to_msg"] as? String
+            let messageId = json["message_id"] as? String
+            
             messagesReceived += 1
             
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
                 
                 do {
-                    // Convert content string to bytes for the protocol
-                    let contentData = content.data(using: .utf8) ?? Data()
-                    let bytes = [UInt8](contentData)
+                    // The protocol expects the full serialized Message JSON bytes
+                    // The WebSocket server sends the message content, which should be the full Message JSON
+                    // But we need to ensure reply_to_msg and message_id are included if present
+                    var messageData: Data
+                    var isFullMessage = false
+                    
+                    // Try to parse content as JSON to see if it's already a full Message
+                    if let contentData = content.data(using: .utf8),
+                       let contentJson = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any],
+                       contentJson["sender"] != nil && contentJson["recipient"] != nil {
+                        // It's already a full Message JSON
+                        isFullMessage = true
+                        var messageDict = contentJson
+                        // Ensure message_id is included if present in WebSocket event
+                        if let messageId = messageId, !messageId.isEmpty {
+                            if messageDict["id"] == nil && messageDict["message_id"] == nil {
+                                messageDict["id"] = messageId
+                            }
+                        }
+                        // Ensure reply_to_msg is included if present in WebSocket event
+                        if let replyToMsg = replyToMsg, !replyToMsg.isEmpty, messageDict["reply_to_msg"] == nil {
+                            messageDict["reply_to_msg"] = replyToMsg
+                        }
+                        messageData = try JSONSerialization.data(withJSONObject: messageDict)
+                    } else {
+                        // Content is plain text, reconstruct full Message JSON
+                        var messageDict: [String: Any] = [
+                            "sender": senderId,
+                            "recipient": self.deviceId, // Will be corrected by protocol
+                            "content": content,
+                            "app_id": "offline-messenger",
+                            "priority": "Medium",
+                            "ttl": 8,
+                            "hop_count": 0,
+                            "requires_ack": true
+                        ]
+                        if let messageId = messageId, !messageId.isEmpty {
+                            messageDict["id"] = messageId
+                        }
+                        if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
+                            messageDict["reply_to_msg"] = replyToMsg
+                        }
+                        messageData = try JSONSerialization.data(withJSONObject: messageDict)
+                    }
+                    
+                    let bytes = [UInt8](messageData)
                     try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
                     
                     self.emitDiagnostic("debug", "Message received from relay", context: [
                         "senderId": senderId,
-                        "contentLength": content.count
+                        "messageId": messageId ?? "none",
+                        "contentLength": content.count,
+                        "hasReplyToMsg": replyToMsg != nil && !replyToMsg!.isEmpty,
+                        "isFullMessage": isFullMessage
                     ])
                 } catch {
                     self.emitDiagnostic("error", "Error processing relay message", context: [

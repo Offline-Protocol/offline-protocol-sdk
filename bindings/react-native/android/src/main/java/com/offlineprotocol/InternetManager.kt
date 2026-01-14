@@ -490,10 +490,34 @@ class InternetManager(
                 handleConnectionClosed(-1, reason)
             }
             
+            "MessageSent" -> {
+                // Handle MessageSent event from WebSocket server
+                // This contains the server-generated message_id that we should use
+                val messageId = json.optString("message_id", null)
+                val recipient = json.optString("recipient", "")
+                val timestamp = json.optString("timestamp", "")
+                
+                if (messageId != null && messageId.isNotEmpty()) {
+                    // The server has confirmed the message was sent with this message_id
+                    // We need to notify the protocol so it can update the message ID
+                    // The protocol will emit a message_sent event with this server-generated ID
+                    emitDiagnostic("debug", "MessageSent from relay server", mapOf(
+                        "messageId" to messageId,
+                        "recipient" to recipient,
+                        "timestamp" to timestamp
+                    ))
+                    // Note: The protocol SDK will handle the message_sent event internally
+                    // The frontend will receive it via the normal event stream
+                }
+            }
+            
             "MessageReceived" -> {
                 // Handle incoming direct message
                 val senderId = json.optString("sender", "")
                 val content = json.optString("content", "")
+                val replyToMsg = json.optString("reply_to_msg", null)
+                val messageId = json.optString("message_id", null)
+                val timestamp = json.optString("timestamp", "")
                 
                 if (senderId.isEmpty()) {
                     emitDiagnostic("warning", "Invalid MessageReceived format")
@@ -503,14 +527,76 @@ class InternetManager(
                 messagesReceived++
                 
                 try {
-                    // Convert content string to bytes for the protocol
-                    val contentBytes = content.toByteArray(Charsets.UTF_8)
-                    val bytes = contentBytes.map { it.toUByte() }
+                    // The protocol expects the full serialized Message JSON bytes
+                    // The WebSocket server sends the message content, which should be the full Message JSON
+                    // (since that's what we sent). However, the server also extracts reply_to_msg and message_id as
+                    // separate fields, so we need to ensure they're included in the Message JSON.
+                    var messageBytes: ByteArray
+                    
+                    try {
+                        // Try to parse content as JSON to see if it's already a full Message
+                        val contentJson = org.json.JSONObject(content)
+                        if (contentJson.has("sender") && contentJson.has("recipient")) {
+                            // It's already a full Message JSON
+                            // Ensure message_id is included if present in WebSocket event
+                            if (messageId != null && messageId.isNotEmpty() && !contentJson.has("id") && !contentJson.has("message_id")) {
+                                contentJson.put("id", messageId)
+                            }
+                            // Ensure reply_to_msg is included if present in WebSocket event but missing from content
+                            if (replyToMsg != null && replyToMsg.isNotEmpty() && !contentJson.has("reply_to_msg")) {
+                                contentJson.put("reply_to_msg", replyToMsg)
+                            }
+                            messageBytes = contentJson.toString().toByteArray(Charsets.UTF_8)
+                        } else {
+                            // Content is just the message text, reconstruct full Message JSON
+                            // This shouldn't happen if server forwards the full Message, but handle it anyway
+                            val messageJson = org.json.JSONObject().apply {
+                                if (messageId != null && messageId.isNotEmpty()) {
+                                    put("id", messageId)
+                                }
+                                put("sender", senderId)
+                                put("recipient", deviceId) // Will be corrected by protocol
+                                put("content", content)
+                                put("app_id", "offline-messenger") // Default app ID
+                                put("priority", "Medium")
+                                put("ttl", 8)
+                                put("hop_count", 0)
+                                put("requires_ack", true)
+                                if (replyToMsg != null && replyToMsg.isNotEmpty()) {
+                                    put("reply_to_msg", replyToMsg)
+                                }
+                            }
+                            messageBytes = messageJson.toString().toByteArray(Charsets.UTF_8)
+                        }
+                    } catch (e: org.json.JSONException) {
+                        // Content is not JSON (plain text), reconstruct full Message JSON
+                        val messageJson = org.json.JSONObject().apply {
+                            if (messageId != null && messageId.isNotEmpty()) {
+                                put("id", messageId)
+                            }
+                            put("sender", senderId)
+                            put("recipient", deviceId) // Will be corrected by protocol
+                            put("content", content)
+                            put("app_id", "offline-messenger") // Default app ID
+                            put("priority", "Medium")
+                            put("ttl", 8)
+                            put("hop_count", 0)
+                            put("requires_ack", true)
+                            if (replyToMsg != null && replyToMsg.isNotEmpty()) {
+                                put("reply_to_msg", replyToMsg)
+                            }
+                        }
+                        messageBytes = messageJson.toString().toByteArray(Charsets.UTF_8)
+                    }
+                    
+                    val bytes = messageBytes.map { it.toUByte() }
                     protocol.internetMessageReceived(senderId, bytes)
                     
                     emitDiagnostic("debug", "Message received from relay", mapOf(
                         "senderId" to senderId,
-                        "contentLength" to content.length
+                        "messageId" to (messageId ?: "none"),
+                        "contentLength" to content.length,
+                        "hasReplyToMsg" to (replyToMsg != null && replyToMsg.isNotEmpty())
                     ))
                 } catch (e: Exception) {
                     emitDiagnostic("error", "Error processing relay message", mapOf(
@@ -577,7 +663,7 @@ class InternetManager(
                 }
                 
                 val message = protocol.internetGetNextMessage() ?: break
-                sendMessage(message.recipientId, message.data.map { it.toByte() }.toByteArray())
+                sendMessage(message.recipientId, message.data.map { it.toByte() }.toByteArray(), message.replyToMsg)
                 messagesSent++
             }
             
@@ -593,7 +679,7 @@ class InternetManager(
         }
     }
     
-    private fun sendMessage(recipientId: String, data: ByteArray) {
+    private fun sendMessage(recipientId: String, data: ByteArray, replyToMsg: String? = null) {
         val ws = webSocket
         // Re-check connection state right before sending
         // This handles race conditions where connection drops between poll and send
@@ -612,39 +698,13 @@ class InternetManager(
         // Convert data to string content for the relay protocol
         val content = String(data, Charsets.UTF_8)
         
-        // Try to parse the message JSON to extract reply_to_msg if present
-        var replyToMsg: String? = null
-        try {
-            val messageJson = org.json.JSONObject(content)
-            if (messageJson.has("reply_to_msg") && !messageJson.isNull("reply_to_msg")) {
-                // reply_to_msg is stored as a MessageId object with a string representation
-                // Try to extract it as a string first
-                val replyToMsgValue = messageJson.opt("reply_to_msg")
-                if (replyToMsgValue is String) {
-                    replyToMsg = replyToMsgValue
-                } else if (replyToMsgValue is org.json.JSONObject) {
-                    // If it's an object, it might be a MessageId with nested structure
-                    // Try to get a string representation
-                    replyToMsg = replyToMsgValue.toString()
-                } else {
-                    // Try as string
-                    replyToMsg = messageJson.optString("reply_to_msg", null)
-                    if (replyToMsg.isNullOrEmpty()) {
-                        replyToMsg = null
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // If parsing fails, message might not be JSON or might be plain text
-            // Continue without reply_to_msg
-        }
-        
         // Wrap in relay server protocol format
+        // reply_to_msg is now provided directly from the Rust SDK via InternetMessage
         val relayMessage = org.json.JSONObject().apply {
             put("type", "SendMessage")
             put("recipient", recipientId)
             put("content", content)
-            if (replyToMsg != null) {
+            if (replyToMsg != null && replyToMsg.isNotEmpty()) {
                 put("reply_to_msg", replyToMsg)
             }
         }

@@ -206,6 +206,10 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     Record<string, number>
   >({});
   const processedIncomingMessageIdsRef = useRef<Map<string, number>>(new Map());
+  // Track pending messages by recipient to match with server's MessageSent events
+  const pendingMessagesByRecipientRef = useRef<
+    Map<string, Array<{ tempId: string; message: Message }>>
+  >(new Map());
 
   // MLS encryption state
   const [isMlsInitialized, setIsMlsInitialized] = useState(false);
@@ -593,22 +597,23 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           }
         }
 
-        const messageId = await protocolSendMessage(
+        // Send message - SDK may return a temporary ID, but we'll use server's message_id from MessageSent event
+        const tempMessageId = await protocolSendMessage(
           recipientId,
           messageToSend,
           priority,
           replyToMsg,
         );
-        if (!messageId) {
+        if (!tempMessageId) {
           throw new Error('Message ID not returned');
         }
         console.log(
-          `[ProtocolProvider] Message queued successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`,
+          `[ProtocolProvider] Message queued successfully to ${recipientId} with temp ID ${tempMessageId} (encrypted: ${isEncrypted})`,
         );
 
         const now = Date.now();
         const newMessage: Message = {
-          id: messageId,
+          id: tempMessageId, // Temporary ID, will be updated when server's MessageSent event arrives
           senderId: currentUserId,
           recipientId,
           content, // Store the original plaintext content for display
@@ -619,6 +624,12 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           isEncrypted,
           replyToMsg,
         };
+
+        // Track pending message to match with server's MessageSent event
+        const pendingQueue =
+          pendingMessagesByRecipientRef.current.get(recipientId) || [];
+        pendingQueue.push({ tempId: tempMessageId, message: newMessage });
+        pendingMessagesByRecipientRef.current.set(recipientId, pendingQueue);
 
         setChats(prevChats => {
           const existingChatIndex = prevChats.findIndex(
@@ -749,7 +760,42 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           case 'message_sent': {
             const sentEvent = event as any;
             if (sentEvent.sender === currentUserId && sentEvent.message_id) {
-              sentMessageIds.add(sentEvent.message_id);
+              const serverMessageId = sentEvent.message_id;
+              const recipient = sentEvent.recipient;
+
+              // Match with pending message using FIFO queue
+              const pendingQueue =
+                pendingMessagesByRecipientRef.current.get(recipient);
+              if (pendingQueue && pendingQueue.length > 0) {
+                const { tempId, message } = pendingQueue.shift()!;
+                // Update message ID with server-generated ID
+                setChats(prevChats => {
+                  return prevChats.map(chat => {
+                    if (chat.peerId === recipient) {
+                      const updatedMessages = chat.messages.map(msg =>
+                        msg.id === tempId
+                          ? { ...msg, id: serverMessageId }
+                          : msg,
+                      );
+                      const updatedLastMessage =
+                        chat.lastMessage?.id === tempId
+                          ? { ...chat.lastMessage, id: serverMessageId }
+                          : chat.lastMessage;
+                      return {
+                        ...chat,
+                        messages: updatedMessages,
+                        lastMessage: updatedLastMessage,
+                      };
+                    }
+                    return chat;
+                  });
+                });
+                console.log(
+                  `[ProtocolProvider] Updated message ID from ${tempId} to ${serverMessageId} for recipient ${recipient}`,
+                );
+              }
+
+              sentMessageIds.add(serverMessageId);
             }
             break;
           }
@@ -773,9 +819,14 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               break;
             }
 
-            const messageId: string =
-              msgEvent.message_id ||
-              `inbound_${msgEvent.sender}_${msgEvent.timestamp ?? Date.now()}`;
+            // Use server-generated message_id, don't generate our own
+            const messageId: string = msgEvent.message_id;
+            if (!messageId) {
+              console.warn(
+                '[ProtocolProvider] Received message without message_id, skipping',
+              );
+              break;
+            }
 
             if (processedIncomingMessageIdsRef.current.has(messageId)) {
               break;

@@ -3976,6 +3976,8 @@ data class InternetMessage (
     var `recipientId`: kotlin.String
     , 
     var `data`: List<kotlin.UByte>
+    , 
+    var `replyToMsg`: kotlin.String?
     
 ){
     
@@ -3992,17 +3994,20 @@ public object FfiConverterTypeInternetMessage: FfiConverterRustBuffer<InternetMe
         return InternetMessage(
             FfiConverterString.read(buf),
             FfiConverterSequenceUByte.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: InternetMessage) = (
             FfiConverterString.allocationSize(value.`recipientId`) +
-            FfiConverterSequenceUByte.allocationSize(value.`data`)
+            FfiConverterSequenceUByte.allocationSize(value.`data`) +
+            FfiConverterOptionalString.allocationSize(value.`replyToMsg`)
     )
 
     override fun write(value: InternetMessage, buf: ByteBuffer) {
             FfiConverterString.write(value.`recipientId`, buf)
             FfiConverterSequenceUByte.write(value.`data`, buf)
+            FfiConverterOptionalString.write(value.`replyToMsg`, buf)
     }
 }
 

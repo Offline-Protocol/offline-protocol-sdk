@@ -27,25 +27,53 @@ interface MessageBubbleProps {
   isFirstInGroup: boolean;
   onSwipeRight?: (message: Message) => void;
   allMessages?: Message[]; // For finding replied-to message
+  peerName?: string; // For displaying sender name in replies
 }
 
-function MessageBubble({ message, isLastInGroup, isFirstInGroup, onSwipeRight, allMessages }: MessageBubbleProps) {
+function MessageBubble({
+  message,
+  isLastInGroup,
+  isFirstInGroup,
+  onSwipeRight,
+  allMessages,
+  peerName,
+}: MessageBubbleProps) {
   const { theme } = useTheme();
   const isFromMe = message.isFromMe;
   const isEncrypted = message.isEncrypted ?? false;
-  
+
   // Find the message this is replying to
-  const repliedToMessage = message.replyToMsg && allMessages
-    ? allMessages.find(m => m.id === message.replyToMsg)
-    : undefined;
-  
+  const repliedToMessage =
+    message.replyToMsg && allMessages
+      ? allMessages.find(m => m.id === message.replyToMsg)
+      : undefined;
+
+	console.log({allMessages})
+
+  // Determine the sender label for the reply preview
+  const getReplySenderLabel = () => {
+    if (!repliedToMessage) return 'Original message';
+
+    // If the current message is from me
+    if (isFromMe) {
+      // I'm replying to my own message or their message
+      return repliedToMessage.isFromMe ? 'You' : peerName || 'They';
+    } else {
+      // Received message - they're replying to my message or their own
+      return repliedToMessage.isFromMe ? 'You' : peerName || 'They';
+    }
+  };
+
   // Pan responder for swipe gesture
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => false,
       onMoveShouldSetPanResponder: (_, gestureState) => {
         // Only respond to horizontal swipes (right swipe)
-        return Math.abs(gestureState.dx) > 10 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy);
+        return (
+          Math.abs(gestureState.dx) > 10 &&
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy)
+        );
       },
       onPanResponderRelease: (_, gestureState) => {
         // Right swipe (positive dx) to select for reply
@@ -53,13 +81,13 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup, onSwipeRight, a
           onSwipeRight(message);
         }
       },
-    })
+    }),
   ).current;
-  
+
   const formatTime = (timestamp: number) => {
-    return new Date(timestamp).toLocaleTimeString([], { 
-      hour: '2-digit', 
-      minute: '2-digit' 
+    return new Date(timestamp).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
     });
   };
 
@@ -92,7 +120,7 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup, onSwipeRight, a
   };
 
   return (
-    <View 
+    <View
       style={[
         styles.messageContainer,
         isFromMe ? styles.myMessageContainer : styles.theirMessageContainer,
@@ -102,71 +130,109 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup, onSwipeRight, a
       <View
         style={[
           styles.messageBubble,
-          isFromMe 
-            ? [styles.myMessageBubble, { backgroundColor: theme.colors.primary }]
-            : [styles.theirMessageBubble, { backgroundColor: theme.colors.surface }],
+          isFromMe
+            ? [
+                styles.myMessageBubble,
+                { backgroundColor: theme.colors.primary },
+              ]
+            : [
+                styles.theirMessageBubble,
+                { backgroundColor: theme.colors.surface },
+              ],
           isFirstInGroup && styles.firstInGroup,
           isLastInGroup && styles.lastInGroup,
         ]}
       >
-        {/* Reply preview */}
-        {repliedToMessage && (
-          <View style={[
-            styles.replyPreview,
-            {
-              backgroundColor: isFromMe 
-                ? 'rgba(255,255,255,0.2)' 
-                : theme.colors.background,
-              borderLeftColor: theme.colors.primary,
-            }
-          ]}>
-            <Text
-              style={[
-                styles.replyPreviewSender,
-                { color: isFromMe ? theme.colors.textInverse : theme.colors.primary }
-              ]}
-              numberOfLines={1}
-            >
-              {repliedToMessage.isFromMe ? 'You' : 'They'}
-            </Text>
-            <Text
-              style={[
-                styles.replyPreviewText,
-                { color: isFromMe ? theme.colors.textInverse : theme.colors.textSecondary }
-              ]}
-              numberOfLines={1}
-            >
-              {repliedToMessage.content}
-            </Text>
+        {/* Reply preview - show if message has replyToMsg attribute */}
+        {message.replyToMsg && (
+          <View
+            style={[
+              styles.replyPreview,
+              {
+                backgroundColor: isFromMe
+                  ? 'rgba(255,255,255,0.2)'
+                  : theme.colors.background,
+                borderLeftColor: theme.colors.primary,
+              },
+            ]}
+          >
+            {repliedToMessage ? (
+              <>
+                <Text
+                  style={[
+                    styles.replyPreviewSender,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.primary,
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {getReplySenderLabel()}
+                </Text>
+                <Text
+                  style={[
+                    styles.replyPreviewText,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.textSecondary,
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {repliedToMessage.content}
+                </Text>
+              </>
+            ) : (
+              // Fallback when replied-to message not found
+              <Text
+                style={[
+                  styles.replyPreviewText,
+                  {
+                    color: isFromMe
+                      ? theme.colors.textInverse
+                      : theme.colors.textSecondary,
+                    fontStyle: 'italic',
+                  },
+                ]}
+                numberOfLines={1}
+              >
+                Replying to a message
+              </Text>
+            )}
           </View>
         )}
-        
+
         <Text
           style={[
             styles.messageText,
-            { 
-              color: isFromMe ? theme.colors.textInverse : theme.colors.text 
+            {
+              color: isFromMe ? theme.colors.textInverse : theme.colors.text,
             },
           ]}
         >
           {message.content}
         </Text>
-        
+
         <View style={styles.messageFooter}>
           {isEncrypted && (
             <Icon
               name="lock-closed"
               size={10}
-              color={isFromMe ? theme.colors.textInverse : theme.colors.textSecondary}
+              color={
+                isFromMe ? theme.colors.textInverse : theme.colors.textSecondary
+              }
               style={{ marginRight: 4, opacity: 0.7 }}
             />
           )}
           <Text
             style={[
               styles.messageTime,
-              { 
-                color: isFromMe 
-                  ? theme.colors.textInverse 
+              {
+                color: isFromMe
+                  ? theme.colors.textInverse
                   : theme.colors.textSecondary,
                 opacity: 0.7,
               },
@@ -174,7 +240,7 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup, onSwipeRight, a
           >
             {formatTime(message.timestamp)}
           </Text>
-          
+
           {isFromMe && (
             <Icon
               name={getStatusIcon(message.status)}
@@ -185,9 +251,14 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup, onSwipeRight, a
           )}
         </View>
       </View>
-      
+
       {message.priority === MessagePriority.High && (
-        <View style={[styles.priorityIndicator, { backgroundColor: getPriorityColor(message.priority) }]} />
+        <View
+          style={[
+            styles.priorityIndicator,
+            { backgroundColor: getPriorityColor(message.priority) },
+          ]}
+        />
       )}
     </View>
   );
@@ -380,13 +451,18 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
 
   const groupedMessages = groupMessages(messages);
 
-  const renderMessage = ({ item }: { item: Message & { isFirstInGroup: boolean; isLastInGroup: boolean } }) => (
+  const renderMessage = ({
+    item,
+  }: {
+    item: Message & { isFirstInGroup: boolean; isLastInGroup: boolean };
+  }) => (
     <MessageBubble
       message={item}
       isFirstInGroup={item.isFirstInGroup}
       isLastInGroup={item.isLastInGroup}
       onSwipeRight={handleSwipeRight}
       allMessages={messages}
+      peerName={peerName}
     />
   );
 

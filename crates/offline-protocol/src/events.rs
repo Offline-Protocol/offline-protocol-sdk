@@ -50,6 +50,9 @@ pub enum Event {
         transport: String,
         /// When the message was received.
         timestamp: i64,
+        /// ID of the message this is replying to (optional).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reply_to_msg: Option<String>,
     },
 
     /// A message was successfully delivered (ACK received).
@@ -416,6 +419,7 @@ impl fmt::Debug for Event {
                 hop_count,
                 transport,
                 timestamp,
+                reply_to_msg: _,
             } => f
                 .debug_struct("MessageReceived")
                 .field("message_id", message_id)
@@ -425,6 +429,7 @@ impl fmt::Debug for Event {
                 .field("hop_count", hop_count)
                 .field("transport", transport)
                 .field("timestamp", timestamp)
+                .field("reply_to_msg", &"[REDACTED]")
                 .finish(),
             Self::MessageDelivered {
                 message_id,
