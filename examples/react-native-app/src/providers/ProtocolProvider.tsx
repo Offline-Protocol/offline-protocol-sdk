@@ -206,10 +206,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     Record<string, number>
   >({});
   const processedIncomingMessageIdsRef = useRef<Map<string, number>>(new Map());
-  // Track pending messages by recipient to match with server's MessageSent events
-  const pendingMessagesByRecipientRef = useRef<
-    Map<string, Array<{ tempId: string; message: Message }>>
-  >(new Map());
 
   // MLS encryption state
   const [isMlsInitialized, setIsMlsInitialized] = useState(false);
@@ -597,23 +593,23 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           }
         }
 
-        // Send message - SDK may return a temporary ID, but we'll use server's message_id from MessageSent event
-        const tempMessageId = await protocolSendMessage(
+        // Send message - SDK returns the final message ID
+        const messageId = await protocolSendMessage(
           recipientId,
           messageToSend,
           priority,
           replyToMsg,
         );
-        if (!tempMessageId) {
+        if (!messageId) {
           throw new Error('Message ID not returned');
         }
         console.log(
-          `[ProtocolProvider] Message queued successfully to ${recipientId} with temp ID ${tempMessageId} (encrypted: ${isEncrypted})`,
+          `[ProtocolProvider] Message sent successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`,
         );
 
         const now = Date.now();
         const newMessage: Message = {
-          id: tempMessageId, // Temporary ID, will be updated when server's MessageSent event arrives
+          id: messageId, // Use the ID returned by protocolSendMessage directly
           senderId: currentUserId,
           recipientId,
           content, // Store the original plaintext content for display
@@ -625,12 +621,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           replyToMsg,
         };
 
-        // Track pending message to match with server's MessageSent event
-        const pendingQueue =
-          pendingMessagesByRecipientRef.current.get(recipientId) || [];
-        pendingQueue.push({ tempId: tempMessageId, message: newMessage });
-        pendingMessagesByRecipientRef.current.set(recipientId, pendingQueue);
-
         setChats(prevChats => {
           const existingChatIndex = prevChats.findIndex(
             chat => chat.peerId === recipientId,
@@ -639,6 +629,16 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           if (existingChatIndex >= 0) {
             const updatedChats = [...prevChats];
             const existingChat = updatedChats[existingChatIndex];
+            // Check if message already exists (deduplicate by ID)
+            const messageExists = existingChat.messages.some(
+              msg => msg.id === messageId,
+            );
+            if (messageExists) {
+              console.warn(
+                `[ProtocolProvider] Duplicate message ${messageId} detected when sending, skipping`,
+              );
+              return prevChats; // Don't add duplicate
+            }
             updatedChats[existingChatIndex] = {
               ...existingChat,
               peerName: getPeerDisplayName(recipientId),
@@ -760,42 +760,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           case 'message_sent': {
             const sentEvent = event as any;
             if (sentEvent.sender === currentUserId && sentEvent.message_id) {
-              const serverMessageId = sentEvent.message_id;
-              const recipient = sentEvent.recipient;
-
-              // Match with pending message using FIFO queue
-              const pendingQueue =
-                pendingMessagesByRecipientRef.current.get(recipient);
-              if (pendingQueue && pendingQueue.length > 0) {
-                const { tempId, message } = pendingQueue.shift()!;
-                // Update message ID with server-generated ID
-                setChats(prevChats => {
-                  return prevChats.map(chat => {
-                    if (chat.peerId === recipient) {
-                      const updatedMessages = chat.messages.map(msg =>
-                        msg.id === tempId
-                          ? { ...msg, id: serverMessageId }
-                          : msg,
-                      );
-                      const updatedLastMessage =
-                        chat.lastMessage?.id === tempId
-                          ? { ...chat.lastMessage, id: serverMessageId }
-                          : chat.lastMessage;
-                      return {
-                        ...chat,
-                        messages: updatedMessages,
-                        lastMessage: updatedLastMessage,
-                      };
-                    }
-                    return chat;
-                  });
-                });
-                console.log(
-                  `[ProtocolProvider] Updated message ID from ${tempId} to ${serverMessageId} for recipient ${recipient}`,
-                );
-              }
-
-              sentMessageIds.add(serverMessageId);
+              const messageId = sentEvent.message_id;
+              sentMessageIds.add(messageId);
             }
             break;
           }
@@ -1123,6 +1089,16 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             );
             if (existingChatIndex >= 0) {
               const existingChat = updatedChats[existingChatIndex];
+              // Check if message already exists (deduplicate by ID)
+              const messageExists = existingChat.messages.some(
+                msg => msg.id === message.id,
+              );
+              if (messageExists) {
+                console.warn(
+                  `[ProtocolProvider] Duplicate message ${message.id} detected, skipping`,
+                );
+                return; // Skip adding duplicate
+              }
               const nextMessages = [...existingChat.messages, message];
               updatedChats[existingChatIndex] = {
                 ...existingChat,
