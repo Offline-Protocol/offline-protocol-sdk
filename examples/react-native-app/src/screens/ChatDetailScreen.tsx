@@ -10,6 +10,8 @@ import {
   Platform,
   Alert,
   Keyboard,
+  GestureResponderEvent,
+  PanResponder,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon } from '../components/Icon';
@@ -23,12 +25,36 @@ interface MessageBubbleProps {
   message: Message;
   isLastInGroup: boolean;
   isFirstInGroup: boolean;
+  onSwipeRight?: (message: Message) => void;
+  allMessages?: Message[]; // For finding replied-to message
 }
 
-function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubbleProps) {
+function MessageBubble({ message, isLastInGroup, isFirstInGroup, onSwipeRight, allMessages }: MessageBubbleProps) {
   const { theme } = useTheme();
   const isFromMe = message.isFromMe;
   const isEncrypted = message.isEncrypted ?? false;
+  
+  // Find the message this is replying to
+  const repliedToMessage = message.replyToMsg && allMessages
+    ? allMessages.find(m => m.id === message.replyToMsg)
+    : undefined;
+  
+  // Pan responder for swipe gesture
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        // Only respond to horizontal swipes (right swipe)
+        return Math.abs(gestureState.dx) > 10 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        // Right swipe (positive dx) to select for reply
+        if (gestureState.dx > 50 && onSwipeRight) {
+          onSwipeRight(message);
+        }
+      },
+    })
+  ).current;
   
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString([], { 
@@ -71,6 +97,7 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubble
         styles.messageContainer,
         isFromMe ? styles.myMessageContainer : styles.theirMessageContainer,
       ]}
+      {...panResponder.panHandlers}
     >
       <View
         style={[
@@ -82,6 +109,38 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubble
           isLastInGroup && styles.lastInGroup,
         ]}
       >
+        {/* Reply preview */}
+        {repliedToMessage && (
+          <View style={[
+            styles.replyPreview,
+            {
+              backgroundColor: isFromMe 
+                ? 'rgba(255,255,255,0.2)' 
+                : theme.colors.background,
+              borderLeftColor: theme.colors.primary,
+            }
+          ]}>
+            <Text
+              style={[
+                styles.replyPreviewSender,
+                { color: isFromMe ? theme.colors.textInverse : theme.colors.primary }
+              ]}
+              numberOfLines={1}
+            >
+              {repliedToMessage.isFromMe ? 'You' : 'They'}
+            </Text>
+            <Text
+              style={[
+                styles.replyPreviewText,
+                { color: isFromMe ? theme.colors.textInverse : theme.colors.textSecondary }
+              ]}
+              numberOfLines={1}
+            >
+              {repliedToMessage.content}
+            </Text>
+          </View>
+        )}
+        
         <Text
           style={[
             styles.messageText,
@@ -151,6 +210,7 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   const [showPriorityPicker, setShowPriorityPicker] = useState(false);
   const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
   const [inputHeight, setInputHeight] = useState(44);
+  const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(null);
   
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
@@ -257,9 +317,10 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     if (!text) return;
 
     try {
-      await sendMessage(peerId, text, priority);
+      await sendMessage(peerId, text, priority, replyingToMessage?.id);
       setInputText('');
       setInputHeight(44);
+      setReplyingToMessage(null); // Clear reply selection after sending
       // Keep keyboard open for quick follow-up messages
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
@@ -267,7 +328,16 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     } catch (error) {
       Alert.alert('Send Failed', 'Failed to send message. Please try again.');
     }
-  }, [inputText, peerId, priority, sendMessage]);
+  }, [inputText, peerId, priority, sendMessage, replyingToMessage]);
+  
+  const handleSwipeRight = useCallback((message: Message) => {
+    setReplyingToMessage(message);
+    // Focus input and scroll to bottom
+    inputRef.current?.focus();
+    setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  }, []);
 
   const handleContentSizeChange = useCallback((event: any) => {
     const newHeight = Math.min(Math.max(44, event.nativeEvent.contentSize.height + 20), 120);
@@ -315,6 +385,8 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
       message={item}
       isFirstInGroup={item.isFirstInGroup}
       isLastInGroup={item.isLastInGroup}
+      onSwipeRight={handleSwipeRight}
+      allMessages={messages}
     />
   );
 
@@ -466,6 +538,31 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
       ]}
     >
       {renderPriorityPicker()}
+      
+      {/* Reply Preview */}
+      {replyingToMessage && (
+        <View style={[styles.replyPreviewContainer, { backgroundColor: theme.colors.background }]}>
+          <View style={[styles.replyPreviewContent, { borderLeftColor: theme.colors.primary }]}>
+            <View style={styles.replyPreviewInfo}>
+              <Text style={[styles.replyPreviewLabel, { color: theme.colors.primary }]}>
+                Replying to {replyingToMessage.isFromMe ? 'yourself' : peerName}
+              </Text>
+              <Text
+                style={[styles.replyPreviewMessage, { color: theme.colors.textSecondary }]}
+                numberOfLines={1}
+              >
+                {replyingToMessage.content}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setReplyingToMessage(null)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Icon name="close" size={18} color={theme.colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
       
       {/* Input Row */}
       <View style={styles.inputRow}>
@@ -891,5 +988,47 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 2,
+  },
+  replyPreview: {
+    marginBottom: 8,
+    paddingLeft: 10,
+    paddingRight: 8,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderLeftWidth: 3,
+  },
+  replyPreviewSender: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 2,
+    opacity: 0.9,
+  },
+  replyPreviewText: {
+    fontSize: 13,
+    opacity: 0.8,
+  },
+  replyPreviewContainer: {
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  replyPreviewContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 10,
+    borderLeftWidth: 3,
+  },
+  replyPreviewInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  replyPreviewLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  replyPreviewMessage: {
+    fontSize: 13,
   },
 });

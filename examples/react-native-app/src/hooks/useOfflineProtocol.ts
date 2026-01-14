@@ -35,6 +35,7 @@ interface UseOfflineProtocolReturn {
     recipient: string,
     content: string,
     priority: MessagePriority,
+    replyToMsg?: string,
   ) => Promise<string | null>;
   clearEvents: () => void;
   requestPermissions: () => Promise<boolean>;

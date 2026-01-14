@@ -99,6 +99,7 @@ export interface Message {
   status: 'sending' | 'sent' | 'delivered' | 'failed';
   isFromMe: boolean;
   isEncrypted?: boolean;
+  replyToMsg?: string; // Message ID this message is replying to
 }
 
 export interface Chat {
@@ -152,6 +153,7 @@ interface ProtocolContextType {
     recipientId: string,
     content: string,
     priority?: MessagePriority,
+    replyToMsg?: string,
   ) => Promise<void>;
   markAsRead: (chatId: string) => void;
   updateUserName: (name: string) => void;
@@ -323,6 +325,9 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     relay: {
       allowRelay: true,
       relayPriority: 'auto',
+    },
+    encryption: {
+      enabled: false,
     },
   });
 
@@ -498,6 +503,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       recipientId: string,
       content: string,
       priority: MessagePriority = MessagePriority.Medium,
+      replyToMsg?: string,
     ) => {
       try {
         console.log(
@@ -591,6 +597,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           recipientId,
           messageToSend,
           priority,
+          replyToMsg,
         );
         if (!messageId) {
           throw new Error('Message ID not returned');
@@ -610,6 +617,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           status: 'sending',
           isFromMe: true,
           isEncrypted,
+          replyToMsg,
         };
 
         setChats(prevChats => {
@@ -943,6 +951,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               status: 'delivered',
               isFromMe: false,
               isEncrypted,
+              replyToMsg: msgEvent.reply_to_msg || msgEvent.replyToMsg,
             };
             receivedMessages.push(receivedMessage);
             break;
