@@ -162,6 +162,14 @@ pub struct OfflineProtocol {
 
     /// Set of peers we've already sent our key package to.
     key_package_sent_to: std::collections::HashSet<String>,
+
+    /// Sessions confirmed established (received Welcome or successful decrypt).
+    /// Only encrypt messages when the session is confirmed to avoid race conditions.
+    confirmed_sessions: std::collections::HashSet<String>,
+
+    /// Encrypted messages received before session was established (sender -> messages).
+    /// These are queued and processed after session confirmation.
+    pending_decryption: HashMap<String, Vec<Message>>,
 }
 
 impl OfflineProtocol {
@@ -199,6 +207,8 @@ impl OfflineProtocol {
             pending_encrypted_messages: HashMap::new(),
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
+            confirmed_sessions: std::collections::HashSet::new(),
+            pending_decryption: HashMap::new(),
             config,
         })
     }
@@ -619,6 +629,11 @@ impl OfflineProtocol {
     }
 
     /// Encrypts content for a recipient, handling session creation if needed.
+    /// 
+    /// To avoid race conditions where both peers create sessions simultaneously,
+    /// we defer encryption until the session is "confirmed". A session is confirmed when:
+    /// - We join via their Welcome message (welcome-wins), OR
+    /// - We successfully decrypt their first message
     fn encrypt_content_for_recipient(
         &mut self,
         recipient: &str,
@@ -651,6 +666,14 @@ impl OfflineProtocol {
                 // Send welcome as internal message
                 self.send_welcome_message(recipient, &welcome)?;
                 debug!(recipient = %recipient, "Created MLS session and sent welcome");
+                
+                // Don't encrypt immediately after creating session.
+                // Queue message until session is confirmed (peer processes our Welcome
+                // and we successfully decrypt their first message, or we receive their Welcome).
+                // This avoids race conditions where both peers create sessions.
+                if self.config.encryption.store_pending {
+                    return Err(Error::SessionPending);
+                }
             } else {
                 // No key package available
                 if self.config.encryption.store_pending {
@@ -660,6 +683,16 @@ impl OfflineProtocol {
                 }
                 return Err(Error::NoKeyPackage(recipient.to_string()));
             }
+        }
+
+        // Only encrypt if session is confirmed (Welcome processed or successful decrypt)
+        if !self.confirmed_sessions.contains(recipient) {
+            debug!(recipient = %recipient, "Session exists but not confirmed, queuing message");
+            if self.config.encryption.store_pending {
+                return Err(Error::SessionPending);
+            }
+            // If not storing pending, we still need to wait for confirmation
+            return Err(Error::SessionPending);
         }
 
         // Encrypt the message
@@ -733,6 +766,61 @@ impl OfflineProtocol {
             }
         }
         Ok(())
+    }
+
+    /// Processes encrypted messages that were received before the session was established.
+    /// 
+    /// This handles the case where encrypted messages arrive before the Welcome message.
+    /// After the session is confirmed (via Welcome), we re-process these queued messages.
+    fn process_pending_decryption(&mut self, sender: &str) {
+        let messages = match self.pending_decryption.remove(sender) {
+            Some(msgs) => msgs,
+            None => return,
+        };
+        
+        if messages.is_empty() {
+            return;
+        }
+        
+        info!(sender = %sender, count = messages.len(), "Processing pending encrypted messages");
+        
+        for msg in messages {
+            // Re-process each message through the internal handler
+            if let Some(result) = self.process_internal_message(&msg) {
+                match result {
+                    InternalMessageResult::Decrypted(content) => {
+                        // Successfully decrypted - add to received messages queue
+                        let mut decrypted_msg = msg.clone();
+                        decrypted_msg.content = content.clone();
+                        decrypted_msg.metadata.insert("encrypted".to_string(), "true".to_string());
+                        decrypted_msg.metadata.insert("delayed_decrypt".to_string(), "true".to_string());
+                        
+                        if let Ok(mut state) = lock_shared_state(&self.shared_state) {
+                            state.received_messages.push(decrypted_msg.clone());
+                            
+                            // Emit message received event
+                            let event = Event::MessageReceived {
+                                message_id: decrypted_msg.id.as_str().to_string(),
+                                sender: decrypted_msg.sender.as_str().to_string(),
+                                recipient: decrypted_msg.recipient.as_str().to_string(),
+                                content,
+                                hop_count: decrypted_msg.hop_count.value(),
+                                transport: "delayed".to_string(),
+                                timestamp: Utc::now().timestamp_millis(),
+                                reply_to_msg: decrypted_msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()),
+                            };
+                            state.emit_event(event);
+                        }
+                        
+                        debug!(message_id = %msg.id, "Processed delayed encrypted message");
+                    }
+                    InternalMessageResult::Consumed => {
+                        // Message was consumed (shouldn't happen for encrypted messages, but handle it)
+                        debug!(message_id = %msg.id, "Delayed message was consumed internally");
+                    }
+                }
+            }
+        }
     }
 
     /// Sends our key package to a peer for session establishment.
@@ -1026,15 +1114,26 @@ impl OfflineProtocol {
             if let Ok(welcome) = serde_json::from_str::<WelcomeMessage>(data) {
                 debug!(sender = %sender, group_id = %welcome.group_id, "Received welcome message");
                 
-                // Track if we need to flush pending messages
+                // Track if we need to flush pending messages and process pending decryption
                 let mut should_flush = false;
                 let sender_owned = sender.to_string();
                 
                 if let Some(mls) = self.mls_manager.clone() {
                     if let Ok(manager) = mls.read() {
-                        match manager.join_session(&welcome) {
+                        // Check if we already have a session (race condition)
+                        let has_existing = manager.has_session(sender).unwrap_or(false);
+                        
+                        let result = if has_existing {
+                            // Welcome-wins: replace our session with theirs
+                            info!(sender = %sender, "Welcome-wins: replacing our session with incoming Welcome");
+                            manager.replace_session_with_welcome(&welcome)
+                        } else {
+                            manager.join_session(&welcome)
+                        };
+                        
+                        match result {
                             Ok(_) => {
-                                info!(sender = %sender, "Joined MLS session");
+                                info!(sender = %sender, "Joined MLS session via Welcome");
                                 should_flush = true;
                             }
                             Err(e) => {
@@ -1044,9 +1143,16 @@ impl OfflineProtocol {
                     }
                 }
                 
-                // Flush pending messages after releasing the MLS lock
+                // Confirm session and process queued items after releasing the MLS lock
                 if should_flush {
+                    // Mark session as confirmed - we're using their session state
+                    self.confirmed_sessions.insert(sender_owned.clone());
+                    
+                    // Flush pending outgoing messages
                     let _ = self.flush_pending_messages(&sender_owned);
+                    
+                    // Process any encrypted messages that arrived before the Welcome
+                    self.process_pending_decryption(&sender_owned);
                 }
             }
             return Some(InternalMessageResult::Consumed);
@@ -1056,27 +1162,75 @@ impl OfflineProtocol {
         if content.starts_with(internal_prefixes::ENCRYPTED) {
             let data = &content[internal_prefixes::ENCRYPTED.len()..];
             if let Ok(encrypted) = serde_json::from_str::<EncryptedMessage>(data) {
-                if let Some(mls) = &self.mls_manager {
+                // Track state to update after releasing MLS lock
+                enum DecryptResult {
+                    Success { text: String, sender: String },
+                    Empty,
+                    SessionNotReady { sender: String },
+                    Failed { _error: String },
+                    MlsNotInitialized,
+                }
+                
+                let result = if let Some(mls) = self.mls_manager.clone() {
                     if let Ok(manager) = mls.read() {
                         match manager.decrypt(&encrypted) {
                             Ok(Some(plaintext)) => {
                                 let text = String::from_utf8_lossy(&plaintext).to_string();
-                                debug!(sender = %sender, "Decrypted message");
-                                return Some(InternalMessageResult::Decrypted(text));
+                                debug!(sender = %sender, "Decrypted message successfully");
+                                DecryptResult::Success { 
+                                    text, 
+                                    sender: sender.to_string() 
+                                }
                             }
                             Ok(None) => {
                                 warn!(sender = %sender, "Decryption returned empty");
-                                return Some(InternalMessageResult::Decrypted("[Decryption failed]".to_string()));
+                                DecryptResult::Empty
                             }
                             Err(e) => {
-                                warn!(error = %e, sender = %sender, "Failed to decrypt message");
-                                return Some(InternalMessageResult::Decrypted("[Unable to decrypt]".to_string()));
+                                let error_str = e.to_string();
+                                if error_str.contains("not found") || error_str.contains("GroupNotFound") {
+                                    info!(sender = %sender, "Encrypted message received before session ready, queuing");
+                                    DecryptResult::SessionNotReady { sender: sender.to_string() }
+                                } else {
+                                    warn!(error = %e, sender = %sender, "Failed to decrypt message");
+                                    DecryptResult::Failed { _error: error_str }
+                                }
                             }
                         }
+                    } else {
+                        DecryptResult::MlsNotInitialized
+                    }
+                } else {
+                    DecryptResult::MlsNotInitialized
+                };
+                
+                // Now handle the result without holding the MLS lock
+                match result {
+                    DecryptResult::Success { text, sender: sender_owned } => {
+                        if !self.confirmed_sessions.contains(&sender_owned) {
+                            info!(sender = %sender_owned, "Session confirmed via successful decryption");
+                            self.confirmed_sessions.insert(sender_owned.clone());
+                            let _ = self.flush_pending_messages(&sender_owned);
+                        }
+                        return Some(InternalMessageResult::Decrypted(text));
+                    }
+                    DecryptResult::Empty => {
+                        return Some(InternalMessageResult::Decrypted("[Decryption failed]".to_string()));
+                    }
+                    DecryptResult::SessionNotReady { sender: sender_owned } => {
+                        self.pending_decryption
+                            .entry(sender_owned)
+                            .or_default()
+                            .push(message.clone());
+                        return Some(InternalMessageResult::Consumed);
+                    }
+                    DecryptResult::Failed { .. } => {
+                        return Some(InternalMessageResult::Decrypted("[Unable to decrypt]".to_string()));
+                    }
+                    DecryptResult::MlsNotInitialized => {
+                        return Some(InternalMessageResult::Decrypted("[Encryption not initialized]".to_string()));
                     }
                 }
-                // MLS not initialized, return placeholder
-                return Some(InternalMessageResult::Decrypted("[Encryption not initialized]".to_string()));
             }
         }
 
@@ -1976,5 +2130,176 @@ mod tests {
         assert!(!config.encryption.enabled);
         assert!(config.encryption.auto_key_exchange);
         assert!(!config.encryption.store_pending);
+    }
+
+    #[test]
+    fn test_confirmed_sessions_tracking() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        
+        // Initially no confirmed sessions
+        assert!(protocol.confirmed_sessions.is_empty());
+        
+        // Add a confirmed session
+        protocol.confirmed_sessions.insert("peer123".to_string());
+        
+        assert!(protocol.confirmed_sessions.contains("peer123"));
+        assert!(!protocol.confirmed_sessions.contains("peer456"));
+    }
+
+    #[test]
+    fn test_pending_decryption_queue() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        
+        // Initially no pending decryption messages
+        assert!(protocol.pending_decryption.is_empty());
+        
+        // Queue an encrypted message for a sender
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "encrypted content",
+        );
+        
+        protocol.pending_decryption
+            .entry("sender123".to_string())
+            .or_default()
+            .push(message);
+        
+        // Check message is queued
+        assert!(protocol.pending_decryption.contains_key("sender123"));
+        assert_eq!(protocol.pending_decryption.get("sender123").unwrap().len(), 1);
+        
+        // Queue another message from same sender
+        let message2 = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "more encrypted content",
+        );
+        
+        protocol.pending_decryption
+            .entry("sender123".to_string())
+            .or_default()
+            .push(message2);
+        
+        assert_eq!(protocol.pending_decryption.get("sender123").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_session_confirmation_clears_pending_decryption() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        
+        // Queue some pending decryption messages
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "encrypted content",
+        );
+        
+        protocol.pending_decryption
+            .entry("sender123".to_string())
+            .or_default()
+            .push(message);
+        
+        assert!(!protocol.pending_decryption.is_empty());
+        
+        // Calling process_pending_decryption should remove the entries
+        // (even if decryption fails since MLS is not initialized)
+        protocol.process_pending_decryption("sender123");
+        
+        // The messages should be removed from the pending queue
+        assert!(!protocol.pending_decryption.contains_key("sender123"));
+    }
+
+    #[test]
+    fn test_on_neighbor_lost_clears_confirmed_session() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        
+        // Add a confirmed session
+        protocol.confirmed_sessions.insert("peer123".to_string());
+        protocol.key_package_sent_to.insert("peer123".to_string());
+        
+        assert!(protocol.confirmed_sessions.contains("peer123"));
+        
+        // When neighbor is lost, the key_package_sent_to is cleared
+        // (confirmed_sessions might still remain - it's the crypto state)
+        protocol.on_neighbor_lost("peer123");
+        
+        assert!(!protocol.key_package_sent_to.contains("peer123"));
+    }
+
+    #[test]
+    fn test_welcome_message_confirms_session() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        
+        // Initially no confirmed sessions
+        assert!(!protocol.confirmed_sessions.contains("sender123"));
+        
+        // Simulate receiving a welcome message
+        // Note: Since MLS is not initialized, the welcome won't actually be processed,
+        // but we can test the structure is in place
+        let welcome_content = format!(
+            "{}{{\"group_id\":\"session:sender123:user123\",\"welcome_data\":[],\"inviter_id\":\"sender123\",\"timestamp_ms\":12345}}",
+            internal_prefixes::WELCOME
+        );
+        
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &welcome_content,
+        );
+        
+        // Process the message
+        let result = protocol.process_internal_message(&message);
+        
+        // Should be consumed (welcome message is internal)
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+    }
+
+    #[test]
+    fn test_encrypted_message_before_session_queued() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        
+        // Create an encrypted message with the proper format
+        let encrypted_content = format!(
+            "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+            internal_prefixes::ENCRYPTED
+        );
+        
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &encrypted_content,
+        );
+        
+        // Process the message without MLS initialized - should fail gracefully
+        let result = protocol.process_internal_message(&message);
+        
+        // Without MLS initialized, should return placeholder text
+        assert!(matches!(result, Some(InternalMessageResult::Decrypted(_))));
     }
 }

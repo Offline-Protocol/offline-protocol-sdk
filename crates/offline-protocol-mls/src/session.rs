@@ -107,7 +107,24 @@ impl SessionManager {
     }
 
     /// Joins a session using a Welcome message.
+    /// 
+    /// Implements "welcome-wins" strategy: if we already created a session for this peer
+    /// (race condition), we delete our session and adopt the incoming Welcome instead.
+    /// This ensures both peers end up with the same cryptographic state.
     pub fn join_session(&self, welcome_msg: &WelcomeMessage) -> Result<GroupInfo> {
+        let session_id = GroupId::from(welcome_msg.group_id.as_str());
+        
+        // Welcome-wins: If we already created a session for this peer,
+        // delete it and use the incoming Welcome instead
+        if self.group_manager.load_group(&session_id)?.is_some() {
+            info!(
+                session_id = %session_id,
+                inviter = %welcome_msg.inviter_id,
+                "Welcome-wins: replacing existing session with incoming Welcome"
+            );
+            self.group_manager.delete_group(&session_id)?;
+        }
+        
         // Deserialize the Welcome from the MlsMessageOut bytes
         let mls_msg = MlsMessageIn::tls_deserialize_exact(&welcome_msg.welcome_data)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
@@ -246,5 +263,35 @@ mod tests {
         let manager = create_test_session_manager("alice");
         assert!(!manager.has_session("bob").unwrap());
         assert!(manager.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_session_id_is_deterministic() {
+        // Session IDs should be the same regardless of which user creates them
+        let alice_manager = create_test_session_manager("alice");
+        let bob_manager = create_test_session_manager("bob");
+        
+        let alice_to_bob = alice_manager.get_session_id("bob");
+        let bob_to_alice = bob_manager.get_session_id("alice");
+        
+        // Both should produce the same session ID
+        assert_eq!(alice_to_bob, bob_to_alice);
+        
+        // The session ID should have a consistent format with sorted user IDs
+        assert_eq!(alice_to_bob.as_str(), "session:alice:bob");
+    }
+
+    #[test]
+    fn test_delete_session() {
+        let manager = create_test_session_manager("alice");
+        
+        // Initially no session
+        assert!(!manager.has_session("bob").unwrap());
+        
+        // Delete non-existent session should not panic (delete_group handles this)
+        // This is important for welcome-wins where we delete before knowing if exists
+        let result = manager.delete_session("bob");
+        // Should succeed even if nothing to delete
+        assert!(result.is_ok());
     }
 }
