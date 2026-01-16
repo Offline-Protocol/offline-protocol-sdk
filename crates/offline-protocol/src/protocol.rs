@@ -48,7 +48,7 @@ enum InternalMessageResult {
 }
 
 /// Pending message waiting for session establishment.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct PendingMessage {
     /// Original plaintext content.
     content: String,
@@ -59,8 +59,13 @@ struct PendingMessage {
     /// Reply-to message ID if applicable.
     reply_to_msg: Option<MessageId>,
     /// When the message was queued (for future TTL/expiry support).
-    #[allow(dead_code)]
     queued_at: DateTime<Utc>,
+}
+
+/// Storage key types for message persistence.
+mod storage_keys {
+    /// Key type for pending encrypted messages.
+    pub const PENDING_MESSAGES: &str = "pending_messages";
 }
 
 /// Protocol state.
@@ -170,6 +175,10 @@ pub struct OfflineProtocol {
     /// Encrypted messages received before session was established (sender -> messages).
     /// These are queued and processed after session confirmation.
     pending_decryption: HashMap<String, Vec<Message>>,
+
+    /// Storage for persisting pending messages (reuses MLS storage).
+    /// When set, pending messages survive app crashes/restarts.
+    message_storage: Option<Arc<dyn MlsStorage>>,
 }
 
 impl OfflineProtocol {
@@ -209,6 +218,7 @@ impl OfflineProtocol {
             key_package_sent_to: std::collections::HashSet::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             pending_decryption: HashMap::new(),
+            message_storage: None,
             config,
         })
     }
@@ -218,10 +228,35 @@ impl OfflineProtocol {
     /// This must be called before encryption can be used. The storage
     /// backend should be a platform-native secure storage implementation
     /// (iOS Keychain, Android EncryptedSharedPreferences, etc.).
+    ///
+    /// The same storage is also used for persisting pending messages,
+    /// ensuring they survive app crashes/restarts.
     pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
-        let manager = MlsManager::new(&self.config.user_id, storage)?;
+        let manager = MlsManager::new(&self.config.user_id, storage.clone())?;
         self.mls_manager = Some(Arc::new(RwLock::new(manager)));
-        info!(user_id = %self.config.user_id, "MLS encryption initialized");
+        
+        // Also use this storage for pending message persistence
+        self.message_storage = Some(storage);
+        
+        // Restore any pending messages from previous session
+        self.restore_pending_messages()?;
+        
+        info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
+        Ok(())
+    }
+    
+    /// Enables message persistence using the provided storage backend.
+    ///
+    /// This allows pending messages to survive app crashes/restarts even
+    /// when MLS encryption is not used. The storage backend should be a
+    /// platform-native secure storage implementation.
+    ///
+    /// Note: If you call `initialize_mls()`, message persistence is
+    /// automatically enabled using the same storage.
+    pub fn enable_message_persistence(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
+        self.message_storage = Some(storage);
+        self.restore_pending_messages()?;
+        info!("Message persistence enabled");
         Ok(())
     }
 
@@ -739,6 +774,9 @@ impl OfflineProtocol {
             queued_at: Utc::now(),
         };
         
+        // Persist to storage first (survives crashes)
+        self.persist_pending_message(recipient, &pending);
+        
         self.pending_encrypted_messages
             .entry(recipient.to_string())
             .or_insert_with(Vec::new)
@@ -751,6 +789,9 @@ impl OfflineProtocol {
     fn flush_pending_messages(&mut self, recipient: &str) -> Result<()> {
         if let Some(pending) = self.pending_encrypted_messages.remove(recipient) {
             info!(recipient = %recipient, count = pending.len(), "Flushing pending messages");
+            
+            // Clear from persistent storage since we're about to send them
+            self.clear_pending_messages_from_storage(recipient);
             
             for msg in pending {
                 // Re-attempt to send each pending message
@@ -822,6 +863,78 @@ impl OfflineProtocol {
             }
         }
     }
+
+    // ========================================================================
+    // PENDING MESSAGE PERSISTENCE
+    // ========================================================================
+
+    /// Persists a pending message for a recipient to storage.
+    /// 
+    /// This ensures messages survive app crashes/restarts.
+    fn persist_pending_message(&self, recipient: &str, pending: &PendingMessage) {
+        let Some(storage) = &self.message_storage else { return };
+        
+        // Load existing messages for this recipient
+        let mut messages: Vec<PendingMessage> = self
+            .load_pending_messages_from_storage(recipient)
+            .unwrap_or_default();
+        
+        // Add the new message
+        messages.push(pending.clone());
+        
+        // Serialize and store
+        match serde_json::to_vec(&messages) {
+            Ok(data) => {
+                if let Err(e) = storage.store(storage_keys::PENDING_MESSAGES, recipient, &data) {
+                    warn!(recipient = %recipient, error = %e, "Failed to persist pending message");
+                }
+            }
+            Err(e) => {
+                warn!(recipient = %recipient, error = %e, "Failed to serialize pending messages");
+            }
+        }
+    }
+    
+    /// Loads pending messages for a recipient from storage.
+    fn load_pending_messages_from_storage(&self, recipient: &str) -> Option<Vec<PendingMessage>> {
+        let storage = self.message_storage.as_ref()?;
+        let data = storage.load(storage_keys::PENDING_MESSAGES, recipient).ok()??;
+        serde_json::from_slice(&data).ok()
+    }
+    
+    /// Removes pending messages for a recipient from storage.
+    fn clear_pending_messages_from_storage(&self, recipient: &str) {
+        if let Some(storage) = &self.message_storage {
+            let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
+        }
+    }
+    
+    /// Restores all pending messages from storage on startup.
+    /// 
+    /// This should be called after initializing storage to recover
+    /// any messages that were pending when the app was terminated.
+    fn restore_pending_messages(&mut self) -> Result<()> {
+        let Some(storage) = &self.message_storage else { return Ok(()) };
+        
+        let recipients = storage
+            .list_keys(storage_keys::PENDING_MESSAGES)
+            .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
+        
+        for recipient in recipients {
+            if let Some(messages) = self.load_pending_messages_from_storage(&recipient) {
+                if !messages.is_empty() {
+                    info!(recipient = %recipient, count = messages.len(), "Restored pending messages from storage");
+                    self.pending_encrypted_messages.insert(recipient, messages);
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
+    // ========================================================================
+    // KEY PACKAGE HANDLING
+    // ========================================================================
 
     /// Sends our key package to a peer for session establishment.
     fn send_key_package_to(&mut self, peer_id: &str) -> Result<()> {
