@@ -522,7 +522,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun sendMessage(recipient: String, content: String, priority: Int, promise: Promise) {
+    fun sendMessage(recipient: String, content: String, priority: Int, replyToMsg: String?, promise: Promise) {
         try {
             val msgPriority = when (priority) {
                 0 -> MessagePriority.LOW
@@ -533,7 +533,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val messageId = proto.sendMessage(recipient, content, msgPriority)
+            val messageId = proto.sendMessage(recipient, content, msgPriority, replyToMsg)
             promise.resolve(messageId)
         } catch (e: Exception) {
             promise.reject("ERROR_SEND", "Failed to send message: ${e.message}", e)

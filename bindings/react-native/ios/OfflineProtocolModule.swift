@@ -568,6 +568,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func sendMessage(_ recipient: String,
                           content: String,
                           priority: Int,
+                          replyToMsg: String?,
                           resolver: @escaping RCTPromiseResolveBlock,
                           rejecter: @escaping RCTPromiseRejectBlock) {
         do {
@@ -586,7 +587,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                             userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
             }
             
-            let messageId = try proto.sendMessage(recipient: recipient, content: content, priority: msgPriority)
+            let messageId = try proto.sendMessage(recipient: recipient, content: content, priority: msgPriority, replyToMsg: replyToMsg)
             resolver(messageId)
         } catch {
             rejecter("ERROR_SEND", "Failed to send message: \(error.localizedDescription)", error)

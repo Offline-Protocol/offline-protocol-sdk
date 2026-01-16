@@ -99,6 +99,7 @@ export interface Message {
   status: 'sending' | 'sent' | 'delivered' | 'failed';
   isFromMe: boolean;
   isEncrypted?: boolean;
+  replyToMsg?: string; // Message ID this message is replying to
 }
 
 export interface Chat {
@@ -152,6 +153,7 @@ interface ProtocolContextType {
     recipientId: string,
     content: string,
     priority?: MessagePriority,
+    replyToMsg?: string,
   ) => Promise<void>;
   markAsRead: (chatId: string) => void;
   updateUserName: (name: string) => void;
@@ -323,6 +325,9 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     relay: {
       allowRelay: true,
       relayPriority: 'auto',
+    },
+    encryption: {
+      enabled: false,
     },
   });
 
@@ -498,6 +503,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       recipientId: string,
       content: string,
       priority: MessagePriority = MessagePriority.Medium,
+      replyToMsg?: string,
     ) => {
       try {
         console.log(
@@ -587,21 +593,23 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           }
         }
 
+        // Send message - SDK returns the final message ID
         const messageId = await protocolSendMessage(
           recipientId,
           messageToSend,
           priority,
+          replyToMsg,
         );
         if (!messageId) {
           throw new Error('Message ID not returned');
         }
         console.log(
-          `[ProtocolProvider] Message queued successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`,
+          `[ProtocolProvider] Message sent successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`,
         );
 
         const now = Date.now();
         const newMessage: Message = {
-          id: messageId,
+          id: messageId, // Use the ID returned by protocolSendMessage directly
           senderId: currentUserId,
           recipientId,
           content, // Store the original plaintext content for display
@@ -610,6 +618,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           status: 'sending',
           isFromMe: true,
           isEncrypted,
+          replyToMsg,
         };
 
         setChats(prevChats => {
@@ -620,6 +629,16 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           if (existingChatIndex >= 0) {
             const updatedChats = [...prevChats];
             const existingChat = updatedChats[existingChatIndex];
+            // Check if message already exists (deduplicate by ID)
+            const messageExists = existingChat.messages.some(
+              msg => msg.id === messageId,
+            );
+            if (messageExists) {
+              console.warn(
+                `[ProtocolProvider] Duplicate message ${messageId} detected when sending, skipping`,
+              );
+              return prevChats; // Don't add duplicate
+            }
             updatedChats[existingChatIndex] = {
               ...existingChat,
               peerName: getPeerDisplayName(recipientId),
@@ -741,7 +760,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           case 'message_sent': {
             const sentEvent = event as any;
             if (sentEvent.sender === currentUserId && sentEvent.message_id) {
-              sentMessageIds.add(sentEvent.message_id);
+              const messageId = sentEvent.message_id;
+              sentMessageIds.add(messageId);
             }
             break;
           }
@@ -765,9 +785,14 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               break;
             }
 
-            const messageId: string =
-              msgEvent.message_id ||
-              `inbound_${msgEvent.sender}_${msgEvent.timestamp ?? Date.now()}`;
+            // Use server-generated message_id, don't generate our own
+            const messageId: string = msgEvent.message_id;
+            if (!messageId) {
+              console.warn(
+                '[ProtocolProvider] Received message without message_id, skipping',
+              );
+              break;
+            }
 
             if (processedIncomingMessageIdsRef.current.has(messageId)) {
               break;
@@ -943,6 +968,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               status: 'delivered',
               isFromMe: false,
               isEncrypted,
+              replyToMsg: msgEvent.reply_to_msg || msgEvent.replyToMsg,
             };
             receivedMessages.push(receivedMessage);
             break;
@@ -1063,6 +1089,16 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             );
             if (existingChatIndex >= 0) {
               const existingChat = updatedChats[existingChatIndex];
+              // Check if message already exists (deduplicate by ID)
+              const messageExists = existingChat.messages.some(
+                msg => msg.id === message.id,
+              );
+              if (messageExists) {
+                console.warn(
+                  `[ProtocolProvider] Duplicate message ${message.id} detected, skipping`,
+                );
+                return; // Skip adding duplicate
+              }
               const nextMessages = [...existingChat.messages, message];
               updatedChats[existingChatIndex] = {
                 ...existingChat,

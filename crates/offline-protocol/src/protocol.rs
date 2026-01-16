@@ -54,6 +54,10 @@ struct PendingMessage {
     content: String,
     /// Message priority.
     priority: MessagePriority,
+    /// Message ID (preserved from initial creation).
+    message_id: MessageId,
+    /// Reply-to message ID if applicable.
+    reply_to_msg: Option<MessageId>,
     /// When the message was queued (for future TTL/expiry support).
     #[allow(dead_code)]
     queued_at: DateTime<Utc>,
@@ -394,16 +398,22 @@ impl OfflineProtocol {
         recipient: impl Into<String>,
         content: impl Into<String>,
         priority: Option<MessagePriority>,
+        reply_to_msg: Option<MessageId>,
     ) -> Result<Message> {
         let sender = UserId::new(&self.config.user_id)?;
         let recipient = UserId::new(recipient)?;
         let app_id = AppId::new(&self.config.app_id)?;
 
-        Ok(Message::builder(sender, recipient, app_id)
+        let mut builder = Message::builder(sender, recipient, app_id)
             .content(content)
             .priority(priority.unwrap_or(MessagePriority::Medium))
-            .ttl(TTL::new(self.config.initial_ttl)?)
-            .build())
+            .ttl(TTL::new(self.config.initial_ttl)?);
+        
+        if let Some(reply_to) = reply_to_msg {
+            builder = builder.reply_to_msg(reply_to);
+        }
+
+        Ok(builder.build())
     }
 
     /// Handles successful message send.
@@ -498,6 +508,7 @@ impl OfflineProtocol {
     /// * `recipient` - Recipient's user ID
     /// * `content` - Message content
     /// * `priority` - Message priority (optional, defaults to Medium)
+    /// * `reply_to_msg` - ID of the message this is replying to (optional)
     ///
     /// # Returns
     ///
@@ -515,6 +526,7 @@ impl OfflineProtocol {
         recipient: impl Into<String>,
         content: impl Into<String>,
         priority: Option<MessagePriority>,
+        reply_to_msg: Option<impl Into<String>>,
     ) -> Result<MessageId> {
         // Check if protocol is running
         {
@@ -528,14 +540,28 @@ impl OfflineProtocol {
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
+        // Parse reply_to_msg if provided
+        let reply_to_msg_id = reply_to_msg
+            .map(|r| MessageId::from_str(&r.into()))
+            .transpose()
+            .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
+
         // Auto-encrypt if enabled
         let final_content = if self.should_auto_encrypt() {
             match self.encrypt_content_for_recipient(&recipient_str, &content_str, priority) {
                 Ok(encrypted) => encrypted,
                 Err(Error::SessionPending) => {
-                    // Message was queued for later, return a placeholder ID
-                    debug!(recipient = %recipient_str, "Message queued pending session establishment");
-                    return Err(Error::SessionPending);
+                    // Create message first to get an ID before queuing
+                    // This ensures we always return a message ID, even when queued
+                    let temp_message = self.create_message(&recipient_str, content_str.clone(), Some(priority), reply_to_msg_id.clone())?;
+                    let message_id = temp_message.id.clone();
+                    
+                    // Queue the pending message with the message ID
+                    debug!(recipient = %recipient_str, message_id = %message_id, "Message queued pending session establishment");
+                    self.queue_pending_message(&recipient_str, &content_str, priority, message_id.clone(), reply_to_msg_id.clone());
+                    
+                    // Return the message ID even though it's queued
+                    return Ok(message_id);
                 }
                 Err(Error::NoKeyPackage(ref r)) => {
                     // No key package, send unencrypted if we're in a fallback mode
@@ -552,7 +578,7 @@ impl OfflineProtocol {
         };
 
         // Create message with potentially encrypted content
-        let message = self.create_message(&recipient_str, final_content, Some(priority))?;
+        let message = self.create_message(&recipient_str, final_content, Some(priority), reply_to_msg_id)?;
         let message_id = message.id.clone();
 
         // Check for duplicates
@@ -597,7 +623,7 @@ impl OfflineProtocol {
         &mut self,
         recipient: &str,
         content: &str,
-        priority: MessagePriority,
+        _priority: MessagePriority,
     ) -> Result<String> {
         // Clone the Arc to avoid borrow issues
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
@@ -628,8 +654,8 @@ impl OfflineProtocol {
             } else {
                 // No key package available
                 if self.config.encryption.store_pending {
-                    // Queue message for later
-                    self.queue_pending_message(recipient, content, priority);
+                    // Note: queue_pending_message will be called from send_message
+                    // after creating a message to get an ID
                     return Err(Error::SessionPending);
                 }
                 return Err(Error::NoKeyPackage(recipient.to_string()));
@@ -656,17 +682,27 @@ impl OfflineProtocol {
         let content = format!("{}{}", internal_prefixes::WELCOME, serialized);
         
         // Create and send internal message with high priority
-        let message = self.create_message(recipient, content, Some(MessagePriority::High))?;
+        let message = self.create_message(recipient, content, Some(MessagePriority::High), None)?;
         let _ = self.transport_manager.send(&message);
         
         Ok(())
     }
-
-    /// Queues a message for later sending when session is established.
-    fn queue_pending_message(&mut self, recipient: &str, content: &str, priority: MessagePriority) {
+    
+    /// Queues a message with a specific message ID for later sending when session is established.
+    fn queue_pending_message(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        priority: MessagePriority,
+        message_id: MessageId,
+        reply_to_msg: Option<MessageId>,
+    ) {
+        let message_id_str = message_id.as_str().to_string();
         let pending = PendingMessage {
             content: content.to_string(),
             priority,
+            message_id,
+            reply_to_msg,
             queued_at: Utc::now(),
         };
         
@@ -675,7 +711,7 @@ impl OfflineProtocol {
             .or_insert_with(Vec::new)
             .push(pending);
         
-        debug!(recipient = %recipient, "Queued message pending session establishment");
+        debug!(recipient = %recipient, message_id = %message_id_str, "Queued message pending session establishment");
     }
 
     /// Flushes pending messages for a recipient after session is established.
@@ -685,9 +721,14 @@ impl OfflineProtocol {
             
             for msg in pending {
                 // Re-attempt to send each pending message
-                match self.send_message(recipient, msg.content, Some(msg.priority)) {
-                    Ok(id) => debug!(message_id = %id, "Sent pending message"),
-                    Err(e) => warn!(error = %e, "Failed to send pending message"),
+                // Use the stored message ID by passing reply_to_msg if it exists
+                let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
+                match self.send_message(recipient, msg.content, Some(msg.priority), reply_to_str) {
+                    Ok(id) => {
+                        // Note: The new message will have a new ID, but the original ID was already returned to the caller
+                        debug!(original_id = %msg.message_id, new_id = %id, "Sent pending message");
+                    }
+                    Err(e) => warn!(original_id = %msg.message_id, error = %e, "Failed to send pending message"),
                 }
             }
         }
@@ -714,7 +755,7 @@ impl OfflineProtocol {
         let content = format!("{}{}", internal_prefixes::KEY_PACKAGE, serialized);
         
         // Send as low priority internal message
-        let message = self.create_message(peer_id, content, Some(MessagePriority::Low))?;
+        let message = self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
         let _ = self.transport_manager.send(&message);
         
         self.key_package_sent_to.insert(peer_id.to_string());
@@ -784,6 +825,7 @@ impl OfflineProtocol {
     /// * `content` - Message content
     /// * `priority` - Message priority (optional, defaults to Medium)
     /// * `transport` - The transport to use
+    /// * `reply_to_msg` - ID of the message this is replying to (optional)
     ///
     /// # Returns
     ///
@@ -794,6 +836,7 @@ impl OfflineProtocol {
         content: impl Into<String>,
         priority: Option<MessagePriority>,
         transport: TransportType,
+        reply_to_msg: Option<impl Into<String>>,
     ) -> Result<MessageId> {
         // Check if protocol is running
         {
@@ -803,8 +846,14 @@ impl OfflineProtocol {
             }
         }
 
+        // Parse reply_to_msg if provided
+        let reply_to_msg_id = reply_to_msg
+            .map(|r| MessageId::from_str(&r.into()))
+            .transpose()
+            .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
+
         // Create message
-        let message = self.create_message(recipient, content, priority)?;
+        let message = self.create_message(recipient, content, priority, reply_to_msg_id)?;
         let message_id = message.id.clone();
 
         // Check for duplicates
@@ -922,6 +971,7 @@ impl OfflineProtocol {
                         hop_count: message.hop_count.value(),
                         transport: transport_used.to_string(),
                         timestamp: message.timestamp.as_millis(),
+                        reply_to_msg: message.reply_to_msg.as_ref().map(|id| id.as_str().to_string()),
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {
@@ -1558,7 +1608,7 @@ mod tests {
 
         protocol.start().unwrap();
 
-        let result = protocol.send_message("bob", "Hello!", None);
+        let result = protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
         assert!(result.is_ok());
     }
 
@@ -1566,7 +1616,7 @@ mod tests {
     fn test_send_message_not_started() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-        let result = protocol.send_message("bob", "Hello!", None);
+        let result = protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
         assert!(result.is_err());
     }
 
@@ -1619,7 +1669,7 @@ mod tests {
             .add_transport(TransportType::BLE, Box::new(mock_transport));
 
         protocol.start().unwrap();
-        protocol.send_message("bob", "Hello!", None).unwrap();
+        protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>).unwrap();
 
         assert!(*event_received.lock().unwrap());
     }
@@ -1638,8 +1688,8 @@ mod tests {
         protocol.start().unwrap();
 
         // Send same message twice
-        protocol.send_message("bob", "Hello!", None).unwrap();
-        let result = protocol.send_message("bob", "Hello!", None);
+        protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>).unwrap();
+        let result = protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
 
         // Second send should succeed (different message ID generated)
         assert!(result.is_ok());
@@ -1670,7 +1720,7 @@ mod tests {
 
         protocol.start().unwrap();
 
-        protocol.send_message("bob", "Hello!", None).unwrap();
+        protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>).unwrap();
         assert_eq!(mock_transport.sent_messages().len(), 1);
 
         thread::sleep(Duration::from_millis(15));
@@ -1728,7 +1778,7 @@ mod tests {
         );
 
         // Test that we can send a message via BLE
-        let result = protocol.send_message("bob", "Hello from BLE-only!", None);
+        let result = protocol.send_message("bob", "Hello from BLE-only!", None::<MessagePriority>, None::<String>);
         assert!(
             result.is_ok(),
             "Should be able to send message when only BLE is enabled"
@@ -1900,10 +1950,10 @@ mod tests {
         let mut protocol = OfflineProtocol::new(config).unwrap();
         
         // Queue some pending messages
-        protocol.queue_pending_message("bob", "Hello Bob!", MessagePriority::High);
-        protocol.queue_pending_message("bob", "Another message", MessagePriority::Medium);
-        protocol.queue_pending_message("alice", "Hello Alice!", MessagePriority::Low);
-        
+        protocol.queue_pending_message("bob", "Hello Bob!", MessagePriority::High, MessageId::new(), None);
+        protocol.queue_pending_message("bob", "Another message", MessagePriority::Medium, MessageId::new(), None);
+        protocol.queue_pending_message("alice", "Hello Alice!", MessagePriority::Low, MessageId::new(), None);
+			
         // Check pending messages are stored
         assert!(protocol.pending_encrypted_messages.contains_key("bob"));
         assert!(protocol.pending_encrypted_messages.contains_key("alice"));

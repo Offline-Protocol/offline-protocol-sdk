@@ -10,6 +10,7 @@ import {
   Platform,
   Alert,
   Keyboard,
+  PanResponder,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon } from '../components/Icon';
@@ -23,17 +24,72 @@ interface MessageBubbleProps {
   message: Message;
   isLastInGroup: boolean;
   isFirstInGroup: boolean;
+  onSwipeRight?: (message: Message) => void;
+  allMessages?: Message[]; // For finding replied-to message in current chat
+  allChatsMessages?: Message[]; // For finding replied-to message across all chats
+  peerName?: string; // For displaying sender name in replies
 }
 
-function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubbleProps) {
+function MessageBubble({
+  message,
+  isLastInGroup,
+  isFirstInGroup,
+  onSwipeRight,
+  allMessages,
+  allChatsMessages,
+  peerName,
+}: MessageBubbleProps) {
   const { theme } = useTheme();
   const isFromMe = message.isFromMe;
   const isEncrypted = message.isEncrypted ?? false;
-  
+
+  // Find the message this is replying to
+  // First try current chat, then search across all chats
+  const repliedToMessage = message.replyToMsg
+    ? allMessages?.find(m => m.id === message.replyToMsg) ||
+      allChatsMessages?.find(m => m.id === message.replyToMsg)
+    : undefined;
+
+  console.log({ allMessages });
+
+  // Determine the sender label for the reply preview
+  const getReplySenderLabel = () => {
+    if (!repliedToMessage) return 'Original message';
+
+    // If the current message is from me
+    if (isFromMe) {
+      // I'm replying to my own message or their message
+      return repliedToMessage.isFromMe ? 'You' : peerName || 'They';
+    } else {
+      // Received message - they're replying to my message or their own
+      return repliedToMessage.isFromMe ? 'You' : peerName || 'They';
+    }
+  };
+
+  // Pan responder for swipe gesture
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        // Only respond to horizontal swipes (right swipe)
+        return (
+          Math.abs(gestureState.dx) > 10 &&
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy)
+        );
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        // Right swipe (positive dx) to select for reply
+        if (gestureState.dx > 50 && onSwipeRight) {
+          onSwipeRight(message);
+        }
+      },
+    }),
+  ).current;
+
   const formatTime = (timestamp: number) => {
-    return new Date(timestamp).toLocaleTimeString([], { 
-      hour: '2-digit', 
-      minute: '2-digit' 
+    return new Date(timestamp).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
     });
   };
 
@@ -66,48 +122,136 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubble
   };
 
   return (
-    <View 
+    <View
       style={[
         styles.messageContainer,
         isFromMe ? styles.myMessageContainer : styles.theirMessageContainer,
       ]}
+      {...panResponder.panHandlers}
     >
       <View
         style={[
           styles.messageBubble,
-          isFromMe 
-            ? [styles.myMessageBubble, { backgroundColor: theme.colors.primary }]
-            : [styles.theirMessageBubble, { backgroundColor: theme.colors.surface }],
+          isFromMe
+            ? [
+                styles.myMessageBubble,
+                { backgroundColor: theme.colors.primary },
+              ]
+            : [
+                styles.theirMessageBubble,
+                { backgroundColor: theme.colors.surface },
+              ],
           isFirstInGroup && styles.firstInGroup,
           isLastInGroup && styles.lastInGroup,
         ]}
       >
+        {/* Reply preview - show if message has replyToMsg attribute */}
+        {message.replyToMsg && (
+          <View
+            style={[
+              styles.replyPreview,
+              {
+                backgroundColor: isFromMe
+                  ? 'rgba(255,255,255,0.2)'
+                  : theme.colors.background,
+                borderLeftColor: theme.colors.primary,
+              },
+            ]}
+          >
+            {/* Always show sender label and content if available */}
+            {repliedToMessage ? (
+              <>
+                <Text
+                  style={[
+                    styles.replyPreviewSender,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.primary,
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {getReplySenderLabel()}
+                </Text>
+                <Text
+                  style={[
+                    styles.replyPreviewText,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.textSecondary,
+                    },
+                  ]}
+                  numberOfLines={2}
+                >
+                  {repliedToMessage.content || 'Message content unavailable'}
+                </Text>
+              </>
+            ) : (
+              // Show message ID if message not found, so user knows what was replied to
+              <>
+                <Text
+                  style={[
+                    styles.replyPreviewSender,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.primary,
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  Original message
+                </Text>
+                <Text
+                  style={[
+                    styles.replyPreviewText,
+                    {
+                      color: isFromMe
+                        ? theme.colors.textInverse
+                        : theme.colors.textSecondary,
+                      fontStyle: 'italic',
+                      opacity: 0.7,
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  Message not found (ID: {message.replyToMsg?.slice(0, 8)}...)
+                </Text>
+              </>
+            )}
+          </View>
+        )}
+
         <Text
           style={[
             styles.messageText,
-            { 
-              color: isFromMe ? theme.colors.textInverse : theme.colors.text 
+            {
+              color: isFromMe ? theme.colors.textInverse : theme.colors.text,
             },
           ]}
         >
           {message.content}
         </Text>
-        
+
         <View style={styles.messageFooter}>
           {isEncrypted && (
             <Icon
               name="lock-closed"
               size={10}
-              color={isFromMe ? theme.colors.textInverse : theme.colors.textSecondary}
+              color={
+                isFromMe ? theme.colors.textInverse : theme.colors.textSecondary
+              }
               style={{ marginRight: 4, opacity: 0.7 }}
             />
           )}
           <Text
             style={[
               styles.messageTime,
-              { 
-                color: isFromMe 
-                  ? theme.colors.textInverse 
+              {
+                color: isFromMe
+                  ? theme.colors.textInverse
                   : theme.colors.textSecondary,
                 opacity: 0.7,
               },
@@ -115,7 +259,7 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubble
           >
             {formatTime(message.timestamp)}
           </Text>
-          
+
           {isFromMe && (
             <Icon
               name={getStatusIcon(message.status)}
@@ -126,9 +270,14 @@ function MessageBubble({ message, isLastInGroup, isFirstInGroup }: MessageBubble
           )}
         </View>
       </View>
-      
+
       {message.priority === MessagePriority.High && (
-        <View style={[styles.priorityIndicator, { backgroundColor: getPriorityColor(message.priority) }]} />
+        <View
+          style={[
+            styles.priorityIndicator,
+            { backgroundColor: getPriorityColor(message.priority) },
+          ]}
+        />
       )}
     </View>
   );
@@ -141,17 +290,32 @@ interface ChatDetailScreenProps {
   onNavigateToProfile: (userId: string) => void;
 }
 
-export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile }: ChatDetailScreenProps) {
+export function ChatDetailScreen({
+  peerId,
+  peerName,
+  onBack,
+  onNavigateToProfile,
+}: ChatDetailScreenProps) {
   const { theme } = useTheme();
-  
-  const { chats, contacts, sendMessage, currentUserId, isOnline, connectedPeersCount, isMlsInitialized, encryptedPeers } = useProtocol();
+
+  const {
+    chats,
+    contacts,
+    sendMessage,
+    isOnline,
+    connectedPeersCount,
+    encryptedPeers,
+  } = useProtocol();
   const insets = useSafeAreaInsets();
   const [inputText, setInputText] = useState('');
-  const [priority, setPriority] = useState<MessagePriority>(MessagePriority.Medium);
+  const [priority, setPriority] = useState<MessagePriority>(
+    MessagePriority.Medium,
+  );
   const [showPriorityPicker, setShowPriorityPicker] = useState(false);
-  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
-  const [inputHeight, setInputHeight] = useState(44);
-  
+  const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(
+    null,
+  );
+
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -159,9 +323,11 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   const chat = chats.find(c => c.peerId === peerId);
   const contact = contacts.find(c => c.id === peerId);
   const messages = chat?.messages || [];
+  // Collect all messages from all chats for cross-chat reply lookup
+  const allChatsMessages = chats.flatMap(c => c.messages);
   const isPeerOnline = contact?.isOnline ?? false;
   const isEncryptedChat = chat?.isEncrypted || encryptedPeers.has(peerId);
-  
+
   const avatarColor = generateAvatarColor(peerId);
   const initials = getUserInitials(peerName);
 
@@ -175,18 +341,28 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
       >
         <Icon name="arrow-back" size={24} color={theme.colors.primary} />
       </TouchableOpacity>
-      
+
       <TouchableOpacity
         style={styles.headerTitle}
         onPress={() => onNavigateToProfile(peerId)}
         activeOpacity={0.7}
       >
         <View style={[styles.headerAvatar, { backgroundColor: avatarColor }]}>
-          <Text style={[styles.headerAvatarText, { color: theme.colors.textInverse }]}>
+          <Text
+            style={[
+              styles.headerAvatarText,
+              { color: theme.colors.textInverse },
+            ]}
+          >
             {initials}
           </Text>
           {contact?.isOnline && (
-            <View style={[styles.headerOnlineIndicator, { backgroundColor: theme.colors.online }]} />
+            <View
+              style={[
+                styles.headerOnlineIndicator,
+                { backgroundColor: theme.colors.online },
+              ]}
+            />
           )}
         </View>
         <View style={styles.headerInfo}>
@@ -195,18 +371,29 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
               {peerName}
             </Text>
             {isEncryptedChat && (
-              <View style={[styles.encryptedBadge, { backgroundColor: theme.colors.success + '20' }]}>
-                <Icon name="lock-closed" size={10} color={theme.colors.success} />
+              <View
+                style={[
+                  styles.encryptedBadge,
+                  { backgroundColor: theme.colors.success + '20' },
+                ]}
+              >
+                <Icon
+                  name="lock-closed"
+                  size={10}
+                  color={theme.colors.success}
+                />
               </View>
             )}
           </View>
-          <Text style={[styles.headerStatus, { color: theme.colors.textSecondary }]}>
+          <Text
+            style={[styles.headerStatus, { color: theme.colors.textSecondary }]}
+          >
             {contact?.isOnline ? 'Online' : 'Offline'}
             {isEncryptedChat ? ' • Encrypted' : ''}
           </Text>
         </View>
       </TouchableOpacity>
-      
+
       <View style={{ width: 40 }} />
     </View>
   );
@@ -215,7 +402,6 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     const keyboardWillShow = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
       () => {
-        setIsKeyboardVisible(true);
         // Scroll to end with a slight delay to ensure layout is updated
         if (scrollTimeoutRef.current) {
           clearTimeout(scrollTimeoutRef.current);
@@ -223,15 +409,14 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
         scrollTimeoutRef.current = setTimeout(() => {
           flatListRef.current?.scrollToEnd({ animated: true });
         }, 100);
-      }
+      },
     );
-    
+
     const keyboardWillHide = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
       () => {
-        setIsKeyboardVisible(false);
         setShowPriorityPicker(false);
-      }
+      },
     );
 
     return () => {
@@ -257,9 +442,9 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     if (!text) return;
 
     try {
-      await sendMessage(peerId, text, priority);
+      await sendMessage(peerId, text, priority, replyingToMessage?.id);
       setInputText('');
-      setInputHeight(44);
+      setReplyingToMessage(null); // Clear reply selection after sending
       // Keep keyboard open for quick follow-up messages
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
@@ -267,11 +452,19 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
     } catch (error) {
       Alert.alert('Send Failed', 'Failed to send message. Please try again.');
     }
-  }, [inputText, peerId, priority, sendMessage]);
+  }, [inputText, peerId, priority, sendMessage, replyingToMessage]);
 
-  const handleContentSizeChange = useCallback((event: any) => {
-    const newHeight = Math.min(Math.max(44, event.nativeEvent.contentSize.height + 20), 120);
-    setInputHeight(newHeight);
+  const handleSwipeRight = useCallback((message: Message) => {
+    setReplyingToMessage(message);
+    // Focus input and scroll to bottom
+    inputRef.current?.focus();
+    setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  }, []);
+
+  const handleContentSizeChange = useCallback(() => {
+    // TextInput will auto-resize with multiline
   }, []);
 
   const togglePriorityPicker = useCallback(() => {
@@ -284,55 +477,71 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   }, []);
 
   const groupMessages = (messages: Message[]) => {
-    const grouped: (Message & { isFirstInGroup: boolean; isLastInGroup: boolean })[] = [];
-    
+    const grouped: (Message & {
+      isFirstInGroup: boolean;
+      isLastInGroup: boolean;
+    })[] = [];
+
     messages.forEach((message, index) => {
       const prevMessage = messages[index - 1];
       const nextMessage = messages[index + 1];
-      
-      const isFirstInGroup = !prevMessage || 
+
+      const isFirstInGroup =
+        !prevMessage ||
         prevMessage.isFromMe !== message.isFromMe ||
         message.timestamp - prevMessage.timestamp > 300000; // 5 minutes
-      
-      const isLastInGroup = !nextMessage || 
+
+      const isLastInGroup =
+        !nextMessage ||
         nextMessage.isFromMe !== message.isFromMe ||
         nextMessage.timestamp - message.timestamp > 300000; // 5 minutes
-      
+
       grouped.push({
         ...message,
         isFirstInGroup,
         isLastInGroup,
       });
     });
-    
+
     return grouped;
   };
 
   const groupedMessages = groupMessages(messages);
 
-  const renderMessage = ({ item }: { item: Message & { isFirstInGroup: boolean; isLastInGroup: boolean } }) => (
+  const renderMessage = ({
+    item,
+  }: {
+    item: Message & { isFirstInGroup: boolean; isLastInGroup: boolean };
+  }) => (
     <MessageBubble
       message={item}
       isFirstInGroup={item.isFirstInGroup}
       isLastInGroup={item.isLastInGroup}
+      onSwipeRight={handleSwipeRight}
+      allMessages={messages}
+      allChatsMessages={allChatsMessages}
+      peerName={peerName}
     />
   );
 
   const renderEmptyState = () => (
-    <View  style={styles.emptyState}>
+    <View style={styles.emptyState}>
       <View style={[styles.emptyAvatar, { backgroundColor: avatarColor }]}>
-        <Text style={[styles.emptyAvatarText, { color: theme.colors.textInverse }]}>
+        <Text
+          style={[styles.emptyAvatarText, { color: theme.colors.textInverse }]}
+        >
           {initials}
         </Text>
       </View>
       <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>
         Start a conversation with {peerName}
       </Text>
-      <Text style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}>
-        {contact?.isOnline 
-          ? 'They\'re online and ready to chat!'
-          : 'Your message will be delivered when they come online.'
-        }
+      <Text
+        style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}
+      >
+        {contact?.isOnline
+          ? "They're online and ready to chat!"
+          : 'Your message will be delivered when they come online.'}
       </Text>
     </View>
   );
@@ -366,16 +575,33 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   const renderStatusBanner = () => {
     if (!isOnline) {
       return (
-        <View style={[
-          styles.statusBanner,
-          { backgroundColor: `${theme.colors.error}22`, borderColor: theme.colors.error }
-        ]}>
-          <Icon name="alert-circle" size={16} color={theme.colors.error} style={{ marginRight: 8 }} />
+        <View
+          style={[
+            styles.statusBanner,
+            {
+              backgroundColor: `${theme.colors.error}22`,
+              borderColor: theme.colors.error,
+            },
+          ]}
+        >
+          <Icon
+            name="alert-circle"
+            size={16}
+            color={theme.colors.error}
+            style={{ marginRight: 8 }}
+          />
           <View style={{ flex: 1 }}>
-            <Text style={[styles.statusBannerTitle, { color: theme.colors.error }]}>
+            <Text
+              style={[styles.statusBannerTitle, { color: theme.colors.error }]}
+            >
               Messenger offline
             </Text>
-            <Text style={[styles.statusBannerSubtitle, { color: theme.colors.textSecondary }]}>
+            <Text
+              style={[
+                styles.statusBannerSubtitle,
+                { color: theme.colors.textSecondary },
+              ]}
+            >
               Messages will send automatically when service restarts.
             </Text>
           </View>
@@ -385,16 +611,36 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
 
     if (!isPeerOnline) {
       return (
-        <View style={[
-          styles.statusBanner,
-          { backgroundColor: `${theme.colors.warning}22`, borderColor: theme.colors.warning }
-        ]}>
-          <Icon name="time" size={16} color={theme.colors.warning} style={{ marginRight: 8 }} />
+        <View
+          style={[
+            styles.statusBanner,
+            {
+              backgroundColor: `${theme.colors.warning}22`,
+              borderColor: theme.colors.warning,
+            },
+          ]}
+        >
+          <Icon
+            name="time"
+            size={16}
+            color={theme.colors.warning}
+            style={{ marginRight: 8 }}
+          />
           <View style={{ flex: 1 }}>
-            <Text style={[styles.statusBannerTitle, { color: theme.colors.warning }]}>
+            <Text
+              style={[
+                styles.statusBannerTitle,
+                { color: theme.colors.warning },
+              ]}
+            >
               Waiting for {peerName}
             </Text>
-            <Text style={[styles.statusBannerSubtitle, { color: theme.colors.textSecondary }]}>
+            <Text
+              style={[
+                styles.statusBannerSubtitle,
+                { color: theme.colors.textSecondary },
+              ]}
+            >
               {connectedPeersCount > 0
                 ? 'We will deliver this message once they come back online.'
                 : 'Keep the app open so nearby peers can relay your message.'}
@@ -409,38 +655,81 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
 
   const renderPriorityPicker = () => {
     if (!showPriorityPicker) return null;
-    
+
     return (
-      <View style={[styles.priorityPickerContainer, { backgroundColor: theme.colors.surface }]}>
-        <Text style={[styles.priorityPickerTitle, { color: theme.colors.textSecondary }]}>
+      <View
+        style={[
+          styles.priorityPickerContainer,
+          { backgroundColor: theme.colors.surface },
+        ]}
+      >
+        <Text
+          style={[
+            styles.priorityPickerTitle,
+            { color: theme.colors.textSecondary },
+          ]}
+        >
           Message Priority
         </Text>
         <View style={styles.priorityPickerOptions}>
           {[
-            { p: MessagePriority.Low, label: 'Low', desc: 'Delivered when convenient' },
-            { p: MessagePriority.Medium, label: 'Normal', desc: 'Standard delivery' },
-            { p: MessagePriority.High, label: 'Urgent', desc: 'Prioritized delivery' },
+            {
+              p: MessagePriority.Low,
+              label: 'Low',
+              desc: 'Delivered when convenient',
+            },
+            {
+              p: MessagePriority.Medium,
+              label: 'Normal',
+              desc: 'Standard delivery',
+            },
+            {
+              p: MessagePriority.High,
+              label: 'Urgent',
+              desc: 'Prioritized delivery',
+            },
           ].map(({ p, label, desc }) => (
             <TouchableOpacity
               key={p}
               style={[
                 styles.priorityPickerOption,
                 {
-                  backgroundColor: priority === p ? getPriorityColor(p) + '15' : 'transparent',
-                  borderColor: priority === p ? getPriorityColor(p) : theme.colors.border,
+                  backgroundColor:
+                    priority === p ? getPriorityColor(p) + '15' : 'transparent',
+                  borderColor:
+                    priority === p ? getPriorityColor(p) : theme.colors.border,
                 },
               ]}
               onPress={() => selectPriority(p)}
               activeOpacity={0.7}
             >
-              <View style={[styles.priorityPickerIcon, { backgroundColor: getPriorityColor(p) }]}>
-                <Icon name={getPriorityIcon(p)} size={14} color={theme.colors.textInverse} />
+              <View
+                style={[
+                  styles.priorityPickerIcon,
+                  { backgroundColor: getPriorityColor(p) },
+                ]}
+              >
+                <Icon
+                  name={getPriorityIcon(p)}
+                  size={14}
+                  color={theme.colors.textInverse}
+                />
               </View>
               <View style={styles.priorityPickerText}>
-                <Text style={[styles.priorityPickerLabel, { color: theme.colors.text }]}>
+                <Text
+                  style={[
+                    styles.priorityPickerLabel,
+                    { color: theme.colors.text },
+                  ]}
+                >
                   {label}
                 </Text>
-                <Text style={[styles.priorityPickerDesc, { color: theme.colors.textSecondary }]}>
+                <Text
+                  style={[
+                    styles.priorityPickerDesc,
+                    { color: theme.colors.textSecondary },
+                  ]}
+                >
                   {desc}
                 </Text>
               </View>
@@ -455,18 +744,62 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   };
 
   const renderInputArea = () => (
-    <View 
+    <View
       style={[
         styles.inputContainer,
-        { 
+        {
           backgroundColor: theme.colors.surface,
           borderTopColor: theme.colors.border,
-          paddingBottom: Platform.OS === 'ios' ? Math.max(insets.bottom, 8) : 12,
+          paddingBottom:
+            Platform.OS === 'ios' ? Math.max(insets.bottom, 8) : 12,
         },
       ]}
     >
       {renderPriorityPicker()}
-      
+
+      {/* Reply Preview */}
+      {replyingToMessage && (
+        <View
+          style={[
+            styles.replyPreviewContainer,
+            { backgroundColor: theme.colors.background },
+          ]}
+        >
+          <View
+            style={[
+              styles.replyPreviewContent,
+              { borderLeftColor: theme.colors.primary },
+            ]}
+          >
+            <View style={styles.replyPreviewInfo}>
+              <Text
+                style={[
+                  styles.replyPreviewLabel,
+                  { color: theme.colors.primary },
+                ]}
+              >
+                Replying to {replyingToMessage.isFromMe ? 'yourself' : peerName}
+              </Text>
+              <Text
+                style={[
+                  styles.replyPreviewMessage,
+                  { color: theme.colors.textSecondary },
+                ]}
+                numberOfLines={1}
+              >
+                {replyingToMessage.content}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setReplyingToMessage(null)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Icon name="close" size={18} color={theme.colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
       {/* Input Row */}
       <View style={styles.inputRow}>
         {/* Priority Toggle Button */}
@@ -474,7 +807,9 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
           style={[
             styles.priorityToggle,
             {
-              backgroundColor: showPriorityPicker ? getPriorityColor(priority) : theme.colors.background,
+              backgroundColor: showPriorityPicker
+                ? getPriorityColor(priority)
+                : theme.colors.background,
             },
           ]}
           onPress={togglePriorityPicker}
@@ -484,17 +819,26 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
           <Icon
             name={getPriorityIcon(priority)}
             size={18}
-            color={showPriorityPicker ? theme.colors.textInverse : getPriorityColor(priority)}
+            color={
+              showPriorityPicker
+                ? theme.colors.textInverse
+                : getPriorityColor(priority)
+            }
           />
         </TouchableOpacity>
 
         {/* Text Input */}
-        <View style={[styles.inputWrapper, { backgroundColor: theme.colors.background }]}>
+        <View
+          style={[
+            styles.inputWrapper,
+            { backgroundColor: theme.colors.background },
+          ]}
+        >
           <TextInput
             ref={inputRef}
             style={[
               styles.textInput,
-              { 
+              {
                 color: theme.colors.text,
                 minHeight: 24,
                 maxHeight: 100,
@@ -520,7 +864,7 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
             </View>
           )}
         </View>
-        
+
         {/* Send Button */}
         <TouchableOpacity
           style={[
@@ -529,8 +873,8 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
               backgroundColor: !isOnline
                 ? theme.colors.border
                 : inputText.trim()
-                  ? theme.colors.primary
-                  : theme.colors.border,
+                ? theme.colors.primary
+                : theme.colors.border,
             },
           ]}
           onPress={handleSend}
@@ -545,8 +889,8 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
               !isOnline
                 ? theme.colors.textSecondary
                 : inputText.trim()
-                  ? theme.colors.textInverse
-                  : theme.colors.textSecondary
+                ? theme.colors.textInverse
+                : theme.colors.textSecondary
             }
           />
         </TouchableOpacity>
@@ -555,7 +899,9 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
   );
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
+    <View
+      style={[styles.container, { backgroundColor: theme.colors.background }]}
+    >
       {renderHeader()}
       <KeyboardAvoidingView
         style={styles.keyboardAvoidingView}
@@ -564,12 +910,12 @@ export function ChatDetailScreen({ peerId, peerName, onBack, onNavigateToProfile
       >
         <View style={styles.contentContainer}>
           {renderStatusBanner()}
-          
+
           {/* Messages List */}
           <FlatList
             ref={flatListRef}
             data={groupedMessages}
-            keyExtractor={(item) => item.id}
+            keyExtractor={item => item.id}
             renderItem={renderMessage}
             contentContainerStyle={[
               styles.messagesList,
@@ -891,5 +1237,47 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 2,
+  },
+  replyPreview: {
+    marginBottom: 8,
+    paddingLeft: 10,
+    paddingRight: 8,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderLeftWidth: 3,
+  },
+  replyPreviewSender: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 2,
+    opacity: 0.9,
+  },
+  replyPreviewText: {
+    fontSize: 13,
+    opacity: 0.8,
+  },
+  replyPreviewContainer: {
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  replyPreviewContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 10,
+    borderLeftWidth: 3,
+  },
+  replyPreviewInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  replyPreviewLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  replyPreviewMessage: {
+    fontSize: 13,
   },
 });

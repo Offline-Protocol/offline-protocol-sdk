@@ -342,7 +342,7 @@ interface OfflineProtocol {
     
     // Messaging
     [Throws=ProtocolError]
-    string send_message(string recipient, string content, MessagePriority priority);
+    string send_message(string recipient, string content, MessagePriority priority, string? reply_to_msg);
     
     string? receive_message();
     
@@ -615,6 +615,7 @@ dictionary BleFragment {
 dictionary InternetMessage {
     string recipient_id;
     sequence<u8> data;
+    string? reply_to_msg;
 };
 
 // WiFi Direct message for outgoing data

@@ -116,6 +116,10 @@ pub struct Message {
     /// Whether this message requires an ACK.
     #[serde(default = "default_requires_ack")]
     pub requires_ack: bool,
+
+    /// ID of the message this is replying to (optional).
+    #[serde(default)]
+    pub reply_to_msg: Option<MessageId>,
 }
 
 fn default_requires_ack() -> bool {
@@ -149,6 +153,7 @@ impl Message {
             content: content.into(),
             metadata: HashMap::new(),
             requires_ack: true,
+            reply_to_msg: None,
         }
     }
 
@@ -216,6 +221,7 @@ pub struct MessageBuilder {
     ttl: TTL,
     metadata: HashMap<String, String>,
     requires_ack: bool,
+    reply_to_msg: Option<MessageId>,
 }
 
 impl MessageBuilder {
@@ -230,6 +236,7 @@ impl MessageBuilder {
             ttl: TTL::default(),
             metadata: HashMap::new(),
             requires_ack: true,
+            reply_to_msg: None,
         }
     }
 
@@ -263,6 +270,12 @@ impl MessageBuilder {
         self
     }
 
+    /// Sets the message this is replying to.
+    pub fn reply_to_msg(mut self, reply_to: MessageId) -> Self {
+        self.reply_to_msg = Some(reply_to);
+        self
+    }
+
     /// Builds the message.
     pub fn build(self) -> Message {
         Message {
@@ -277,6 +290,7 @@ impl MessageBuilder {
             content: self.content,
             metadata: self.metadata,
             requires_ack: self.requires_ack,
+            reply_to_msg: self.reply_to_msg,
         }
     }
 }

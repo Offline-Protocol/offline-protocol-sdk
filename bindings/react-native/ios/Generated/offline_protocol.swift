@@ -740,7 +740,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendFile(recipient: String, filePath: String, fileName: String) throws  -> String
     
-    func sendMessage(recipient: String, content: String, priority: MessagePriority) throws  -> String
+    func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
     
     func setBatteryLevel(level: UInt8) 
     
@@ -1469,13 +1469,14 @@ open func sendFile(recipient: String, filePath: String, fileName: String)throws 
 })
 }
     
-open func sendMessage(recipient: String, content: String, priority: MessagePriority)throws  -> String  {
+open func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(content),
-        FfiConverterTypeMessagePriority_lower(priority),$0
+        FfiConverterTypeMessagePriority_lower(priority),
+        FfiConverterOptionString.lower(replyToMsg),$0
     )
 })
 }
@@ -2151,12 +2152,14 @@ public func FfiConverterTypeGradientRoutingConfig_lower(_ value: GradientRouting
 public struct InternetMessage: Equatable, Hashable {
     public var recipientId: String
     public var data: [UInt8]
+    public var replyToMsg: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recipientId: String, data: [UInt8]) {
+    public init(recipientId: String, data: [UInt8], replyToMsg: String?) {
         self.recipientId = recipientId
         self.data = data
+        self.replyToMsg = replyToMsg
     }
 
     
@@ -2174,13 +2177,15 @@ public struct FfiConverterTypeInternetMessage: FfiConverterRustBuffer {
         return
             try InternetMessage(
                 recipientId: FfiConverterString.read(from: &buf), 
-                data: FfiConverterSequenceUInt8.read(from: &buf)
+                data: FfiConverterSequenceUInt8.read(from: &buf), 
+                replyToMsg: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: InternetMessage, into buf: inout [UInt8]) {
         FfiConverterString.write(value.recipientId, into: &buf)
         FfiConverterSequenceUInt8.write(value.data, into: &buf)
+        FfiConverterOptionString.write(value.replyToMsg, into: &buf)
     }
 }
 
@@ -5056,7 +5061,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 33006) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 36955) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320) {

@@ -586,7 +586,8 @@ export class OfflineProtocol {
     const messageId = await OfflineProtocolNativeModule.sendMessage(
       params.recipient,
       params.content,
-      priority
+      priority,
+      params.replyToMsg ?? null
     );
     return messageId;
   }

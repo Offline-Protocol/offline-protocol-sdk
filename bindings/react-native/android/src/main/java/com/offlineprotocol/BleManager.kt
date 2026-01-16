@@ -1061,10 +1061,16 @@ class BleManager(
             return // Silently skip to reduce log spam in dense networks
         }
         
+        // Extract service information for logging
+        val serviceUuids = scanRecord?.serviceUuids
+        val serviceData = scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
+        
         val lastLog = discoveryLogTimestamps[address]
         if (lastLog == null || now - lastLog > 30000) {
             discoveryLogTimestamps[address] = now
-            Log.d(TAG, "Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount)")
+            val hasServiceUuid = serviceUuids?.any { it.uuid == SERVICE_UUID } == true
+            val hasServiceData = serviceData != null
+            Log.d(TAG, "🔍 Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount, hasServiceUuid: $hasServiceUuid, hasServiceData: $hasServiceData)")
             emitDiagnostic(
                 "info",
                 "Discovered BLE device",
@@ -1072,13 +1078,14 @@ class BleManager(
                     "address" to address,
                     "rssi" to rssi,
                     "connectable" to isConnectable,
-                    "visiblePeers" to estimatedVisiblePeerCount
+                    "visiblePeers" to estimatedVisiblePeerCount,
+                    "hasServiceUuid" to hasServiceUuid,
+                    "hasServiceData" to hasServiceData,
+                    "serviceUuids" to (serviceUuids?.map { it.uuid.toString() } ?: emptyList())
                 )
             )
         }
         lastSeenRssi[address] = rssi.toShort()
-
-        val serviceData = scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
         val meshMetadata = MeshAdvertisementData.decode(serviceData)
         meshMetadata?.let {
             lastSeenMeshAdvertisements[address] = MeshObservation(it, rssi, now)
@@ -1188,9 +1195,43 @@ class BleManager(
         val serviceUuids = scanRecord?.serviceUuids
         if (serviceUuids != null) {
             for (uuid in serviceUuids) {
-                if (uuid.uuid == SERVICE_UUID) {
+                // Check both full UUID and short form for cross-platform compatibility
+                if (uuid.uuid == SERVICE_UUID || uuid.toString().uppercase() == SERVICE_UUID.toString().uppercase()) {
+                    if (logThrottler.shouldLog("service_uuid_match_$address", intervalMs = 30_000)) {
+                        Log.d(TAG, "✅ Device $address matches service UUID: ${uuid.uuid}")
+                    }
                     return true
                 }
+            }
+        }
+        
+        // Also check service UUIDs in scan record bytes (for iOS compatibility)
+        // iOS sometimes advertises service UUIDs in a format Android's API doesn't parse correctly
+        val scanRecordBytes = scanRecord?.bytes
+        if (scanRecordBytes != null) {
+            // Convert UUID to byte array format used in BLE advertisements
+            val uuidString = SERVICE_UUID.toString().uppercase().replace("-", "")
+            val uuidBytes = uuidString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            // Check if UUID bytes appear in scan record (simple substring search)
+            var found = false
+            for (i in 0..(scanRecordBytes.size - uuidBytes.size)) {
+                var match = true
+                for (j in uuidBytes.indices) {
+                    if (scanRecordBytes[i + j] != uuidBytes[j]) {
+                        match = false
+                        break
+                    }
+                }
+                if (match) {
+                    found = true
+                    break
+                }
+            }
+            if (found) {
+                if (logThrottler.shouldLog("service_uuid_bytes_match_$address", intervalMs = 30_000)) {
+                    Log.d(TAG, "✅ Device $address matches service UUID in raw bytes")
+                }
+                return true
             }
         }
         
@@ -1234,10 +1275,12 @@ class BleManager(
                 return false
             }
             
-            // Only process signals above minimum threshold for unknown devices
-            // Use a tiered approach: stronger signals get priority
+            // More lenient RSSI threshold for cross-platform discovery
+            // iOS devices may not advertise service UUID in a format Android recognizes,
+            // so we need to be more aggressive about connecting to verify via GATT
             val shouldAttempt = when {
                 rssi >= -70 -> true  // Strong signal - always try
+                rssi >= -85 -> true  // Medium signal - be more lenient for iOS compatibility
                 rssi >= UNKNOWN_DEVICE_MIN_RSSI && recentUnknownAttempts < MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE / 2 -> true
                 else -> false
             }
@@ -1245,11 +1288,12 @@ class BleManager(
             if (shouldAttempt) {
                 unknownDeviceAttempts[address] = now
                 if (logThrottler.shouldLog("unknown_connectable_$address", intervalMs = 30_000)) {
-                    Log.d(TAG, "Allowing unknown connectable device for GATT verification: $address RSSI=$rssi")
-                    emitDiagnostic("debug", "Allowing unknown device for GATT verification", mapOf(
+                    Log.d(TAG, "🔍 Allowing unknown connectable device for GATT verification: $address RSSI=$rssi (iOS compatibility mode)")
+                    emitDiagnostic("info", "Allowing unknown device for GATT verification", mapOf(
                         "address" to address,
                         "rssi" to rssi,
-                        "recentAttempts" to recentUnknownAttempts
+                        "recentAttempts" to recentUnknownAttempts,
+                        "reason" to "ios_compatibility"
                     ))
                 }
                 return true
