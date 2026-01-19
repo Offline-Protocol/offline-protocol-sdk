@@ -304,6 +304,26 @@ impl MlsManager {
         self.session_manager.join_session(welcome)
     }
 
+    /// Replaces an existing session with an incoming Welcome message.
+    /// 
+    /// This implements the "welcome-wins" strategy for race condition resolution.
+    /// When both peers simultaneously create a session, this method allows one peer
+    /// to replace their own session with the other peer's Welcome, ensuring both
+    /// end up with the same cryptographic state.
+    pub fn replace_session_with_welcome(&self, welcome: &WelcomeMessage) -> Result<GroupInfo> {
+        let other_user_id = &welcome.inviter_id;
+        
+        // Clear any pending welcome we were about to send
+        let _ = self.clear_pending_welcome(other_user_id);
+        
+        // Delete conflicting contact key package (we no longer need it)
+        let key_type = StorageKeyType::ContactKeyPackage.as_str();
+        let _ = self.storage.delete(key_type, other_user_id);
+        
+        // Join using their Welcome (session.join_session handles deleting our existing session)
+        self.session_manager.join_session(welcome)
+    }
+
     /// Encrypts a message for a 1:1 session.
     pub fn encrypt_for_user(&self, other_user_id: &str, plaintext: &[u8]) -> Result<EncryptedMessage> {
         if !self.has_session(other_user_id)? {
