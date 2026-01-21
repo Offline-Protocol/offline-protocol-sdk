@@ -30,6 +30,7 @@ RCT_EXTERN_METHOD(stop:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(sendMessage:(NSString *)recipient
                   content:(NSString *)content
                   priority:(nonnull NSNumber *)priority
+									replyToMsg:(NSString *)replyToMsg
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
