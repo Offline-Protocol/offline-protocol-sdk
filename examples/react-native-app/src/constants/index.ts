@@ -5,7 +5,11 @@
 /**
  * Default WebSocket relay server URL for internet transport.
  */
-export const DEFAULT_RELAY_SERVER_URL = 'wss://relay-server-production-31c7.up.railway.app/ws';
+export const DEFAULT_RELAY_SERVER_URL = 'ws://192.168.1.6:3000/ws';
+
+// Hardcoded token for aditi user
+export const HARDCODED_TOKEN =
+  'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImFkaXRpcG9sa2FtQGdtYWlsLmNvbSIsImlkIjoxMDcwMiwidXNlcm5hbWUiOiJhZGl0aSIsImRldklkIjpmYWxzZSwiaWF0IjoxNzY4OTk4OTI5LCJleHAiOjE4MDg1OTg5Mjl9.Pe7rrZt5KcpkYiZ_pk0hzIViUDX0CfW_7fZCovPkxi28TuBfmfbBvAP03SBLwfu89sydMsmjDuhXLM80O8gUd8CGkhUuAN0fYmfGTgsYPSUrNzdtC1w-BLtQPRr8IErQHVX8Pl_SqZxTG6ZfxgehqeooOCy3cIAWczpToQvcwJ5S2DFOAXGYQoA5chQfsPC1uauJSe62q5obDlWLK1c3F2k4xPDjwOkRCTtNCq28MPvEta9dgxwFNrTmUyS6pMQG67tL-_1987ciVmZA5IX8kCm7uIrYEwnaEY98db6xbzjM0ffPfbiX9H3V73zUKyM3jq9NVCIATYaR2bhJDiOGlA';
 
 /**
  * Presence message prefix used to identify presence/status messages.

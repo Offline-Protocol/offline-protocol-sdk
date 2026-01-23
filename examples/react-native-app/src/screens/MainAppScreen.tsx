@@ -22,6 +22,8 @@ import { VisualizationScreen } from './VisualizationScreen';
 import { NetworkScreen } from './NetworkScreen';
 import { OnlineScreen } from './OnlineScreen';
 import { MlsDiagnosticsScreen } from './MlsDiagnosticsScreen';
+import { GroupsScreen } from './GroupsScreen';
+import { GroupDetailScreen } from './GroupDetailScreen';
 
 // Components
 import { Icon } from '../components/Icon';
@@ -30,8 +32,8 @@ import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 
-type Tab = 'chats' | 'contacts' | 'analytics' | 'settings';
-type Screen = 'main' | 'chatDetail' | 'profile' | 'controlCenter' | 'visualization' | 'network' | 'online' | 'mlsDiagnostics';
+type Tab = 'chats' | 'contacts' | 'groups' | 'analytics' | 'settings';
+type Screen = 'main' | 'chatDetail' | 'profile' | 'controlCenter' | 'visualization' | 'network' | 'online' | 'mlsDiagnostics' | 'groupDetail';
 
 interface ChatDetailParams {
   peerId: string;
@@ -73,6 +75,7 @@ export function MainAppScreen() {
   const [currentScreen, setCurrentScreen] = useState<Screen>('main');
   const [chatDetailParams, setChatDetailParams] = useState<ChatDetailParams | null>(null);
   const [profileParams, setProfileParams] = useState<ProfileParams | null>(null);
+  const [groupDetailParams, setGroupDetailParams] = useState<{ groupId: string; groupName: string } | null>(null);
 
   const { width } = Dimensions.get('window');
   const isTablet = width >= 768;
@@ -108,10 +111,16 @@ export function MainAppScreen() {
     setCurrentScreen('mlsDiagnostics');
   };
 
+  const navigateToGroupDetail = (groupId: string, groupName: string) => {
+    setGroupDetailParams({ groupId, groupName });
+    setCurrentScreen('groupDetail');
+  };
+
   const navigateBack = () => {
     setCurrentScreen('main');
     setChatDetailParams(null);
     setProfileParams(null);
+    setGroupDetailParams(null);
   };
 
   const totalUnreadCount = chats.reduce((sum, chat) => sum + chat.unreadCount, 0);
@@ -130,6 +139,12 @@ export function MainAppScreen() {
       icon: 'people-outline',
       iconActive: 'people',
       badge: connectedPeersCount > 0 ? connectedPeersCount : undefined,
+    },
+    {
+      id: 'groups' as const,
+      label: 'Groups',
+      icon: 'people-circle-outline',
+      iconActive: 'people-circle',
     },
     {
       id: 'analytics' as const,
@@ -261,6 +276,16 @@ export function MainAppScreen() {
       return <MlsDiagnosticsScreen onBack={navigateBack} />;
     }
 
+    if (currentScreen === 'groupDetail' && groupDetailParams) {
+      return (
+        <GroupDetailScreen
+          groupId={groupDetailParams.groupId}
+          groupName={groupDetailParams.groupName}
+          onBack={navigateBack}
+        />
+      );
+    }
+
     // Main tabs
     switch (activeTab) {
       case 'chats':
@@ -272,6 +297,8 @@ export function MainAppScreen() {
             onNavigateToChatDetail={navigateToChatDetail}
           />
         );
+      case 'groups':
+        return <GroupsScreen onNavigateToGroupDetail={navigateToGroupDetail} />;
       case 'analytics':
         return (
           <AnalyticsScreen

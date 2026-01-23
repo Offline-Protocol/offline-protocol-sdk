@@ -1,40 +1,7 @@
-import { useContext } from 'react';
-import {
-  WebSocketRelayContext,
-  WebSocketRelayContextValue,
-} from '../providers/WebSocketRelayProvider';
-
-// Re-export types from provider
-export type {
-  OnlineMessage,
-  OnlineUser,
-  OnlineGroup,
-  GroupMember,
-  GroupDetails,
-  ConnectionStatus,
-  WebSocketRelayContextValue,
-} from '../providers/WebSocketRelayProvider';
-
-/**
- * Hook to access the shared WebSocket relay connection.
- * Must be used within a WebSocketRelayProvider.
- */
-export function useWebSocketRelay(): WebSocketRelayContextValue {
-  const context = useContext(WebSocketRelayContext);
-  if (!context) {
-    throw new Error(
-      'useWebSocketRelay must be used within a WebSocketRelayProvider',
-    );
-  }
-  return context;
-}
-
-// Keep the old implementation below for reference, but it's no longer used
-// The actual logic is now in WebSocketRelayProvider
-
-/* OLD IMPLEMENTATION - Now in WebSocketRelayProvider
-import { useState, useCallback, useRef, useEffect } from 'react';
+import React, { createContext, useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { DEFAULT_RELAY_SERVER_URL } from '../constants';
+
+// Types
 interface AuthenticatedResponse {
   type: 'Authenticated';
   user_id: string;
@@ -172,9 +139,56 @@ export interface OnlineGroup {
   createdAt: Date;
 }
 
-type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'authenticated' | 'error';
+export interface GroupMember {
+  userId: string;
+  role: 'admin' | 'member';
+  joinedAt: Date;
+}
 
-interface UseWebSocketRelayOptions {
+export interface GroupDetails {
+  groupId: string;
+  name: string;
+  createdBy: string;
+  createdAt: Date;
+  members: GroupMember[];
+}
+
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'authenticated' | 'error';
+
+export interface WebSocketRelayContextValue {
+  status: ConnectionStatus;
+  authenticatedUser: OnlineUser | null;
+  messages: OnlineMessage[];
+  onlineUsers: Map<string, OnlineUser>;
+  groups: OnlineGroup[];
+  groupDetails: Map<string, GroupDetails>;
+  groupMessages: Map<string, OnlineMessage[]>;
+  typingUsers: Map<string, Set<string>>;
+  error: string | null;
+
+  connect: () => void;
+  disconnect: () => void;
+  authenticate: (token: string) => boolean;
+  send: (message: Record<string, unknown>) => boolean;
+  sendMessage: (recipientId: string, content: string) => boolean;
+  checkPresence: (userId: string) => boolean;
+  setTyping: (conversationId: string) => boolean;
+  clearTyping: (conversationId: string) => boolean;
+  createGroup: (groupId: string, name: string) => boolean;
+  sendGroupMessage: (groupId: string, content: string) => boolean;
+  addGroupMember: (groupId: string, userId: string) => boolean;
+  removeGroupMember: (groupId: string, userId: string) => boolean;
+  leaveGroup: (groupId: string) => boolean;
+  getGroupInfo: (groupId: string) => boolean;
+  getUserGroups: () => boolean;
+  clearMessages: () => void;
+  clearGroupMessages: (groupId: string) => void;
+}
+
+export const WebSocketRelayContext = createContext<WebSocketRelayContextValue | null>(null);
+
+interface WebSocketRelayProviderProps {
+  children: React.ReactNode;
   onMessageReceived?: (message: OnlineMessage) => void;
   onGroupMessageReceived?: (groupId: string, message: OnlineMessage) => void;
   onPresenceUpdate?: (userId: string, isOnline: boolean, lastSeen?: Date) => void;
@@ -182,12 +196,21 @@ interface UseWebSocketRelayOptions {
   onError?: (error: string) => void;
 }
 
-export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
+export function WebSocketRelayProvider({ 
+  children,
+  onMessageReceived,
+  onGroupMessageReceived,
+  onPresenceUpdate,
+  onTypingUpdate,
+  onError,
+}: WebSocketRelayProviderProps) {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [authenticatedUser, setAuthenticatedUser] = useState<OnlineUser | null>(null);
   const [messages, setMessages] = useState<OnlineMessage[]>([]);
   const [onlineUsers, setOnlineUsers] = useState<Map<string, OnlineUser>>(new Map());
   const [groups, setGroups] = useState<OnlineGroup[]>([]);
+  const [groupDetails, setGroupDetails] = useState<Map<string, GroupDetails>>(new Map());
+  const [groupMessages, setGroupMessages] = useState<Map<string, OnlineMessage[]>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [typingUsers, setTypingUsers] = useState<Map<string, Set<string>>>(new Map());
 
@@ -221,7 +244,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
           const authError = data as AuthErrorResponse;
           setStatus('error');
           setError(authError.reason);
-          options.onError?.(authError.reason);
+          onError?.(authError.reason);
           break;
         }
 
@@ -235,13 +258,13 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
             isFromMe: false,
           };
           setMessages(prev => [...prev, newMessage]);
-          options.onMessageReceived?.(newMessage);
+          onMessageReceived?.(newMessage);
           break;
         }
 
         case 'DeliveryError': {
           const deliveryError = data as DeliveryErrorResponse;
-          options.onError?.(
+          onError?.(
             `Failed to deliver to ${deliveryError.recipient}: ${deliveryError.reason}`,
           );
           break;
@@ -260,7 +283,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
             });
             return updated;
           });
-          options.onPresenceUpdate?.(presence.user_id, presence.online);
+          onPresenceUpdate?.(presence.user_id, presence.online);
           break;
         }
 
@@ -278,7 +301,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
             });
             return updated;
           });
-          options.onPresenceUpdate?.(
+          onPresenceUpdate?.(
             presence.user_id,
             presence.online,
             lastSeen,
@@ -288,14 +311,25 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
 
         case 'GroupMessageReceived': {
           const groupMsg = data as GroupMessageReceivedResponse;
+          console.log('[WebSocketRelay] Group message received:', groupMsg);
           const newMessage: OnlineMessage = {
             id: generateMessageId(),
             sender: groupMsg.sender,
             content: groupMsg.content,
             timestamp: new Date(groupMsg.timestamp),
-            isFromMe: groupMsg.sender === authenticatedUser?.userId,
+            isFromMe: groupMsg.sender === authenticatedUser?.userId || groupMsg.sender === authenticatedUser?.username,
           };
-          options.onGroupMessageReceived?.(groupMsg.group_id, newMessage);
+          // Store in groupMessages
+          setGroupMessages(prev => {
+            const updated = new Map(prev);
+            const existing = updated.get(groupMsg.group_id) || [];
+            // Avoid duplicates by checking message id
+            if (!existing.some(m => m.id === newMessage.id)) {
+              updated.set(groupMsg.group_id, [...existing, newMessage]);
+            }
+            return updated;
+          });
+          onGroupMessageReceived?.(groupMsg.group_id, newMessage);
           break;
         }
 
@@ -314,10 +348,25 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
 
         case 'GroupInfo': {
           const groupInfo = data as GroupInfoResponse;
-          // Store group info - components can access it via a getter or callback
-          // For now, just log it - components will request it when needed
-          console.log('[WebSocketRelay] Group info received:', groupInfo);
-          // Could emit an event here for components to listen
+          console.log('[WebSocketRelay] Group info received:', JSON.stringify(groupInfo, null, 2));
+          console.log('[WebSocketRelay] Members raw:', JSON.stringify(groupInfo.members, null, 2));
+          const details: GroupDetails = {
+            groupId: groupInfo.group_id,
+            name: groupInfo.name,
+            createdBy: groupInfo.created_by,
+            createdAt: new Date(groupInfo.created_at),
+            members: (groupInfo.members || []).map(m => ({
+              userId: m.user_id || (m as any).username || 'unknown',
+              role: m.role || 'member',
+              joinedAt: m.joined_at ? new Date(m.joined_at) : new Date(),
+            })),
+          };
+          console.log('[WebSocketRelay] Processed group details:', JSON.stringify(details, null, 2));
+          setGroupDetails(prev => {
+            const updated = new Map(prev);
+            updated.set(groupInfo.group_id, details);
+            return updated;
+          });
           break;
         }
 
@@ -335,7 +384,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
 
         case 'GroupError': {
           const groupError = data as GroupErrorResponse;
-          options.onError?.(groupError.reason);
+          onError?.(groupError.reason);
           break;
         }
 
@@ -353,7 +402,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
             updated.set(typing.conversation_id, conversationTypers);
             return updated;
           });
-          options.onTypingUpdate?.(
+          onTypingUpdate?.(
             typing.conversation_id,
             typing.user_id,
             typing.typing,
@@ -367,10 +416,11 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
     } catch (err) {
       console.error('[WebSocketRelay] Failed to parse message:', err);
     }
-  }, [authenticatedUser?.userId, generateMessageId, options]);
+  }, [authenticatedUser?.userId, generateMessageId, onMessageReceived, onGroupMessageReceived, onPresenceUpdate, onTypingUpdate, onError]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('[WebSocketRelay] Already connected');
       return;
     }
 
@@ -383,6 +433,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
     setError(null);
 
     try {
+      console.log('[WebSocketRelay] Connecting to:', DEFAULT_RELAY_SERVER_URL);
       const ws = new WebSocket(DEFAULT_RELAY_SERVER_URL);
 
       ws.onopen = () => {
@@ -447,7 +498,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
 
   const authenticate = useCallback((token: string) => {
     if (status !== 'connected') {
-      console.error('[WebSocketRelay] Cannot authenticate: not connected');
+      console.error('[WebSocketRelay] Cannot authenticate: not connected (status:', status, ')');
       return false;
     }
 
@@ -595,6 +646,14 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
     setMessages([]);
   }, []);
 
+  const clearGroupMessages = useCallback((groupId: string) => {
+    setGroupMessages(prev => {
+      const updated = new Map(prev);
+      updated.delete(groupId);
+      return updated;
+    });
+  }, []);
+
   useEffect(() => {
     return () => {
       if (reconnectTimeoutRef.current) {
@@ -606,18 +665,21 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
     };
   }, []);
 
-  return {
+  const value = useMemo<WebSocketRelayContextValue>(() => ({
     status,
     authenticatedUser,
     messages,
     onlineUsers,
     groups,
+    groupDetails,
+    groupMessages,
     typingUsers,
     error,
 
     connect,
     disconnect,
     authenticate,
+    send,
     sendMessage,
     checkPresence,
     setTyping,
@@ -630,6 +692,39 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
     getGroupInfo,
     getUserGroups,
     clearMessages,
-  };
+    clearGroupMessages,
+  }), [
+    status,
+    authenticatedUser,
+    messages,
+    onlineUsers,
+    groups,
+    groupDetails,
+    groupMessages,
+    typingUsers,
+    error,
+    connect,
+    disconnect,
+    authenticate,
+    send,
+    sendMessage,
+    checkPresence,
+    setTyping,
+    clearTyping,
+    createGroup,
+    sendGroupMessage,
+    addGroupMember,
+    removeGroupMember,
+    leaveGroup,
+    getGroupInfo,
+    getUserGroups,
+    clearMessages,
+    clearGroupMessages,
+  ]);
+
+  return (
+    <WebSocketRelayContext.Provider value={value}>
+      {children}
+    </WebSocketRelayContext.Provider>
+  );
 }
-END OF OLD IMPLEMENTATION */
