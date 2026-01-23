@@ -652,6 +652,26 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
     
+    func groupAddMember(groupId: String, username: String) throws  -> String
+    
+    func groupCreate(name: String) throws  -> String
+    
+    func groupDelete(groupId: String) throws  -> String
+    
+    func groupGetInfo(groupId: String) throws  -> String
+    
+    func groupGetUserGroups() throws  -> String
+    
+    func groupLeave(groupId: String) throws  -> String
+    
+    func groupRemoveAdmin(groupId: String, username: String) throws  -> String
+    
+    func groupRemoveMember(groupId: String, username: String) throws  -> String
+    
+    func groupSendMessage(groupId: String, content: String) throws  -> String
+    
+    func groupSetAdmin(groupId: String, username: String) throws  -> String
+    
     func hasRoute(destination: String)  -> Bool
     
     func initializeMls(storage: MlsStorageProvider) throws 
@@ -1088,6 +1108,100 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
             self.uniffiCloneHandle(),
         FfiConverterTypeTransportType_lower(transportType),$0
+    )
+})
+}
+    
+open func groupAddMember(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_add_member(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
+open func groupCreate(name: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_create(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(name),$0
+    )
+})
+}
+    
+open func groupDelete(groupId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_delete(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func groupGetInfo(groupId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_get_info(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func groupGetUserGroups()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_get_user_groups(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func groupLeave(groupId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_leave(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func groupRemoveAdmin(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remove_admin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
+open func groupRemoveMember(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remove_member(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
+open func groupSendMessage(groupId: String, content: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_send_message(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(content),$0
+    )
+})
+}
+    
+open func groupSetAdmin(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_set_admin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
     )
 })
 }
@@ -4927,6 +5041,36 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_add_member() != 6312) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_create() != 16661) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_delete() != 20529) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_get_info() != 43670) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_get_user_groups() != 44986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_leave() != 21356) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_remove_admin() != 55696) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_remove_member() != 28253) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_send_message() != 10800) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_set_admin() != 36104) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 44869) {
