@@ -2482,6 +2482,144 @@ impl OfflineProtocol {
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
+
+    // ========================================================================
+    // GROUP MANAGEMENT (RELAY SERVER API)
+    // ========================================================================
+
+    /// Create a new group. Creator becomes admin.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_create(&self, name: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "CreateGroup",
+            "name": name
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize CreateGroup: {}", e)))
+    }
+
+    /// Send encrypted message to a group. Content must be pre-encrypted by client.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_send_message(
+        &self,
+        group_id: String,
+        content: String
+    ) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "SendGroupMessage",
+            "group_id": group_id,
+            "content": content
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e)))
+    }
+
+    /// Add member to group. Admin only.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_add_member(
+        &self,
+        group_id: String,
+        username: String
+    ) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "AddGroupMember",
+            "group_id": group_id,
+            "username": username
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize AddGroupMember: {}", e)))
+    }
+
+    /// Remove member from group. Admin only, or user can remove themselves.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_remove_member(
+        &self,
+        group_id: String,
+        username: String
+    ) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "RemoveGroupMember",
+            "group_id": group_id,
+            "username": username
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e)))
+    }
+
+    /// Set member as admin. Admin only.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_set_admin(
+        &self,
+        group_id: String,
+        username: String
+    ) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "SetGroupAdmin",
+            "group_id": group_id,
+            "username": username
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SetGroupAdmin: {}", e)))
+    }
+
+    /// Remove admin role from member. Admin only.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_remove_admin(
+        &self,
+        group_id: String,
+        username: String
+    ) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "RemoveGroupAdmin",
+            "group_id": group_id,
+            "username": username
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e)))
+    }
+
+    /// Leave a group.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_leave(&self, group_id: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "LeaveGroup",
+            "group_id": group_id
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize LeaveGroup: {}", e)))
+    }
+
+    /// Delete a group. Admin only.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_delete(&self, group_id: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "DeleteGroup",
+            "group_id": group_id
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize DeleteGroup: {}", e)))
+    }
+
+    /// Get group information.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_get_info(&self, group_id: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "GetGroupInfo",
+            "group_id": group_id
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize GetGroupInfo: {}", e)))
+    }
+
+    /// Get all groups the user is a member of.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn group_get_user_groups(&self) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "GetUserGroups"
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize GetUserGroups: {}", e)))
+    }
 }
 
 #[cfg(test)]

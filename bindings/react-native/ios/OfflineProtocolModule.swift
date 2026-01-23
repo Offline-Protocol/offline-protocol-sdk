@@ -2328,6 +2328,162 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
+    // MARK: - Group Management (Relay Server API)
+    
+    @objc func groupCreate(_ name: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupCreate(name: name)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to create group: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupSendMessage(_ groupId: String,
+                                content: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupSendMessage(groupId: groupId, content: content)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to send group message: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupAddMember(_ groupId: String,
+                              username: String,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupAddMember(groupId: groupId, username: username)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to add group member: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupRemoveMember(_ groupId: String,
+                                 username: String,
+                                 resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupRemoveMember(groupId: groupId, username: username)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to remove group member: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupSetAdmin(_ groupId: String,
+                            username: String,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupSetAdmin(groupId: groupId, username: username)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to set group admin: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupRemoveAdmin(_ groupId: String,
+                               username: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupRemoveAdmin(groupId: groupId, username: username)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to remove group admin: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupLeave(_ groupId: String,
+                         resolver: @escaping RCTPromiseResolveBlock,
+                         rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupLeave(groupId: groupId)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to leave group: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupDelete(_ groupId: String,
+                          resolver: @escaping RCTPromiseResolveBlock,
+                          rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupDelete(groupId: groupId)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to delete group: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupGetInfo(_ groupId: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupGetInfo(groupId: groupId)
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to get group info: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func groupGetUserGroups(_ resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let json = try proto.groupGetUserGroups()
+            resolver(json)
+        } catch {
+            rejecter("ERROR_GROUP", "Failed to get user groups: \(error.localizedDescription)", error)
+        }
+    }
+    
     // MARK: - Helpers
     
     private func parseInternetConfig(_ config: NSDictionary?) throws -> (String, UInt16) {
