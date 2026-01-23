@@ -46,10 +46,10 @@ export function OnlineScreen() {
     checkPresence,
     clearMessages,
   } = useWebSocketRelay({
-    onMessageReceived: (message) => {
+    onMessageReceived: message => {
       console.log('[OnlineScreen] Message received:', message);
     },
-    onError: (err) => {
+    onError: err => {
       Alert.alert('Error', err);
     },
   });
@@ -68,9 +68,7 @@ export function OnlineScreen() {
       Alert.alert('Error', 'Please enter a username');
       return;
     }
-    // In test mode, the token becomes the user ID
-    authenticate(username);
-  }, [authenticate, usernameInput]);
+  }, [usernameInput]);
 
   const handleSendMessage = useCallback(() => {
     if (!recipientId.trim() || !messageInput.trim()) {
@@ -100,16 +98,8 @@ export function OnlineScreen() {
     }
   }, [currentUserName]);
 
-  // Auto-authenticate when connected if we have a username
-  useEffect(() => {
-    if (status === 'connected' && usernameInput.trim() && !hasAutoAuthenticatedRef.current) {
-      hasAutoAuthenticatedRef.current = true;
-      authenticate(usernameInput.trim());
-    }
-    if (status === 'disconnected') {
-      hasAutoAuthenticatedRef.current = false;
-    }
-  }, [status, usernameInput, authenticate]);
+  // Auto-authenticate is now handled by useWebSocketRelay with hardcoded token
+  // This effect is no longer needed but kept for backwards compatibility
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -153,7 +143,9 @@ export function OnlineScreen() {
     <View style={[styles.card, { backgroundColor: theme.colors.surface }]}>
       <View style={styles.cardHeader}>
         <View style={styles.statusRow}>
-          <View style={[styles.statusDot, { backgroundColor: getStatusColor() }]} />
+          <View
+            style={[styles.statusDot, { backgroundColor: getStatusColor() }]}
+          />
           <Text style={[styles.statusLabel, { color: theme.colors.text }]}>
             {getStatusLabel()}
           </Text>
@@ -162,7 +154,9 @@ export function OnlineScreen() {
 
       {authenticatedUser && (
         <View style={styles.userInfo}>
-          <Text style={[styles.userLabel, { color: theme.colors.textSecondary }]}>
+          <Text
+            style={[styles.userLabel, { color: theme.colors.textSecondary }]}
+          >
             Logged in as:
           </Text>
           <Text style={[styles.userName, { color: theme.colors.text }]}>
@@ -175,7 +169,12 @@ export function OnlineScreen() {
       )}
 
       {error && (
-        <View style={[styles.errorBox, { backgroundColor: theme.colors.error + '20' }]}>
+        <View
+          style={[
+            styles.errorBox,
+            { backgroundColor: theme.colors.error + '20' },
+          ]}
+        >
           <Icon name="alert-circle" size={16} color={theme.colors.error} />
           <Text style={[styles.errorText, { color: theme.colors.error }]}>
             {error}
@@ -185,15 +184,23 @@ export function OnlineScreen() {
 
       {status === 'connected' && (
         <View style={styles.usernameSection}>
-          <Text style={[styles.usernameLabel, { color: theme.colors.textSecondary }]}>
+          <Text
+            style={[
+              styles.usernameLabel,
+              { color: theme.colors.textSecondary },
+            ]}
+          >
             Choose your username (this becomes your User ID):
           </Text>
           <TextInput
-            style={[styles.usernameInput, { 
-              color: theme.colors.text, 
-              backgroundColor: theme.colors.background,
-              borderColor: theme.colors.border,
-            }]}
+            style={[
+              styles.usernameInput,
+              {
+                color: theme.colors.text,
+                backgroundColor: theme.colors.background,
+                borderColor: theme.colors.border,
+              },
+            ]}
             value={usernameInput}
             onChangeText={setUsernameInput}
             placeholder="e.g., alice, bob, charlie..."
@@ -201,7 +208,9 @@ export function OnlineScreen() {
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <Text style={[styles.usernameHint, { color: theme.colors.textSecondary }]}>
+          <Text
+            style={[styles.usernameHint, { color: theme.colors.textSecondary }]}
+          >
             Other users can message you using this ID
           </Text>
         </View>
@@ -214,12 +223,16 @@ export function OnlineScreen() {
             onPress={handleConnect}
           >
             <Icon name="wifi" size={18} color={theme.colors.textInverse} />
-            <Text style={[styles.buttonText, { color: theme.colors.textInverse }]}>
+            <Text
+              style={[styles.buttonText, { color: theme.colors.textInverse }]}
+            >
               Connect
             </Text>
           </TouchableOpacity>
         ) : status === 'connecting' ? (
-          <View style={[styles.button, { backgroundColor: theme.colors.border }]}>
+          <View
+            style={[styles.button, { backgroundColor: theme.colors.border }]}
+          >
             <ActivityIndicator color={theme.colors.text} size="small" />
             <Text style={[styles.buttonText, { color: theme.colors.text }]}>
               Connecting...
@@ -229,26 +242,44 @@ export function OnlineScreen() {
           <>
             <TouchableOpacity
               style={[
-                styles.button, 
-                { backgroundColor: usernameInput.trim() ? theme.colors.primary : theme.colors.border }
+                styles.button,
+                {
+                  backgroundColor: usernameInput.trim()
+                    ? theme.colors.primary
+                    : theme.colors.border,
+                },
               ]}
               onPress={handleAuthenticate}
               disabled={!usernameInput.trim()}
             >
-              <Icon 
-                name="log-in" 
-                size={18} 
-                color={usernameInput.trim() ? theme.colors.textInverse : theme.colors.textSecondary} 
+              <Icon
+                name="log-in"
+                size={18}
+                color={
+                  usernameInput.trim()
+                    ? theme.colors.textInverse
+                    : theme.colors.textSecondary
+                }
               />
-              <Text style={[
-                styles.buttonText, 
-                { color: usernameInput.trim() ? theme.colors.textInverse : theme.colors.textSecondary }
-              ]}>
+              <Text
+                style={[
+                  styles.buttonText,
+                  {
+                    color: usernameInput.trim()
+                      ? theme.colors.textInverse
+                      : theme.colors.textSecondary,
+                  },
+                ]}
+              >
                 Join as {usernameInput.trim() || '...'}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.button, styles.buttonSecondary, { borderColor: theme.colors.error }]}
+              style={[
+                styles.button,
+                styles.buttonSecondary,
+                { borderColor: theme.colors.error },
+              ]}
               onPress={handleDisconnect}
             >
               <Icon name="close" size={18} color={theme.colors.error} />
@@ -256,7 +287,11 @@ export function OnlineScreen() {
           </>
         ) : (
           <TouchableOpacity
-            style={[styles.button, styles.buttonSecondary, { borderColor: theme.colors.error }]}
+            style={[
+              styles.button,
+              styles.buttonSecondary,
+              { borderColor: theme.colors.error },
+            ]}
             onPress={handleDisconnect}
           >
             <Icon name="close" size={18} color={theme.colors.error} />
@@ -279,14 +314,18 @@ export function OnlineScreen() {
       ]}
     >
       {!item.isFromMe && (
-        <Text style={[styles.messageSender, { color: theme.colors.textSecondary }]}>
+        <Text
+          style={[styles.messageSender, { color: theme.colors.textSecondary }]}
+        >
           {item.sender}
         </Text>
       )}
       <Text
         style={[
           styles.messageText,
-          { color: item.isFromMe ? theme.colors.textInverse : theme.colors.text },
+          {
+            color: item.isFromMe ? theme.colors.textInverse : theme.colors.text,
+          },
         ]}
       >
         {item.content}
@@ -294,10 +333,17 @@ export function OnlineScreen() {
       <Text
         style={[
           styles.messageTime,
-          { color: item.isFromMe ? theme.colors.textInverse : theme.colors.textSecondary },
+          {
+            color: item.isFromMe
+              ? theme.colors.textInverse
+              : theme.colors.textSecondary,
+          },
         ]}
       >
-        {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        {item.timestamp.toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        })}
       </Text>
     </View>
   );
@@ -306,19 +352,38 @@ export function OnlineScreen() {
     <View style={styles.tabContent}>
       {status !== 'authenticated' ? (
         <View style={styles.centeredMessage}>
-          <Icon name="lock-closed" size={48} color={theme.colors.textSecondary} />
-          <Text style={[styles.centeredText, { color: theme.colors.textSecondary }]}>
+          <Icon
+            name="lock-closed"
+            size={48}
+            color={theme.colors.textSecondary}
+          />
+          <Text
+            style={[styles.centeredText, { color: theme.colors.textSecondary }]}
+          >
             Connect and authenticate to start chatting
           </Text>
         </View>
       ) : (
         <>
-          <View style={[styles.recipientInput, { backgroundColor: theme.colors.surface }]}>
-            <Text style={[styles.inputLabel, { color: theme.colors.textSecondary }]}>
+          <View
+            style={[
+              styles.recipientInput,
+              { backgroundColor: theme.colors.surface },
+            ]}
+          >
+            <Text
+              style={[styles.inputLabel, { color: theme.colors.textSecondary }]}
+            >
               Recipient ID:
             </Text>
             <TextInput
-              style={[styles.textInput, { color: theme.colors.text, backgroundColor: theme.colors.background }]}
+              style={[
+                styles.textInput,
+                {
+                  color: theme.colors.text,
+                  backgroundColor: theme.colors.background,
+                },
+              ]}
               value={recipientId}
               onChangeText={setRecipientId}
               placeholder="Enter user ID..."
@@ -331,11 +396,25 @@ export function OnlineScreen() {
           <View style={styles.messagesContainer}>
             {messages.length === 0 ? (
               <View style={styles.emptyMessages}>
-                <Icon name="chatbubbles-outline" size={48} color={theme.colors.textSecondary} />
-                <Text style={[styles.emptyText, { color: theme.colors.textSecondary }]}>
+                <Icon
+                  name="chatbubbles-outline"
+                  size={48}
+                  color={theme.colors.textSecondary}
+                />
+                <Text
+                  style={[
+                    styles.emptyText,
+                    { color: theme.colors.textSecondary },
+                  ]}
+                >
                   No messages yet
                 </Text>
-                <Text style={[styles.emptySubtext, { color: theme.colors.textSecondary }]}>
+                <Text
+                  style={[
+                    styles.emptySubtext,
+                    { color: theme.colors.textSecondary },
+                  ]}
+                >
                   Send a message to start the conversation
                 </Text>
               </View>
@@ -343,7 +422,7 @@ export function OnlineScreen() {
               <FlatList
                 ref={flatListRef}
                 data={messages}
-                keyExtractor={(item) => item.id}
+                keyExtractor={item => item.id}
                 renderItem={renderMessageBubble}
                 contentContainerStyle={styles.messagesList}
                 showsVerticalScrollIndicator={false}
@@ -351,8 +430,18 @@ export function OnlineScreen() {
             )}
           </View>
 
-          <View style={[styles.inputContainer, { backgroundColor: theme.colors.surface }]}>
-            <View style={[styles.inputWrapper, { backgroundColor: theme.colors.background }]}>
+          <View
+            style={[
+              styles.inputContainer,
+              { backgroundColor: theme.colors.surface },
+            ]}
+          >
+            <View
+              style={[
+                styles.inputWrapper,
+                { backgroundColor: theme.colors.background },
+              ]}
+            >
               <TextInput
                 style={[styles.messageInput, { color: theme.colors.text }]}
                 value={messageInput}
@@ -367,9 +456,10 @@ export function OnlineScreen() {
               style={[
                 styles.sendButton,
                 {
-                  backgroundColor: messageInput.trim() && recipientId.trim()
-                    ? theme.colors.primary
-                    : theme.colors.border,
+                  backgroundColor:
+                    messageInput.trim() && recipientId.trim()
+                      ? theme.colors.primary
+                      : theme.colors.border,
                 },
               ]}
               onPress={handleSendMessage}
@@ -378,20 +468,27 @@ export function OnlineScreen() {
               <Icon
                 name="send"
                 size={20}
-                color={messageInput.trim() && recipientId.trim()
-                  ? theme.colors.textInverse
-                  : theme.colors.textSecondary}
+                color={
+                  messageInput.trim() && recipientId.trim()
+                    ? theme.colors.textInverse
+                    : theme.colors.textSecondary
+                }
               />
             </TouchableOpacity>
           </View>
 
           {messages.length > 0 && (
             <TouchableOpacity
-              style={[styles.clearButton, { backgroundColor: theme.colors.surface }]}
+              style={[
+                styles.clearButton,
+                { backgroundColor: theme.colors.surface },
+              ]}
               onPress={clearMessages}
             >
               <Icon name="trash-outline" size={16} color={theme.colors.error} />
-              <Text style={[styles.clearButtonText, { color: theme.colors.error }]}>
+              <Text
+                style={[styles.clearButtonText, { color: theme.colors.error }]}
+              >
                 Clear Messages
               </Text>
             </TouchableOpacity>
@@ -406,19 +503,30 @@ export function OnlineScreen() {
       {status !== 'authenticated' ? (
         <View style={styles.centeredMessage}>
           <Icon name="people" size={48} color={theme.colors.textSecondary} />
-          <Text style={[styles.centeredText, { color: theme.colors.textSecondary }]}>
+          <Text
+            style={[styles.centeredText, { color: theme.colors.textSecondary }]}
+          >
             Connect and authenticate to check user presence
           </Text>
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false}>
-          <View style={[styles.card, { backgroundColor: theme.colors.surface }]}>
+          <View
+            style={[styles.card, { backgroundColor: theme.colors.surface }]}
+          >
             <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
               Check User Presence
             </Text>
             <View style={styles.presenceInputRow}>
               <TextInput
-                style={[styles.textInput, styles.presenceInput, { color: theme.colors.text, backgroundColor: theme.colors.background }]}
+                style={[
+                  styles.textInput,
+                  styles.presenceInput,
+                  {
+                    color: theme.colors.text,
+                    backgroundColor: theme.colors.background,
+                  },
+                ]}
                 value={checkUserId}
                 onChangeText={setCheckUserId}
                 placeholder="Enter user ID..."
@@ -427,37 +535,65 @@ export function OnlineScreen() {
                 autoCorrect={false}
               />
               <TouchableOpacity
-                style={[styles.checkButton, { backgroundColor: theme.colors.primary }]}
+                style={[
+                  styles.checkButton,
+                  { backgroundColor: theme.colors.primary },
+                ]}
                 onPress={handleCheckPresence}
               >
-                <Icon name="search" size={20} color={theme.colors.textInverse} />
+                <Icon
+                  name="search"
+                  size={20}
+                  color={theme.colors.textInverse}
+                />
               </TouchableOpacity>
             </View>
           </View>
 
-          <View style={[styles.card, { backgroundColor: theme.colors.surface }]}>
+          <View
+            style={[styles.card, { backgroundColor: theme.colors.surface }]}
+          >
             <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
               Known Users ({onlineUsers.size})
             </Text>
             {onlineUsers.size === 0 ? (
-              <Text style={[styles.emptyText, { color: theme.colors.textSecondary }]}>
+              <Text
+                style={[
+                  styles.emptyText,
+                  { color: theme.colors.textSecondary },
+                ]}
+              >
                 No users checked yet
               </Text>
             ) : (
-              Array.from(onlineUsers.values()).map((user) => (
+              Array.from(onlineUsers.values()).map(user => (
                 <View key={user.userId} style={styles.userItem}>
                   <View style={styles.userItemLeft}>
                     <View
                       style={[
                         styles.userStatusDot,
-                        { backgroundColor: user.isOnline ? theme.colors.online : theme.colors.offline },
+                        {
+                          backgroundColor: user.isOnline
+                            ? theme.colors.online
+                            : theme.colors.offline,
+                        },
                       ]}
                     />
                     <View>
-                      <Text style={[styles.userItemName, { color: theme.colors.text }]}>
+                      <Text
+                        style={[
+                          styles.userItemName,
+                          { color: theme.colors.text },
+                        ]}
+                      >
                         {user.username}
                       </Text>
-                      <Text style={[styles.userItemId, { color: theme.colors.textSecondary }]}>
+                      <Text
+                        style={[
+                          styles.userItemId,
+                          { color: theme.colors.textSecondary },
+                        ]}
+                      >
                         {user.userId}
                       </Text>
                     </View>
@@ -465,10 +601,16 @@ export function OnlineScreen() {
                   <Text
                     style={[
                       styles.userStatus,
-                      { color: user.isOnline ? theme.colors.online : theme.colors.textSecondary },
+                      {
+                        color: user.isOnline
+                          ? theme.colors.online
+                          : theme.colors.textSecondary,
+                      },
                     ]}
                   >
-                    {user.isOnline ? 'Online' : user.lastSeen
+                    {user.isOnline
+                      ? 'Online'
+                      : user.lastSeen
                       ? `Last seen ${user.lastSeen.toLocaleTimeString()}`
                       : 'Offline'}
                   </Text>
@@ -485,30 +627,57 @@ export function OnlineScreen() {
     <View style={styles.tabContent}>
       {status !== 'authenticated' ? (
         <View style={styles.centeredMessage}>
-          <Icon name="people-circle" size={48} color={theme.colors.textSecondary} />
-          <Text style={[styles.centeredText, { color: theme.colors.textSecondary }]}>
+          <Icon
+            name="people-circle"
+            size={48}
+            color={theme.colors.textSecondary}
+          />
+          <Text
+            style={[styles.centeredText, { color: theme.colors.textSecondary }]}
+          >
             Connect and authenticate to manage groups
           </Text>
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false}>
-          <View style={[styles.card, { backgroundColor: theme.colors.surface }]}>
+          <View
+            style={[styles.card, { backgroundColor: theme.colors.surface }]}
+          >
             <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
               Your Groups ({groups.length})
             </Text>
             {groups.length === 0 ? (
-              <Text style={[styles.emptyText, { color: theme.colors.textSecondary }]}>
+              <Text
+                style={[
+                  styles.emptyText,
+                  { color: theme.colors.textSecondary },
+                ]}
+              >
                 No groups yet
               </Text>
             ) : (
-              groups.map((group) => (
+              groups.map(group => (
                 <View key={group.groupId} style={styles.groupItem}>
-                  <Icon name="people-circle" size={24} color={theme.colors.primary} />
+                  <Icon
+                    name="people-circle"
+                    size={24}
+                    color={theme.colors.primary}
+                  />
                   <View style={styles.groupItemInfo}>
-                    <Text style={[styles.groupItemName, { color: theme.colors.text }]}>
+                    <Text
+                      style={[
+                        styles.groupItemName,
+                        { color: theme.colors.text },
+                      ]}
+                    >
                       {group.name}
                     </Text>
-                    <Text style={[styles.groupItemId, { color: theme.colors.textSecondary }]}>
+                    <Text
+                      style={[
+                        styles.groupItemId,
+                        { color: theme.colors.textSecondary },
+                      ]}
+                    >
                       {group.groupId}
                     </Text>
                   </View>
@@ -517,8 +686,17 @@ export function OnlineScreen() {
             )}
           </View>
 
-          <View style={[styles.infoBox, { backgroundColor: theme.colors.primary + '15' }]}>
-            <Icon name="information-circle" size={20} color={theme.colors.primary} />
+          <View
+            style={[
+              styles.infoBox,
+              { backgroundColor: theme.colors.primary + '15' },
+            ]}
+          >
+            <Icon
+              name="information-circle"
+              size={20}
+              color={theme.colors.primary}
+            />
             <Text style={[styles.infoText, { color: theme.colors.text }]}>
               Group management features are available through the WebSocket API.
               Create groups, add members, and send group messages.
@@ -543,7 +721,8 @@ export function OnlineScreen() {
   };
 
   // Chat tab has FlatList, so we don't wrap it in ScrollView
-  const shouldUseScrollView = activeTab !== 'chat' || status !== 'authenticated' || messages.length === 0;
+  const shouldUseScrollView =
+    activeTab !== 'chat' || status !== 'authenticated' || messages.length === 0;
 
   return (
     <KeyboardAvoidingView
@@ -555,10 +734,14 @@ export function OnlineScreen() {
         style={styles.header}
       >
         <View style={styles.headerContent}>
-          <Text style={[styles.headerTitle, { color: theme.colors.textInverse }]}>
+          <Text
+            style={[styles.headerTitle, { color: theme.colors.textInverse }]}
+          >
             Online Transport
           </Text>
-          <Text style={[styles.headerSubtitle, { color: theme.colors.textInverse }]}>
+          <Text
+            style={[styles.headerSubtitle, { color: theme.colors.textInverse }]}
+          >
             WebSocket Relay Server
           </Text>
         </View>
@@ -573,25 +756,39 @@ export function OnlineScreen() {
         >
           {renderConnectionCard()}
 
-          <View style={[styles.tabBar, { backgroundColor: theme.colors.surface }]}>
-            {tabs.map((tab) => (
+          <View
+            style={[styles.tabBar, { backgroundColor: theme.colors.surface }]}
+          >
+            {tabs.map(tab => (
               <TouchableOpacity
                 key={tab.id}
                 style={[
                   styles.tab,
-                  activeTab === tab.id && [styles.activeTab, { borderColor: theme.colors.primary }],
+                  activeTab === tab.id && [
+                    styles.activeTab,
+                    { borderColor: theme.colors.primary },
+                  ],
                 ]}
                 onPress={() => setActiveTab(tab.id)}
               >
                 <Icon
                   name={tab.icon}
                   size={20}
-                  color={activeTab === tab.id ? theme.colors.primary : theme.colors.textSecondary}
+                  color={
+                    activeTab === tab.id
+                      ? theme.colors.primary
+                      : theme.colors.textSecondary
+                  }
                 />
                 <Text
                   style={[
                     styles.tabLabel,
-                    { color: activeTab === tab.id ? theme.colors.primary : theme.colors.textSecondary },
+                    {
+                      color:
+                        activeTab === tab.id
+                          ? theme.colors.primary
+                          : theme.colors.textSecondary,
+                    },
                   ]}
                 >
                   {tab.label}
@@ -606,25 +803,39 @@ export function OnlineScreen() {
         <View style={[styles.content, styles.scrollContent]}>
           {renderConnectionCard()}
 
-          <View style={[styles.tabBar, { backgroundColor: theme.colors.surface }]}>
-            {tabs.map((tab) => (
+          <View
+            style={[styles.tabBar, { backgroundColor: theme.colors.surface }]}
+          >
+            {tabs.map(tab => (
               <TouchableOpacity
                 key={tab.id}
                 style={[
                   styles.tab,
-                  activeTab === tab.id && [styles.activeTab, { borderColor: theme.colors.primary }],
+                  activeTab === tab.id && [
+                    styles.activeTab,
+                    { borderColor: theme.colors.primary },
+                  ],
                 ]}
                 onPress={() => setActiveTab(tab.id)}
               >
                 <Icon
                   name={tab.icon}
                   size={20}
-                  color={activeTab === tab.id ? theme.colors.primary : theme.colors.textSecondary}
+                  color={
+                    activeTab === tab.id
+                      ? theme.colors.primary
+                      : theme.colors.textSecondary
+                  }
                 />
                 <Text
                   style={[
                     styles.tabLabel,
-                    { color: activeTab === tab.id ? theme.colors.primary : theme.colors.textSecondary },
+                    {
+                      color:
+                        activeTab === tab.id
+                          ? theme.colors.primary
+                          : theme.colors.textSecondary,
+                    },
                   ]}
                 >
                   {tab.label}
