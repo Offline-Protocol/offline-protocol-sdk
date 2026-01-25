@@ -612,6 +612,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func emitTestEvent() 
     
+    func establishSecureSession(peerId: String) throws  -> MlsWelcomeMessage?
+    
     func finalizeFile(fileId: String) throws 
     
     func forceTransport(transportType: TransportType) throws 
@@ -651,6 +653,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func getTopology() throws  -> NetworkTopology
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
+    
+    func hasPendingKeyPackage(peerId: String)  -> Bool
     
     func hasRoute(destination: String)  -> Bool
     
@@ -928,6 +932,15 @@ open func emitTestEvent()  {try! rustCall() {
 }
 }
     
+open func establishSecureSession(peerId: String)throws  -> MlsWelcomeMessage?  {
+    return try  FfiConverterOptionTypeMlsWelcomeMessage.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
+    )
+})
+}
+    
 open func finalizeFile(fileId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(
             self.uniffiCloneHandle(),
@@ -1088,6 +1101,15 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
             self.uniffiCloneHandle(),
         FfiConverterTypeTransportType_lower(transportType),$0
+    )
+})
+}
+    
+open func hasPendingKeyPackage(peerId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
     )
 })
 }
@@ -4869,6 +4891,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 25919) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4927,6 +4952,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 44869) {

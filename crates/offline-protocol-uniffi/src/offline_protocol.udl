@@ -532,6 +532,15 @@ interface OfflineProtocol {
     // Check if a 1:1 session exists with another user
     boolean mls_has_session(string other_user_id);
     
+    // Check if a pending key package is available for a peer
+    boolean has_pending_key_package(string peer_id);
+    
+    // Establish a secure session with a peer (high-level API)
+    // Returns the Welcome message if session was created, null if session already exists
+    // Throws if no key package is available for the peer
+    [Throws=ProtocolError]
+    MlsWelcomeMessage? establish_secure_session(string peer_id);
+    
     // Create a 1:1 session with another user (returns Welcome to send)
     [Throws=ProtocolError]
     MlsWelcomeMessage mls_create_session(string other_user_id);
