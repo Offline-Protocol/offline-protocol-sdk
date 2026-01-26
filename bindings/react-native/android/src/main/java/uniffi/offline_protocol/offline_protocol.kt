@@ -720,6 +720,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clea
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport(
@@ -759,6 +761,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route(
 ): Short
@@ -946,6 +950,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_ex
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -986,6 +992,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topolo
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(`ptr`: Long,`destination`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1269,6 +1277,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 25919.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1327,6 +1338,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route() != 44869.toShort()) {
@@ -2062,6 +2076,8 @@ public interface OfflineProtocolInterface {
     
     fun `emitTestEvent`()
     
+    fun `establishSecureSession`(`peerId`: kotlin.String): MlsWelcomeMessage?
+    
     fun `finalizeFile`(`fileId`: kotlin.String)
     
     fun `forceTransport`(`transportType`: TransportType)
@@ -2101,6 +2117,8 @@ public interface OfflineProtocolInterface {
     fun `getTopology`(): NetworkTopology
     
     fun `getTransportMetrics`(`transportType`: TransportType): TransportMetrics?
+    
+    fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean
     
     fun `hasRoute`(`destination`: kotlin.String): kotlin.Boolean
     
@@ -2487,6 +2505,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `establishSecureSession`(`peerId`: kotlin.String): MlsWelcomeMessage? {
+            return FfiConverterOptionalTypeMlsWelcomeMessage.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `finalizeFile`(`fileId`: kotlin.String)
         = 
     callWithHandle {
@@ -2741,6 +2773,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
         it,
         FfiConverterTypeTransportType.lower(`transportType`),_status)
+}
+    }
+    )
+    }
+    
+
+    override fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
 }
     }
     )
