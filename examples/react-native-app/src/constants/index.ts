@@ -2,14 +2,23 @@
  * Application-wide constants for the React Native example app.
  */
 
+import {
+  RELAY_SERVER_URL as ENV_RELAY_SERVER_URL,
+  RELAY_AUTH_TOKEN as ENV_RELAY_AUTH_TOKEN,
+} from '@env';
+
 /**
  * Default WebSocket relay server URL for internet transport.
+ * Can be overridden via RELAY_SERVER_URL environment variable.
  */
-export const DEFAULT_RELAY_SERVER_URL = 'ws://192.168.1.7:3000/ws';
+export const DEFAULT_RELAY_SERVER_URL =
+  ENV_RELAY_SERVER_URL || 'ws://localhost:3000/ws';
 
-// Hardcoded token for aditi user
-export const HARDCODED_TOKEN =
-  'REDACTED_TOKEN';
+/**
+ * Authentication token for WebSocket relay server.
+ * Must be set via RELAY_AUTH_TOKEN environment variable in .env file.
+ */
+export const HARDCODED_TOKEN = ENV_RELAY_AUTH_TOKEN || '';
 
 /**
  * Presence message prefix used to identify presence/status messages.
