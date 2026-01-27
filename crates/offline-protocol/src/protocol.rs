@@ -686,7 +686,8 @@ impl OfflineProtocol {
 
         if !has_session {
             // Try to create session from stored key package
-            if let Some(key_pkg) = self.pending_key_packages.remove(recipient) {
+            // Clone first, only remove after all operations succeed to avoid losing the key package on failure
+            if let Some(key_pkg) = self.pending_key_packages.get(recipient).cloned() {
                 {
                     let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                     manager.import_key_package(recipient, &key_pkg)?;
@@ -700,6 +701,9 @@ impl OfflineProtocol {
                 
                 // Send welcome as internal message
                 self.send_welcome_message(recipient, &welcome)?;
+                
+                // All operations succeeded, now safe to remove the key package
+                self.pending_key_packages.remove(recipient);
                 debug!(recipient = %recipient, "Created MLS session and sent welcome");
                 
                 // Don't encrypt immediately after creating session.
@@ -1009,6 +1013,85 @@ impl OfflineProtocol {
     pub fn on_neighbor_lost(&mut self, peer_id: &str) {
         // Remove from key package sent tracking so we can re-send if they reconnect
         self.key_package_sent_to.remove(peer_id);
+    }
+
+    /// Establishes a secure MLS session with a peer.
+    ///
+    /// This high-level method handles the complete session establishment flow:
+    /// 1. Checks if a session already exists (returns Ok(None) if so)
+    /// 2. Checks for a pending key package from the peer
+    /// 3. If found, imports the key package, creates the session, and sends the Welcome message
+    /// 4. If no key package is available, returns an error
+    ///
+    /// This method is designed for use by application code that needs explicit control
+    /// over session establishment, as opposed to the automatic encryption flow.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - The ID of the peer to establish a session with
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(WelcomeMessage))` - Session created, Welcome message returned (and sent to peer)
+    /// * `Ok(None)` - Session already exists
+    /// * `Err(NoKeyPackage)` - No key package available for the peer yet
+    pub fn establish_secure_session(&mut self, peer_id: &str) -> Result<Option<WelcomeMessage>> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        
+        // Check if session already exists
+        let has_session = {
+            let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.has_session(peer_id)?
+        };
+        
+        if has_session {
+            debug!(peer_id = %peer_id, "Session already exists");
+            return Ok(None);
+        }
+        
+        // Check for pending key package
+        // Clone first, only remove after all operations succeed to avoid losing the key package on failure
+        if let Some(key_pkg) = self.pending_key_packages.get(peer_id).cloned() {
+            {
+                let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                manager.import_key_package(peer_id, &key_pkg)?;
+            }
+            
+            // Create session and get welcome message
+            let welcome = {
+                let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                manager.create_session(peer_id)?
+            };
+            
+            // Send welcome message to peer
+            self.send_welcome_message(peer_id, &welcome)?;
+            
+            // All operations succeeded, now safe to remove the key package
+            self.pending_key_packages.remove(peer_id);
+            
+            info!(peer_id = %peer_id, group_id = %welcome.group_id, "Established secure session");
+            return Ok(Some(welcome));
+        }
+        
+        // No key package available - peer hasn't sent one yet
+        debug!(peer_id = %peer_id, "No key package available for peer");
+        Err(Error::NoKeyPackage(peer_id.to_string()))
+    }
+
+    /// Checks if a pending key package is available for a peer.
+    ///
+    /// This can be used to check if session establishment is possible
+    /// before calling `establish_secure_session`.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_id` - The ID of the peer to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if a key package is available, `false` otherwise
+    pub fn has_pending_key_package(&self, peer_id: &str) -> bool {
+        self.pending_key_packages.contains_key(peer_id)
     }
 
     /// Gets access to the MLS manager for advanced operations.

@@ -1380,8 +1380,52 @@ export class OfflineProtocol {
   }
 
   /**
+   * Checks if a pending key package is available for a peer.
+   *
+   * Key packages are received automatically when peers are discovered
+   * (if auto_key_exchange is enabled). This method checks if we have
+   * received the peer's key package and can establish a session.
+   *
+   * @param peerId - Peer's ID
+   * @returns True if key package is available
+   */
+  async hasPendingKeyPackage(peerId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.hasPendingKeyPackage(peerId);
+  }
+
+  /**
+   * Establishes a secure MLS session with a peer (high-level API).
+   *
+   * This method handles the complete session establishment flow:
+   * - If session already exists, returns null
+   * - If a pending key package is available, imports it, creates session, sends Welcome
+   * - If no key package is available, throws an error
+   *
+   * This is the recommended method for establishing secure sessions as it
+   * handles the key package exchange flow automatically.
+   *
+   * @param peerId - Peer's ID
+   * @returns Welcome message if session was created, null if session already exists
+   * @throws Error if no key package is available (peer hasn't completed key exchange)
+   */
+  async establishSecureSession(peerId: string): Promise<MlsWelcome | null> {
+    const result = await OfflineProtocolNativeModule.establishSecureSession(peerId);
+    if (!result) return null;
+    return {
+      groupId: result.groupId,
+      welcomeData: result.welcomeData,
+      inviterId: result.inviterId,
+      timestampMs: result.timestampMs,
+    };
+  }
+
+  /**
    * Creates an MLS session with another user.
    * Returns a Welcome message that must be sent to the other user.
+   *
+   * Note: Prefer using `establishSecureSession` which handles the key package
+   * flow automatically. This lower-level method requires the peer's key package
+   * to already be imported via `mlsImportKeyPackage`.
    *
    * @param otherUserId - Other user's ID
    * @returns Welcome message to send to the other user

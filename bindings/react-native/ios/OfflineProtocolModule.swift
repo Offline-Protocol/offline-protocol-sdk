@@ -1987,6 +1987,44 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(proto.mlsHasSession(otherUserId: otherUserId))
     }
     
+    /// Check if a pending key package is available for a peer
+    @objc func hasPendingKeyPackage(_ peerId: String,
+                                    resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            resolver(false)
+            return
+        }
+        resolver(proto.hasPendingKeyPackage(peerId: peerId))
+    }
+    
+    /// Establish a secure session with a peer (high-level API)
+    @objc func establishSecureSession(_ peerId: String,
+                                      resolver: @escaping RCTPromiseResolveBlock,
+                                      rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MLS", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            if let welcome = try proto.establishSecureSession(peerId: peerId) {
+                let result: [String: Any] = [
+                    "groupId": welcome.groupId,
+                    "welcomeData": welcome.welcomeData.map { NSNumber(value: $0) },
+                    "inviterId": welcome.inviterId,
+                    "groupName": welcome.groupName ?? NSNull(),
+                    "timestampMs": NSNumber(value: welcome.timestampMs)
+                ]
+                resolver(result)
+            } else {
+                // Session already exists
+                resolver(NSNull())
+            }
+        } catch {
+            rejecter("ERROR_MLS", "Failed to establish secure session: \(error.localizedDescription)", error)
+        }
+    }
+    
     /// Encrypt a message for a user
     @objc func mlsEncryptForUser(_ otherUserId: String,
                                  plaintext: [NSNumber],
