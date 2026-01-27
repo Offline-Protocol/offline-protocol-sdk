@@ -5,7 +5,7 @@
 /**
  * Default WebSocket relay server URL for internet transport.
  */
-export const DEFAULT_RELAY_SERVER_URL = 'ws://192.168.1.6:3000/ws';
+export const DEFAULT_RELAY_SERVER_URL = 'ws://192.168.1.7:3000/ws';
 
 // Hardcoded token for aditi user
 export const HARDCODED_TOKEN =
