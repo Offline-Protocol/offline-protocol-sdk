@@ -376,6 +376,7 @@ RCT_EXTERN_METHOD(groupCreate:(NSString *)name
 
 RCT_EXTERN_METHOD(groupSendMessage:(NSString *)groupId
                   content:(NSString *)content
+                  replyToMsg:(NSString * _Nullable)replyToMsg
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

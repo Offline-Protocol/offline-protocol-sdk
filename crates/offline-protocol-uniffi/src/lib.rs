@@ -2484,6 +2484,84 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // PRESENCE AND KEY MANAGEMENT (RELAY SERVER API)
+    // ========================================================================
+
+    /// Check if a user is online.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn check_presence(&self, username: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "CheckPresence",
+            "username": username
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize CheckPresence: {}", e)))
+    }
+
+    /// Request prekey bundle for a user to establish encrypted communication.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn request_prekey_bundle(&self, username: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "RequestPreKeyBundle",
+            "username": username
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e)))
+    }
+
+    /// Upload identity key and prekeys for Signal Protocol.
+    /// Returns JSON string to send via WebSocket relay.
+    /// Parameters are JSON strings that will be parsed and included in the payload.
+    pub fn upload_keys(
+        &self,
+        identity_key: String,
+        signed_prekey_json: String,
+        one_time_prekeys_json: String,
+    ) -> Result<String, ProtocolError> {
+        // Parse the JSON strings into values
+        let signed_prekey: serde_json::Value = serde_json::from_str(&signed_prekey_json)
+            .map_err(|e| ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e)))?;
+        
+        let one_time_prekeys: Vec<serde_json::Value> = serde_json::from_str(&one_time_prekeys_json)
+            .map_err(|e| ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e)))?;
+        
+        let payload = serde_json::json!({
+            "type": "UploadKeys",
+            "identity_key": identity_key,
+            "signed_prekey": signed_prekey,
+            "one_time_prekeys": one_time_prekeys
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize UploadKeys: {}", e)))
+    }
+
+    /// Set typing indicator in a conversation.
+    /// For direct messages, conversation_id should be the recipient's username.
+    /// For group chats, conversation_id should be the group_id.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn set_typing(&self, conversation_id: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "SetTyping",
+            "conversation_id": conversation_id
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SetTyping: {}", e)))
+    }
+
+    /// Clear typing indicator in a conversation.
+    /// For direct messages, conversation_id should be the recipient's username.
+    /// For group chats, conversation_id should be the group_id.
+    /// Returns JSON string to send via WebSocket relay.
+    pub fn clear_typing(&self, conversation_id: String) -> Result<String, ProtocolError> {
+        let payload = serde_json::json!({
+            "type": "ClearTyping",
+            "conversation_id": conversation_id
+        });
+        serde_json::to_string(&payload)
+            .map_err(|e| ProtocolError::Other(format!("Failed to serialize ClearTyping: {}", e)))
+    }
+
+    // ========================================================================
     // GROUP MANAGEMENT (RELAY SERVER API)
     // ========================================================================
 
@@ -2503,13 +2581,19 @@ impl OfflineProtocol {
     pub fn group_send_message(
         &self,
         group_id: String,
-        content: String
+        content: String,
+        reply_to_msg: Option<String>,
     ) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "type": "SendGroupMessage",
             "group_id": group_id,
             "content": content
         });
+        
+        if let Some(reply_to) = reply_to_msg {
+            payload["reply_to_msg"] = serde_json::Value::String(reply_to);
+        }
+        
         serde_json::to_string(&payload)
             .map_err(|e| ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e)))
     }
