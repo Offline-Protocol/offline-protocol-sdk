@@ -2347,6 +2347,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     @objc func groupSendMessage(_ groupId: String,
                                 content: String,
+                                replyToMsg: String?,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
@@ -2354,7 +2355,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let json = try proto.groupSendMessage(groupId: groupId, content: content)
+            let json = try proto.groupSendMessage(groupId: groupId, content: content, replyToMsg: replyToMsg)
             resolver(json)
         } catch {
             rejecter("ERROR_GROUP", "Failed to send group message: \(error.localizedDescription)", error)

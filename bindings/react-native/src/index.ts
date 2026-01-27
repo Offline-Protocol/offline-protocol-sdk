@@ -1681,8 +1681,8 @@ export class OfflineProtocol {
    * Send encrypted message to a group. Content must be pre-encrypted by client.
    * Returns JSON string to send via WebSocket relay.
    */
-  async groupSendMessage(groupId: string, content: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupSendMessage(groupId, content);
+  async groupSendMessage(groupId: string, content: string, replyToMsg?: string | null): Promise<string> {
+    return await OfflineProtocolNativeModule.groupSendMessage(groupId, content, replyToMsg || null);
   }
 
   /**

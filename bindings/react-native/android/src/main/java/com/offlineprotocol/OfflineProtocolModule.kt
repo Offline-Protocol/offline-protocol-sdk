@@ -2233,10 +2233,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun groupSendMessage(groupId: String, content: String, promise: Promise) {
+    fun groupSendMessage(groupId: String, content: String, replyToMsg: String?, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupSendMessage(groupId, content)
+            val json = proto.groupSendMessage(groupId, content, replyToMsg)
             promise.resolve(json)
         } catch (e: Exception) {
             promise.reject("ERROR_GROUP", "Failed to send group message: ${e.message}", e)

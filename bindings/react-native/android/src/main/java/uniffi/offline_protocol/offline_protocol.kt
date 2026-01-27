@@ -716,7 +716,11 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_check_presence(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
 ): Short
@@ -864,6 +868,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remo
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file(
@@ -875,6 +881,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi(
 ): Short
@@ -893,6 +901,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upda
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_routing_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message(
 ): Short
@@ -962,8 +972,12 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_status
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_check_presence(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1022,7 +1036,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remo
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remove_member(`ptr`: Long,`groupId`: RustBuffer.ByValue,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_send_message(`ptr`: Long,`groupId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_send_message(`ptr`: Long,`groupId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_set_admin(`ptr`: Long,`groupId`: RustBuffer.ByValue,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1110,6 +1124,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_nei
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1122,6 +1138,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(`ptr`: Long,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1140,6 +1158,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_rou
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,`metrics`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys(`ptr`: Long,`identityKey`: RustBuffer.ByValue,`signedPrekeyJson`: RustBuffer.ByValue,`oneTimePrekeysJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1303,7 +1323,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_check_presence() != 15829.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes() != 32382.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing() != 54663.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796.toShort()) {
@@ -1393,7 +1419,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_remove_member() != 28253.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_send_message() != 10800.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_send_message() != 3905.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_set_admin() != 36104.toShort()) {
@@ -1525,6 +1551,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1541,6 +1570,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing() != 10907.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161.toShort()) {
@@ -1568,6 +1600,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys() != 42899.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936.toShort()) {
@@ -2128,7 +2163,11 @@ public interface OfflineProtocolInterface {
     
     fun `cancelFileTransfer`(`fileId`: kotlin.String)
     
+    fun `checkPresence`(`username`: kotlin.String): kotlin.String
+    
     fun `cleanupExpiredRoutes`()
+    
+    fun `clearTyping`(`conversationId`: kotlin.String): kotlin.String
     
     fun `emitTestEvent`()
     
@@ -2188,7 +2227,7 @@ public interface OfflineProtocolInterface {
     
     fun `groupRemoveMember`(`groupId`: kotlin.String, `username`: kotlin.String): kotlin.String
     
-    fun `groupSendMessage`(`groupId`: kotlin.String, `content`: kotlin.String): kotlin.String
+    fun `groupSendMessage`(`groupId`: kotlin.String, `content`: kotlin.String, `replyToMsg`: kotlin.String?): kotlin.String
     
     fun `groupSetAdmin`(`groupId`: kotlin.String, `username`: kotlin.String): kotlin.String
     
@@ -2276,6 +2315,8 @@ public interface OfflineProtocolInterface {
     
     fun `removeTransport`(`transportType`: TransportType)
     
+    fun `requestPrekeyBundle`(`username`: kotlin.String): kotlin.String
+    
     fun `resume`()
     
     fun `sendFile`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String
@@ -2287,6 +2328,8 @@ public interface OfflineProtocolInterface {
     fun `setEventCallback`(`callback`: EventCallback)
     
     fun `setRelayPriority`(`priority`: RelayPriority)
+    
+    fun `setTyping`(`conversationId`: kotlin.String): kotlin.String
     
     fun `shouldEscalateToWifi`(): kotlin.Boolean
     
@@ -2305,6 +2348,8 @@ public interface OfflineProtocolInterface {
     fun `updateRoutingConfig`(`config`: GradientRoutingConfig)
     
     fun `updateTransportMetrics`(`transportType`: TransportType, `metrics`: TransportMetrics)
+    
+    fun `uploadKeys`(`identityKey`: kotlin.String, `signedPrekeyJson`: kotlin.String, `oneTimePrekeysJson`: kotlin.String): kotlin.String
     
     fun `wifiDirectGetNextMessage`(): WifiDirectMessage?
     
@@ -2552,6 +2597,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    
+    @Throws(ProtocolException::class)override fun `checkPresence`(`username`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_check_presence(
+        it,
+        FfiConverterString.lower(`username`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `cleanupExpiredRoutes`()
         = 
     callWithHandle {
@@ -2562,6 +2621,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    
+    @Throws(ProtocolException::class)override fun `clearTyping`(`conversationId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing(
+        it,
+        FfiConverterString.lower(`conversationId`),_status)
+}
+    }
+    )
+    }
     
 
     override fun `emitTestEvent`()
@@ -2950,13 +3023,13 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `groupSendMessage`(`groupId`: kotlin.String, `content`: kotlin.String): kotlin.String {
+    @Throws(ProtocolException::class)override fun `groupSendMessage`(`groupId`: kotlin.String, `content`: kotlin.String, `replyToMsg`: kotlin.String?): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_send_message(
         it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`content`),_status)
+        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`content`),FfiConverterOptionalString.lower(`replyToMsg`),_status)
 }
     }
     )
@@ -3534,6 +3607,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `requestPrekeyBundle`(`username`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
+        it,
+        FfiConverterString.lower(`username`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `resume`()
         = 
     callWithHandle {
@@ -3609,6 +3696,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    
+    @Throws(ProtocolException::class)override fun `setTyping`(`conversationId`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing(
+        it,
+        FfiConverterString.lower(`conversationId`),_status)
+}
+    }
+    )
+    }
     
 
     override fun `shouldEscalateToWifi`(): kotlin.Boolean {
@@ -3722,6 +3823,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    
+    @Throws(ProtocolException::class)override fun `uploadKeys`(`identityKey`: kotlin.String, `signedPrekeyJson`: kotlin.String, `oneTimePrekeysJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys(
+        it,
+        FfiConverterString.lower(`identityKey`),FfiConverterString.lower(`signedPrekeyJson`),FfiConverterString.lower(`oneTimePrekeysJson`),_status)
+}
+    }
+    )
+    }
     
 
     override fun `wifiDirectGetNextMessage`(): WifiDirectMessage? {

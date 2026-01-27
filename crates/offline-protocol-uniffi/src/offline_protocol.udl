@@ -605,6 +605,40 @@ interface OfflineProtocol {
     MlsGroupInfo mls_process_welcome(MlsWelcomeMessage welcome);
     
     // ========================================================================
+    // PRESENCE AND KEY MANAGEMENT (RELAY SERVER API)
+    // ========================================================================
+    
+    // Check if a user is online.
+    // Returns JSON string to send via WebSocket relay.
+    [Throws=ProtocolError]
+    string check_presence(string username);
+    
+    // Request prekey bundle for a user to establish encrypted communication.
+    // Returns JSON string to send via WebSocket relay.
+    [Throws=ProtocolError]
+    string request_prekey_bundle(string username);
+    
+    // Upload identity key and prekeys for Signal Protocol.
+    // Returns JSON string to send via WebSocket relay.
+    // Parameters are JSON strings that will be parsed and included in the payload.
+    [Throws=ProtocolError]
+    string upload_keys(string identity_key, string signed_prekey_json, string one_time_prekeys_json);
+    
+    // Set typing indicator in a conversation.
+    // For direct messages, conversation_id should be the recipient's username.
+    // For group chats, conversation_id should be the group_id.
+    // Returns JSON string to send via WebSocket relay.
+    [Throws=ProtocolError]
+    string set_typing(string conversation_id);
+    
+    // Clear typing indicator in a conversation.
+    // For direct messages, conversation_id should be the recipient's username.
+    // For group chats, conversation_id should be the group_id.
+    // Returns JSON string to send via WebSocket relay.
+    [Throws=ProtocolError]
+    string clear_typing(string conversation_id);
+    
+    // ========================================================================
     // GROUP MANAGEMENT (RELAY SERVER API)
     // ========================================================================
     
@@ -616,7 +650,7 @@ interface OfflineProtocol {
     // Send encrypted message to a group. Content must be pre-encrypted by client.
     // Returns JSON string to send via WebSocket relay.
     [Throws=ProtocolError]
-    string group_send_message(string group_id, string content);
+    string group_send_message(string group_id, string content, string? reply_to_msg);
     
     // Add member to group. Admin only.
     // Returns JSON string to send via WebSocket relay.
