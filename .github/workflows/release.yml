@@ -1,0 +1,174 @@
+name: Release & Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-ios:
+    name: Build iOS Libraries
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-ios-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ios-
+
+      - name: Install uniffi-bindgen
+        run: cargo install uniffi --version 0.30.0 --features cli --locked
+
+      - name: Build iOS Libraries
+        working-directory: bindings/react-native
+        run: bash scripts/build-uniffi-ios.sh
+
+      - name: Upload iOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-libs
+          path: |
+            bindings/react-native/ios/libs/
+            bindings/react-native/ios/Generated/
+          retention-days: 1
+
+  build-android:
+    name: Build Android Libraries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-android-
+
+      - name: Install uniffi-bindgen
+        run: cargo install uniffi --version 0.30.0 --features cli --locked
+
+      - name: Build Android Libraries
+        working-directory: bindings/react-native
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: bash scripts/build-uniffi-android.sh
+
+      - name: Upload Android Native Libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-jniLibs
+          path: bindings/react-native/android/src/main/jniLibs/
+          retention-days: 1
+
+      - name: Upload Android Generated Bindings
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-uniffi-bindings
+          path: bindings/react-native/android/src/main/java/uniffi/
+          retention-days: 1
+
+  release:
+    name: Create Release & Publish to npm
+    needs: [build-ios, build-android]
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download iOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-libs
+          path: bindings/react-native/ios
+
+      - name: Download Android Native Libs
+        uses: actions/download-artifact@v4
+        with:
+          name: android-jniLibs
+          path: bindings/react-native/android/src/main/jniLibs
+
+      - name: Download Android Generated Bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: android-uniffi-bindings
+          path: bindings/react-native/android/src/main/java/uniffi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Update package.json version
+        working-directory: bindings/react-native
+        run: npm version ${{ steps.version.outputs.VERSION }} --no-git-tag-version --allow-same-version
+
+      - name: Install dependencies
+        working-directory: bindings/react-native
+        run: npm ci
+
+      - name: Build TypeScript
+        working-directory: bindings/react-native
+        run: npm run build
+
+      - name: Validate package
+        working-directory: bindings/react-native
+        run: bash scripts/prepare-npm.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to npm
+        working-directory: bindings/react-native
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
