@@ -52,14 +52,27 @@ if [ -z "$ANDROID_NDK_HOME" ] && [ -z "$NDK_HOME" ]; then
   fi
 fi
 
-# Add NDK toolchain to PATH
-NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
-if [ ! -d "$NDK_TOOLCHAIN" ]; then
-  # Try alternate path for Apple Silicon
-  NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-aarch64/bin"
-fi
+# Add NDK toolchain to PATH (detect OS)
+OS_NAME="$(uname -s)"
+case "$OS_NAME" in
+  Darwin)
+    ARCH_NAME="$(uname -m)"
+    if [ "$ARCH_NAME" = "arm64" ]; then
+      NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-aarch64/bin"
+    else
+      NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+    fi
+    ;;
+  Linux)
+    NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    ;;
+  *)
+    echo "Warning: Unsupported OS: $OS_NAME"
+    NDK_TOOLCHAIN=""
+    ;;
+esac
 
-if [ -d "$NDK_TOOLCHAIN" ]; then
+if [ -n "$NDK_TOOLCHAIN" ] && [ -d "$NDK_TOOLCHAIN" ]; then
   export PATH="$NDK_TOOLCHAIN:$PATH"
   echo "Added NDK toolchain to PATH: $NDK_TOOLCHAIN"
 else
