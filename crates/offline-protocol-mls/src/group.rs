@@ -83,8 +83,9 @@ impl GroupManager {
         match data {
             Some(_bytes) => {
                 // MlsGroup in OpenMLS 0.7 uses the storage provider pattern
-                let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
-                
+                let mls_group_id =
+                    openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
+
                 // Try to load from the provider's storage
                 match MlsGroup::load(self.provider.storage(), &mls_group_id) {
                     Ok(Some(group)) => Ok(Some(group)),
@@ -92,7 +93,10 @@ impl GroupManager {
                         debug!(group_id = %group_id, "Group not found in crypto storage");
                         Ok(None)
                     }
-                    Err(e) => Err(MlsError::Deserialization(format!("Failed to load group: {:?}", e))),
+                    Err(e) => Err(MlsError::Deserialization(format!(
+                        "Failed to load group: {:?}",
+                        e
+                    ))),
                 }
             }
             None => Ok(None),
@@ -103,16 +107,14 @@ impl GroupManager {
     pub fn save_group(&self, group_id: &GroupId, group: &MlsGroup) -> Result<()> {
         // We also keep a marker in our storage for listing purposes
         let key_type = StorageKeyType::GroupState.as_str();
-        
+
         // Serialize the group epoch as a marker
         let marker = group.epoch().as_u64().to_le_bytes();
         self.storage.store(key_type, group_id.as_str(), &marker)?;
 
         // Verify that the OpenMLS storage backend has a persisted copy of the group.
         let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
-        if MlsGroup::load(self.provider.storage(), &mls_group_id)?
-            .is_none()
-        {
+        if MlsGroup::load(self.provider.storage(), &mls_group_id)?.is_none() {
             return Err(MlsError::Storage(StorageError::StoreFailed(
                 "Failed to persist MLS group state".to_string(),
             )));
@@ -124,7 +126,7 @@ impl GroupManager {
     pub fn delete_group(&self, group_id: &GroupId) -> Result<()> {
         let key_type = StorageKeyType::GroupState.as_str();
         self.storage.delete(key_type, group_id.as_str())?;
-        
+
         // Also delete from provider storage
         // Note: MlsGroup doesn't expose a delete method directly on the struct (static),
         // usually we just delete the underlying key.
@@ -205,9 +207,7 @@ impl GroupManager {
             .map_err(|e| MlsError::Decryption(e.to_string()))?;
 
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app_msg) => {
-                Ok(Some(app_msg.into_bytes()))
-            }
+            ProcessedMessageContent::ApplicationMessage(app_msg) => Ok(Some(app_msg.into_bytes())),
             ProcessedMessageContent::ProposalMessage(_) => {
                 debug!("Received proposal message");
                 Ok(None)
@@ -227,11 +227,7 @@ impl GroupManager {
     }
 
     /// Joins a group using a Welcome message.
-    pub fn join_group(
-        &self,
-        welcome: Welcome,
-        group_id: &GroupId,
-    ) -> Result<MlsGroup> {
+    pub fn join_group(&self, welcome: Welcome, group_id: &GroupId) -> Result<MlsGroup> {
         let group_config = MlsGroupJoinConfig::builder()
             .use_ratchet_tree_extension(true)
             .build();
@@ -262,7 +258,11 @@ impl GroupManager {
 
         GroupInfo {
             group_id: group_id.clone(),
-            name: if is_session { None } else { Some(group_id.as_str().to_string()) },
+            name: if is_session {
+                None
+            } else {
+                Some(group_id.as_str().to_string())
+            },
             members,
             members_count,
             epoch: group.epoch().as_u64(),

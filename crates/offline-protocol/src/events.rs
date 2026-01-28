@@ -193,6 +193,26 @@ pub enum Event {
         /// Minimum required battery level.
         min_required: u8,
     },
+
+    /// A secure MLS session was successfully established.
+    SecureSessionEstablished {
+        /// Peer ID of the other party.
+        peer_id: String,
+        /// MLS group ID for the session.
+        group_id: String,
+        /// Whether this is a 1:1 session (true) or a multi-party group (false).
+        is_session: bool,
+        /// Whether the local device initiated the session (sent the Welcome).
+        initiated_by_local: bool,
+    },
+
+    /// Failed to establish a secure MLS session.
+    SecureSessionFailed {
+        /// Peer ID of the other party.
+        peer_id: String,
+        /// Reason for the failure.
+        reason: String,
+    },
 }
 
 impl Event {
@@ -375,6 +395,26 @@ impl Event {
             battery_level,
             min_required,
         }
+    }
+
+    /// Creates a SecureSessionEstablished event.
+    pub fn secure_session_established(
+        peer_id: String,
+        group_id: String,
+        is_session: bool,
+        initiated_by_local: bool,
+    ) -> Self {
+        Self::SecureSessionEstablished {
+            peer_id,
+            group_id,
+            is_session,
+            initiated_by_local,
+        }
+    }
+
+    /// Creates a SecureSessionFailed event.
+    pub fn secure_session_failed(peer_id: String, reason: String) -> Self {
+        Self::SecureSessionFailed { peer_id, reason }
     }
 
     /// Converts the event to JSON.
@@ -560,6 +600,23 @@ impl fmt::Debug for Event {
                 .debug_struct("RelayDemotedBattery")
                 .field("battery_level", battery_level)
                 .field("min_required", min_required)
+                .finish(),
+            Self::SecureSessionEstablished {
+                peer_id: _,
+                group_id,
+                is_session,
+                initiated_by_local,
+            } => f
+                .debug_struct("SecureSessionEstablished")
+                .field("peer_id", &"[REDACTED]")
+                .field("group_id", group_id)
+                .field("is_session", is_session)
+                .field("initiated_by_local", initiated_by_local)
+                .finish(),
+            Self::SecureSessionFailed { peer_id: _, reason } => f
+                .debug_struct("SecureSessionFailed")
+                .field("peer_id", &"[REDACTED]")
+                .field("reason", reason)
                 .finish(),
         }
     }

@@ -7,37 +7,25 @@
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
 use offline_protocol::{
-    file_transfer::FileTransferManager,
-    Event as CoreEvent,
-    NetworkVisualizer,
-    OfflineProtocol as CoreProtocol,
-    ProtocolConfig as CoreConfig,
+    file_transfer::FileTransferManager, Event as CoreEvent, NetworkVisualizer,
+    OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
 use offline_protocol_mls::{
-    EncryptedMessage as CoreEncryptedMessage,
-    GroupId as CoreGroupId,
-    GroupInfo as CoreGroupInfo,
-    KeyPackageBundle as CoreKeyPackageBundle,
-    MlsManager as CoreMlsManager,
-    MlsStorage as CoreMlsStorage,
-    StorageError as CoreStorageError,
+    EncryptedMessage as CoreEncryptedMessage, GroupId as CoreGroupId, GroupInfo as CoreGroupInfo,
+    KeyPackageBundle as CoreKeyPackageBundle, MlsManager as CoreMlsManager,
+    MlsStorage as CoreMlsStorage, StorageError as CoreStorageError,
     WelcomeMessage as CoreWelcomeMessage,
 };
 use offline_protocol_router::{
-    DorsConfig as CoreDorsConfig,
-    GradientRoutingConfig as CoreGradientRoutingConfig,
-    PathSelector,
+    DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
 };
 use offline_protocol_transport::{
-    ble::BleTransport,
-    internet::InternetTransport,
-    wifi_direct::WifiDirectTransport,
-    Transport,
+    ble::BleTransport, internet::InternetTransport, wifi_direct::WifiDirectTransport, Transport,
     TransportType as CoreTransportType,
 };
-use std::collections::{ HashMap, VecDeque };
-use std::sync::{ Arc, Mutex, RwLock };
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 // Include the UniFFI scaffolding
@@ -119,7 +107,8 @@ impl From<CoreStorageError> for MlsStorageError {
 /// MLS Storage callback interface - apps implement this for platform-native secure storage
 pub trait MlsStorageProvider: Send + Sync {
     /// Store data with the given key type and ID
-    fn store(&self, key_type: String, key_id: String, data: Vec<u8>) -> Result<(), MlsStorageError>;
+    fn store(&self, key_type: String, key_id: String, data: Vec<u8>)
+        -> Result<(), MlsStorageError>;
 
     /// Load data for the given key type and ID
     fn load(&self, key_type: String, key_id: String) -> Result<Option<Vec<u8>>, MlsStorageError>;
@@ -141,80 +130,96 @@ impl CoreMlsStorage for MlsStorageWrapper {
         &self,
         key_type: &str,
         key_id: &str,
-        data: &[u8]
+        data: &[u8],
     ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.provider.store(key_type.to_string(), key_id.to_string(), data.to_vec()).map_err(|e| {
-            match e {
-                MlsStorageError::StoreFailed =>
-                    CoreStorageError::StoreFailed("Storage failed".to_string()),
-                MlsStorageError::LoadFailed =>
-                    CoreStorageError::StoreFailed("Load failed".to_string()),
-                MlsStorageError::DeleteFailed =>
-                    CoreStorageError::StoreFailed("Delete failed".to_string()),
+        self.provider
+            .store(key_type.to_string(), key_id.to_string(), data.to_vec())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::StoreFailed("Storage failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::StoreFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::StoreFailed("Delete failed".to_string())
+                }
                 MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData =>
-                    CoreStorageError::CorruptedData("Data corrupted".to_string()),
-            }
-        })
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
     }
 
     fn load(
         &self,
         key_type: &str,
-        key_id: &str
+        key_id: &str,
     ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
-        self.provider.load(key_type.to_string(), key_id.to_string()).map_err(|e| {
-            match e {
-                MlsStorageError::StoreFailed =>
-                    CoreStorageError::LoadFailed("Storage failed".to_string()),
-                MlsStorageError::LoadFailed =>
-                    CoreStorageError::LoadFailed("Load failed".to_string()),
-                MlsStorageError::DeleteFailed =>
-                    CoreStorageError::LoadFailed("Delete failed".to_string()),
+        self.provider
+            .load(key_type.to_string(), key_id.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::LoadFailed("Storage failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::LoadFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::LoadFailed("Delete failed".to_string())
+                }
                 MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData =>
-                    CoreStorageError::CorruptedData("Data corrupted".to_string()),
-            }
-        })
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
     }
 
     fn delete(
         &self,
         key_type: &str,
-        key_id: &str
+        key_id: &str,
     ) -> offline_protocol_mls::storage::StorageResult<()> {
-        self.provider.delete(key_type.to_string(), key_id.to_string()).map_err(|e| {
-            match e {
-                MlsStorageError::StoreFailed =>
-                    CoreStorageError::DeleteFailed("Storage failed".to_string()),
-                MlsStorageError::LoadFailed =>
-                    CoreStorageError::DeleteFailed("Load failed".to_string()),
-                MlsStorageError::DeleteFailed =>
-                    CoreStorageError::DeleteFailed("Delete failed".to_string()),
+        self.provider
+            .delete(key_type.to_string(), key_id.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::DeleteFailed("Storage failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::DeleteFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::DeleteFailed("Delete failed".to_string())
+                }
                 MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
-                MlsStorageError::CorruptedData =>
-                    CoreStorageError::CorruptedData("Data corrupted".to_string()),
-            }
-        })
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
     }
 
     fn list_keys(
         &self,
-        key_type: &str
+        key_type: &str,
     ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
-        self.provider.list_keys(key_type.to_string()).map_err(|e| {
-            match e {
-                MlsStorageError::StoreFailed =>
-                    CoreStorageError::LoadFailed("Storage failed".to_string()),
-                MlsStorageError::LoadFailed =>
-                    CoreStorageError::LoadFailed("Load failed".to_string()),
-                MlsStorageError::DeleteFailed =>
-                    CoreStorageError::LoadFailed("Delete failed".to_string()),
+        self.provider
+            .list_keys(key_type.to_string())
+            .map_err(|e| match e {
+                MlsStorageError::StoreFailed => {
+                    CoreStorageError::LoadFailed("Storage failed".to_string())
+                }
+                MlsStorageError::LoadFailed => {
+                    CoreStorageError::LoadFailed("Load failed".to_string())
+                }
+                MlsStorageError::DeleteFailed => {
+                    CoreStorageError::LoadFailed("Delete failed".to_string())
+                }
                 MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound("".to_string()),
-                MlsStorageError::CorruptedData =>
-                    CoreStorageError::CorruptedData("Data corrupted".to_string()),
-            }
-        })
+                MlsStorageError::CorruptedData => {
+                    CoreStorageError::CorruptedData("Data corrupted".to_string())
+                }
+            })
     }
 }
 
@@ -823,17 +828,15 @@ impl OfflineProtocol {
 
         // Ensure BLE transport is set to Available immediately when protocol starts
         // This fixes the issue where messages get stuck because BLE transport status is Unavailable
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 // Force BLE transport to Available status - the native layer will manage actual BLE availability
-                ble_transport.on_status_changed(
-                    offline_protocol_transport::TransportStatus::Available
-                );
+                ble_transport
+                    .on_status_changed(offline_protocol_transport::TransportStatus::Available);
             }
         }
 
@@ -958,10 +961,9 @@ impl OfflineProtocol {
         //  Ensure BLE transport is available before attempting to send
         // This is especially important when BLE is the only transport enabled (Internet/WiFi disabled)
         // BLE should work independently and be available for message sending
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
@@ -969,9 +971,8 @@ impl OfflineProtocol {
                 if current_status != offline_protocol_transport::TransportStatus::Available {
                     // Force status to Available if BLE transport exists
                     // This ensures BLE is included in get_available_transports() for DORS selection
-                    ble_transport.on_status_changed(
-                        offline_protocol_transport::TransportStatus::Available
-                    );
+                    ble_transport
+                        .on_status_changed(offline_protocol_transport::TransportStatus::Available);
                 }
             }
         }
@@ -990,7 +991,7 @@ impl OfflineProtocol {
                     &content,
                     Some(priority.into()),
                     core_transport,
-                    reply_to_msg
+                    reply_to_msg,
                 )
                 .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
         } else {
@@ -1005,12 +1006,8 @@ impl OfflineProtocol {
     /// Receives the next message (returns JSON string or None)
     pub fn receive_message(&self) -> Option<String> {
         let mut protocol = self.inner.lock().unwrap();
-        protocol
-            .receive_message()
-            .and_then(|msg| {
-                serde_json
-                    ::to_string(
-                        &serde_json::json!({
+        protocol.receive_message().and_then(|msg| {
+            serde_json::to_string(&serde_json::json!({
                 "id": msg.id.as_str(),
                 "sender": msg.sender.as_str(),
                 "recipient": msg.recipient.as_str(),
@@ -1018,10 +1015,9 @@ impl OfflineProtocol {
                 "timestamp": msg.timestamp.as_millis(),
                 "hop_count": msg.hop_count.value(),
                 "priority": format!("{:?}", msg.priority),
-            })
-                    )
-                    .ok()
-            })
+            }))
+            .ok()
+        })
     }
 
     // ========================================================================
@@ -1087,10 +1083,9 @@ impl OfflineProtocol {
     pub fn ble_status_changed(&self, is_available: bool) -> Result<(), ProtocolError> {
         // Update the BLE transport status based on platform availability
         let protocol = self.inner.lock().unwrap();
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
@@ -1111,32 +1106,27 @@ impl OfflineProtocol {
     pub fn ble_fragment_received(
         &self,
         _sender_id: String,
-        fragment: Vec<u8>
+        fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         // Process the fragment first
         {
             let protocol = self.inner.lock().unwrap();
-            if
-                let Some(transport_arc) = protocol
-                    .transport_manager()
-                    .get_transport(CoreTransportType::BLE)
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
             {
                 let transport = transport_arc.lock().unwrap();
 
                 // Safe downcast to BleTransport using Any trait
                 if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                     // Process the fragment
-                    ble_transport
-                        .on_fragment_received(fragment)
-                        .map_err(|e| {
-                            ProtocolError::Other(format!("Fragment processing failed: {}", e))
-                        })?;
+                    ble_transport.on_fragment_received(fragment).map_err(|e| {
+                        ProtocolError::Other(format!("Fragment processing failed: {}", e))
+                    })?;
                 } else {
-                    return Err(
-                        ProtocolError::Other(
-                            "BLE transport not available or wrong type".to_string()
-                        )
-                    );
+                    return Err(ProtocolError::Other(
+                        "BLE transport not available or wrong type".to_string(),
+                    ));
                 }
             }
         }
@@ -1156,20 +1146,19 @@ impl OfflineProtocol {
     pub fn ble_get_next_fragment(&self) -> Option<BleFragment> {
         //  Ensure BLE transport is available for fragment polling
         let protocol = self.inner.lock().unwrap();
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
         {
             let transport = transport_arc.lock().unwrap();
 
             // Safe downcast to BleTransport using Any trait
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 // Ensure BLE is available for fragment polling
-                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available {
-                    ble_transport.on_status_changed(
-                        offline_protocol_transport::TransportStatus::Available
-                    );
+                if ble_transport.status() != offline_protocol_transport::TransportStatus::Available
+                {
+                    ble_transport
+                        .on_status_changed(offline_protocol_transport::TransportStatus::Available);
                 }
 
                 // Get next fragment
@@ -1232,14 +1221,13 @@ impl OfflineProtocol {
         // Update the Internet transport status in the transport manager
         {
             let protocol = self.inner.lock().unwrap();
-            if
-                let Some(transport_arc) = protocol
-                    .transport_manager()
-                    .get_transport(CoreTransportType::Internet)
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::Internet)
             {
                 let transport = transport_arc.lock().unwrap();
-                if
-                    let Some(internet_transport) = transport
+                if let Some(internet_transport) =
+                    transport
                         .as_any()
                         .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
                 {
@@ -1287,26 +1275,26 @@ impl OfflineProtocol {
     pub fn internet_message_received(
         &self,
         sender_id: String,
-        data: Vec<u8>
+        data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         // Try to deserialize and process the message through the transport
         let protocol = self.inner.lock().unwrap();
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::Internet)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Internet)
         {
             let transport = transport_arc.lock().unwrap();
-            if
-                let Some(internet_transport) = transport
+            if let Some(internet_transport) =
+                transport
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
                 // Pass raw data to the transport for processing
                 if let Err(e) = internet_transport.on_data_received(data.clone()) {
-                    return Err(
-                        ProtocolError::Other(format!("Failed to process internet message: {}", e))
-                    );
+                    return Err(ProtocolError::Other(format!(
+                        "Failed to process internet message: {}",
+                        e
+                    )));
                 }
             }
         }
@@ -1341,14 +1329,13 @@ impl OfflineProtocol {
 
         // Try to get message from the Internet transport
         let protocol = self.inner.lock().unwrap();
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::Internet)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Internet)
         {
             let transport = transport_arc.lock().unwrap();
-            if
-                let Some(internet_transport) = transport
+            if let Some(internet_transport) =
+                transport
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
@@ -1358,7 +1345,10 @@ impl OfflineProtocol {
                         return Some(InternetMessage {
                             recipient_id: message.recipient.as_str().to_string(),
                             data,
-                            reply_to_msg: message.reply_to_msg.as_ref().map(|id| id.as_str().to_string()),
+                            reply_to_msg: message
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
                         });
                     }
                 }
@@ -1369,12 +1359,13 @@ impl OfflineProtocol {
         let mut internet_state = self.internet_state.lock().unwrap();
         if let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
             // Try to deserialize to extract reply_to_msg
-            let reply_to_msg = if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::Internet)
-            {
-                let transport = transport_arc.lock().unwrap();
-                if let Some(internet_transport) = transport
+            let reply_to_msg =
+                if let Some(transport_arc) = protocol
+                    .transport_manager()
+                    .get_transport(CoreTransportType::Internet)
+                {
+                    let transport = transport_arc.lock().unwrap();
+                    if let Some(internet_transport) = transport
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
                 {
@@ -1384,10 +1375,10 @@ impl OfflineProtocol {
                 } else {
                     None
                 }
-            } else {
-                None
-            };
-            
+                } else {
+                    None
+                };
+
             return Some(InternetMessage {
                 recipient_id: recipient,
                 data,
@@ -1420,10 +1411,9 @@ impl OfflineProtocol {
 
         // Update the WiFi Direct transport status in the transport manager
         let protocol = self.inner.lock().unwrap();
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::WiFiDirect)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
@@ -1459,24 +1449,22 @@ impl OfflineProtocol {
     pub fn wifi_direct_message_received(
         &self,
         sender_id: String,
-        data: Vec<u8>
+        data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         // Try to deserialize and process the message through the transport
         let protocol = self.inner.lock().unwrap();
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::WiFiDirect)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 // Pass raw data to the transport for processing
                 if let Err(e) = wifi_transport.on_data_received(data.clone()) {
-                    return Err(
-                        ProtocolError::Other(
-                            format!("Failed to process WiFi Direct message: {}", e)
-                        )
-                    );
+                    return Err(ProtocolError::Other(format!(
+                        "Failed to process WiFi Direct message: {}",
+                        e
+                    )));
                 }
             }
         }
@@ -1511,10 +1499,9 @@ impl OfflineProtocol {
 
         // Try to get message from the WiFi Direct transport
         let protocol = self.inner.lock().unwrap();
-        if
-            let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::WiFiDirect)
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
@@ -1583,17 +1570,15 @@ impl OfflineProtocol {
     pub fn add_internet_transport(
         &self,
         _server_url: String,
-        _port: u16
+        _port: u16,
     ) -> Result<(), ProtocolError> {
         // Internet transport requires server infrastructure
         // This would need to be implemented by creating an InternetTransport instance
         // and adding it via transport_manager_mut().add_transport()
         // For now, this is not implemented as it requires network server setup
-        Err(
-            ProtocolError::Other(
-                "Internet transport requires server infrastructure setup".to_string()
-            )
-        )
+        Err(ProtocolError::Other(
+            "Internet transport requires server infrastructure setup".to_string(),
+        ))
     }
 
     /// Adds Wi-Fi Direct transport
@@ -1601,9 +1586,9 @@ impl OfflineProtocol {
         // WiFi Direct transport would need to be created and added dynamically
         // This requires platform-specific WiFi Direct implementation
         // For now, this is not implemented as it's platform-specific
-        Err(
-            ProtocolError::Other("WiFi Direct transport must be added by platform code".to_string())
-        )
+        Err(ProtocolError::Other(
+            "WiFi Direct transport must be added by platform code".to_string(),
+        ))
     }
 
     /// Removes a transport
@@ -1615,7 +1600,9 @@ impl OfflineProtocol {
         };
 
         let mut protocol = self.inner.lock().unwrap();
-        protocol.transport_manager_mut().remove_transport(core_transport_type);
+        protocol
+            .transport_manager_mut()
+            .remove_transport(core_transport_type);
         Ok(())
     }
 
@@ -1623,17 +1610,14 @@ impl OfflineProtocol {
     pub fn get_active_transports(&self) -> Vec<String> {
         let protocol = self.inner.lock().unwrap();
         let transports = protocol.transport_manager().get_active_transports();
-        transports
-            .iter()
-            .map(|t| format!("{:?}", t))
-            .collect()
+        transports.iter().map(|t| format!("{:?}", t)).collect()
     }
 
     /// Updates transport metrics
     pub fn update_transport_metrics(
         &self,
         _transport_type: TransportType,
-        _metrics: TransportMetrics
+        _metrics: TransportMetrics,
     ) -> Result<(), ProtocolError> {
         // Transport metrics are tracked internally by the transport implementations
         // This method is kept for backwards compatibility but is a no-op
@@ -1659,13 +1643,12 @@ impl OfflineProtocol {
         &self,
         _recipient: String,
         _file_path: String,
-        file_name: String
+        file_name: String,
     ) -> Result<String, ProtocolError> {
         // Generate file ID
         let file_id = format!(
             "file_{}_{}",
-            std::time::SystemTime
-                ::now()
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
                 .unwrap_or(0),
@@ -1684,7 +1667,7 @@ impl OfflineProtocol {
         &self,
         file_id: String,
         chunk_index: u32,
-        data: Vec<u8>
+        data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let mut file_manager = self.file_manager.lock().unwrap();
 
@@ -1693,8 +1676,8 @@ impl OfflineProtocol {
         let chunk = FileChunk {
             file_id: file_id.clone(),
             file_name: "unknown".to_string(), // Will be updated by first chunk
-            file_size: 0, // Will be updated by first chunk
-            total_chunks: 1, // Will be updated by first chunk
+            file_size: 0,                     // Will be updated by first chunk
+            total_chunks: 1,                  // Will be updated by first chunk
             chunk_index,
             chunk_data: data,
             file_checksum: String::new(),
@@ -1744,7 +1727,8 @@ impl OfflineProtocol {
         let core_topology = visualizer.get_topology();
 
         // Convert to uniffi types
-        let nodes = core_topology.nodes
+        let nodes = core_topology
+            .nodes
             .iter()
             .map(|n| NetworkNode {
                 node_id: n.user_id.clone(),
@@ -1754,7 +1738,8 @@ impl OfflineProtocol {
             })
             .collect();
 
-        let links = core_topology.links
+        let links = core_topology
+            .links
             .iter()
             .map(|l| NetworkLink {
                 source_id: l.from.clone(),
@@ -1785,13 +1770,12 @@ impl OfflineProtocol {
                 sent_at_ms: s.sent_at as u64,
                 delivered_at_ms: s.delivered_at.map(|t| t as u64),
                 hop_count: s.hop_count,
-                status: (
-                    if s.delivered_at.is_some() {
-                        "delivered"
-                    } else {
-                        "pending"
-                    }
-                ).to_string(),
+                status: (if s.delivered_at.is_some() {
+                    "delivered"
+                } else {
+                    "pending"
+                })
+                .to_string(),
             })
             .collect()
     }
@@ -1871,7 +1855,7 @@ impl OfflineProtocol {
     /// Gets detailed metrics for a specific transport
     pub fn get_transport_metrics(
         &self,
-        _transport_type: TransportType
+        _transport_type: TransportType,
     ) -> Option<TransportMetrics> {
         // Transport metrics are tracked internally by the transport implementations
         // For now, return mock data based on transport type
@@ -1970,7 +1954,9 @@ impl OfflineProtocol {
     /// the neighbor can reach the message's original sender.
     pub fn learn_route(&self, destination: String, next_hop: String, hop_count: u8, quality: f32) {
         let mut path_selector = self.path_selector.lock().unwrap();
-        path_selector.routing_table_mut().learn_route(&destination, &next_hop, hop_count, quality);
+        path_selector
+            .routing_table_mut()
+            .learn_route(&destination, &next_hop, hop_count, quality);
     }
 
     /// Gets the best (highest quality) route to a destination.
@@ -2065,10 +2051,8 @@ impl OfflineProtocol {
         let mut path_selector = self.path_selector.lock().unwrap();
         let mut path_config = path_selector.config().clone();
         path_config.gradient_routing = core_config;
-        *path_selector = PathSelector::with_config(
-            path_config,
-            offline_protocol_router::RelayManager::new()
-        );
+        *path_selector =
+            PathSelector::with_config(path_config, offline_protocol_router::RelayManager::new());
     }
 
     /// Updates the ACK configuration at runtime.
@@ -2136,7 +2120,7 @@ impl OfflineProtocol {
     /// Initialize MLS with a storage provider
     pub fn initialize_mls(
         &self,
-        storage: Box<dyn MlsStorageProvider>
+        storage: Box<dyn MlsStorageProvider>,
     ) -> Result<(), ProtocolError> {
         let wrapper = Arc::new(MlsStorageWrapper {
             provider: Arc::from(storage),
@@ -2145,9 +2129,9 @@ impl OfflineProtocol {
         // Initialize MLS in the core protocol for auto-encryption
         {
             let mut protocol = self.inner.lock().unwrap();
-            protocol.initialize_mls(wrapper.clone()).map_err(|e|
-                ProtocolError::MlsError(e.to_string())
-            )?;
+            protocol
+                .initialize_mls(wrapper.clone())
+                .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
         }
 
         // Also store a reference for direct MLS API access
@@ -2156,9 +2140,8 @@ impl OfflineProtocol {
             protocol.config().user_id.clone()
         };
 
-        let manager = CoreMlsManager::new(&user_id, wrapper).map_err(|e|
-            ProtocolError::MlsError(e.to_string())
-        )?;
+        let manager = CoreMlsManager::new(&user_id, wrapper)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
 
         *self.mls_manager.write().unwrap() = Some(manager);
         Ok(())
@@ -2173,7 +2156,7 @@ impl OfflineProtocol {
 
     /// Helper to get MLS manager or error
     fn get_mls_manager(
-        &self
+        &self,
     ) -> Result<std::sync::RwLockReadGuard<'_, Option<CoreMlsManager>>, ProtocolError> {
         let guard = self.mls_manager.read().unwrap();
         if guard.is_none() {
@@ -2206,7 +2189,7 @@ impl OfflineProtocol {
     pub fn mls_import_key_package(
         &self,
         user_id: String,
-        key_package_data: Vec<u8>
+        key_package_data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2224,13 +2207,12 @@ impl OfflineProtocol {
             }
         };
         match guard.as_ref() {
-            Some(manager) =>
-                manager
-                    .get_pending_key_packages()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(MlsKeyPackageBundle::from)
-                    .collect(),
+            Some(manager) => manager
+                .get_pending_key_packages()
+                .unwrap_or_default()
+                .into_iter()
+                .map(MlsKeyPackageBundle::from)
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -2270,18 +2252,20 @@ impl OfflineProtocol {
     }
 
     /// Establish a secure session with a peer (high-level API)
-    /// 
+    ///
     /// This method handles the complete session establishment flow:
     /// - If session already exists, returns None
     /// - If a pending key package is available, imports it, creates session, sends Welcome
     /// - If no key package is available, returns an error
     pub fn establish_secure_session(
         &self,
-        peer_id: String
+        peer_id: String,
     ) -> Result<Option<MlsWelcomeMessage>, ProtocolError> {
-        let mut guard = self.inner.lock()
+        let mut guard = self
+            .inner
+            .lock()
             .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
-        
+
         guard
             .establish_secure_session(&peer_id)
             .map(|opt| opt.map(MlsWelcomeMessage::from))
@@ -2291,7 +2275,7 @@ impl OfflineProtocol {
     /// Create a 1:1 session
     pub fn mls_create_session(
         &self,
-        other_user_id: String
+        other_user_id: String,
     ) -> Result<MlsWelcomeMessage, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2304,7 +2288,7 @@ impl OfflineProtocol {
     /// Join a session using a Welcome message
     pub fn mls_join_session(
         &self,
-        welcome: MlsWelcomeMessage
+        welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2318,7 +2302,7 @@ impl OfflineProtocol {
     pub fn mls_encrypt_for_user(
         &self,
         other_user_id: String,
-        plaintext: Vec<u8>
+        plaintext: Vec<u8>,
     ) -> Result<MlsEncryptedMessage, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2331,7 +2315,7 @@ impl OfflineProtocol {
     /// Decrypt a message from a 1:1 session
     pub fn mls_decrypt_from_user(
         &self,
-        encrypted: MlsEncryptedMessage
+        encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2358,14 +2342,20 @@ impl OfflineProtocol {
     pub fn mls_delete_session(&self, other_user_id: String) -> Result<(), ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
-        manager.delete_session(&other_user_id).map_err(|e| ProtocolError::MlsError(e.to_string()))
+        manager
+            .delete_session(&other_user_id)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
     /// Get a pending Welcome message
     pub fn mls_get_pending_welcome(&self, other_user_id: String) -> Option<MlsWelcomeMessage> {
         let guard = self.mls_manager.read().ok()?;
         let manager = guard.as_ref()?;
-        manager.get_pending_welcome(&other_user_id).ok().flatten().map(MlsWelcomeMessage::from)
+        manager
+            .get_pending_welcome(&other_user_id)
+            .ok()
+            .flatten()
+            .map(MlsWelcomeMessage::from)
     }
 
     /// Clear a pending Welcome message
@@ -2391,7 +2381,7 @@ impl OfflineProtocol {
     pub fn mls_add_group_member(
         &self,
         group_id: String,
-        member_key_package: Vec<u8>
+        member_key_package: Vec<u8>,
     ) -> Result<MlsWelcomeMessage, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2405,7 +2395,7 @@ impl OfflineProtocol {
     pub fn mls_remove_group_member(
         &self,
         group_id: String,
-        member_id: String
+        member_id: String,
     ) -> Result<MlsEncryptedMessage, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2428,7 +2418,7 @@ impl OfflineProtocol {
     pub fn mls_encrypt_for_group(
         &self,
         group_id: String,
-        plaintext: Vec<u8>
+        plaintext: Vec<u8>,
     ) -> Result<MlsEncryptedMessage, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2441,7 +2431,7 @@ impl OfflineProtocol {
     /// Decrypt a message from a group
     pub fn mls_decrypt_from_group(
         &self,
-        encrypted: MlsEncryptedMessage
+        encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2453,7 +2443,7 @@ impl OfflineProtocol {
     /// Join a group using a Welcome message
     pub fn mls_join_group(
         &self,
-        welcome: MlsWelcomeMessage
+        welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2472,13 +2462,12 @@ impl OfflineProtocol {
             }
         };
         match guard.as_ref() {
-            Some(manager) =>
-                manager
-                    .list_groups()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|g| g.as_str().to_string())
-                    .collect(),
+            Some(manager) => manager
+                .list_groups()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|g| g.as_str().to_string())
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -2487,23 +2476,29 @@ impl OfflineProtocol {
     pub fn mls_get_group_info(&self, group_id: String) -> Option<MlsGroupInfo> {
         let guard = self.mls_manager.read().ok()?;
         let manager = guard.as_ref()?;
-        manager.get_group_info(&CoreGroupId::new(group_id)).ok().flatten().map(MlsGroupInfo::from)
+        manager
+            .get_group_info(&CoreGroupId::new(group_id))
+            .ok()
+            .flatten()
+            .map(MlsGroupInfo::from)
     }
 
     /// Decrypt any encrypted message
     pub fn mls_decrypt(
         &self,
-        encrypted: MlsEncryptedMessage
+        encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
-        manager.decrypt(&encrypted.into()).map_err(|e| ProtocolError::MlsError(e.to_string()))
+        manager
+            .decrypt(&encrypted.into())
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
     /// Process a Welcome message
     pub fn mls_process_welcome(
         &self,
-        welcome: MlsWelcomeMessage
+        welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
         let guard = self.get_mls_manager()?;
         let manager = guard.as_ref().unwrap();
@@ -2584,10 +2579,14 @@ mod tests {
 
         assert_eq!(protocol.ble_get_peer_count(), 0);
 
-        protocol.ble_peer_discovered("peer1".to_string(), -50).unwrap();
+        protocol
+            .ble_peer_discovered("peer1".to_string(), -50)
+            .unwrap();
         assert_eq!(protocol.ble_get_peer_count(), 1);
 
-        protocol.ble_peer_discovered("peer2".to_string(), -60).unwrap();
+        protocol
+            .ble_peer_discovered("peer2".to_string(), -60)
+            .unwrap();
         assert_eq!(protocol.ble_get_peer_count(), 2);
 
         protocol.ble_peer_lost("peer1".to_string()).unwrap();
@@ -2602,7 +2601,11 @@ mod tests {
 
         // Generate a file ID
         let file_id = protocol
-            .send_file("recipient".to_string(), "/path/to/file".to_string(), "test.txt".to_string())
+            .send_file(
+                "recipient".to_string(),
+                "/path/to/file".to_string(),
+                "test.txt".to_string(),
+            )
             .unwrap();
 
         // File is not tracked until chunks are processed
@@ -2648,8 +2651,8 @@ mod tests {
         protocol.learn_route(
             "alice".to_string(),
             "peer1".to_string(),
-            2, // hop count
-            0.8 // quality
+            2,   // hop count
+            0.8, // quality
         );
 
         // Should now have a route

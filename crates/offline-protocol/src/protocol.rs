@@ -4,9 +4,7 @@ use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OU
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
-use offline_protocol_mls::{
-    EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage,
-};
+use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{
     AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
     RetryQueue,
@@ -234,17 +232,17 @@ impl OfflineProtocol {
     pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
         let manager = MlsManager::new(&self.config.user_id, storage.clone())?;
         self.mls_manager = Some(Arc::new(RwLock::new(manager)));
-        
+
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
-        
+
         // Restore any pending messages from previous session
         self.restore_pending_messages()?;
-        
+
         info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
         Ok(())
     }
-    
+
     /// Enables message persistence using the provided storage backend.
     ///
     /// This allows pending messages to survive app crashes/restarts even
@@ -453,7 +451,7 @@ impl OfflineProtocol {
             .content(content)
             .priority(priority.unwrap_or(MessagePriority::Medium))
             .ttl(TTL::new(self.config.initial_ttl)?);
-        
+
         if let Some(reply_to) = reply_to_msg {
             builder = builder.reply_to_msg(reply_to);
         }
@@ -598,13 +596,24 @@ impl OfflineProtocol {
                 Err(Error::SessionPending) => {
                     // Create message first to get an ID before queuing
                     // This ensures we always return a message ID, even when queued
-                    let temp_message = self.create_message(&recipient_str, content_str.clone(), Some(priority), reply_to_msg_id.clone())?;
+                    let temp_message = self.create_message(
+                        &recipient_str,
+                        content_str.clone(),
+                        Some(priority),
+                        reply_to_msg_id.clone(),
+                    )?;
                     let message_id = temp_message.id.clone();
-                    
+
                     // Queue the pending message with the message ID
                     debug!(recipient = %recipient_str, message_id = %message_id, "Message queued pending session establishment");
-                    self.queue_pending_message(&recipient_str, &content_str, priority, message_id.clone(), reply_to_msg_id.clone());
-                    
+                    self.queue_pending_message(
+                        &recipient_str,
+                        &content_str,
+                        priority,
+                        message_id.clone(),
+                        reply_to_msg_id.clone(),
+                    );
+
                     // Return the message ID even though it's queued
                     return Ok(message_id);
                 }
@@ -623,7 +632,12 @@ impl OfflineProtocol {
         };
 
         // Create message with potentially encrypted content
-        let message = self.create_message(&recipient_str, final_content, Some(priority), reply_to_msg_id)?;
+        let message = self.create_message(
+            &recipient_str,
+            final_content,
+            Some(priority),
+            reply_to_msg_id,
+        )?;
         let message_id = message.id.clone();
 
         // Check for duplicates
@@ -664,7 +678,7 @@ impl OfflineProtocol {
     }
 
     /// Encrypts content for a recipient, handling session creation if needed.
-    /// 
+    ///
     /// To avoid race conditions where both peers create sessions simultaneously,
     /// we defer encryption until the session is "confirmed". A session is confirmed when:
     /// - We join via their Welcome message (welcome-wins), OR
@@ -677,10 +691,12 @@ impl OfflineProtocol {
     ) -> Result<String> {
         // Clone the Arc to avoid borrow issues
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
-        
+
         // Check for existing session
         let has_session = {
-            let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager.has_session(recipient)?
         };
 
@@ -689,23 +705,41 @@ impl OfflineProtocol {
             // Clone first, only remove after all operations succeed to avoid losing the key package on failure
             if let Some(key_pkg) = self.pending_key_packages.get(recipient).cloned() {
                 {
-                    let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                    let manager = mls
+                        .read()
+                        .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                     manager.import_key_package(recipient, &key_pkg)?;
                 }
-                
+
                 // Create session and send welcome message
                 let welcome = {
-                    let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                    let manager = mls
+                        .read()
+                        .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                     manager.create_session(recipient)?
                 };
-                
+
                 // Send welcome as internal message
                 self.send_welcome_message(recipient, &welcome)?;
-                
+
                 // All operations succeeded, now safe to remove the key package
                 self.pending_key_packages.remove(recipient);
-                debug!(recipient = %recipient, "Created MLS session and sent welcome");
-                
+
+                let group_id = welcome.group_id.as_str().to_string();
+                let is_session = group_id.starts_with("session:");
+
+                debug!(recipient = %recipient, group_id = %group_id, "Created MLS session and sent welcome");
+
+                // Emit secure session established event
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::secure_session_established(
+                        recipient.to_string(),
+                        group_id,
+                        is_session,
+                        true, // initiated_by_local is true - we sent the Welcome
+                    ));
+                }
+
                 // Don't encrypt immediately after creating session.
                 // Queue message until session is confirmed (peer processes our Welcome
                 // and we successfully decrypt their first message, or we receive their Welcome).
@@ -736,30 +770,32 @@ impl OfflineProtocol {
 
         // Encrypt the message
         let encrypted = {
-            let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager.encrypt_for_user(recipient, content.as_bytes())?
         };
 
         // Serialize encrypted message with prefix
-        let serialized = serde_json::to_string(&encrypted)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
-        
+        let serialized =
+            serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
+
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
     /// Sends a welcome message to establish an MLS session.
     fn send_welcome_message(&mut self, recipient: &str, welcome: &WelcomeMessage) -> Result<()> {
-        let serialized = serde_json::to_string(welcome)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let serialized =
+            serde_json::to_string(welcome).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::WELCOME, serialized);
-        
+
         // Create and send internal message with high priority
         let message = self.create_message(recipient, content, Some(MessagePriority::High), None)?;
         let _ = self.transport_manager.send(&message);
-        
+
         Ok(())
     }
-    
+
     /// Queues a message with a specific message ID for later sending when session is established.
     fn queue_pending_message(
         &mut self,
@@ -777,15 +813,15 @@ impl OfflineProtocol {
             reply_to_msg,
             queued_at: Utc::now(),
         };
-        
+
         // Persist to storage first (survives crashes)
         self.persist_pending_message(recipient, &pending);
-        
+
         self.pending_encrypted_messages
             .entry(recipient.to_string())
             .or_insert_with(Vec::new)
             .push(pending);
-        
+
         debug!(recipient = %recipient, message_id = %message_id_str, "Queued message pending session establishment");
     }
 
@@ -793,10 +829,10 @@ impl OfflineProtocol {
     fn flush_pending_messages(&mut self, recipient: &str) -> Result<()> {
         if let Some(pending) = self.pending_encrypted_messages.remove(recipient) {
             info!(recipient = %recipient, count = pending.len(), "Flushing pending messages");
-            
+
             // Clear from persistent storage since we're about to send them
             self.clear_pending_messages_from_storage(recipient);
-            
+
             for msg in pending {
                 // Re-attempt to send each pending message
                 // Use the stored message ID by passing reply_to_msg if it exists
@@ -806,7 +842,9 @@ impl OfflineProtocol {
                         // Note: The new message will have a new ID, but the original ID was already returned to the caller
                         debug!(original_id = %msg.message_id, new_id = %id, "Sent pending message");
                     }
-                    Err(e) => warn!(original_id = %msg.message_id, error = %e, "Failed to send pending message"),
+                    Err(e) => {
+                        warn!(original_id = %msg.message_id, error = %e, "Failed to send pending message")
+                    }
                 }
             }
         }
@@ -814,7 +852,7 @@ impl OfflineProtocol {
     }
 
     /// Processes encrypted messages that were received before the session was established.
-    /// 
+    ///
     /// This handles the case where encrypted messages arrive before the Welcome message.
     /// After the session is confirmed (via Welcome), we re-process these queued messages.
     fn process_pending_decryption(&mut self, sender: &str) {
@@ -822,13 +860,13 @@ impl OfflineProtocol {
             Some(msgs) => msgs,
             None => return,
         };
-        
+
         if messages.is_empty() {
             return;
         }
-        
+
         info!(sender = %sender, count = messages.len(), "Processing pending encrypted messages");
-        
+
         for msg in messages {
             // Re-process each message through the internal handler
             if let Some(result) = self.process_internal_message(&msg) {
@@ -837,12 +875,16 @@ impl OfflineProtocol {
                         // Successfully decrypted - add to received messages queue
                         let mut decrypted_msg = msg.clone();
                         decrypted_msg.content = content.clone();
-                        decrypted_msg.metadata.insert("encrypted".to_string(), "true".to_string());
-                        decrypted_msg.metadata.insert("delayed_decrypt".to_string(), "true".to_string());
-                        
+                        decrypted_msg
+                            .metadata
+                            .insert("encrypted".to_string(), "true".to_string());
+                        decrypted_msg
+                            .metadata
+                            .insert("delayed_decrypt".to_string(), "true".to_string());
+
                         if let Ok(mut state) = lock_shared_state(&self.shared_state) {
                             state.received_messages.push(decrypted_msg.clone());
-                            
+
                             // Emit message received event
                             let event = Event::MessageReceived {
                                 message_id: decrypted_msg.id.as_str().to_string(),
@@ -852,11 +894,14 @@ impl OfflineProtocol {
                                 hop_count: decrypted_msg.hop_count.value(),
                                 transport: "delayed".to_string(),
                                 timestamp: Utc::now().timestamp_millis(),
-                                reply_to_msg: decrypted_msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()),
+                                reply_to_msg: decrypted_msg
+                                    .reply_to_msg
+                                    .as_ref()
+                                    .map(|id| id.as_str().to_string()),
                             };
                             state.emit_event(event);
                         }
-                        
+
                         debug!(message_id = %msg.id, "Processed delayed encrypted message");
                     }
                     InternalMessageResult::Consumed => {
@@ -873,19 +918,21 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Persists a pending message for a recipient to storage.
-    /// 
+    ///
     /// This ensures messages survive app crashes/restarts.
     fn persist_pending_message(&self, recipient: &str, pending: &PendingMessage) {
-        let Some(storage) = &self.message_storage else { return };
-        
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+
         // Load existing messages for this recipient
         let mut messages: Vec<PendingMessage> = self
             .load_pending_messages_from_storage(recipient)
             .unwrap_or_default();
-        
+
         // Add the new message
         messages.push(pending.clone());
-        
+
         // Serialize and store
         match serde_json::to_vec(&messages) {
             Ok(data) => {
@@ -898,32 +945,36 @@ impl OfflineProtocol {
             }
         }
     }
-    
+
     /// Loads pending messages for a recipient from storage.
     fn load_pending_messages_from_storage(&self, recipient: &str) -> Option<Vec<PendingMessage>> {
         let storage = self.message_storage.as_ref()?;
-        let data = storage.load(storage_keys::PENDING_MESSAGES, recipient).ok()??;
+        let data = storage
+            .load(storage_keys::PENDING_MESSAGES, recipient)
+            .ok()??;
         serde_json::from_slice(&data).ok()
     }
-    
+
     /// Removes pending messages for a recipient from storage.
     fn clear_pending_messages_from_storage(&self, recipient: &str) {
         if let Some(storage) = &self.message_storage {
             let _ = storage.delete(storage_keys::PENDING_MESSAGES, recipient);
         }
     }
-    
+
     /// Restores all pending messages from storage on startup.
-    /// 
+    ///
     /// This should be called after initializing storage to recover
     /// any messages that were pending when the app was terminated.
     fn restore_pending_messages(&mut self) -> Result<()> {
-        let Some(storage) = &self.message_storage else { return Ok(()) };
-        
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+
         let recipients = storage
             .list_keys(storage_keys::PENDING_MESSAGES)
             .map_err(|e| Error::Other(format!("Failed to list pending messages: {}", e)))?;
-        
+
         for recipient in recipients {
             if let Some(messages) = self.load_pending_messages_from_storage(&recipient) {
                 if !messages.is_empty() {
@@ -932,7 +983,7 @@ impl OfflineProtocol {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -943,29 +994,31 @@ impl OfflineProtocol {
     /// Sends our key package to a peer for session establishment.
     fn send_key_package_to(&mut self, peer_id: &str) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
-        
+
         let key_pkg = {
-            let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager.get_or_create_key_package()?
         };
-        
+
         let payload = KeyPackagePayload {
             user_id: self.config.user_id.clone(),
             key_package_data: key_pkg.key_package_data,
             timestamp_ms: Utc::now().timestamp_millis() as u64,
         };
-        
-        let serialized = serde_json::to_string(&payload)
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::KEY_PACKAGE, serialized);
-        
+
         // Send as low priority internal message
         let message = self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
         let _ = self.transport_manager.send(&message);
-        
+
         self.key_package_sent_to.insert(peer_id.to_string());
         debug!(peer_id = %peer_id, "Sent key package");
-        
+
         Ok(())
     }
 
@@ -1037,42 +1090,62 @@ impl OfflineProtocol {
     /// * `Err(NoKeyPackage)` - No key package available for the peer yet
     pub fn establish_secure_session(&mut self, peer_id: &str) -> Result<Option<WelcomeMessage>> {
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
-        
+
         // Check if session already exists
         let has_session = {
-            let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager.has_session(peer_id)?
         };
-        
+
         if has_session {
             debug!(peer_id = %peer_id, "Session already exists");
             return Ok(None);
         }
-        
+
         // Check for pending key package
         // Clone first, only remove after all operations succeed to avoid losing the key package on failure
         if let Some(key_pkg) = self.pending_key_packages.get(peer_id).cloned() {
             {
-                let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                let manager = mls
+                    .read()
+                    .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                 manager.import_key_package(peer_id, &key_pkg)?;
             }
-            
+
             // Create session and get welcome message
             let welcome = {
-                let manager = mls.read().map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                let manager = mls
+                    .read()
+                    .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
                 manager.create_session(peer_id)?
             };
-            
+
             // Send welcome message to peer
             self.send_welcome_message(peer_id, &welcome)?;
-            
+
             // All operations succeeded, now safe to remove the key package
             self.pending_key_packages.remove(peer_id);
-            
-            info!(peer_id = %peer_id, group_id = %welcome.group_id, "Established secure session");
+
+            let group_id = welcome.group_id.as_str().to_string();
+            let is_session = group_id.starts_with("session:");
+
+            info!(peer_id = %peer_id, group_id = %group_id, "Established secure session");
+
+            // Emit secure session established event
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::secure_session_established(
+                    peer_id.to_string(),
+                    group_id,
+                    is_session,
+                    true, // initiated_by_local is true - we sent the Welcome
+                ));
+            }
+
             return Ok(Some(welcome));
         }
-        
+
         // No key package available - peer hasn't sent one yet
         debug!(peer_id = %peer_id, "No key package available for peer");
         Err(Error::NoKeyPackage(peer_id.to_string()))
@@ -1232,7 +1305,9 @@ impl OfflineProtocol {
                             InternalMessageResult::Decrypted(plaintext) => {
                                 // Replace content with decrypted plaintext
                                 message.content = plaintext;
-                                message.metadata.insert("encrypted".to_string(), "true".to_string());
+                                message
+                                    .metadata
+                                    .insert("encrypted".to_string(), "true".to_string());
                             }
                         }
                     }
@@ -1255,7 +1330,10 @@ impl OfflineProtocol {
                         hop_count: message.hop_count.value(),
                         transport: transport_used.to_string(),
                         timestamp: message.timestamp.as_millis(),
-                        reply_to_msg: message.reply_to_msg.as_ref().map(|id| id.as_str().to_string()),
+                        reply_to_msg: message
+                            .reply_to_msg
+                            .as_ref()
+                            .map(|id| id.as_str().to_string()),
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {
@@ -1292,8 +1370,9 @@ impl OfflineProtocol {
             let data = &content[internal_prefixes::KEY_PACKAGE.len()..];
             if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
                 debug!(sender = %sender, "Received key package");
-                self.pending_key_packages.insert(sender.to_string(), payload.key_package_data);
-                
+                self.pending_key_packages
+                    .insert(sender.to_string(), payload.key_package_data);
+
                 // Send our key package back if auto_key_exchange is enabled
                 if self.config.encryption.auto_key_exchange && self.config.encryption.enabled {
                     if !self.key_package_sent_to.contains(sender) {
@@ -1309,16 +1388,19 @@ impl OfflineProtocol {
             let data = &content[internal_prefixes::WELCOME.len()..];
             if let Ok(welcome) = serde_json::from_str::<WelcomeMessage>(data) {
                 debug!(sender = %sender, group_id = %welcome.group_id, "Received welcome message");
-                
+
                 // Track if we need to flush pending messages and process pending decryption
                 let mut should_flush = false;
                 let sender_owned = sender.to_string();
-                
+                let group_id = welcome.group_id.as_str().to_string();
+                let is_session = group_id.starts_with("session:");
+                let mut error_reason: Option<String> = None;
+
                 if let Some(mls) = self.mls_manager.clone() {
                     if let Ok(manager) = mls.read() {
                         // Check if we already have a session (race condition)
                         let has_existing = manager.has_session(sender).unwrap_or(false);
-                        
+
                         let result = if has_existing {
                             // Welcome-wins: replace our session with theirs
                             info!(sender = %sender, "Welcome-wins: replacing our session with incoming Welcome");
@@ -1326,7 +1408,7 @@ impl OfflineProtocol {
                         } else {
                             manager.join_session(&welcome)
                         };
-                        
+
                         match result {
                             Ok(_) => {
                                 info!(sender = %sender, "Joined MLS session via Welcome");
@@ -1334,21 +1416,37 @@ impl OfflineProtocol {
                             }
                             Err(e) => {
                                 warn!(error = %e, sender = %sender, "Failed to join MLS session");
+                                error_reason = Some(e.to_string());
                             }
                         }
                     }
                 }
-                
+
                 // Confirm session and process queued items after releasing the MLS lock
                 if should_flush {
                     // Mark session as confirmed - we're using their session state
                     self.confirmed_sessions.insert(sender_owned.clone());
-                    
+
                     // Flush pending outgoing messages
                     let _ = self.flush_pending_messages(&sender_owned);
-                    
+
                     // Process any encrypted messages that arrived before the Welcome
                     self.process_pending_decryption(&sender_owned);
+
+                    // Emit secure session established event
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::secure_session_established(
+                            sender_owned,
+                            group_id,
+                            is_session,
+                            false, // initiated_by_local is false - we received the Welcome
+                        ));
+                    }
+                } else if let Some(reason) = error_reason {
+                    // Emit secure session failed event
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::secure_session_failed(sender_owned, reason));
+                    }
                 }
             }
             return Some(InternalMessageResult::Consumed);
@@ -1366,16 +1464,16 @@ impl OfflineProtocol {
                     Failed { _error: String },
                     MlsNotInitialized,
                 }
-                
+
                 let result = if let Some(mls) = self.mls_manager.clone() {
                     if let Ok(manager) = mls.read() {
                         match manager.decrypt(&encrypted) {
                             Ok(Some(plaintext)) => {
                                 let text = String::from_utf8_lossy(&plaintext).to_string();
                                 debug!(sender = %sender, "Decrypted message successfully");
-                                DecryptResult::Success { 
-                                    text, 
-                                    sender: sender.to_string() 
+                                DecryptResult::Success {
+                                    text,
+                                    sender: sender.to_string(),
                                 }
                             }
                             Ok(None) => {
@@ -1384,9 +1482,13 @@ impl OfflineProtocol {
                             }
                             Err(e) => {
                                 let error_str = e.to_string();
-                                if error_str.contains("not found") || error_str.contains("GroupNotFound") {
+                                if error_str.contains("not found")
+                                    || error_str.contains("GroupNotFound")
+                                {
                                     info!(sender = %sender, "Encrypted message received before session ready, queuing");
-                                    DecryptResult::SessionNotReady { sender: sender.to_string() }
+                                    DecryptResult::SessionNotReady {
+                                        sender: sender.to_string(),
+                                    }
                                 } else {
                                     warn!(error = %e, sender = %sender, "Failed to decrypt message");
                                     DecryptResult::Failed { _error: error_str }
@@ -1399,10 +1501,13 @@ impl OfflineProtocol {
                 } else {
                     DecryptResult::MlsNotInitialized
                 };
-                
+
                 // Now handle the result without holding the MLS lock
                 match result {
-                    DecryptResult::Success { text, sender: sender_owned } => {
+                    DecryptResult::Success {
+                        text,
+                        sender: sender_owned,
+                    } => {
                         if !self.confirmed_sessions.contains(&sender_owned) {
                             info!(sender = %sender_owned, "Session confirmed via successful decryption");
                             self.confirmed_sessions.insert(sender_owned.clone());
@@ -1411,9 +1516,13 @@ impl OfflineProtocol {
                         return Some(InternalMessageResult::Decrypted(text));
                     }
                     DecryptResult::Empty => {
-                        return Some(InternalMessageResult::Decrypted("[Decryption failed]".to_string()));
+                        return Some(InternalMessageResult::Decrypted(
+                            "[Decryption failed]".to_string(),
+                        ));
                     }
-                    DecryptResult::SessionNotReady { sender: sender_owned } => {
+                    DecryptResult::SessionNotReady {
+                        sender: sender_owned,
+                    } => {
                         self.pending_decryption
                             .entry(sender_owned)
                             .or_default()
@@ -1421,10 +1530,14 @@ impl OfflineProtocol {
                         return Some(InternalMessageResult::Consumed);
                     }
                     DecryptResult::Failed { .. } => {
-                        return Some(InternalMessageResult::Decrypted("[Unable to decrypt]".to_string()));
+                        return Some(InternalMessageResult::Decrypted(
+                            "[Unable to decrypt]".to_string(),
+                        ));
                     }
                     DecryptResult::MlsNotInitialized => {
-                        return Some(InternalMessageResult::Decrypted("[Encryption not initialized]".to_string()));
+                        return Some(InternalMessageResult::Decrypted(
+                            "[Encryption not initialized]".to_string(),
+                        ));
                     }
                 }
             }
@@ -1958,7 +2071,8 @@ mod tests {
 
         protocol.start().unwrap();
 
-        let result = protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
+        let result =
+            protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
         assert!(result.is_ok());
     }
 
@@ -1966,7 +2080,8 @@ mod tests {
     fn test_send_message_not_started() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-        let result = protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
+        let result =
+            protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
         assert!(result.is_err());
     }
 
@@ -2019,7 +2134,9 @@ mod tests {
             .add_transport(TransportType::BLE, Box::new(mock_transport));
 
         protocol.start().unwrap();
-        protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>).unwrap();
+        protocol
+            .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+            .unwrap();
 
         assert!(*event_received.lock().unwrap());
     }
@@ -2038,8 +2155,11 @@ mod tests {
         protocol.start().unwrap();
 
         // Send same message twice
-        protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>).unwrap();
-        let result = protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
+        protocol
+            .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        let result =
+            protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
 
         // Second send should succeed (different message ID generated)
         assert!(result.is_ok());
@@ -2070,7 +2190,9 @@ mod tests {
 
         protocol.start().unwrap();
 
-        protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>).unwrap();
+        protocol
+            .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+            .unwrap();
         assert_eq!(mock_transport.sent_messages().len(), 1);
 
         thread::sleep(Duration::from_millis(15));
@@ -2128,7 +2250,12 @@ mod tests {
         );
 
         // Test that we can send a message via BLE
-        let result = protocol.send_message("bob", "Hello from BLE-only!", None::<MessagePriority>, None::<String>);
+        let result = protocol.send_message(
+            "bob",
+            "Hello from BLE-only!",
+            None::<MessagePriority>,
+            None::<String>,
+        );
         assert!(
             result.is_ok(),
             "Should be able to send message when only BLE is enabled"
@@ -2152,20 +2279,29 @@ mod tests {
     #[test]
     fn test_encryption_config_default_enabled() {
         let config = create_test_config();
-        assert!(config.encryption.enabled, "Encryption should be enabled by default");
-        assert!(config.encryption.auto_key_exchange, "Auto key exchange should be enabled by default");
-        assert!(config.encryption.store_pending, "Store pending should be enabled by default");
+        assert!(
+            config.encryption.enabled,
+            "Encryption should be enabled by default"
+        );
+        assert!(
+            config.encryption.auto_key_exchange,
+            "Auto key exchange should be enabled by default"
+        );
+        assert!(
+            config.encryption.store_pending,
+            "Store pending should be enabled by default"
+        );
     }
 
     #[test]
     fn test_encryption_config_disabled() {
         let mut config = create_test_config();
         config.encryption = EncryptionConfig::disabled();
-        
+
         assert!(!config.encryption.enabled);
         assert!(!config.encryption.auto_key_exchange);
         assert!(!config.encryption.store_pending);
-        
+
         let protocol = OfflineProtocol::new(config).unwrap();
         assert!(!protocol.is_mls_initialized());
     }
@@ -2174,7 +2310,7 @@ mod tests {
     fn test_should_auto_encrypt_without_mls() {
         let config = create_test_config();
         let protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Even though encryption is enabled by default, MLS is not initialized
         assert!(!protocol.is_mls_initialized());
     }
@@ -2184,21 +2320,21 @@ mod tests {
         let mut config = create_test_config();
         config.encryption.enabled = true;
         config.encryption.auto_key_exchange = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Add a mock transport
         let mut mock_transport = MockTransport::new(TransportType::BLE);
         mock_transport.start().unwrap();
         protocol
             .transport_manager_mut()
             .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
-        
+
         protocol.start().unwrap();
-        
+
         // This should not panic even without MLS initialized
         protocol.on_neighbor_discovered("peer123");
-        
+
         // No key package should have been sent since MLS is not initialized
         assert_eq!(mock_transport.sent_messages().len(), 0);
     }
@@ -2208,13 +2344,13 @@ mod tests {
         let mut config = create_test_config();
         config.encryption.enabled = true;
         config.encryption.auto_key_exchange = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Simulate that we've sent a key package to a peer (by inserting into tracking set)
         protocol.key_package_sent_to.insert("peer123".to_string());
         assert!(protocol.key_package_sent_to.contains("peer123"));
-        
+
         // Neighbor lost should remove from tracking
         protocol.on_neighbor_lost("peer123");
         assert!(!protocol.key_package_sent_to.contains("peer123"));
@@ -2233,9 +2369,9 @@ mod tests {
         let mut config = create_test_config();
         config.encryption.enabled = true;
         config.encryption.auto_key_exchange = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Create a key package message
         let key_pkg_payload = KeyPackagePayload {
             user_id: "sender123".to_string(),
@@ -2247,20 +2383,20 @@ mod tests {
             internal_prefixes::KEY_PACKAGE,
             serde_json::to_string(&key_pkg_payload).unwrap()
         );
-        
+
         let message = Message::new(
             UserId::new("sender123").unwrap(),
             UserId::new("user123").unwrap(),
             AppId::new("test-app").unwrap(),
             &content,
         );
-        
+
         // Process the message
         let result = protocol.process_internal_message(&message);
-        
+
         // Should be consumed (not surfaced to app)
         assert!(matches!(result, Some(InternalMessageResult::Consumed)));
-        
+
         // Key package should be stored
         assert!(protocol.pending_key_packages.contains_key("sender123"));
         assert_eq!(
@@ -2273,9 +2409,9 @@ mod tests {
     fn test_process_internal_message_regular_message() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Create a regular (non-internal) message
         let message = Message::new(
             UserId::new("sender123").unwrap(),
@@ -2283,10 +2419,10 @@ mod tests {
             AppId::new("test-app").unwrap(),
             "Hello, this is a regular message!",
         );
-        
+
         // Process the message
         let result = protocol.process_internal_message(&message);
-        
+
         // Should not be an internal message
         assert!(result.is_none());
     }
@@ -2296,18 +2432,36 @@ mod tests {
         let mut config = create_test_config();
         config.encryption.enabled = true;
         config.encryption.store_pending = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Queue some pending messages
-        protocol.queue_pending_message("bob", "Hello Bob!", MessagePriority::High, MessageId::new(), None);
-        protocol.queue_pending_message("bob", "Another message", MessagePriority::Medium, MessageId::new(), None);
-        protocol.queue_pending_message("alice", "Hello Alice!", MessagePriority::Low, MessageId::new(), None);
-			
+        protocol.queue_pending_message(
+            "bob",
+            "Hello Bob!",
+            MessagePriority::High,
+            MessageId::new(),
+            None,
+        );
+        protocol.queue_pending_message(
+            "bob",
+            "Another message",
+            MessagePriority::Medium,
+            MessageId::new(),
+            None,
+        );
+        protocol.queue_pending_message(
+            "alice",
+            "Hello Alice!",
+            MessagePriority::Low,
+            MessageId::new(),
+            None,
+        );
+
         // Check pending messages are stored
         assert!(protocol.pending_encrypted_messages.contains_key("bob"));
         assert!(protocol.pending_encrypted_messages.contains_key("alice"));
-        
+
         let bob_pending = protocol.pending_encrypted_messages.get("bob").unwrap();
         assert_eq!(bob_pending.len(), 2);
         assert_eq!(bob_pending[0].content, "Hello Bob!");
@@ -2322,7 +2476,7 @@ mod tests {
             .store_pending_messages(false)
             .build()
             .unwrap();
-        
+
         assert!(!config.encryption.enabled);
         assert!(config.encryption.auto_key_exchange);
         assert!(!config.encryption.store_pending);
@@ -2333,15 +2487,15 @@ mod tests {
         let mut config = create_test_config();
         config.encryption.enabled = true;
         config.encryption.store_pending = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Initially no confirmed sessions
         assert!(protocol.confirmed_sessions.is_empty());
-        
+
         // Add a confirmed session
         protocol.confirmed_sessions.insert("peer123".to_string());
-        
+
         assert!(protocol.confirmed_sessions.contains("peer123"));
         assert!(!protocol.confirmed_sessions.contains("peer456"));
     }
@@ -2350,12 +2504,12 @@ mod tests {
     fn test_pending_decryption_queue() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Initially no pending decryption messages
         assert!(protocol.pending_decryption.is_empty());
-        
+
         // Queue an encrypted message for a sender
         let message = Message::new(
             UserId::new("sender123").unwrap(),
@@ -2363,16 +2517,20 @@ mod tests {
             AppId::new("test-app").unwrap(),
             "encrypted content",
         );
-        
-        protocol.pending_decryption
+
+        protocol
+            .pending_decryption
             .entry("sender123".to_string())
             .or_default()
             .push(message);
-        
+
         // Check message is queued
         assert!(protocol.pending_decryption.contains_key("sender123"));
-        assert_eq!(protocol.pending_decryption.get("sender123").unwrap().len(), 1);
-        
+        assert_eq!(
+            protocol.pending_decryption.get("sender123").unwrap().len(),
+            1
+        );
+
         // Queue another message from same sender
         let message2 = Message::new(
             UserId::new("sender123").unwrap(),
@@ -2380,22 +2538,26 @@ mod tests {
             AppId::new("test-app").unwrap(),
             "more encrypted content",
         );
-        
-        protocol.pending_decryption
+
+        protocol
+            .pending_decryption
             .entry("sender123".to_string())
             .or_default()
             .push(message2);
-        
-        assert_eq!(protocol.pending_decryption.get("sender123").unwrap().len(), 2);
+
+        assert_eq!(
+            protocol.pending_decryption.get("sender123").unwrap().len(),
+            2
+        );
     }
 
     #[test]
     fn test_session_confirmation_clears_pending_decryption() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Queue some pending decryption messages
         let message = Message::new(
             UserId::new("sender123").unwrap(),
@@ -2403,18 +2565,19 @@ mod tests {
             AppId::new("test-app").unwrap(),
             "encrypted content",
         );
-        
-        protocol.pending_decryption
+
+        protocol
+            .pending_decryption
             .entry("sender123".to_string())
             .or_default()
             .push(message);
-        
+
         assert!(!protocol.pending_decryption.is_empty());
-        
+
         // Calling process_pending_decryption should remove the entries
         // (even if decryption fails since MLS is not initialized)
         protocol.process_pending_decryption("sender123");
-        
+
         // The messages should be removed from the pending queue
         assert!(!protocol.pending_decryption.contains_key("sender123"));
     }
@@ -2423,19 +2586,19 @@ mod tests {
     fn test_on_neighbor_lost_clears_confirmed_session() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Add a confirmed session
         protocol.confirmed_sessions.insert("peer123".to_string());
         protocol.key_package_sent_to.insert("peer123".to_string());
-        
+
         assert!(protocol.confirmed_sessions.contains("peer123"));
-        
+
         // When neighbor is lost, the key_package_sent_to is cleared
         // (confirmed_sessions might still remain - it's the crypto state)
         protocol.on_neighbor_lost("peer123");
-        
+
         assert!(!protocol.key_package_sent_to.contains("peer123"));
     }
 
@@ -2444,12 +2607,12 @@ mod tests {
         let mut config = create_test_config();
         config.encryption.enabled = true;
         config.encryption.store_pending = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Initially no confirmed sessions
         assert!(!protocol.confirmed_sessions.contains("sender123"));
-        
+
         // Simulate receiving a welcome message
         // Note: Since MLS is not initialized, the welcome won't actually be processed,
         // but we can test the structure is in place
@@ -2457,17 +2620,17 @@ mod tests {
             "{}{{\"group_id\":\"session:sender123:user123\",\"welcome_data\":[],\"inviter_id\":\"sender123\",\"timestamp_ms\":12345}}",
             internal_prefixes::WELCOME
         );
-        
+
         let message = Message::new(
             UserId::new("sender123").unwrap(),
             UserId::new("user123").unwrap(),
             AppId::new("test-app").unwrap(),
             &welcome_content,
         );
-        
+
         // Process the message
         let result = protocol.process_internal_message(&message);
-        
+
         // Should be consumed (welcome message is internal)
         assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     }
@@ -2476,25 +2639,25 @@ mod tests {
     fn test_encrypted_message_before_session_queued() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
-        
+
         let mut protocol = OfflineProtocol::new(config).unwrap();
-        
+
         // Create an encrypted message with the proper format
         let encrypted_content = format!(
             "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
             internal_prefixes::ENCRYPTED
         );
-        
+
         let message = Message::new(
             UserId::new("sender123").unwrap(),
             UserId::new("user123").unwrap(),
             AppId::new("test-app").unwrap(),
             &encrypted_content,
         );
-        
+
         // Process the message without MLS initialized - should fail gracefully
         let result = protocol.process_internal_message(&message);
-        
+
         // Without MLS initialized, should return placeholder text
         assert!(matches!(result, Some(InternalMessageResult::Decrypted(_))));
     }

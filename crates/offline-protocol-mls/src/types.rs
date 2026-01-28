@@ -161,8 +161,8 @@ pub struct EncryptedMessage {
 impl EncryptedMessage {
     /// Encodes the encrypted message to base64 for transport.
     pub fn to_base64(&self) -> Result<String, crate::MlsError> {
-        let json = serde_json::to_vec(self)
-            .map_err(|e| crate::MlsError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_vec(self).map_err(|e| crate::MlsError::Serialization(e.to_string()))?;
         Ok(base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             &json,
@@ -173,8 +173,7 @@ impl EncryptedMessage {
     pub fn from_base64(encoded: &str) -> Result<Self, crate::MlsError> {
         let json = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .map_err(|e| crate::MlsError::Deserialization(e.to_string()))?;
-        serde_json::from_slice(&json)
-            .map_err(|e| crate::MlsError::Deserialization(e.to_string()))
+        serde_json::from_slice(&json).map_err(|e| crate::MlsError::Deserialization(e.to_string()))
     }
 }
 
@@ -200,8 +199,8 @@ pub struct WelcomeMessage {
 impl WelcomeMessage {
     /// Encodes the welcome message to base64 for transport.
     pub fn to_base64(&self) -> Result<String, crate::MlsError> {
-        let json = serde_json::to_vec(self)
-            .map_err(|e| crate::MlsError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_vec(self).map_err(|e| crate::MlsError::Serialization(e.to_string()))?;
         Ok(base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             &json,
@@ -212,8 +211,7 @@ impl WelcomeMessage {
     pub fn from_base64(encoded: &str) -> Result<Self, crate::MlsError> {
         let json = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
             .map_err(|e| crate::MlsError::Deserialization(e.to_string()))?;
-        serde_json::from_slice(&json)
-            .map_err(|e| crate::MlsError::Deserialization(e.to_string()))
+        serde_json::from_slice(&json).map_err(|e| crate::MlsError::Deserialization(e.to_string()))
     }
 }
 

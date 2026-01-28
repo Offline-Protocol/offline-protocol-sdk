@@ -3,9 +3,9 @@
 //! This module provides [`MlsProvider`], which combines the OpenMLS Rust crypto
 //! backend with our custom storage adapter.
 
+use crate::storage_adapter::MlsStorageAdapter;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
-use crate::storage_adapter::MlsStorageAdapter;
 use std::sync::Arc;
 
 /// Custom OpenMLS provider that uses our MlsStorageAdapter for persistence.

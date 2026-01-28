@@ -434,6 +434,34 @@ export interface DiagnosticEvent extends BaseEvent {
 }
 
 /**
+ * Secure session established event
+ * Emitted when an MLS session is successfully established with a peer
+ */
+export interface SecureSessionEstablishedEvent extends BaseEvent {
+  type: 'secure_session_established';
+  /** Peer ID of the other party */
+  peer_id: string;
+  /** MLS group ID for the session */
+  group_id: string;
+  /** Whether this is a 1:1 session (true) or a multi-party group (false) */
+  is_session: boolean;
+  /** Whether the local device initiated the session (sent the Welcome) */
+  initiated_by_local: boolean;
+}
+
+/**
+ * Secure session failed event
+ * Emitted when an MLS session fails to be established
+ */
+export interface SecureSessionFailedEvent extends BaseEvent {
+  type: 'secure_session_failed';
+  /** Peer ID of the other party */
+  peer_id: string;
+  /** Reason for the failure */
+  reason: string;
+}
+
+/**
  * Union type of all events
  */
 export type ProtocolEvent =
@@ -449,7 +477,9 @@ export type ProtocolEvent =
   | NetworkMetricsEvent
   | FileProgressEvent
   | FileReceivedEvent
-  | DiagnosticEvent;
+  | DiagnosticEvent
+  | SecureSessionEstablishedEvent
+  | SecureSessionFailedEvent;
 
 /**
  * Event listener type
