@@ -2258,6 +2258,36 @@ impl OfflineProtocol {
         }
     }
 
+    /// Check if a pending key package is available for a peer
+    pub fn has_pending_key_package(&self, peer_id: String) -> bool {
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return false;
+            }
+        };
+        guard.has_pending_key_package(&peer_id)
+    }
+
+    /// Establish a secure session with a peer (high-level API)
+    /// 
+    /// This method handles the complete session establishment flow:
+    /// - If session already exists, returns None
+    /// - If a pending key package is available, imports it, creates session, sends Welcome
+    /// - If no key package is available, returns an error
+    pub fn establish_secure_session(
+        &self,
+        peer_id: String
+    ) -> Result<Option<MlsWelcomeMessage>, ProtocolError> {
+        let mut guard = self.inner.lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        
+        guard
+            .establish_secure_session(&peer_id)
+            .map(|opt| opt.map(MlsWelcomeMessage::from))
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
     /// Create a 1:1 session
     pub fn mls_create_session(
         &self,

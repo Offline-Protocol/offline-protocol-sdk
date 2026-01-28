@@ -314,6 +314,14 @@ RCT_EXTERN_METHOD(mlsHasSession:(NSString *)otherUserId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(hasPendingKeyPackage:(NSString *)peerId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(establishSecureSession:(NSString *)peerId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(mlsEncryptForUser:(NSString *)otherUserId
                   plaintext:(NSArray *)plaintext
                   resolver:(RCTPromiseResolveBlock)resolve

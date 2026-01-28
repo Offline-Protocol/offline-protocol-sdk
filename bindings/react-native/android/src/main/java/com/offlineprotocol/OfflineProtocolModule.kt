@@ -1859,6 +1859,47 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Check if a pending key package is available for a peer
+     */
+    @ReactMethod
+    fun hasPendingKeyPackage(peerId: String, promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.resolve(false)
+            return
+        }
+        promise.resolve(proto.hasPendingKeyPackage(peerId))
+    }
+
+    /**
+     * Establish a secure session with a peer (high-level API)
+     */
+    @ReactMethod
+    fun establishSecureSession(peerId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val welcome = proto.establishSecureSession(peerId)
+            if (welcome != null) {
+                val result = Arguments.createMap().apply {
+                    putString("groupId", welcome.groupId)
+                    val welcomeDataArray = Arguments.createArray()
+                    welcome.welcomeData.forEach { welcomeDataArray.pushInt(it.toInt()) }
+                    putArray("welcomeData", welcomeDataArray)
+                    putString("inviterId", welcome.inviterId)
+                    putString("groupName", welcome.groupName)
+                    putDouble("timestampMs", welcome.timestampMs.toDouble())
+                }
+                promise.resolve(result)
+            } else {
+                // Session already exists
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_MLS", "Failed to establish secure session: ${e.message}", e)
+        }
+    }
+
+    /**
      * Encrypt a message for a user
      */
     @ReactMethod
