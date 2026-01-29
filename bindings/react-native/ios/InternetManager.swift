@@ -524,6 +524,56 @@ public class InternetManager: NSObject, TransportManager {
                 "online": online
             ])
             
+        case "ConnectionRequestReceived":
+            // Forward connection request to JavaScript with full data
+            let sender = json["sender"] as? String ?? ""
+            let senderName = json["sender_name"] as? String ?? sender
+            let timestamp = json["timestamp"] as? String ?? ""
+            var requestContext: [String: Any] = [
+                "type": messageType,
+                "sender": sender,
+                "sender_name": senderName,
+                "timestamp": timestamp
+            ]
+            // Include key package if present
+            if let keyPackage = json["key_package"] as? [Int] {
+                requestContext["key_package"] = keyPackage
+            }
+            emitDiagnostic("debug", "Received relay message", context: requestContext)
+            
+        case "ConnectionAccepted":
+            // Forward connection accepted to JavaScript with full data
+            let acceptedBy = json["accepted_by"] as? String ?? json["sender"] as? String ?? ""
+            let acceptedByName = json["accepted_by_name"] as? String ?? json["sender_name"] as? String ?? acceptedBy
+            var acceptContext: [String: Any] = [
+                "type": messageType,
+                "accepted_by": acceptedBy,
+                "accepted_by_name": acceptedByName
+            ]
+            // Include key package if present
+            if let keyPackage = json["key_package"] as? [Int] {
+                acceptContext["key_package"] = keyPackage
+            }
+            emitDiagnostic("debug", "Received relay message", context: acceptContext)
+            
+        case "ConnectionRejected":
+            // Forward connection rejected to JavaScript with full data
+            let rejectedBy = json["rejected_by"] as? String ?? json["sender"] as? String ?? ""
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": messageType,
+                "rejected_by": rejectedBy
+            ])
+            
+        case "ConnectionRequestError":
+            // Forward connection request error to JavaScript with full data
+            let recipient = json["recipient"] as? String ?? ""
+            let reason = json["reason"] as? String ?? "Unknown error"
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": messageType,
+                "recipient": recipient,
+                "reason": reason
+            ])
+            
         default:
             emitDiagnostic("debug", "Received relay message", context: [
                 "type": messageType

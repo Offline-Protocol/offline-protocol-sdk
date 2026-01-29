@@ -625,6 +625,72 @@ class InternetManager(
                 ))
             }
             
+            "ConnectionRequestReceived" -> {
+                // Forward connection request to JavaScript with full data
+                val sender = json.optString("sender", "")
+                val senderName = json.optString("sender_name", sender)
+                val timestamp = json.optString("timestamp", "")
+                val keyPackage = if (json.has("key_package")) {
+                    try {
+                        val keyPackageArray = json.getJSONArray("key_package")
+                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it) }
+                    } catch (e: Exception) { null }
+                } else null
+                
+                val requestContext = mutableMapOf<String, Any?>(
+                    "type" to messageType,
+                    "sender" to sender,
+                    "sender_name" to senderName,
+                    "timestamp" to timestamp
+                )
+                if (keyPackage != null) {
+                    requestContext["key_package"] = keyPackage
+                }
+                emitDiagnostic("debug", "Received relay message", requestContext)
+            }
+            
+            "ConnectionAccepted" -> {
+                // Forward connection accepted to JavaScript with full data
+                val acceptedBy = json.optString("accepted_by", json.optString("sender", ""))
+                val acceptedByName = json.optString("accepted_by_name", json.optString("sender_name", acceptedBy))
+                val keyPackage = if (json.has("key_package")) {
+                    try {
+                        val keyPackageArray = json.getJSONArray("key_package")
+                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it) }
+                    } catch (e: Exception) { null }
+                } else null
+                
+                val acceptContext = mutableMapOf<String, Any?>(
+                    "type" to messageType,
+                    "accepted_by" to acceptedBy,
+                    "accepted_by_name" to acceptedByName
+                )
+                if (keyPackage != null) {
+                    acceptContext["key_package"] = keyPackage
+                }
+                emitDiagnostic("debug", "Received relay message", acceptContext)
+            }
+            
+            "ConnectionRejected" -> {
+                // Forward connection rejected to JavaScript with full data
+                val rejectedBy = json.optString("rejected_by", json.optString("sender", ""))
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to messageType,
+                    "rejected_by" to rejectedBy
+                ))
+            }
+            
+            "ConnectionRequestError" -> {
+                // Forward connection request error to JavaScript with full data
+                val recipient = json.optString("recipient", "")
+                val reason = json.optString("reason", "Unknown error")
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to messageType,
+                    "recipient" to recipient,
+                    "reason" to reason
+                ))
+            }
+            
             else -> {
                 emitDiagnostic("debug", "Received relay message", mapOf(
                     "type" to messageType
