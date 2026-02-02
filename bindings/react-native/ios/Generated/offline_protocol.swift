@@ -608,7 +608,11 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func cancelFileTransfer(fileId: String) throws 
     
+    func checkPresence(username: String) throws  -> String
+    
     func cleanupExpiredRoutes() 
+    
+    func clearTyping(conversationId: String) throws  -> String
     
     func emitTestEvent() 
     
@@ -654,6 +658,25 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
     
+    func groupAddMember(groupId: String, username: String) throws  -> String
+    
+    func groupCreate(name: String) throws  -> String
+    
+    func groupDelete(groupId: String) throws  -> String
+    
+    func groupGetInfo(groupId: String) throws  -> String
+    
+    func groupGetUserGroups() throws  -> String
+    
+    func groupLeave(groupId: String) throws  -> String
+    
+    func groupRemoveAdmin(groupId: String, username: String) throws  -> String
+    
+    func groupRemoveMember(groupId: String, username: String) throws  -> String
+    
+    func groupSendMessage(groupId: String, content: String, replyToMsg: String?) throws  -> String
+    
+    func groupSetAdmin(groupId: String, username: String) throws  -> String
     func hasPendingKeyPackage(peerId: String)  -> Bool
     
     func hasRoute(destination: String)  -> Bool
@@ -740,6 +763,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func removeTransport(transportType: TransportType) throws 
     
+    func requestPrekeyBundle(username: String) throws  -> String
+    
     func resume() throws 
     
     func sendFile(recipient: String, filePath: String, fileName: String) throws  -> String
@@ -751,6 +776,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func setEventCallback(callback: EventCallback) 
     
     func setRelayPriority(priority: RelayPriority) throws 
+    
+    func setTyping(conversationId: String) throws  -> String
     
     func shouldEscalateToWifi()  -> Bool
     
@@ -769,6 +796,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func updateRoutingConfig(config: GradientRoutingConfig) 
     
     func updateTransportMetrics(transportType: TransportType, metrics: TransportMetrics) throws 
+    
+    func uploadKeys(identityKey: String, signedPrekeyJson: String, oneTimePrekeysJson: String) throws  -> String
     
     func wifiDirectGetNextMessage()  -> WifiDirectMessage?
     
@@ -918,11 +947,29 @@ open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiC
 }
 }
     
+open func checkPresence(username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_check_presence(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
 open func cleanupExpiredRoutes()  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_expired_routes(
             self.uniffiCloneHandle(),$0
     )
 }
+}
+    
+open func clearTyping(conversationId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),$0
+    )
+})
 }
     
 open func emitTestEvent()  {try! rustCall() {
@@ -1105,6 +1152,97 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
 })
 }
     
+open func groupAddMember(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_add_member(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
+open func groupCreate(name: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_create(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(name),$0
+    )
+})
+}
+    
+open func groupDelete(groupId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_delete(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func groupGetInfo(groupId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_get_info(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func groupGetUserGroups()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_get_user_groups(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func groupLeave(groupId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_leave(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
+open func groupRemoveAdmin(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remove_admin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
+open func groupRemoveMember(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remove_member(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
+open func groupSendMessage(groupId: String, content: String, replyToMsg: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_send_message(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(content),
+        FfiConverterOptionString.lower(replyToMsg),$0
+    )
+})
+}
+    
+open func groupSetAdmin(groupId: String, username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_set_admin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(username),$0
 open func hasPendingKeyPackage(peerId: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
@@ -1473,6 +1611,15 @@ open func removeTransport(transportType: TransportType)throws   {try rustCallWit
 }
 }
     
+open func requestPrekeyBundle(username: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(username),$0
+    )
+})
+}
+    
 open func resume()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(
             self.uniffiCloneHandle(),$0
@@ -1525,6 +1672,15 @@ open func setRelayPriority(priority: RelayPriority)throws   {try rustCallWithErr
         FfiConverterTypeRelayPriority_lower(priority),$0
     )
 }
+}
+    
+open func setTyping(conversationId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(conversationId),$0
+    )
+})
 }
     
 open func shouldEscalateToWifi() -> Bool  {
@@ -1596,6 +1752,17 @@ open func updateTransportMetrics(transportType: TransportType, metrics: Transpor
         FfiConverterTypeTransportMetrics_lower(metrics),$0
     )
 }
+}
+    
+open func uploadKeys(identityKey: String, signedPrekeyJson: String, oneTimePrekeysJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(identityKey),
+        FfiConverterString.lower(signedPrekeyJson),
+        FfiConverterString.lower(oneTimePrekeysJson),$0
+    )
+})
 }
     
 open func wifiDirectGetNextMessage() -> WifiDirectMessage?  {
@@ -4885,7 +5052,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_check_presence() != 15829) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cleanup_expired_routes() != 32382) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing() != 54663) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796) {
@@ -4954,6 +5127,34 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_add_member() != 6312) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_create() != 16661) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_delete() != 20529) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_get_info() != 43670) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_get_user_groups() != 44986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_leave() != 21356) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_remove_admin() != 55696) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_remove_member() != 28253) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_send_message() != 3905) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_set_admin() != 36104) {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5083,6 +5284,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5099,6 +5303,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing() != 10907) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161) {
@@ -5126,6 +5333,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys() != 42899) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936) {

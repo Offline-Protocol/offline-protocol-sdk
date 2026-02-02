@@ -37,7 +37,7 @@ import { LINKING_ERROR } from './constants';
 export * from './types';
 export * from './constants';
 
-const OfflineProtocolNativeModule = NativeModules.OfflineProtocolModule
+const OfflineProtocolNativeModule = (NativeModules.OfflineProtocolModule
   ? NativeModules.OfflineProtocolModule
   : new Proxy(
       {},
@@ -46,7 +46,7 @@ const OfflineProtocolNativeModule = NativeModules.OfflineProtocolModule
           throw new Error(LINKING_ERROR);
         },
       }
-    );
+    )) as any; // Type assertion to allow all native module methods including group management
 
 type NativeRelayPriority = 'low' | 'medium' | 'high';
 
@@ -1705,6 +1705,92 @@ export class OfflineProtocol {
       epoch: result.epoch,
       createdAt: result.createdAt,
     };
+  }
+
+  /**
+   * ========================================================================
+   * GROUP MANAGEMENT (RELAY SERVER API)
+   * ========================================================================
+   */
+
+  /**
+   * Create a new group. Creator becomes admin.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupCreate(name: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupCreate(name);
+  }
+
+  /**
+   * Send encrypted message to a group. Content must be pre-encrypted by client.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupSendMessage(groupId: string, content: string, replyToMsg?: string | null): Promise<string> {
+    return await OfflineProtocolNativeModule.groupSendMessage(groupId, content, replyToMsg || null);
+  }
+
+  /**
+   * Add member to group. Admin only.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupAddMember(groupId: string, username: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupAddMember(groupId, username);
+  }
+
+  /**
+   * Remove member from group. Admin only, or user can remove themselves.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupRemoveMember(groupId: string, username: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupRemoveMember(groupId, username);
+  }
+
+  /**
+   * Set member as admin. Admin only.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupSetAdmin(groupId: string, username: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupSetAdmin(groupId, username);
+  }
+
+  /**
+   * Remove admin role from member. Admin only.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupRemoveAdmin(groupId: string, username: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupRemoveAdmin(groupId, username);
+  }
+
+  /**
+   * Leave a group.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupLeave(groupId: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupLeave(groupId);
+  }
+
+  /**
+   * Delete a group. Admin only.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupDelete(groupId: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupDelete(groupId);
+  }
+
+  /**
+   * Get group information.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupGetInfo(groupId: string): Promise<string> {
+    return await OfflineProtocolNativeModule.groupGetInfo(groupId);
+  }
+
+  /**
+   * Get all groups the user is a member of.
+   * Returns JSON string to send via WebSocket relay.
+   */
+  async groupGetUserGroups(): Promise<string> {
+    return await OfflineProtocolNativeModule.groupGetUserGroups();
   }
 
   /**

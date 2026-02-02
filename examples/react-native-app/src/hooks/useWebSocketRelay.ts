@@ -1,7 +1,40 @@
+import { useContext } from 'react';
+import {
+  WebSocketRelayContext,
+  WebSocketRelayContextValue,
+} from '../providers/WebSocketRelayProvider';
+
+// Re-export types from provider
+export type {
+  OnlineMessage,
+  OnlineUser,
+  OnlineGroup,
+  GroupMember,
+  GroupDetails,
+  ConnectionStatus,
+  WebSocketRelayContextValue,
+} from '../providers/WebSocketRelayProvider';
+
+/**
+ * Hook to access the shared WebSocket relay connection.
+ * Must be used within a WebSocketRelayProvider.
+ */
+export function useWebSocketRelay(): WebSocketRelayContextValue {
+  const context = useContext(WebSocketRelayContext);
+  if (!context) {
+    throw new Error(
+      'useWebSocketRelay must be used within a WebSocketRelayProvider',
+    );
+  }
+  return context;
+}
+
+// Keep the old implementation below for reference, but it's no longer used
+// The actual logic is now in WebSocketRelayProvider
+
+/* OLD IMPLEMENTATION - Now in WebSocketRelayProvider
 import { useState, useCallback, useRef, useEffect } from 'react';
-
-const RELAY_SERVER_URL = 'wss://relay-server-production-31c7.up.railway.app/ws';
-
+import { DEFAULT_RELAY_SERVER_URL } from '../constants';
 interface AuthenticatedResponse {
   type: 'Authenticated';
   user_id: string;
@@ -208,7 +241,9 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
 
         case 'DeliveryError': {
           const deliveryError = data as DeliveryErrorResponse;
-          options.onError?.(`Failed to deliver to ${deliveryError.recipient}: ${deliveryError.reason}`);
+          options.onError?.(
+            `Failed to deliver to ${deliveryError.recipient}: ${deliveryError.reason}`,
+          );
           break;
         }
 
@@ -243,7 +278,11 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
             });
             return updated;
           });
-          options.onPresenceUpdate?.(presence.user_id, presence.online, lastSeen);
+          options.onPresenceUpdate?.(
+            presence.user_id,
+            presence.online,
+            lastSeen,
+          );
           break;
         }
 
@@ -273,6 +312,15 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
           break;
         }
 
+        case 'GroupInfo': {
+          const groupInfo = data as GroupInfoResponse;
+          // Store group info - components can access it via a getter or callback
+          // For now, just log it - components will request it when needed
+          console.log('[WebSocketRelay] Group info received:', groupInfo);
+          // Could emit an event here for components to listen
+          break;
+        }
+
         case 'UserGroups': {
           const userGroups = data as UserGroupsResponse;
           setGroups(
@@ -295,7 +343,8 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
           const typing = data as TypingUpdateResponse;
           setTypingUsers(prev => {
             const updated = new Map(prev);
-            const conversationTypers = updated.get(typing.conversation_id) ?? new Set();
+            const conversationTypers =
+              updated.get(typing.conversation_id) ?? new Set();
             if (typing.typing) {
               conversationTypers.add(typing.user_id);
             } else {
@@ -304,7 +353,11 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
             updated.set(typing.conversation_id, conversationTypers);
             return updated;
           });
-          options.onTypingUpdate?.(typing.conversation_id, typing.user_id, typing.typing);
+          options.onTypingUpdate?.(
+            typing.conversation_id,
+            typing.user_id,
+            typing.typing,
+          );
           break;
         }
 
@@ -330,7 +383,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
     setError(null);
 
     try {
-      const ws = new WebSocket(RELAY_SERVER_URL);
+      const ws = new WebSocket(DEFAULT_RELAY_SERVER_URL);
 
       ws.onopen = () => {
         console.log('[WebSocketRelay] Connected');
@@ -384,6 +437,7 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
 
     try {
       wsRef.current.send(JSON.stringify(message));
+      console.log('[WebSocketRelay] ✅ Message sent:', message.type);
       return true;
     } catch (err) {
       console.error('[WebSocketRelay] Send error:', err);
@@ -578,4 +632,4 @@ export function useWebSocketRelay(options: UseWebSocketRelayOptions = {}) {
     clearMessages,
   };
 }
-
+END OF OLD IMPLEMENTATION */
