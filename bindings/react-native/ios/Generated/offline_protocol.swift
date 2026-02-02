@@ -677,6 +677,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func groupSendMessage(groupId: String, content: String, replyToMsg: String?) throws  -> String
     
     func groupSetAdmin(groupId: String, username: String) throws  -> String
+    
     func hasPendingKeyPackage(peerId: String)  -> Bool
     
     func hasRoute(destination: String)  -> Bool
@@ -1243,6 +1244,10 @@ open func groupSetAdmin(groupId: String, username: String)throws  -> String  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
         FfiConverterString.lower(username),$0
+    )
+})
+}
+    
 open func hasPendingKeyPackage(peerId: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
@@ -5155,6 +5160,8 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_set_admin() != 36104) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881) {
         return InitializationResult.apiChecksumMismatch
     }

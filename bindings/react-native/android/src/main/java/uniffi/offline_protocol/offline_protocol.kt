@@ -785,6 +785,7 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_grou
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_send_message(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_set_admin(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_route(
@@ -1433,6 +1434,8 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_set_admin() != 36104.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2243,6 +2246,7 @@ public interface OfflineProtocolInterface {
     fun `groupSendMessage`(`groupId`: kotlin.String, `content`: kotlin.String, `replyToMsg`: kotlin.String?): kotlin.String
     
     fun `groupSetAdmin`(`groupId`: kotlin.String, `username`: kotlin.String): kotlin.String
+    
     fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean
     
     fun `hasRoute`(`destination`: kotlin.String): kotlin.Boolean
@@ -3072,6 +3076,12 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_set_admin(
         it,
         FfiConverterString.lower(`groupId`),FfiConverterString.lower(`username`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {
