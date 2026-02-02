@@ -32,7 +32,7 @@ ANDROID_ABIS=("arm64-v8a" "armeabi-v7a" "x86_64" "x86")
 MISSING_ABIS=()
 
 for abi in "${ANDROID_ABIS[@]}"; do
-  lib_path="$ANDROID_DIR/$abi/liboffline_protocol_uniffi.so"
+  lib_path="$ANDROID_DIR/$abi/libuniffi_offline_protocol.so"
   if [ -f "$lib_path" ]; then
     echo "✅ Android $abi library found"
     echo "   Size: $(du -h "$lib_path" | cut -f1)"

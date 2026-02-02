@@ -11,8 +11,8 @@ use crate::types::{
     StorageKeyType, WelcomeMessage,
 };
 
-use openmls::prelude::*;
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
+use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::OpenMlsProvider;
 use std::sync::{Arc, RwLock};
@@ -51,7 +51,8 @@ impl MlsManager {
         let adapter = MlsStorageAdapter::new(storage.clone());
         let provider = MlsProvider::new(adapter);
 
-        let session_manager = SessionManager::new(user_id.clone(), storage.clone(), provider.clone());
+        let session_manager =
+            SessionManager::new(user_id.clone(), storage.clone(), provider.clone());
         let group_manager = GroupManager::new(user_id.clone(), storage.clone(), provider.clone());
 
         let manager = Self {
@@ -91,13 +92,19 @@ impl MlsManager {
 
         match keys_data {
             Some(json) => {
-                let signature_keys: SignatureKeyPair = serde_json::from_slice(&json)
-                    .map_err(|e| MlsError::Deserialization(format!("Failed to deserialize signature keys: {}", e)))?;
+                let signature_keys: SignatureKeyPair =
+                    serde_json::from_slice(&json).map_err(|e| {
+                        MlsError::Deserialization(format!(
+                            "Failed to deserialize signature keys: {}",
+                            e
+                        ))
+                    })?;
 
                 let public_key = signature_keys.public();
 
                 // Recreate credential
-                let credential = Credential::new(CredentialType::Basic, self.user_id.as_bytes().to_vec());
+                let credential =
+                    Credential::new(CredentialType::Basic, self.user_id.as_bytes().to_vec());
 
                 let credential_with_key = CredentialWithKey {
                     credential,
@@ -106,10 +113,13 @@ impl MlsManager {
 
                 // Safely update the credential cache
                 {
-                    let mut guard = self.credential.write().map_err(|_| MlsError::NotInitialized)?;
+                    let mut guard = self
+                        .credential
+                        .write()
+                        .map_err(|_| MlsError::NotInitialized)?;
                     *guard = Some(credential_with_key);
                 }
-                
+
                 debug!(user_id = %self.user_id, "Loaded existing MLS identity");
                 Ok(true)
             }
@@ -125,12 +135,12 @@ impl MlsManager {
         // Store the key pair directly in our storage
         let keys_json = serde_json::to_vec(&signature_keys)
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
-            
+
         let key_type = StorageKeyType::Identity.as_str();
         self.storage.store(key_type, "key_pair", &keys_json)?;
 
         let public_key = signature_keys.public();
-        
+
         let credential = Credential::new(CredentialType::Basic, self.user_id.as_bytes().to_vec());
 
         let credential_with_key = CredentialWithKey {
@@ -139,27 +149,36 @@ impl MlsManager {
         };
 
         {
-            let mut guard = self.credential.write().map_err(|_| MlsError::NotInitialized)?;
+            let mut guard = self
+                .credential
+                .write()
+                .map_err(|_| MlsError::NotInitialized)?;
             *guard = Some(credential_with_key);
         }
-        
+
         Ok(())
     }
 
     /// Gets the credential with key.
     fn get_credential(&self) -> Result<CredentialWithKey> {
-        let guard = self.credential.read().map_err(|_| MlsError::NotInitialized)?;
+        let guard = self
+            .credential
+            .read()
+            .map_err(|_| MlsError::NotInitialized)?;
         guard.clone().ok_or_else(|| MlsError::NotInitialized)
     }
 
     /// Gets a signer for MLS operations.
     fn get_signer(&self) -> Result<SignatureKeyPair> {
         let key_type = StorageKeyType::Identity.as_str();
-        let keys_data = self.storage.load(key_type, "key_pair")?
+        let keys_data = self
+            .storage
+            .load(key_type, "key_pair")?
             .ok_or_else(|| MlsError::NotInitialized)?;
-            
-        let signature_keys: SignatureKeyPair = serde_json::from_slice(&keys_data)
-            .map_err(|e| MlsError::Deserialization(format!("Failed to deserialize signature keys: {}", e)))?;
+
+        let signature_keys: SignatureKeyPair = serde_json::from_slice(&keys_data).map_err(|e| {
+            MlsError::Deserialization(format!("Failed to deserialize signature keys: {}", e))
+        })?;
 
         Ok(signature_keys)
     }
@@ -196,9 +215,10 @@ impl MlsManager {
             key_package_data,
             DEFAULT_KEY_PACKAGE_LIFETIME_SECS,
         );
-        let serialized = serde_json::to_vec(&bundle)
-            .map_err(|e| MlsError::Serialization(e.to_string()))?;
-        self.storage.store(key_type, &bundle.package_id, &serialized)?;
+        let serialized =
+            serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        self.storage
+            .store(key_type, &bundle.package_id, &serialized)?;
 
         debug!(package_id = %bundle.package_id, "Generated new key package");
         Ok(bundle)
@@ -305,27 +325,31 @@ impl MlsManager {
     }
 
     /// Replaces an existing session with an incoming Welcome message.
-    /// 
+    ///
     /// This implements the "welcome-wins" strategy for race condition resolution.
     /// When both peers simultaneously create a session, this method allows one peer
     /// to replace their own session with the other peer's Welcome, ensuring both
     /// end up with the same cryptographic state.
     pub fn replace_session_with_welcome(&self, welcome: &WelcomeMessage) -> Result<GroupInfo> {
         let other_user_id = &welcome.inviter_id;
-        
+
         // Clear any pending welcome we were about to send
         let _ = self.clear_pending_welcome(other_user_id);
-        
+
         // Delete conflicting contact key package (we no longer need it)
         let key_type = StorageKeyType::ContactKeyPackage.as_str();
         let _ = self.storage.delete(key_type, other_user_id);
-        
+
         // Join using their Welcome (session.join_session handles deleting our existing session)
         self.session_manager.join_session(welcome)
     }
 
     /// Encrypts a message for a 1:1 session.
-    pub fn encrypt_for_user(&self, other_user_id: &str, plaintext: &[u8]) -> Result<EncryptedMessage> {
+    pub fn encrypt_for_user(
+        &self,
+        other_user_id: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptedMessage> {
         if !self.has_session(other_user_id)? {
             let welcome = self.create_session(other_user_id)?;
             warn!(
@@ -333,13 +357,14 @@ impl MlsManager {
                 "Created new session - Welcome message needs to be sent"
             );
             let key_type = "pending_welcome";
-            let welcome_data = serde_json::to_vec(&welcome)
-                .map_err(|e| MlsError::Serialization(e.to_string()))?;
+            let welcome_data =
+                serde_json::to_vec(&welcome).map_err(|e| MlsError::Serialization(e.to_string()))?;
             self.storage.store(key_type, other_user_id, &welcome_data)?;
         }
 
         let signature_keys = self.get_signer()?;
-        self.session_manager.encrypt_message(other_user_id, plaintext, &signature_keys)
+        self.session_manager
+            .encrypt_message(other_user_id, plaintext, &signature_keys)
     }
 
     /// Gets a pending Welcome message.
@@ -387,7 +412,9 @@ impl MlsManager {
         let credential = self.get_credential()?;
         let signature_keys = self.get_signer()?;
 
-        let group = self.group_manager.create_group(&group_id, &credential, &signature_keys)?;
+        let group = self
+            .group_manager
+            .create_group(&group_id, &credential, &signature_keys)?;
 
         // Store group metadata
         let metadata = GroupMetadata::new(Some(group_name.to_string()));
@@ -419,7 +446,9 @@ impl MlsManager {
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let signature_keys = self.get_signer()?;
-        let (_commit, welcome) = self.group_manager.add_member(&mut group, key_package, &signature_keys)?;
+        let (_commit, welcome) =
+            self.group_manager
+                .add_member(&mut group, key_package, &signature_keys)?;
 
         self.group_manager.save_group(group_id, &group)?;
 
@@ -428,8 +457,7 @@ impl MlsManager {
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
 
         // Include group name in welcome for the invitee
-        let group_name = self.load_group_metadata(group_id)?
-            .and_then(|m| m.name);
+        let group_name = self.load_group_metadata(group_id)?.and_then(|m| m.name);
 
         Ok(WelcomeMessage {
             group_id: group_id.clone(),
@@ -441,7 +469,11 @@ impl MlsManager {
     }
 
     /// Removes a member from a group.
-    pub fn remove_group_member(&self, group_id: &GroupId, member_id: &str) -> Result<EncryptedMessage> {
+    pub fn remove_group_member(
+        &self,
+        group_id: &GroupId,
+        member_id: &str,
+    ) -> Result<EncryptedMessage> {
         let mut group = self
             .group_manager
             .load_group(group_id)?
@@ -460,7 +492,9 @@ impl MlsManager {
             .ok_or_else(|| MlsError::UserNotInGroup(member_id.to_string()))?;
 
         let signature_keys = self.get_signer()?;
-        let commit = self.group_manager.remove_member(&mut group, member_index, &signature_keys)?;
+        let commit = self
+            .group_manager
+            .remove_member(&mut group, member_index, &signature_keys)?;
 
         self.group_manager.save_group(group_id, &group)?;
 
@@ -486,22 +520,29 @@ impl MlsManager {
     }
 
     /// Encrypts a message for a group.
-    pub fn encrypt_for_group(&self, group_id: &GroupId, plaintext: &[u8]) -> Result<EncryptedMessage> {
-        self.group_manager.load_group(group_id)?
+    pub fn encrypt_for_group(
+        &self,
+        group_id: &GroupId,
+        plaintext: &[u8],
+    ) -> Result<EncryptedMessage> {
+        self.group_manager
+            .load_group(group_id)?
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-        
+
         // Re-load group to satisfy borrow checker if needed, or just proceed
         // Actually, encrypt_for_group in MlsManager delegates to GroupManager
         // But here I'm reimplementing parts of it?
         // Ah, `manager.rs` implemented `encrypt_for_group` by calling `self.group_manager.load_group`, then `self.group_manager.encrypt_message`, then `save`.
-        
+
         let mut group = self
             .group_manager
             .load_group(group_id)?
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let signature_keys = self.get_signer()?;
-        let mls_message = self.group_manager.encrypt_message(&mut group, plaintext, &signature_keys)?;
+        let mls_message =
+            self.group_manager
+                .encrypt_message(&mut group, plaintext, &signature_keys)?;
 
         self.group_manager.save_group(group_id, &group)?;
 
@@ -529,7 +570,9 @@ impl MlsManager {
         let mls_message = MlsMessageIn::tls_deserialize_exact(&encrypted.ciphertext)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
 
-        let result = self.group_manager.decrypt_message(&mut group, mls_message)?;
+        let result = self
+            .group_manager
+            .decrypt_message(&mut group, mls_message)?;
 
         self.group_manager.save_group(&encrypted.group_id, &group)?;
 
@@ -543,10 +586,16 @@ impl MlsManager {
 
         let welcome_msg = match mls_msg.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Err(MlsError::WelcomeProcessing("Not a Welcome message".to_string())),
+            _ => {
+                return Err(MlsError::WelcomeProcessing(
+                    "Not a Welcome message".to_string(),
+                ))
+            }
         };
 
-        let group = self.group_manager.join_group(welcome_msg, &welcome.group_id)?;
+        let group = self
+            .group_manager
+            .join_group(welcome_msg, &welcome.group_id)?;
         let mut info = self.group_manager.get_group_info(&group, &welcome.group_id);
         info.name = welcome.group_name.clone();
 
@@ -584,7 +633,8 @@ impl MlsManager {
 
     /// Updates the group name.
     pub fn set_group_name(&self, group_id: &GroupId, name: &str) -> Result<()> {
-        let mut metadata = self.load_group_metadata(group_id)?
+        let mut metadata = self
+            .load_group_metadata(group_id)?
             .unwrap_or_else(|| GroupMetadata::new(None));
         metadata.name = Some(name.to_string());
         metadata.touch();
@@ -603,7 +653,8 @@ impl MlsManager {
         key: &str,
         value: &str,
     ) -> Result<()> {
-        let mut metadata = self.load_group_metadata(group_id)?
+        let mut metadata = self
+            .load_group_metadata(group_id)?
             .unwrap_or_else(|| GroupMetadata::new(None));
         metadata.custom.insert(key.to_string(), value.to_string());
         metadata.touch();
@@ -632,7 +683,6 @@ impl MlsManager {
         }
     }
 }
-
 
 impl MlsManager {
     /// Loads a stored key package bundle, handling legacy raw storage and expiration.
@@ -664,8 +714,8 @@ impl MlsManager {
             return Ok(None);
         }
 
-        let serialized = serde_json::to_vec(&bundle)
-            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let serialized =
+            serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage.store(key_type, package_id, &serialized)?;
 
         Ok(Some(bundle))
@@ -687,8 +737,8 @@ impl MlsManager {
     /// Saves group metadata to storage.
     fn save_group_metadata(&self, group_id: &GroupId, metadata: &GroupMetadata) -> Result<()> {
         let key_type = StorageKeyType::GroupMetadata.as_str();
-        let data = serde_json::to_vec(metadata)
-            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_vec(metadata).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage.store(key_type, group_id.as_str(), &data)?;
         Ok(())
     }
@@ -718,7 +768,11 @@ impl MlsManager {
         let signature_keys = self.get_signer()?;
 
         let bundle = group
-            .self_update(&self.provider, &signature_keys, LeafNodeParameters::default())
+            .self_update(
+                &self.provider,
+                &signature_keys,
+                LeafNodeParameters::default(),
+            )
             .map_err(|e| MlsError::OpenMls(format!("Self-update failed: {}", e)))?;
 
         let (commit, _welcome, _group_info) = bundle.into_contents();
@@ -839,7 +893,7 @@ mod tests {
         let manager = create_test_manager("alice");
         let pkg1 = manager.get_or_create_key_package().unwrap();
         let pkg2 = manager.get_or_create_key_package().unwrap();
-        // Since we are now properly persisting keys, pkg2 should be the same as pkg1 
+        // Since we are now properly persisting keys, pkg2 should be the same as pkg1
         // IF the logic reuses existing key packages.
         // get_or_create_key_package logic iterates list_keys.
         assert_eq!(pkg1.package_id, pkg2.package_id);

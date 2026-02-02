@@ -9,8 +9,8 @@ use crate::provider::MlsProvider;
 use crate::storage::MlsStorage;
 use crate::types::{EncryptedMessage, GroupId, GroupInfo, MlsMessageType, WelcomeMessage};
 
-use openmls::prelude::*;
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
+use openmls::prelude::*;
 use openmls_traits::signatures::Signer;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -73,17 +73,13 @@ impl SessionManager {
             )));
         }
 
-        let mut group = self.group_manager.create_group(
-            &session_id,
-            credential_with_key,
-            signer,
-        )?;
+        let mut group =
+            self.group_manager
+                .create_group(&session_id, credential_with_key, signer)?;
 
-        let (_commit, welcome) = self.group_manager.add_member(
-            &mut group,
-            their_key_package,
-            signer,
-        )?;
+        let (_commit, welcome) =
+            self.group_manager
+                .add_member(&mut group, their_key_package, signer)?;
 
         self.group_manager.save_group(&session_id, &group)?;
 
@@ -107,13 +103,13 @@ impl SessionManager {
     }
 
     /// Joins a session using a Welcome message.
-    /// 
+    ///
     /// Implements "welcome-wins" strategy: if we already created a session for this peer
     /// (race condition), we delete our session and adopt the incoming Welcome instead.
     /// This ensures both peers end up with the same cryptographic state.
     pub fn join_session(&self, welcome_msg: &WelcomeMessage) -> Result<GroupInfo> {
         let session_id = GroupId::from(welcome_msg.group_id.as_str());
-        
+
         // Welcome-wins: If we already created a session for this peer,
         // delete it and use the incoming Welcome instead
         if self.group_manager.load_group(&session_id)?.is_some() {
@@ -124,7 +120,7 @@ impl SessionManager {
             );
             self.group_manager.delete_group(&session_id)?;
         }
-        
+
         // Deserialize the Welcome from the MlsMessageOut bytes
         let mls_msg = MlsMessageIn::tls_deserialize_exact(&welcome_msg.welcome_data)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
@@ -132,11 +128,19 @@ impl SessionManager {
         // Extract the Welcome from the message
         let welcome = match mls_msg.extract() {
             MlsMessageBodyIn::Welcome(w) => w,
-            _ => return Err(MlsError::WelcomeProcessing("Not a Welcome message".to_string())),
+            _ => {
+                return Err(MlsError::WelcomeProcessing(
+                    "Not a Welcome message".to_string(),
+                ))
+            }
         };
 
-        let group = self.group_manager.join_group(welcome, &welcome_msg.group_id)?;
-        let info = self.group_manager.get_group_info(&group, &welcome_msg.group_id);
+        let group = self
+            .group_manager
+            .join_group(welcome, &welcome_msg.group_id)?;
+        let info = self
+            .group_manager
+            .get_group_info(&group, &welcome_msg.group_id);
 
         info!(
             session_id = %welcome_msg.group_id,
@@ -161,7 +165,9 @@ impl SessionManager {
             .load_group(&session_id)?
             .ok_or_else(|| MlsError::SessionNotFound(other_user_id.to_string()))?;
 
-        let mls_message = self.group_manager.encrypt_message(&mut group, plaintext, signer)?;
+        let mls_message = self
+            .group_manager
+            .encrypt_message(&mut group, plaintext, signer)?;
 
         self.group_manager.save_group(&session_id, &group)?;
 
@@ -189,7 +195,9 @@ impl SessionManager {
         let mls_message = MlsMessageIn::tls_deserialize_exact(&encrypted.ciphertext)
             .map_err(|e| MlsError::Deserialization(e.to_string()))?;
 
-        let result = self.group_manager.decrypt_message(&mut group, mls_message)?;
+        let result = self
+            .group_manager
+            .decrypt_message(&mut group, mls_message)?;
 
         self.group_manager.save_group(&encrypted.group_id, &group)?;
 
@@ -270,13 +278,13 @@ mod tests {
         // Session IDs should be the same regardless of which user creates them
         let alice_manager = create_test_session_manager("alice");
         let bob_manager = create_test_session_manager("bob");
-        
+
         let alice_to_bob = alice_manager.get_session_id("bob");
         let bob_to_alice = bob_manager.get_session_id("alice");
-        
+
         // Both should produce the same session ID
         assert_eq!(alice_to_bob, bob_to_alice);
-        
+
         // The session ID should have a consistent format with sorted user IDs
         assert_eq!(alice_to_bob.as_str(), "session:alice:bob");
     }
@@ -284,10 +292,10 @@ mod tests {
     #[test]
     fn test_delete_session() {
         let manager = create_test_session_manager("alice");
-        
+
         // Initially no session
         assert!(!manager.has_session("bob").unwrap());
-        
+
         // Delete non-existent session should not panic (delete_group handles this)
         // This is important for welcome-wins where we delete before knowing if exists
         let result = manager.delete_session("bob");
