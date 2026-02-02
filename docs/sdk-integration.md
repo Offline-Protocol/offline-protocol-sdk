@@ -1,6 +1,6 @@
-# Offline Protocol SDK Integration Guide
+# Offline Protocol SDK Integration Guide (React Native)
 
-This guide walks you through integrating the Offline Protocol SDK into your native or React Native applications. It covers installation, transport enablement (BLE, Wi‑Fi Direct, and Internet), Dynamic Offline Relay Switch (DORS) tuning, and practical advice for building offline-first or hybrid (offline + online) experiences.
+This guide covers integrating the Offline Protocol SDK into React Native applications: installation, configuration, transports (BLE, Wi‑Fi Direct, Internet), Dynamic Offline Relay Switch (DORS), **group management via WebSocket relay**, and a **complete API reference** for every function.
 
 ---
 
@@ -12,9 +12,9 @@ This guide walks you through integrating the Offline Protocol SDK into your nati
 - Xcode 15+ (iOS) / Android Studio Giraffe+ (Android).
 - Rust toolchain (nightly not required), Node.js 18+, Yarn or npm.
 - BLE support enabled in project entitlements and manifest.
-- Optional: Wi‑Fi Direct requires Android 10+ with the `android.permission.NEARBY_WIFI_DEVICES` permission.
+- Optional: Wi‑Fi Direct requires Android 10+ with `android.permission.NEARBY_WIFI_DEVICES`.
 
-### 1.2 Installation (React Native)
+### 1.2 Installation
 
 ```bash
 yarn add @offline-protocol/mesh-sdk
@@ -22,18 +22,16 @@ yarn add @offline-protocol/mesh-sdk
 npm install @offline-protocol/mesh-sdk
 ```
 
-Run the platform-specific setup:
-
 - **iOS**: `cd ios && pod install`
-- **Android**: Ensure `minSdkVersion ≥ 24` and Jetpack Compose / enable Kotlin 1.8+.
+- **Android**: Ensure `minSdkVersion ≥ 24` and Kotlin 1.8+.
 
-The native bindings auto-link on both platforms. If you integrate into an existing native project, follow the instructions in `bindings/react-native/README.md`.
+See `bindings/react-native/README.md` for existing native projects.
 
 ---
 
 ## 2. Initialising the SDK
 
-Create a single `OfflineProtocol` instance at app start-up, configure transports, and register event listeners.
+Create one `OfflineProtocol` instance at app start, configure transports, and register event listeners.
 
 ```ts
 import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
@@ -61,9 +59,6 @@ const protocol = new OfflineProtocol({
     ttlEscalationHoldSecs: 25,
     historyWindowSize: 12,
     queueRecoveryRatio: 0.4,
-    lowBatteryThreshold: 20,
-    relayMinBatteryLevel: 30,
-    relayOptimalConnectionCount: 4,
   },
   relay: {
     allowRelay: true,
@@ -80,21 +75,21 @@ protocol.on('message_received', evt => {
 await protocol.start();
 ```
 
-Call `await protocol.stop()` during teardown (logout/app exit) to release BLE/Wi‑Fi resources.
+Call `await protocol.stop()` (and optionally `await protocol.destroy()`) on teardown.
 
 ---
 
-## 3. Choosing Offline vs Hybrid Modes
+## 3. Offline vs Hybrid Modes
 
-| Scenario                 | Recommended `dors.preferOnline` | Enabled Transports                      |
-|-------------------------|-----------------------------------|-----------------------------------------|
-| Fully offline mesh      | `false`                           | BLE + Wi‑Fi Direct                      |
-| Hybrid (Fernweh model)  | `true`                            | Internet (primary), BLE, Wi‑Fi Direct   |
-| Emergency response mesh | `false` + aggressive hysteresis   | BLE + Wi‑Fi Direct (lower TTL, retries) |
+| Scenario                 | Recommended `dors.preferOnline` | Enabled Transports                    |
+|-------------------------|----------------------------------|---------------------------------------|
+| Fully offline mesh      | `false`                          | BLE + Wi‑Fi Direct                     |
+| Hybrid (Fernweh model)  | `true`                           | Internet (primary), BLE, Wi‑Fi Direct |
+| Emergency response mesh | `false` + aggressive hysteresis | BLE + Wi‑Fi Direct                     |
 
-**Offline apps**: set `internet: { enabled: false }`, bump `initialTtl` to 10 for sparse networks, and reduce `relayMinBatteryLevel` so more relays remain active.
+**Offline**: set `internet: { enabled: false }`, bump `initialTtl` for sparse networks.
 
-**Hybrid apps**: keep Internet enabled, but specify policies:
+**Hybrid**: keep Internet enabled; DORS uses it first and falls back to BLE/Wi‑Fi Direct.
 
 ```ts
 transports: {
@@ -104,8 +99,6 @@ transports: {
 }
 ```
 
-DORS will attempt Internet first, fall back to BLE, and escalate to Wi‑Fi Direct when BLE congestion/TTL exhaustion triggers.
-
 ---
 
 ## 4. Enabling Transports
@@ -113,224 +106,372 @@ DORS will attempt Internet first, fall back to BLE, and escalate to Wi‑Fi Dire
 ### 4.1 BLE
 
 - **Permissions**: Bluetooth, Bluetooth Advertise/Connect/Scan (Android 12+), Location (Android), `NSBluetoothAlwaysUsageDescription` (iOS).
-- BLE automatically negotiates MTU and handles fragmentation under the hood. The SDK enforces a 512-fragment cap per message and evicts stale reassembly buffers to prevent leaks.
+- BLE scanning/advertising and fragmentation are handled automatically; 512-fragment cap per message.
 
 ### 4.2 Wi‑Fi Direct (Android)
 
-- Require `android.permission.NEARBY_WIFI_DEVICES` (Android 13+), `ACCESS_FINE_LOCATION`, and `CHANGE_WIFI_STATE`.
-- Set `wifiDirect: { enabled: true, autoAccept: true, groupOwnerIntent: 10 }`.
-- For offline-only experiences, enable Wi‑Fi Direct to create a high-throughput backbone while BLE handles discovery.
+- Permissions: `NEARBY_WIFI_DEVICES` (Android 13+), `ACCESS_FINE_LOCATION`, `CHANGE_WIFI_STATE`.
+- Config: `wifiDirect: { enabled: true, autoAccept: true, groupOwnerIntent: 10 }`.
 
 ### 4.3 Internet
 
-- Provide `serverAddress` (WebSocket URL). The SDK keeps an auto reconnect loop if `autoReconnect` is `true`.
-- Use `preferOnline` to prioritise the Internet; DORS will fall back gracefully when the socket is unavailable.
+- Set `serverAddress` (WebSocket URL). With `autoReconnect: true`, the SDK reconnects automatically.
+- Use `preferOnline` to prefer Internet; DORS falls back when the socket is unavailable.
 
 ---
 
-## 5. DORS Tuning Cheatsheet
+## 5. DORS Tuning
 
-| Parameter                    | Purpose                                             | Default |
-|-----------------------------|------------------------------------------------------|---------|
-| `switchHysteresis`          | Minimum score delta required to switch transports   | 15      |
-| `switchCooldownSecs`        | Minimum time between switches                        | 20s     |
-| `bleToWifiRetryThreshold`   | Failed retries before escalating to Wi‑Fi Direct    | 2       |
-| `rssiSwitchThreshold`       | Trigger RSSI (dBm) for escalation                    | -85     |
-| `lowBatteryThreshold`       | Battery % below which high-power transports are penalised | 20 |
-| `relayMinBatteryLevel`      | Battery % required before becoming a heavy relay     | 30      |
-| `relayOptimalConnectionCount` | Preferred connection count before relays considered saturated | 4 |
+| Parameter                    | Purpose                                           | Default |
+|-----------------------------|---------------------------------------------------|---------|
+| `switchHysteresis`          | Min score delta to switch transports             | 15      |
+| `switchCooldownSecs`        | Min time between switches                         | 20s     |
+| `bleToWifiRetryThreshold`   | Retries before escalating to Wi‑Fi Direct        | 2       |
+| `rssiSwitchThreshold`        | RSSI (dBm) for escalation                         | -85     |
+| `congestionQueueThreshold`  | Queue depth for congestion                        | 50      |
+| `historyWindowSize`         | Samples for smoothing (1–100)                     | 10      |
+| `queueRecoveryRatio`        | Queue ratio indicating recovery (0–1)             | 0.5     |
 
-Hints:
-
-- Drop `switchHysteresis` to 8–10 for emergency networks where latency matters more than stability.
-- Increase `queueRecoveryRatio` to 0.7 if you want congestion signals to clear quickly after recovery.
-- Decrease `bleToWifiRetryThreshold` to `1` when pushing voice/video fragments.
+See `docs/dors-configuration.md` and `docs/configuration.md` for full parameters.
 
 ---
 
-## 6. Handling Lifecycle & Store-and-Forward
+## 6. Lifecycle & Store-and-Forward
 
-The SDK manages a persistent outbox, retry queue, and ACK tracking with exponential backoff. Key methods:
-
-- `protocol.pause()` / `protocol.resume()` for background transitions (Android foreground services recommended).
-- `protocol.process()` is called automatically by the native bindings every 100ms; if you embed into a pure native project, schedule it yourself (e.g., `Handler` or `DispatchQueue`).
-- The retry queue escalates to Wi‑Fi Direct when TTL is nearing exhaustion or BLE congestion persists, and it prunes expired messages gracefully to avoid disk bloat.
+- `protocol.pause()` / `protocol.resume()` for background transitions.
+- Outbox, retry queue, and ACK tracking use exponential backoff; the native layer calls `process()` periodically.
+- Use `getTransportMetrics('ble')`, `getRetryQueueSize()`, `getPendingAckCount()` to monitor health.
 
 ---
 
-## 7. Surfacing Metrics
+## 7. Group SDK (WebSocket Relay)
 
-Use `protocol.getTransportMetrics('ble')` (React Native method) to read runtime health:
+Group features (create groups, send messages, manage members) use a **WebSocket relay server**. The SDK **returns JSON strings** that your app **sends over the WebSocket**; the SDK does not open or manage the socket.
+
+### 7.1 Prerequisites
+
+- Relay server implementing the group WebSocket API.
+- User identity (e.g. JWT) for `Authenticate`.
+
+### 7.2 Connection and Authentication
+
+```ts
+const ws = new WebSocket('wss://your-relay.example.com/ws');
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: 'Authenticate', token: AUTH_TOKEN }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  switch (msg.type) {
+    case 'Authenticated':
+      setCurrentUser({ userId: msg.user_id, username: msg.username });
+      break;
+    case 'UserGroups':
+      setGroups(msg.groups ?? []);
+      break;
+    case 'GroupCreated':
+    case 'GroupMessage':
+    case 'GroupInfo':
+    case 'Error':
+      // Handle per your relay contract
+      break;
+  }
+};
+```
+
+Only after `Authenticated` should you call group methods and send their return values over the WebSocket.
+
+### 7.3 Using Group Methods
+
+Each group method returns a **JSON string**. Send it with `ws.send(payload)`.
+
+```ts
+function sendToRelay(jsonString: string) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(jsonString);
+}
+
+const createPayload = await protocol.groupCreate('My Group');
+sendToRelay(createPayload);
+
+const listPayload = await protocol.groupGetUserGroups();
+sendToRelay(listPayload);
+
+const msgPayload = await protocol.groupSendMessage(groupId, content, replyToMsgId ?? null);
+sendToRelay(msgPayload);
+```
+
+### 7.4 Group Methods Summary
+
+| Method | Description |
+|--------|-------------|
+| `groupCreate(name)` | Create group; creator is admin. |
+| `groupSendMessage(groupId, content, replyToMsg?)` | Send message; optional reply-to message ID. |
+| `groupAddMember(groupId, username)` | Add member (admin). |
+| `groupRemoveMember(groupId, username)` | Remove member (admin or self). |
+| `groupSetAdmin(groupId, username)` | Grant admin (admin). |
+| `groupRemoveAdmin(groupId, username)` | Revoke admin (admin). |
+| `groupLeave(groupId)` | Current user leaves. |
+| `groupDelete(groupId)` | Delete group (admin). |
+| `groupGetInfo(groupId)` | Get group metadata. |
+| `groupGetUserGroups()` | Get all groups for current user. |
+
+Relay responses (e.g. `UserGroups`, `GroupCreated`, `GroupMessage`, `GroupInfo`, `Error`) are received asynchronously in `ws.onmessage`; see your relay API docs for exact shapes.
+
+### 7.5 Reply-to (Threaded Messages)
+
+Store the message ID when the user taps “reply”, then pass it as the third argument:
+
+```ts
+const payload = await protocol.groupSendMessage(groupId, content, replyToMessageId);
+sendToRelay(payload);
+```
+
+Render replies in the UI by resolving `reply_to` / `replyToMsg` to the original message.
+
+---
+
+## 8. Surfacing Metrics
 
 ```ts
 const metrics = await protocol.getTransportMetrics('ble');
 // { packetsSent, packetsReceived, bytesSent, bytesReceived, errorRate, avgLatencyMs }
 ```
 
-In the Rust core, additional telemetry (delivery ratios, hop averages, battery-aware scoring) feeds DORS automatically. Expose them in your UI with badges such as “Relay active”, “Transport switched to Wi‑Fi Direct”, etc., by listening to the `transport_switched`, `relay_promoted`, and `network_metrics` events.
+Subscribe to `transport_switched`, `relay_promoted`, `network_metrics` for DORS and relay status in the UI.
 
 ---
 
-## 8. Testing Checklist
+## 9. Testing Checklist
 
-1. **Permissions**: Ensure all BLE/Wi‑Fi Direct permissions are granted before starting.
-2. **Unit Tests**: Run `cargo test -p offline-protocol-router` to validate DORS logic and `cargo test -p offline-protocol` for reliability flows.
-3. **Benchmarks**: Execute `cargo bench dors_selection` to confirm scoring performance after tuning.
-4. **Device Scenarios**: Simulate low battery, high congestion, and poor RSSI by manipulating the debug menu in the sample React Native app (`examples/react-native-app`).
-5. **Network Split-Brain**: Power off the primary relay and ensure relay promotion events fire and messages recover via alternate paths.
+1. BLE/Wi‑Fi Direct permissions granted before start.
+2. `cargo test -p offline-protocol-router` and `cargo test -p offline-protocol` for core logic.
+3. Example app (`examples/react-native-app`) for device scenarios and Control Center.
+4. For groups: WebSocket connects, `Authenticated` received, `groupGetUserGroups` / create / send / reply-to work; add/remove member, leave, delete (admin).
 
 ---
 
-## 9. Production Tips
+## 10. Production Tips
 
-- Run `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, and the Detox/Jest suites before releasing.
-- Use the provided `docs/dors-configuration.md` for deeper algorithm explanations and tune according to venue size.
-- For privacy: encrypt payloads at the application layer—the SDK propagates encrypted bytes without inspecting them.
-- Monitor battery drain on Wi‑Fi Direct devices; DORS deprioritises high-power transports automatically when the local battery dips below `lowBatteryThreshold`.
+- Run `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` and test suites before release.
+- Use `docs/dors-configuration.md` and `docs/configuration.md` for tuning.
+- Encrypt sensitive payloads at the application layer; the SDK carries bytes without inspecting them.
+- Monitor battery when using Wi‑Fi Direct; DORS deprioritises high-power transports when battery is low.
+
+---
+
+## 11. Complete API Reference
+
+All methods are on the `OfflineProtocol` class. Types and events are exported from `@offline-protocol/mesh-sdk`.
+
+### 11.1 Constructor & Events
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **constructor** | `new OfflineProtocol(config: ProtocolConfig)` | Creates an instance. Does not start the protocol. |
+| **on** | `on(eventType: EventType \| 'all', listener: EventListener): this` | Registers an event listener. |
+| **off** | `off(eventType, listener): this` | Removes an event listener. |
+| **once** | `once(eventType, listener): this` | Registers a one-time listener. |
+| **removeAllListeners** | `removeAllListeners(eventType?: EventType \| 'all'): this` | Removes listeners for a type or all. |
+
+**Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`.
+
+---
+
+### 11.2 Lifecycle
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **start** | `start(): Promise<void>` | Creates native instance if needed, starts protocol, auto-initialises MLS if encryption enabled, auto-enables Internet if configured. |
+| **stop** | `stop(): Promise<void>` | Stops the protocol and BLE operations. |
+| **emitTestEvent** | `emitTestEvent(): Promise<void>` | Emits a test `network_metrics` event (debug). |
+| **destroy** | `destroy(): Promise<void>` | Removes listeners, unsubscribes from native events, destroys native instance. |
+
+---
+
+### 11.3 Messaging
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **sendMessage** | `sendMessage(params: SendMessageParams): Promise<string>` | Sends a message; returns message ID. `params`: `recipient`, `content`, `priority?`, `replyToMsg?`. |
+| **receiveMessage** | `receiveMessage(): Promise<MessageReceivedEvent \| null>` | Polls for the next received message. |
+
+---
+
+### 11.4 Transports & BLE
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **getActiveTransports** | `getActiveTransports(): Promise<TransportType[]>` | Returns active transport types. |
+| **enableTransport** | `enableTransport(type, config?): Promise<void>` | Enables a transport; optional config for Internet/Wi‑Fi Direct. |
+| **disableTransport** | `disableTransport(type: TransportType): Promise<void>` | Disables a transport. |
+| **isBluetoothEnabled** | `isBluetoothEnabled(): Promise<boolean>` | Whether Bluetooth is on. |
+| **requestEnableBluetooth** | `requestEnableBluetooth(): Promise<boolean>` | Requests user to enable Bluetooth (Android shows dialog; iOS returns false). |
+| **getBLePeerCount** | `getBLePeerCount(): Promise<number>` | Number of discovered BLE peers. |
+| **getTransportMetrics** | `getTransportMetrics(transportType): Promise<{...} \| null>` | Metrics: packetsSent/Received, bytesSent/Received, errorRate, avgLatencyMs. |
+| **forceTransport** | `forceTransport(transportType): Promise<void>` | Forces use of a transport (overrides DORS). |
+| **releaseTransportLock** | `releaseTransportLock(): Promise<void>` | Releases transport lock so DORS decides again. |
+
+---
+
+### 11.5 State, Battery & Relay
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **getState** | `getState(): Promise<ProtocolState>` | Current state: Stopped, Running, Paused. |
+| **pause** | `pause(): Promise<void>` | Pauses the protocol. |
+| **resume** | `resume(): Promise<void>` | Resumes from pause. |
+| **setBatteryLevel** | `setBatteryLevel(level: number): Promise<void>` | Sets battery level (0–100) for relay decisions. |
+| **getBatteryLevel** | `getBatteryLevel(): Promise<number \| null>` | Current battery level. |
+| **setRelayPriority** | `setRelayPriority(priority: 'low' \| 'medium' \| 'high'): Promise<void>` | Sets relay priority. |
+| **getRelayPriority** | `getRelayPriority(): Promise<'low' \| 'medium' \| 'high'>` | Current relay priority. |
+| **isRelay** | `isRelay(): Promise<boolean>` | Whether this device is acting as a relay. |
+
+---
+
+### 11.6 Topology & Message Stats
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **getTopology** | `getTopology(): Promise<NetworkTopology>` | Current network topology snapshot. |
+| **getMessageStats** | `getMessageStats(): Promise<MessageDeliveryStats[]>` | Message delivery statistics. |
+| **getDeliverySuccessRate** | `getDeliverySuccessRate(): Promise<number>` | Success rate (0–1). |
+| **getMedianLatency** | `getMedianLatency(): Promise<number \| null>` | Median delivery latency (ms). |
+| **getMedianHops** | `getMedianHops(): Promise<number \| null>` | Median hop count. |
+
+---
+
+### 11.7 DORS & Reliability
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **updateDorsConfig** | `updateDorsConfig(config): Promise<void>` | Updates DORS parameters at runtime (values clamped). |
+| **getDorsConfig** | `getDorsConfig(): Promise<{...}>` | Current DORS configuration. |
+| **updateAckConfig** | `updateAckConfig(config: AckConfig): Promise<void>` | Updates ACK config. |
+| **updateRetryConfig** | `updateRetryConfig(config: RetryConfig): Promise<void>` | Updates retry config. |
+| **updateDedupConfig** | `updateDedupConfig(config: DedupConfig): Promise<void>` | Updates dedup config. |
+| **getDedupStats** | `getDedupStats(): Promise<DedupStats>` | Deduplicator statistics. |
+| **getPendingAckCount** | `getPendingAckCount(): Promise<number>` | Number of pending ACKs. |
+| **getRetryQueueSize** | `getRetryQueueSize(): Promise<number>` | Retry queue size. |
+| **shouldEscalateToWifi** | `shouldEscalateToWifi(): Promise<boolean>` | Whether DORS recommends escalating to Wi‑Fi Direct. |
+
+---
+
+### 11.8 Gradient Routing
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **learnRoute** | `learnRoute(destination, nextHop, hopCount, quality): Promise<void>` | Records a route from an incoming message. |
+| **getBestRoute** | `getBestRoute(destination): Promise<{nextHop, hopCount, quality, lastSeenMs} \| null>` | Best route to destination. |
+| **getAllRoutes** | `getAllRoutes(destination): Promise<Array<{...}>>` | All valid routes to destination. |
+| **hasRoute** | `hasRoute(destination): Promise<boolean>` | Whether any route exists. |
+| **removeNeighborRoutes** | `removeNeighborRoutes(neighborId): Promise<void>` | Removes routes through a neighbor. |
+| **cleanupExpiredRoutes** | `cleanupExpiredRoutes(): Promise<void>` | Removes expired routes. |
+| **getRoutingStats** | `getRoutingStats(): Promise<{destinationCount, routeCount}>` | Routing table stats. |
+| **updateRoutingConfig** | `updateRoutingConfig(config): Promise<void>` | Updates routing config (maxRoutesPerDestination, routeTtlSecs, maxRoutingTableSize). |
+
+---
+
+### 11.9 File Transfer
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **sendFile** | `sendFile(params: SendFileParams): Promise<string>` | Sends a file; returns file ID. `params`: filePath, recipient, fileName?. |
+| **getFileProgress** | `getFileProgress(fileId): Promise<FileProgress \| null>` | Progress for a file transfer. |
+| **cancelFileTransfer** | `cancelFileTransfer(fileId): Promise<boolean>` | Cancels a transfer. |
+| **processFileChunk** | `processFileChunk(fileId, chunkIndex, data: number[]): Promise<void>` | Processes a file chunk (custom handling). |
+| **finalizeFile** | `finalizeFile(fileId): Promise<void>` | Finalises file after all chunks processed. |
+
+---
+
+### 11.10 Wi‑Fi Direct (Low-Level)
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **wifiDirectStatusChanged** | `wifiDirectStatusChanged(isConnected: boolean): Promise<void>` | Notifies protocol of Wi‑Fi Direct connection state. |
+| **wifiDirectMessageReceived** | `wifiDirectMessageReceived(senderId, data: number[]): Promise<void>` | Incoming Wi‑Fi Direct message. |
+| **wifiDirectGetNextMessage** | `wifiDirectGetNextMessage(): Promise<{recipientId, data} \| null>` | Next outgoing Wi‑Fi Direct message. |
+| **wifiDirectPeerConnected** | `wifiDirectPeerConnected(peerId): Promise<void>` | Peer connected. |
+| **wifiDirectPeerDisconnected** | `wifiDirectPeerDisconnected(peerId): Promise<void>` | Peer disconnected. |
+
+---
+
+### 11.11 Internet Transport (Low-Level)
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **internetStatusChanged** | `internetStatusChanged(isConnected: boolean): Promise<void>` | Notifies protocol of internet connection state. |
+| **internetMessageReceived** | `internetMessageReceived(senderId, data: number[]): Promise<void>` | Incoming internet message. |
+| **internetGetNextMessage** | `internetGetNextMessage(): Promise<{recipientId, data} \| null>` | Next outgoing internet message. |
+| **internetReturnMessage** | `internetReturnMessage(): Promise<void>` | Marks last internet message as sent. |
+
+---
+
+### 11.12 MLS (End-to-End Encryption)
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **initializeMlsWithSecureStorage** | `initializeMlsWithSecureStorage(): Promise<void>` | Initialises MLS with iOS Keychain / Android EncryptedSharedPreferences. Called automatically by `start()` when encryption enabled. |
+| **isMlsInitialized** | `isMlsInitialized(): Promise<boolean>` | Whether MLS is ready. |
+| **mlsGenerateKeyPackage** | `mlsGenerateKeyPackage(): Promise<MlsKeyPackage>` | Generates a new key package. |
+| **mlsGetOrCreateKeyPackage** | `mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage>` | Gets or creates key package. |
+| **mlsGetPendingKeyPackages** | `mlsGetPendingKeyPackages(): Promise<MlsKeyPackage[]>` | Pending key packages not yet synced. |
+| **mlsMarkKeyPackageSynced** | `mlsMarkKeyPackageSynced(packageId): Promise<void>` | Marks key package as synced. |
+| **mlsImportKeyPackage** | `mlsImportKeyPackage(userId, keyPackageData: number[]): Promise<void>` | Imports another user's key package. |
+| **mlsHasSession** | `mlsHasSession(otherUserId): Promise<boolean>` | Whether an MLS session exists with that user. |
+| **hasPendingKeyPackage** | `hasPendingKeyPackage(peerId): Promise<boolean>` | Whether a pending key package is available for the peer. |
+| **establishSecureSession** | `establishSecureSession(peerId): Promise<MlsWelcome \| null>` | High-level: establishes session (uses pending key package if available); returns Welcome or null if session exists. |
+| **mlsCreateSession** | `mlsCreateSession(otherUserId): Promise<MlsWelcome>` | Creates session (requires key package already imported). |
+| **mlsJoinSession** | `mlsJoinSession(welcome: MlsWelcome): Promise<MlsSessionInfo>` | Joins session from Welcome message. |
+| **mlsEncryptForUser** | `mlsEncryptForUser(otherUserId, plaintext: number[]): Promise<MlsEncryptedMessage>` | Encrypts for user (creates session if needed). |
+| **mlsDecryptFromUser** | `mlsDecryptFromUser(encrypted): Promise<number[] \| null>` | Decrypts message from user. |
+| **mlsDecrypt** | `mlsDecrypt(encrypted): Promise<number[] \| null>` | Decrypts any MLS message (1:1 or group). |
+| **mlsListSessions** | `mlsListSessions(): Promise<string[]>` | User IDs with active sessions. |
+| **mlsDeleteSession** | `mlsDeleteSession(otherUserId): Promise<void>` | Deletes session with user. |
+| **mlsProcessWelcome** | `mlsProcessWelcome(welcome): Promise<MlsSessionInfo \| MlsGroupInfo>` | Processes Welcome (session or group). |
+
+---
+
+### 11.13 MLS Groups
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **mlsCreateGroup** | `mlsCreateGroup(groupName): Promise<MlsGroupInfo>` | Creates MLS group. |
+| **mlsAddGroupMember** | `mlsAddGroupMember(groupId, memberKeyPackage: number[]): Promise<MlsWelcome>` | Adds member; returns Welcome for new member. |
+| **mlsRemoveGroupMember** | `mlsRemoveGroupMember(groupId, memberId): Promise<void>` | Removes member from MLS group. |
+| **mlsLeaveGroup** | `mlsLeaveGroup(groupId): Promise<void>` | Leaves MLS group. |
+| **mlsEncryptForGroup** | `mlsEncryptForGroup(groupId, plaintext: number[]): Promise<MlsEncryptedMessage>` | Encrypts for group. |
+| **mlsDecryptFromGroup** | `mlsDecryptFromGroup(encrypted): Promise<number[] \| null>` | Decrypts message from group. |
+| **mlsJoinGroup** | `mlsJoinGroup(welcome: MlsWelcome): Promise<MlsGroupInfo>` | Joins group from Welcome. |
+| **mlsListGroups** | `mlsListGroups(): Promise<string[]>` | All MLS group IDs. |
+| **mlsGetGroupInfo** | `mlsGetGroupInfo(groupId): Promise<MlsGroupInfo \| null>` | MLS group info. |
+
+---
+
+### 11.14 Group Management (Relay Server API)
+
+Each method returns a **JSON string** to send over your WebSocket to the relay.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **groupCreate** | `groupCreate(name: string): Promise<string>` | Create group; creator is admin. |
+| **groupSendMessage** | `groupSendMessage(groupId, content, replyToMsg?: string \| null): Promise<string>` | Send message to group; optional reply-to message ID. |
+| **groupAddMember** | `groupAddMember(groupId, username): Promise<string>` | Add member (admin). |
+| **groupRemoveMember** | `groupRemoveMember(groupId, username): Promise<string>` | Remove member (admin or self). |
+| **groupSetAdmin** | `groupSetAdmin(groupId, username): Promise<string>` | Set member as admin (admin). |
+| **groupRemoveAdmin** | `groupRemoveAdmin(groupId, username): Promise<string>` | Remove admin role (admin). |
+| **groupLeave** | `groupLeave(groupId): Promise<string>` | Leave group. |
+| **groupDelete** | `groupDelete(groupId): Promise<string>` | Delete group (admin). |
+| **groupGetInfo** | `groupGetInfo(groupId): Promise<string>` | Get group info. |
+| **groupGetUserGroups** | `groupGetUserGroups(): Promise<string>` | Get all groups for current user. |
 
 ---
 
 ### Need more?
 
-- Check `docs/configuration.md` for every tunable parameter.
-- Reference `examples/react-native-app/src/providers/ProtocolProvider.tsx` to see a full-blown Fernweh hybrid configuration with UI indicators.
-- File issues or questions in the repository to share field findings—we continuously refine relay heuristics based on community feedback.
-
-# Offline Protocol SDK Integration Guide
-
-This guide outlines the recommended steps for integrating the Offline Protocol SDK into mobile applications. It covers configuration, transport enablement, reliability features, and React Native bindings, with particular focus on the Dynamic Offline Relay Switch (DORS) system.
-
-## 1. Core Configuration
-
-The SDK is configured using `ProtocolConfig`. Below is a representative setup that highlights the most commonly tuned parameters.
-
-```rust
-use offline_protocol::{ProtocolConfig, TransportConfig};
-use offline_protocol_router::DorsConfig;
-
-let mut config = ProtocolConfig::new("my-app-id", "local-user-id");
-
-config.transport = TransportConfig {
-    ble_enabled: true,
-    wifi_direct_enabled: true,
-    internet_enabled: true,
-};
-
-config.dors = DorsConfig {
-    prefer_online: true,
-    switch_hysteresis: 15.0,
-    switch_cooldown_secs: 20,
-    ble_to_wifi_retry_threshold: 2,
-    rssi_switch_threshold: -85,
-    congestion_queue_threshold: 50,
-    stability_window_secs: 8,
-    poor_signal_duration_secs: 10,
-    ttl_escalation_threshold: 2,
-    congestion_duration_secs: 10,
-    ttl_escalation_hold_secs: 20,
-    history_window_size: 10,
-    queue_recovery_ratio: 0.5,
-    ..Default::default()
-};
-```
-
-## 2. Transport Enablement Strategy
-
-- **BLE** is always required for discovery and low-bandwidth messaging.
-- **Wi-Fi Direct** (Android only) is optional but provides high throughput links. Enable when devices can afford higher power usage.
-- **Internet** can be enabled for hybrid deployments (Fernweh-style) where cloud connectivity is available.
-
-Transports can be toggled at runtime through the React Native or UniFFI bindings:
-
-```ts
-await protocol.enableTransport('wifiDirect');
-await protocol.forceTransport('ble');    // temporarily pin messages to BLE
-await protocol.releaseTransportLock();  // return to automatic routing
-```
-
-## 3. Offline-Only vs Hybrid Modes
-
-- **Offline-first** (default): `preferOnline = false` and disable `internetEnabled`. Messages never leave the mesh.
-- **Hybrid**: `preferOnline = true` while keeping BLE/Wi-Fi Direct enabled. DORS will route through the internet when reachable and automatically fall back to local transports.
-- Use the Control Center screen in the example app or `updateDorsConfig({ preferOnline: true })` via bindings to toggle modes dynamically.
-
-## 4. DORS Tuning
-
-Key parameters to adjust for different environments:
-
-| Parameter | When to adjust | Typical range |
-|-----------|----------------|----------------|
-| `switch_hysteresis` | Prevent flapping in noisy RF environments | 10 – 25 |
-| `switch_cooldown_secs` | Lower for fast-moving peers; raise for static deployments | 10 – 45 s |
-| `ble_to_wifi_retry_threshold` | Escalate sooner for time-sensitive traffic | 1 – 3 retries |
-| `congestion_queue_threshold` | Set based on acceptable queue depth (messages) | 30 – 70 |
-| `congestion_duration_secs` | Require sustained congestion before escalating | 5 – 20 s |
-| `queue_recovery_ratio` | Define how much queues must drain before de-escalating | 0.3 – 0.6 |
-| `history_window_size` | Larger window smooths DORS metrics, smaller reacts faster | 6 – 16 samples |
-
-All parameters include guardrails in the bindings (minimum/maximum values and rounding).
-
-## 5. Reliability & Store-and-Forward
-
-Recent updates add a persistent outbox and smarter retry pipeline:
-
-- Messages requiring ACKs are stored in the outbox and retried with exponential backoff.
-- ACK timeouts automatically enqueue retries and raise DORS retry failure signals.
-- Fragment reassembly now tracks latency and drops stale assemblies after `FRAGMENT_TIMEOUT_SECS`.
-- Applications can inspect outbox health via `getTransportMetrics('ble')` (queue depth, failure counts).
-
-Call `protocol.process()` periodically (bindings schedule this automatically) to advance retries and cleanup tasks.
-
-## 6. React Native Integration Highlights
-
-```ts
-const protocol = new OfflineProtocol({
-  appId: 'demo-app',
-  userId: 'alice',
-  preferOnline: false, // offline-only default
-});
-
-await protocol.create();
-await protocol.start();
-
-// Update DORS at runtime (values are clamped on native side)
-await protocol.updateDorsConfig({
-  preferOnline: true,
-  congestionDurationSecs: 8,
-  queueRecoveryRatio: 0.45,
-});
-
-// Read live transport metrics
-const bleMetrics = await protocol.getTransportMetrics('ble');
-console.log('BLE queue depth', bleMetrics.queueDepth);
-```
-
-Bindings ensure all runtime updates are sanitized (for example `historyWindowSize` is limited to 1–100 and ratios are confined to 0–1).
-
-## 7. Native Platform Notes
-
-- **Android**: Wi-Fi Direct setup requires `ACCESS_FINE_LOCATION` and optional `NEARBY_WIFI_DEVICES`. The UniFFI layer exposes `updateDorsConfig` and provides clamping via Kotlin extensions.
-- **iOS**: BLE is the only mesh transport. DORS still functions for automatic tuning (congestion timers, TTL escalation). Config values are clamped in `OfflineProtocolModule.swift`.
-
-## 8. Metrics & Instrumentation
-
-- Use `getTransportMetrics` to retrieve queue depth, latency, success/failure counts per transport.
-- Subscribe to `transport:switched` and `network:metrics` events to visualize DORS decisions.
-- Example app’s analytics screen demonstrates how to surface these metrics within UI.
-
-## 9. Suggested Practices
-
-1. Start with conservative DORS defaults: hysteresis 15, cooldown 20, queue threshold 50.
-2. For emergency response scenarios, lower hysteresis/cooldown and increase retry thresholds.
-3. Persist protocol state (outbox, deduplicator) across app restarts to preserve store-and-forward guarantees.
-4. Schedule a background task (or React Native timer) to call `protocol.refreshMetrics()`/`process()` every few seconds.
-5. When exposing configuration sliders/toggles to end-users, route updates through the sanitised binding helpers (as done in the example Control Center screen).
-
-For further customization, review:
-- `crates/offline-protocol/src/protocol.rs` for reliability hooks.
-- `crates/offline-protocol-router/src/dors.rs` for scoring logic.
-- `examples/react-native-app` Control Center implementation for live tuning patterns.
-
-With these pieces in place, you can deliver applications that operate seamlessly offline, take advantage of dynamic transport switching, and provide clear operational telemetry to end-users.
-
-
+- **Configuration**: `docs/configuration.md` for every tunable parameter.
+- **DORS**: `docs/dors-configuration.md` for algorithm details.
+- **Mesh**: `bindings/react-native/MESH.md` for mesh networking and BLE.
+- **Architecture**: `docs/architecture.md` for high-level design.
+- **Example app**: `examples/react-native-app` and `ProtocolProvider.tsx` for a full setup with UI.
