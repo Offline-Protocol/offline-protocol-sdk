@@ -1296,6 +1296,67 @@ export class OfflineProtocol {
     return await OfflineProtocolNativeModule.isMlsInitialized();
   }
 
+  // ========================================================================
+  // IDENTITY AND SIGNING OPERATIONS
+  // ========================================================================
+
+  /**
+   * Gets the identity public key (Ed25519, 32 bytes).
+   * This is the public key derived from the MLS credential and can be shared
+   * with others for identity verification and secure communication.
+   *
+   * @returns The public key as an array of bytes
+   * @throws Error if MLS is not initialized
+   */
+  async getIdentityPublicKey(): Promise<number[]> {
+    return await OfflineProtocolNativeModule.getIdentityPublicKey();
+  }
+
+  /**
+   * Derives a deterministic user ID from a public key.
+   * Returns a base58-encoded string derived from SHA-256(publicKey)[0:20].
+   * The same public key always produces the same user ID.
+   *
+   * This allows binding a user's identity to their cryptographic keys,
+   * ensuring that user IDs cannot be forged.
+   *
+   * @param publicKey - The public key bytes (32 bytes for Ed25519)
+   * @returns The derived user ID string
+   */
+  async deriveUserIdFromPublicKey(publicKey: number[]): Promise<string> {
+    return await OfflineProtocolNativeModule.deriveUserIdFromPublicKey(publicKey);
+  }
+
+  /**
+   * Signs arbitrary data with the identity private key (Ed25519).
+   * Use this to prove ownership of your identity or to sign messages.
+   *
+   * @param data - The data to sign
+   * @returns The signature as an array of bytes (64 bytes)
+   * @throws Error if MLS is not initialized
+   */
+  async signData(data: number[]): Promise<number[]> {
+    return await OfflineProtocolNativeModule.signData(data);
+  }
+
+  /**
+   * Verifies a signature against a public key.
+   * Use this to verify that data was signed by the owner of a public key.
+   *
+   * @param publicKey - The signer's public key (32 bytes)
+   * @param data - The data that was signed
+   * @param signature - The signature to verify (64 bytes)
+   * @returns True if the signature is valid
+   * @throws Error if verification fails due to invalid input
+   */
+  async verifySignature(
+    publicKey: number[],
+    data: number[],
+    signature: number[]
+  ): Promise<boolean> {
+    return await OfflineProtocolNativeModule.verifySignature(publicKey, data, signature);
+  }
+
   /**
    * Generates a new MLS key package.
    * Key packages are used by others to establish encrypted sessions with you.
