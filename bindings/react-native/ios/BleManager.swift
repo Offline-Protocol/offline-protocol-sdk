@@ -927,6 +927,8 @@ public class BleManager: NSObject, TransportManager {
     private func refreshAdvertising(reason: String) {
         guard peripheralManager?.state == .poweredOn else { return }
         stopAdvertising()
+        // Update the signed identity to match the new advertisement data
+        updateSignedIdentity()
         scheduleAdvertisingRestart(reason: reason)
     }
 

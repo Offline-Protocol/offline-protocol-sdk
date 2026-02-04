@@ -1014,6 +1014,8 @@ class BleManager(
 
     private fun refreshAdvertising(reason: String) {
         stopAdvertising()
+        // Update the signed identity to match the new advertisement data
+        updateSignedIdentity()
         scheduleAdvertisingRestart(reason)
     }
 
