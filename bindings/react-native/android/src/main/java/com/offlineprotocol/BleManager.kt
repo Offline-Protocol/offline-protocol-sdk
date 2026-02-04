@@ -674,20 +674,20 @@ class BleManager(
         }
         
         try {
-            // Get the public key
+            // Get the public key (List<UByte> from UniFFI)
             val publicKey = protocol.getIdentityPublicKey()
             
             // Get current advertisement data
             val meshData = meshController.toAdvertisement()
             val advertisementData = meshData.encode()
             
-            // Sign the advertisement data
-            val signature = protocol.signData(advertisementData.toList())
+            // Sign the advertisement data (convert ByteArray to List<UByte> for UniFFI)
+            val signature = protocol.signData(advertisementData.map { it.toUByte() })
             
-            // Create the signed identity
+            // Create the signed identity (convert List<UByte> to ByteArray)
             cachedSignedIdentity = com.offlineprotocol.mesh.SignedIdentityData(
-                publicKey = publicKey.toByteArray(),
-                signature = signature.toByteArray(),
+                publicKey = publicKey.map { it.toByte() }.toByteArray(),
+                signature = signature.map { it.toByte() }.toByteArray(),
                 advertisementData = advertisementData
             )
             
@@ -2564,10 +2564,11 @@ class BleManager(
             }
             
             try {
+                // Convert ByteArray to List<UByte> for UniFFI bindings
                 val isValid = protocol.verifySignature(
-                    signedIdentity.publicKey.toList(),
-                    signedIdentity.advertisementData.toList(),
-                    signedIdentity.signature.toList()
+                    signedIdentity.publicKey.map { it.toUByte() },
+                    signedIdentity.advertisementData.map { it.toUByte() },
+                    signedIdentity.signature.map { it.toUByte() }
                 )
                 
                 if (isValid) {
