@@ -25,6 +25,13 @@ thiserror = { workspace = true }
 # Encoding
 base64 = { workspace = true }
 hex = "0.4"
+bs58 = "0.5"
+
+# Hashing
+sha2 = "0.10"
+
+# Ed25519 for signature verification
+ed25519-dalek = { version = "2.1", features = ["digest"] }
 
 # UUID for group IDs
 uuid = { workspace = true }
