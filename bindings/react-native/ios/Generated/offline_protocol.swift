@@ -614,6 +614,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func clearTyping(conversationId: String) throws  -> String
     
+    func deriveUserIdFromPublicKey(publicKey: [UInt8])  -> String
+    
     func emitTestEvent() 
     
     func establishSecureSession(peerId: String) throws  -> MlsWelcomeMessage?
@@ -637,6 +639,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func getDorsConfig()  -> DorsConfig
     
     func getFileProgress(fileId: String)  -> FileProgress?
+    
+    func getIdentityPublicKey() throws  -> [UInt8]
     
     func getMedianHops()  -> UInt8
     
@@ -782,6 +786,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func shouldEscalateToWifi()  -> Bool
     
+    func signData(data: [UInt8]) throws  -> [UInt8]
+    
     func start() throws 
     
     func stop() throws 
@@ -799,6 +805,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func updateTransportMetrics(transportType: TransportType, metrics: TransportMetrics) throws 
     
     func uploadKeys(identityKey: String, signedPrekeyJson: String, oneTimePrekeysJson: String) throws  -> String
+    
+    func verifySignature(publicKey: [UInt8], data: [UInt8], signature: [UInt8]) throws  -> Bool
     
     func wifiDirectGetNextMessage()  -> WifiDirectMessage?
     
@@ -973,6 +981,15 @@ open func clearTyping(conversationId: String)throws  -> String  {
 })
 }
     
+open func deriveUserIdFromPublicKey(publicKey: [UInt8]) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceUInt8.lower(publicKey),$0
+    )
+})
+}
+    
 open func emitTestEvent()  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(
             self.uniffiCloneHandle(),$0
@@ -1068,6 +1085,14 @@ open func getFileProgress(fileId: String) -> FileProgress?  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(fileId),$0
+    )
+})
+}
+    
+open func getIdentityPublicKey()throws  -> [UInt8]  {
+    return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -1696,6 +1721,15 @@ open func shouldEscalateToWifi() -> Bool  {
 })
 }
     
+open func signData(data: [UInt8])throws  -> [UInt8]  {
+    return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceUInt8.lower(data),$0
+    )
+})
+}
+    
 open func start()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(
             self.uniffiCloneHandle(),$0
@@ -1766,6 +1800,17 @@ open func uploadKeys(identityKey: String, signedPrekeyJson: String, oneTimePreke
         FfiConverterString.lower(identityKey),
         FfiConverterString.lower(signedPrekeyJson),
         FfiConverterString.lower(oneTimePrekeysJson),$0
+    )
+})
+}
+    
+open func verifySignature(publicKey: [UInt8], data: [UInt8], signature: [UInt8])throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceUInt8.lower(publicKey),
+        FfiConverterSequenceUInt8.lower(data),
+        FfiConverterSequenceUInt8.lower(signature),$0
     )
 })
 }
@@ -5066,6 +5111,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing() != 54663) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5100,6 +5148,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 21794) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 22077) {
@@ -5318,6 +5369,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 3647) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 10699) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5343,6 +5397,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys() != 42899) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 13732) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936) {

@@ -998,12 +998,12 @@ public class BleManager: NSObject, TransportManager {
     /// Updates the signed identity data for GATT serving.
     /// Signs the current advertisement data with the identity private key.
     private func updateSignedIdentity() {
-        guard protocolInstance.isMlsInitialized() else {
-            print("[BleManager] MLS not initialized, cannot create signed identity")
-            return
-        }
-        
         do {
+            guard protocolInstance.isMlsInitialized() else {
+                print("[BleManager] MLS not initialized, cannot create signed identity")
+                return
+            }
+            
             // Get the public key
             let publicKey = try protocolInstance.getIdentityPublicKey()
             

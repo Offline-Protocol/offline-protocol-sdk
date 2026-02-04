@@ -644,6 +644,7 @@ class BleManager(
                 BluetoothGattCharacteristic.PERMISSION_READ
             )
             // Value is set dynamically when advertising starts via updateSignedIdentity()
+            // Note: If this fails, we still continue with service setup - identity is optional for discovery
             updateSignedIdentity()
             
             // Create service
@@ -659,7 +660,14 @@ class BleManager(
             emitDiagnostic("info", "GATT server setup initiated")
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while setting up GATT server", e)
+            emitDiagnostic("error", "Permission denied in GATT server setup", mapOf("exception" to e.javaClass.simpleName))
             throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting up GATT server: ${e.message}", e)
+            emitDiagnostic("error", "Error setting up GATT server", mapOf(
+                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: "unknown")
+            ))
         }
     }
     
@@ -668,12 +676,12 @@ class BleManager(
      * Signs the current advertisement data with the identity private key.
      */
     private fun updateSignedIdentity() {
-        if (!protocol.isMlsInitialized()) {
-            Log.d(TAG, "MLS not initialized, cannot create signed identity")
-            return
-        }
-        
         try {
+            if (!protocol.isMlsInitialized()) {
+                Log.d(TAG, "MLS not initialized, cannot create signed identity")
+                return
+            }
+            
             // Get the public key (List<UByte> from UniFFI)
             val publicKey = protocol.getIdentityPublicKey()
             

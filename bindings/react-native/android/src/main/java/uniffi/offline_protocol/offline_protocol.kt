@@ -722,6 +722,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clea
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session(
@@ -745,6 +747,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops(
 ): Short
@@ -890,6 +894,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop(
@@ -907,6 +913,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upda
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message(
 ): Short
@@ -982,6 +990,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_ex
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(`ptr`: Long,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1005,6 +1015,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_delive
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
@@ -1150,6 +1162,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1168,6 +1182,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_tra
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys(`ptr`: Long,`identityKey`: RustBuffer.ByValue,`signedPrekeyJson`: RustBuffer.ByValue,`oneTimePrekeysJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature(`ptr`: Long,`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1340,6 +1356,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing() != 54663.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1374,6 +1393,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 21794.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 22077.toShort()) {
@@ -1592,6 +1614,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 3647.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 10699.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1617,6 +1642,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_upload_keys() != 42899.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 13732.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936.toShort()) {
@@ -2183,6 +2211,8 @@ public interface OfflineProtocolInterface {
     
     fun `clearTyping`(`conversationId`: kotlin.String): kotlin.String
     
+    fun `deriveUserIdFromPublicKey`(`publicKey`: List<kotlin.UByte>): kotlin.String
+    
     fun `emitTestEvent`()
     
     fun `establishSecureSession`(`peerId`: kotlin.String): MlsWelcomeMessage?
@@ -2206,6 +2236,8 @@ public interface OfflineProtocolInterface {
     fun `getDorsConfig`(): DorsConfig
     
     fun `getFileProgress`(`fileId`: kotlin.String): FileProgress?
+    
+    fun `getIdentityPublicKey`(): List<kotlin.UByte>
     
     fun `getMedianHops`(): kotlin.UByte
     
@@ -2351,6 +2383,8 @@ public interface OfflineProtocolInterface {
     
     fun `shouldEscalateToWifi`(): kotlin.Boolean
     
+    fun `signData`(`data`: List<kotlin.UByte>): List<kotlin.UByte>
+    
     fun `start`()
     
     fun `stop`()
@@ -2368,6 +2402,8 @@ public interface OfflineProtocolInterface {
     fun `updateTransportMetrics`(`transportType`: TransportType, `metrics`: TransportMetrics)
     
     fun `uploadKeys`(`identityKey`: kotlin.String, `signedPrekeyJson`: kotlin.String, `oneTimePrekeysJson`: kotlin.String): kotlin.String
+    
+    fun `verifySignature`(`publicKey`: List<kotlin.UByte>, `data`: List<kotlin.UByte>, `signature`: List<kotlin.UByte>): kotlin.Boolean
     
     fun `wifiDirectGetNextMessage`(): WifiDirectMessage?
     
@@ -2655,6 +2691,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `deriveUserIdFromPublicKey`(`publicKey`: List<kotlin.UByte>): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(
+        it,
+        FfiConverterSequenceUByte.lower(`publicKey`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `emitTestEvent`()
         = 
     callWithHandle {
@@ -2805,6 +2854,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(
         it,
         FfiConverterString.lower(`fileId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `getIdentityPublicKey`(): List<kotlin.UByte> {
+            return FfiConverterSequenceUByte.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(
+        it,
+        _status)
 }
     }
     )
@@ -3771,6 +3834,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `signData`(`data`: List<kotlin.UByte>): List<kotlin.UByte> {
+            return FfiConverterSequenceUByte.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(
+        it,
+        FfiConverterSequenceUByte.lower(`data`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `start`()
         = 
     callWithHandle {
@@ -3878,6 +3955,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_upload_keys(
         it,
         FfiConverterString.lower(`identityKey`),FfiConverterString.lower(`signedPrekeyJson`),FfiConverterString.lower(`oneTimePrekeysJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `verifySignature`(`publicKey`: List<kotlin.UByte>, `data`: List<kotlin.UByte>, `signature`: List<kotlin.UByte>): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature(
+        it,
+        FfiConverterSequenceUByte.lower(`publicKey`),FfiConverterSequenceUByte.lower(`data`),FfiConverterSequenceUByte.lower(`signature`),_status)
 }
     }
     )
