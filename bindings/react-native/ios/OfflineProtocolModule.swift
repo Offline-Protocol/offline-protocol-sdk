@@ -1759,6 +1759,76 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(proto.isMlsInitialized())
     }
     
+    // ========================================================================
+    // IDENTITY AND SIGNING OPERATIONS
+    // ========================================================================
+    
+    /// Get the identity public key (Ed25519, 32 bytes)
+    @objc func getIdentityPublicKey(_ resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let publicKey = try proto.getIdentityPublicKey()
+            resolver(publicKey.map { NSNumber(value: $0) })
+        } catch {
+            rejecter("ERROR_CRYPTO", "Failed to get identity public key: \(error.localizedDescription)", error)
+        }
+    }
+    
+    /// Derive a user ID from a public key
+    @objc func deriveUserIdFromPublicKey(_ publicKey: [NSNumber],
+                                         resolver: @escaping RCTPromiseResolveBlock,
+                                         rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        let publicKeyBytes = publicKey.map { $0.uint8Value }
+        let userId = proto.deriveUserIdFromPublicKey(publicKey: publicKeyBytes)
+        resolver(userId)
+    }
+    
+    /// Sign data with the identity private key
+    @objc func signData(_ data: [NSNumber],
+                        resolver: @escaping RCTPromiseResolveBlock,
+                        rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let dataBytes = data.map { $0.uint8Value }
+            let signature = try proto.signData(data: dataBytes)
+            resolver(signature.map { NSNumber(value: $0) })
+        } catch {
+            rejecter("ERROR_CRYPTO", "Failed to sign data: \(error.localizedDescription)", error)
+        }
+    }
+    
+    /// Verify a signature against a public key
+    @objc func verifySignature(_ publicKey: [NSNumber],
+                               data: [NSNumber],
+                               signature: [NSNumber],
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let publicKeyBytes = publicKey.map { $0.uint8Value }
+            let dataBytes = data.map { $0.uint8Value }
+            let signatureBytes = signature.map { $0.uint8Value }
+            let isValid = try proto.verifySignature(publicKey: publicKeyBytes, data: dataBytes, signature: signatureBytes)
+            resolver(isValid)
+        } catch {
+            rejecter("ERROR_CRYPTO", "Failed to verify signature: \(error.localizedDescription)", error)
+        }
+    }
+    
     /// Generate a new MLS key package
     @objc func mlsGenerateKeyPackage(_ resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {

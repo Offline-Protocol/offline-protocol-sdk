@@ -1620,6 +1620,71 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         promise.resolve(proto.isMlsInitialized())
     }
 
+    // ========================================================================
+    // IDENTITY AND SIGNING OPERATIONS
+    // ========================================================================
+
+    /**
+     * Get the identity public key (Ed25519, 32 bytes)
+     */
+    @ReactMethod
+    fun getIdentityPublicKey(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val publicKey = proto.getIdentityPublicKey()
+            promise.resolve(Arguments.fromList(publicKey.map { it.toInt() }))
+        } catch (e: Exception) {
+            promise.reject("ERROR_CRYPTO", "Failed to get identity public key: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Derive a user ID from a public key
+     */
+    @ReactMethod
+    fun deriveUserIdFromPublicKey(publicKey: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val publicKeyBytes = (0 until publicKey.size()).map { publicKey.getInt(it).toUByte() }
+            val userId = proto.deriveUserIdFromPublicKey(publicKeyBytes)
+            promise.resolve(userId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CRYPTO", "Failed to derive user ID: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Sign data with the identity private key
+     */
+    @ReactMethod
+    fun signData(data: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val dataBytes = (0 until data.size()).map { data.getInt(it).toUByte() }
+            val signature = proto.signData(dataBytes)
+            promise.resolve(Arguments.fromList(signature.map { it.toInt() }))
+        } catch (e: Exception) {
+            promise.reject("ERROR_CRYPTO", "Failed to sign data: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Verify a signature against a public key
+     */
+    @ReactMethod
+    fun verifySignature(publicKey: ReadableArray, data: ReadableArray, signature: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val publicKeyBytes = (0 until publicKey.size()).map { publicKey.getInt(it).toUByte() }
+            val dataBytes = (0 until data.size()).map { data.getInt(it).toUByte() }
+            val signatureBytes = (0 until signature.size()).map { signature.getInt(it).toUByte() }
+            val isValid = proto.verifySignature(publicKeyBytes, dataBytes, signatureBytes)
+            promise.resolve(isValid)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CRYPTO", "Failed to verify signature: ${e.message}", e)
+        }
+    }
+
     /**
      * Generate a new MLS key package
      */
