@@ -46,6 +46,7 @@ public class BleManager: NSObject, TransportManager {
     private let SERVICE_UUID = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
     private let MESSAGE_CHAR_UUID = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
     private let DEVICE_ID_CHAR_UUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+    private let IDENTITY_CHAR_UUID = CBUUID(string: "6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
     
     private let FRAGMENT_POLL_INTERVAL: TimeInterval = 0.1 // 100ms
     private let MAX_FRAGMENT_SIZE = 185
@@ -93,6 +94,13 @@ public class BleManager: NSObject, TransportManager {
     private var peripheralManager: CBPeripheralManager?
     private var messageCharacteristic: CBMutableCharacteristic?
     private var deviceIdCharacteristic: CBMutableCharacteristic?
+    private var identityCharacteristic: CBMutableCharacteristic?
+    
+    /// Cached signed identity data for serving via GATT
+    private var cachedSignedIdentity: SignedIdentityData?
+    
+    /// Verified peer identities (peripheral UUID -> SignedIdentityData)
+    private var verifiedPeerIdentities: [UUID: SignedIdentityData] = [:]
     
     // Fragment polling
     private var fragmentTimer: Timer?
@@ -790,7 +798,7 @@ public class BleManager: NSObject, TransportManager {
             if peripheral.state == .connected {
                 self.connections.registerPeripheral(peripheral)
                 if let service = peripheral.services?.first(where: { $0.uuid == self.SERVICE_UUID }) {
-                    peripheral.discoverCharacteristics([self.MESSAGE_CHAR_UUID, self.DEVICE_ID_CHAR_UUID], for: service)
+                    peripheral.discoverCharacteristics([self.MESSAGE_CHAR_UUID, self.DEVICE_ID_CHAR_UUID, self.IDENTITY_CHAR_UUID], for: service)
                 } else {
                     peripheral.discoverServices([self.SERVICE_UUID])
                 }
@@ -939,7 +947,7 @@ public class BleManager: NSObject, TransportManager {
     
     private func setupGattServer() {
         guard let peripheral = peripheralManager else { return }
-        if messageCharacteristic != nil && deviceIdCharacteristic != nil && isGattServiceReady {
+        if messageCharacteristic != nil && deviceIdCharacteristic != nil && identityCharacteristic != nil && isGattServiceReady {
             return
         }
         
@@ -963,14 +971,63 @@ public class BleManager: NSObject, TransportManager {
             permissions: [.readable]
         )
         
+        // Create identity characteristic (read) - contains public key + signature
+        // Value is set dynamically when advertising starts via updateSignedIdentity()
+        identityCharacteristic = CBMutableCharacteristic(
+            type: IDENTITY_CHAR_UUID,
+            properties: [.read],
+            value: nil,
+            permissions: [.readable]
+        )
+        
+        // Update the signed identity data
+        updateSignedIdentity()
+        
         // Create service
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
-        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!]
+        service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!]
         
         // Add service to peripheral manager (asynchronous - callback in peripheralManager(_:didAdd:error:))
         peripheral.add(service)
         print("[BleManager] GATT server setup initiated, waiting for service registration callback...")
         emitDiagnostic("info", "GATT server setup initiated")
+    }
+    
+    /// Updates the signed identity data for GATT serving.
+    /// Signs the current advertisement data with the identity private key.
+    private func updateSignedIdentity() {
+        guard protocolInstance.isMlsInitialized() else {
+            print("[BleManager] MLS not initialized, cannot create signed identity")
+            return
+        }
+        
+        do {
+            // Get the public key
+            let publicKey = try protocolInstance.getIdentityPublicKey()
+            
+            // Get current advertisement data
+            let meshData = meshController.advertisement()
+            let advertisementData = meshData.encode()
+            
+            // Sign the advertisement data
+            let signature = try protocolInstance.signData(data: [UInt8](advertisementData))
+            
+            // Create the signed identity
+            cachedSignedIdentity = SignedIdentityData(
+                publicKey: Data(publicKey),
+                signature: Data(signature),
+                advertisementData: advertisementData
+            )
+            
+            // Update the GATT characteristic value
+            if let identity = cachedSignedIdentity {
+                identityCharacteristic?.value = identity.encode()
+                print("[BleManager] Updated signed identity for GATT serving")
+            }
+        } catch {
+            print("[BleManager] Failed to create signed identity: \(error)")
+            emitDiagnostic("warning", "Failed to create signed identity", context: ["error": error.localizedDescription])
+        }
     }
     
     private func startFragmentPolling() {
@@ -2240,7 +2297,7 @@ extension BleManager: CBPeripheralDelegate {
         guard let services = peripheral.services else { return }
         
         for service in services where service.uuid == SERVICE_UUID {
-            peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID], for: service)
+            peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
         }
         emitDiagnostic("info", "Discovered BLE services", context: ["peripheral": peripheral.identifier.uuidString])
     }
@@ -2262,6 +2319,9 @@ extension BleManager: CBPeripheralDelegate {
                 emitDiagnostic("info", "Enabled notifications for message characteristic", context: ["peripheral": peripheral.identifier.uuidString])
             } else if characteristic.uuid == DEVICE_ID_CHAR_UUID {
                 // Read device ID
+                peripheral.readValue(for: characteristic)
+            } else if characteristic.uuid == IDENTITY_CHAR_UUID {
+                // Read identity (public key + signature)
                 peripheral.readValue(for: characteristic)
             }
         }
@@ -2322,6 +2382,57 @@ extension BleManager: CBPeripheralDelegate {
         } else if characteristic.uuid == MESSAGE_CHAR_UUID {
             // Handle received message fragment
             handleReceivedData(data, senderId: connections.peripheralDeviceId(for: peripheral.identifier), centralId: peripheral.identifier)
+        } else if characteristic.uuid == IDENTITY_CHAR_UUID {
+            // Handle received identity data
+            handleReceivedIdentity(data, for: peripheral)
+        }
+    }
+    
+    /// Handles received identity data from a peer.
+    /// Verifies the signature and stores the verified identity.
+    private func handleReceivedIdentity(_ data: Data, for peripheral: CBPeripheral) {
+        guard let signedIdentity = SignedIdentityData.decode(data) else {
+            print("[BleManager] Failed to decode identity data from \(peripheral.identifier)")
+            emitDiagnostic("warning", "Failed to decode peer identity", context: ["peripheral": peripheral.identifier.uuidString])
+            return
+        }
+        
+        // Verify the signature
+        do {
+            let isValid = try protocolInstance.verifySignature(
+                publicKey: [UInt8](signedIdentity.publicKey),
+                data: [UInt8](signedIdentity.advertisementData),
+                signature: [UInt8](signedIdentity.signature)
+            )
+            
+            if isValid {
+                // Store the verified identity
+                verifiedPeerIdentities[peripheral.identifier] = signedIdentity
+                
+                // Derive the user ID from the public key
+                let derivedUserId = signedIdentity.deriveUserId()
+                print("[BleManager] ✅ Verified peer identity: \(derivedUserId) for \(peripheral.identifier)")
+                emitDiagnostic("info", "Verified peer identity", context: [
+                    "peripheral": peripheral.identifier.uuidString,
+                    "derivedUserId": derivedUserId
+                ])
+                
+                // Update routing with the cryptographically derived user ID
+                // This ensures routing tables only contain verified peers
+                let rssi = peripheralRSSI[peripheral.identifier] ?? -60
+                protocolInstance.learnRoute(
+                    destination: derivedUserId,
+                    nextHop: derivedUserId,
+                    hopCount: 1,
+                    quality: Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0)))
+                )
+            } else {
+                print("[BleManager] ⚠️ Invalid signature for peer \(peripheral.identifier)")
+                emitDiagnostic("warning", "Invalid peer signature", context: ["peripheral": peripheral.identifier.uuidString])
+            }
+        } catch {
+            print("[BleManager] Failed to verify signature: \(error)")
+            emitDiagnostic("error", "Signature verification failed", context: ["error": error.localizedDescription])
         }
     }
     

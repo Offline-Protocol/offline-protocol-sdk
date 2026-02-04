@@ -67,6 +67,7 @@ class BleManager(
         private val SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
         private val MESSAGE_CHAR_UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
         private val DEVICE_ID_CHAR_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val IDENTITY_CHAR_UUID = UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
         
         private const val FRAGMENT_POLL_INTERVAL_MS = 100L // 100ms
         private const val MAX_FRAGMENT_SIZE = 185
@@ -136,8 +137,15 @@ class BleManager(
     private var gattServer: BluetoothGattServer? = null
     private var messageCharacteristic: BluetoothGattCharacteristic? = null
     private var deviceIdCharacteristic: BluetoothGattCharacteristic? = null
+    private var identityCharacteristic: BluetoothGattCharacteristic? = null
     @Volatile private var isGattServiceReady = false
     @Volatile private var pendingAdvertiseReason: String? = null
+    
+    // Cached signed identity data for serving via GATT
+    private var cachedSignedIdentity: com.offlineprotocol.mesh.SignedIdentityData? = null
+    
+    // Verified peer identities (device address -> SignedIdentityData)
+    private val verifiedPeerIdentities = ConcurrentHashMap<String, com.offlineprotocol.mesh.SignedIdentityData>()
     
     // Connection registry keeps track of client/server links and desired roles.
     private val connections = MeshConnectionRegistry()
@@ -629,10 +637,20 @@ class BleManager(
             )
             deviceIdCharacteristic?.value = deviceId.toByteArray(Charsets.UTF_8)
             
+            // Create identity characteristic (read) - contains public key + signature
+            identityCharacteristic = BluetoothGattCharacteristic(
+                IDENTITY_CHAR_UUID,
+                BluetoothGattCharacteristic.PROPERTY_READ,
+                BluetoothGattCharacteristic.PERMISSION_READ
+            )
+            // Value is set dynamically when advertising starts via updateSignedIdentity()
+            updateSignedIdentity()
+            
             // Create service
             val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
             service.addCharacteristic(messageCharacteristic)
             service.addCharacteristic(deviceIdCharacteristic)
+            service.addCharacteristic(identityCharacteristic)
             
             // Add service to GATT server (asynchronous - callback in onServiceAdded)
             gattServer?.addService(service)
@@ -642,6 +660,45 @@ class BleManager(
         } catch (e: SecurityException) {
             Log.e(TAG, "Permission denied while setting up GATT server", e)
             throw e
+        }
+    }
+    
+    /**
+     * Updates the signed identity data for GATT serving.
+     * Signs the current advertisement data with the identity private key.
+     */
+    private fun updateSignedIdentity() {
+        if (!protocol.isMlsInitialized()) {
+            Log.d(TAG, "MLS not initialized, cannot create signed identity")
+            return
+        }
+        
+        try {
+            // Get the public key
+            val publicKey = protocol.getIdentityPublicKey()
+            
+            // Get current advertisement data
+            val meshData = meshController.toAdvertisement()
+            val advertisementData = meshData.encode()
+            
+            // Sign the advertisement data
+            val signature = protocol.signData(advertisementData.toList())
+            
+            // Create the signed identity
+            cachedSignedIdentity = com.offlineprotocol.mesh.SignedIdentityData(
+                publicKey = publicKey.toByteArray(),
+                signature = signature.toByteArray(),
+                advertisementData = advertisementData
+            )
+            
+            // Update the GATT characteristic value
+            cachedSignedIdentity?.let { identity ->
+                identityCharacteristic?.value = identity.encode()
+                Log.d(TAG, "Updated signed identity for GATT serving")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to create signed identity: ${e.message}", e)
+            emitDiagnostic("warning", "Failed to create signed identity", mapOf("error" to (e.message ?: "unknown")))
         }
     }
     
@@ -2196,11 +2253,22 @@ class BleManager(
             characteristic: BluetoothGattCharacteristic
         ) {
             try {
-                if (characteristic.uuid == DEVICE_ID_CHAR_UUID) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, characteristic.value)
-                    Log.d(TAG, "Sent device ID to ${device.address}")
-                } else {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                when (characteristic.uuid) {
+                    DEVICE_ID_CHAR_UUID -> {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, characteristic.value)
+                        Log.d(TAG, "Sent device ID to ${device.address}")
+                    }
+                    IDENTITY_CHAR_UUID -> {
+                        // Ensure we have fresh signed identity data
+                        if (identityCharacteristic?.value == null) {
+                            updateSignedIdentity()
+                        }
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, identityCharacteristic?.value)
+                        Log.d(TAG, "Sent signed identity to ${device.address}")
+                    }
+                    else -> {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                    }
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "Permission denied in read request", e)
@@ -2386,6 +2454,15 @@ class BleManager(
                         Log.w(TAG, "⚠️ Device ID characteristic NOT FOUND on ${gatt.device.address}")
                     }
                     
+                    // Read identity characteristic (public key + signature)
+                    val identityChar = service.getCharacteristic(IDENTITY_CHAR_UUID)
+                    if (identityChar != null) {
+                        Log.d(TAG, "🔐 Reading identity characteristic from ${gatt.device.address}")
+                        // Note: We read this after device ID is read (queued)
+                    } else {
+                        Log.w(TAG, "⚠️ Identity characteristic NOT FOUND on ${gatt.device.address}")
+                    }
+                    
                     // Enable notifications for message characteristic
                     val messageChar = service.getCharacteristic(MESSAGE_CHAR_UUID)
                     if (messageChar != null) {
@@ -2456,7 +2533,66 @@ class BleManager(
                     
                     // Process any pending fragments for this device
                     processPendingFragments(gatt.device.address, deviceIdValue)
+                    
+                    // Now read the identity characteristic for signature verification
+                    val service = gatt.getService(SERVICE_UUID)
+                    val identityChar = service?.getCharacteristic(IDENTITY_CHAR_UUID)
+                    if (identityChar != null) {
+                        try {
+                            gatt.readCharacteristic(identityChar)
+                            Log.d(TAG, "🔐 Queued identity characteristic read for ${gatt.device.address}")
+                        } catch (e: SecurityException) {
+                            Log.e(TAG, "❌ Permission denied reading identity characteristic", e)
+                        }
+                    }
                 }
+            } else if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == IDENTITY_CHAR_UUID) {
+                handleReceivedIdentity(characteristic.value, gatt.device.address)
+            }
+        }
+        
+        /**
+         * Handles received identity data from a peer.
+         * Verifies the signature and stores the verified identity.
+         */
+        private fun handleReceivedIdentity(data: ByteArray?, address: String) {
+            val signedIdentity = com.offlineprotocol.mesh.SignedIdentityData.decode(data)
+            if (signedIdentity == null) {
+                Log.w(TAG, "Failed to decode identity data from $address")
+                emitDiagnostic("warning", "Failed to decode peer identity", mapOf("address" to address))
+                return
+            }
+            
+            try {
+                val isValid = protocol.verifySignature(
+                    signedIdentity.publicKey.toList(),
+                    signedIdentity.advertisementData.toList(),
+                    signedIdentity.signature.toList()
+                )
+                
+                if (isValid) {
+                    // Store the verified identity
+                    verifiedPeerIdentities[address] = signedIdentity
+                    
+                    // Derive the user ID from the public key
+                    val derivedUserId = signedIdentity.deriveUserId()
+                    Log.i(TAG, "✅ Verified peer identity: $derivedUserId for $address")
+                    emitDiagnostic("info", "Verified peer identity", mapOf(
+                        "address" to address,
+                        "derivedUserId" to derivedUserId
+                    ))
+                    
+                    // Update routing with the cryptographically derived user ID
+                    val rssi = lastSeenRssi[address] ?: (-60).toShort()
+                    val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
+                    protocol.learnRoute(derivedUserId, derivedUserId, 1.toUByte(), quality)
+                } else {
+                    Log.w(TAG, "⚠️ Invalid signature for peer $address")
+                    emitDiagnostic("warning", "Invalid peer signature", mapOf("address" to address))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to verify signature: ${e.message}", e)
+                emitDiagnostic("error", "Signature verification failed", mapOf("error" to (e.message ?: "unknown")))
             }
         }
         
