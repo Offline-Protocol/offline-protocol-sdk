@@ -64,6 +64,7 @@ import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
 import { generateUserId } from '../utils/user';
 import {
   DEFAULT_RELAY_SERVER_URL,
+  HARDCODED_TOKEN,
   PRESENCE_MESSAGE_PREFIX,
   PRESENCE_REBROADCAST_INTERVAL_MS,
   PROCESSED_MESSAGE_RETENTION_MS,
@@ -300,6 +301,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         enabled: true,
         serverAddress: DEFAULT_RELAY_SERVER_URL,
         autoReconnect: true,
+        authToken: HARDCODED_TOKEN || undefined,
       },
       wifiDirect: {
         enabled: true,

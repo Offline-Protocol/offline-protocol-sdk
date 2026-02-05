@@ -46,6 +46,7 @@ class InternetManager(
     private var serverUrl: String? = null
     private var autoReconnect = true
     private var maxReconnectAttempts = 0 // 0 = infinite
+    private var authToken: String? = null
     
     // OkHttp components
     private var okHttpClient: OkHttpClient? = null
@@ -139,6 +140,26 @@ class InternetManager(
             "autoReconnect" to autoReconnect,
             "maxReconnectAttempts" to maxReconnectAttempts
         ))
+    }
+    
+    /**
+     * Set the auth token for authentication.
+     * If the WebSocket is already connected, this will trigger re-authentication.
+     */
+    fun setAuthToken(token: String?) {
+        val wasAuthenticated = isAuthenticated.get()
+        this.authToken = token
+        
+        emitDiagnostic("info", "Auth token updated", mapOf(
+            "hasToken" to (token != null),
+            "wasAuthenticated" to wasAuthenticated
+        ))
+        
+        // If already connected and authenticated, re-authenticate with new token
+        // If connected but not authenticated, try authenticating now
+        if (isConnected.get() && (wasAuthenticated || !isAuthenticated.get())) {
+            sendAuthentication()
+        }
     }
     
     // MARK: - TransportManager Implementation
@@ -298,10 +319,11 @@ class InternetManager(
     private fun sendAuthentication() {
         val ws = webSocket ?: return
         
-        // In test mode, the token becomes the user ID
+        // Use auth token if available, otherwise fall back to deviceId
+        val token = authToken ?: deviceId
         val authMessage = org.json.JSONObject().apply {
             put("type", "Authenticate")
-            put("token", deviceId)
+            put("token", token)
         }
         
         val sent = ws.send(authMessage.toString())

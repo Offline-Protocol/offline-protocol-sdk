@@ -176,7 +176,8 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
 export class OfflineProtocol {
   private eventEmitter: NativeEventEmitter;
   private eventSubscription: EmitterSubscription | null = null;
-  private eventListeners: Map<EventType | 'all', Set<EventListener>> = new Map();
+  private eventListeners: Map<EventType | "all", Set<EventListener>> =
+    new Map();
   private config: ProtocolConfig;
   private isCreated: boolean = false;
   private initialRuntimeConfig: InitialRuntimeConfig | null = null;
@@ -231,7 +232,9 @@ export class OfflineProtocol {
       : undefined;
 
     this.initialRuntimeConfig =
-      dorsConfig || relayConfig ? { dors: dorsConfig, relay: relayConfig } : null;
+      dorsConfig || relayConfig
+        ? { dors: dorsConfig, relay: relayConfig }
+        : null;
     this.initialRuntimeConfigApplied = false;
 
     const nativeConfig: NativeConfig = {
@@ -292,26 +295,31 @@ export class OfflineProtocol {
       }
     }
 
-    console.log('[OfflineProtocol] Native config:', JSON.stringify(nativeConfig));
+    console.log(
+      "[OfflineProtocol] Native config:",
+      JSON.stringify(nativeConfig)
+    );
     return nativeConfig;
   }
 
-  private normalizeRelayPriority(priority?: string | null): NativeRelayPriority | null {
+  private normalizeRelayPriority(
+    priority?: string | null
+  ): NativeRelayPriority | null {
     if (!priority) {
       return null;
     }
     const normalized = priority.toLowerCase();
     switch (normalized) {
-      case 'low':
-      case 'medium':
-      case 'high':
+      case "low":
+      case "medium":
+      case "high":
         return normalized as NativeRelayPriority;
-      case 'never':
-        return 'low';
-      case 'always':
-        return 'high';
-      case 'auto':
-        return 'medium';
+      case "never":
+        return "low";
+      case "always":
+        return "high";
+      case "auto":
+        return "medium";
       default:
         return null;
     }
@@ -331,19 +339,31 @@ export class OfflineProtocol {
 
     if (dors) {
       try {
-        await OfflineProtocolNativeModule.updateDorsConfig(JSON.stringify(dors));
+        await OfflineProtocolNativeModule.updateDorsConfig(
+          JSON.stringify(dors)
+        );
       } catch (error) {
-        console.warn('[OfflineProtocol] Failed to apply DORS configuration', error);
+        console.warn(
+          "[OfflineProtocol] Failed to apply DORS configuration",
+          error
+        );
       }
     }
 
     if (relay?.relayPriority) {
-      const normalizedPriority = this.normalizeRelayPriority(relay.relayPriority);
+      const normalizedPriority = this.normalizeRelayPriority(
+        relay.relayPriority
+      );
       if (normalizedPriority) {
         try {
-          await OfflineProtocolNativeModule.setRelayPriority(normalizedPriority);
+          await OfflineProtocolNativeModule.setRelayPriority(
+            normalizedPriority
+          );
         } catch (error) {
-          console.warn('[OfflineProtocol] Failed to apply relay priority', error);
+          console.warn(
+            "[OfflineProtocol] Failed to apply relay priority",
+            error
+          );
         }
       }
     }
@@ -356,13 +376,13 @@ export class OfflineProtocol {
    */
   private setupEventSubscription(): void {
     this.eventSubscription = this.eventEmitter.addListener(
-      'OfflineProtocol_Event',
+      "OfflineProtocol_Event",
       (data: { eventJson: string }) => {
         try {
           const event = JSON.parse(data.eventJson) as ProtocolEvent;
           this.emitEvent(event);
         } catch (error) {
-          console.error('Failed to parse event JSON:', error);
+          console.error("Failed to parse event JSON:", error);
         }
       }
     );
@@ -385,13 +405,13 @@ export class OfflineProtocol {
     }
 
     // Call 'all' event listeners
-    const allListeners = this.eventListeners.get('all');
+    const allListeners = this.eventListeners.get("all");
     if (allListeners) {
       allListeners.forEach((listener) => {
         try {
           listener(event);
         } catch (error) {
-          console.error('Error in event listener for all events:', error);
+          console.error("Error in event listener for all events:", error);
         }
       });
     }
@@ -416,7 +436,7 @@ export class OfflineProtocol {
    * ```
    */
   on<T extends ProtocolEvent = ProtocolEvent>(
-    eventType: EventType | 'all',
+    eventType: EventType | "all",
     listener: EventListener<T>
   ): this {
     if (!this.eventListeners.has(eventType)) {
@@ -434,7 +454,7 @@ export class OfflineProtocol {
    * @returns This instance for chaining
    */
   off<T extends ProtocolEvent = ProtocolEvent>(
-    eventType: EventType | 'all',
+    eventType: EventType | "all",
     listener: EventListener<T>
   ): this {
     const listeners = this.eventListeners.get(eventType);
@@ -455,7 +475,7 @@ export class OfflineProtocol {
    * @returns This instance for chaining
    */
   once<T extends ProtocolEvent = ProtocolEvent>(
-    eventType: EventType | 'all',
+    eventType: EventType | "all",
     listener: EventListener<T>
   ): this {
     const onceWrapper: EventListener<T> = (event) => {
@@ -472,7 +492,7 @@ export class OfflineProtocol {
    * @param eventType - Optional event type. If not provided, removes all listeners.
    * @returns This instance for chaining
    */
-  removeAllListeners(eventType?: EventType | 'all'): this {
+  removeAllListeners(eventType?: EventType | "all"): this {
     if (eventType) {
       this.eventListeners.delete(eventType);
     } else {
@@ -519,9 +539,11 @@ export class OfflineProtocol {
     if (encryptionEnabled) {
       try {
         await OfflineProtocolNativeModule.initializeMlsWithSecureStorage();
-        console.log('[OfflineProtocol] MLS auto-initialized with secure storage');
+        console.log(
+          "[OfflineProtocol] MLS auto-initialized with secure storage"
+        );
       } catch (error) {
-        console.warn('[OfflineProtocol] Failed to auto-initialize MLS:', error);
+        console.warn("[OfflineProtocol] Failed to auto-initialize MLS:", error);
       }
     }
 
@@ -529,14 +551,22 @@ export class OfflineProtocol {
     const internetConfig = this.config.transports?.internet;
     if (internetConfig?.enabled && internetConfig?.serverAddress) {
       try {
-        await this.enableTransport('internet', {
+        const enableConfig: InternetTransportConfig = {
           enabled: true,
           serverAddress: internetConfig.serverAddress,
           autoReconnect: internetConfig.autoReconnect ?? true,
-        });
-        console.log('[OfflineProtocol] Internet transport auto-enabled');
+        };
+        // Include authToken if provided in config
+        if (internetConfig.authToken) {
+          enableConfig.authToken = internetConfig.authToken;
+        }
+        await this.enableTransport("internet", enableConfig);
+        console.log("[OfflineProtocol] Internet transport auto-enabled");
       } catch (error) {
-        console.warn('[OfflineProtocol] Failed to auto-enable internet transport:', error);
+        console.warn(
+          "[OfflineProtocol] Failed to auto-enable internet transport:",
+          error
+        );
       }
     }
   }
@@ -559,7 +589,7 @@ export class OfflineProtocol {
 
   /**
    * Emits a test event to verify the event system is working
-   * 
+   *
    * This is a debugging method that emits a network_metrics event with all zeros.
    * Use this to verify that events are being delivered from Rust through the
    * native bridge to JavaScript.
@@ -706,7 +736,8 @@ export class OfflineProtocol {
    * @throws Error if file fails to send
    */
   async sendFile(params: SendFileParams): Promise<string> {
-    const fileName = params.fileName || params.filePath.split('/').pop() || 'file';
+    const fileName =
+      params.fileName || params.filePath.split("/").pop() || "file";
     const fileId = await OfflineProtocolNativeModule.sendFile(
       params.filePath,
       params.recipient,
@@ -779,7 +810,7 @@ export class OfflineProtocol {
   async getState(): Promise<ProtocolState> {
     return await OfflineProtocolNativeModule.getState();
   }
-  
+
   /**
    * Sets the battery level for relay decisions
    *
@@ -788,7 +819,7 @@ export class OfflineProtocol {
   async setBatteryLevel(level: number): Promise<void> {
     return await OfflineProtocolNativeModule.setBatteryLevel(level);
   }
-  
+
   /**
    * Gets the current battery level
    *
@@ -797,26 +828,26 @@ export class OfflineProtocol {
   async getBatteryLevel(): Promise<number | null> {
     return await OfflineProtocolNativeModule.getBatteryLevel();
   }
-  
+
   /**
    * Sets the relay priority
    *
    * @param priority - Relay priority ('low', 'medium', or 'high')
    * @throws Error if setting fails
    */
-  async setRelayPriority(priority: 'low' | 'medium' | 'high'): Promise<void> {
+  async setRelayPriority(priority: "low" | "medium" | "high"): Promise<void> {
     return await OfflineProtocolNativeModule.setRelayPriority(priority);
   }
-  
+
   /**
    * Gets the current relay priority
    *
    * @returns Relay priority
    */
-  async getRelayPriority(): Promise<'low' | 'medium' | 'high'> {
+  async getRelayPriority(): Promise<"low" | "medium" | "high"> {
     return await OfflineProtocolNativeModule.getRelayPriority();
   }
-  
+
   /**
    * Checks if this device is currently acting as a relay
    *
@@ -834,7 +865,7 @@ export class OfflineProtocol {
   async getBLePeerCount(): Promise<number> {
     return await OfflineProtocolNativeModule.bleGetPeerCount();
   }
-  
+
   /**
    * Gets detailed metrics for a specific transport
    *
@@ -851,7 +882,7 @@ export class OfflineProtocol {
   } | null> {
     return await OfflineProtocolNativeModule.getTransportMetrics(transportType);
   }
-  
+
   /**
    * Forces the protocol to use a specific transport (overrides DORS)
    *
@@ -861,14 +892,14 @@ export class OfflineProtocol {
   async forceTransport(transportType: TransportType): Promise<void> {
     return await OfflineProtocolNativeModule.forceTransport(transportType);
   }
-  
+
   /**
    * Releases the transport lock and lets DORS make decisions again
    */
   async releaseTransportLock(): Promise<void> {
     return await OfflineProtocolNativeModule.releaseTransportLock();
   }
-  
+
   /**
    * Updates DORS configuration at runtime
    *
@@ -898,10 +929,16 @@ export class OfflineProtocol {
       payload.switchCooldownSecs = Math.max(0, payload.switchCooldownSecs);
     }
     if (payload.congestionDurationSecs !== undefined) {
-      payload.congestionDurationSecs = Math.max(0, payload.congestionDurationSecs);
+      payload.congestionDurationSecs = Math.max(
+        0,
+        payload.congestionDurationSecs
+      );
     }
     if (payload.ttlEscalationHoldSecs !== undefined) {
-      payload.ttlEscalationHoldSecs = Math.max(1, payload.ttlEscalationHoldSecs);
+      payload.ttlEscalationHoldSecs = Math.max(
+        1,
+        payload.ttlEscalationHoldSecs
+      );
     }
     if (payload.historyWindowSize !== undefined) {
       payload.historyWindowSize = Math.max(
@@ -915,9 +952,11 @@ export class OfflineProtocol {
         Math.max(0, payload.queueRecoveryRatio)
       );
     }
-    return await OfflineProtocolNativeModule.updateDorsConfig(JSON.stringify(payload));
+    return await OfflineProtocolNativeModule.updateDorsConfig(
+      JSON.stringify(payload)
+    );
   }
-  
+
   /**
    * Gets the current DORS configuration
    *
@@ -940,7 +979,7 @@ export class OfflineProtocol {
   }> {
     return await OfflineProtocolNativeModule.getDorsConfig();
   }
-  
+
   /**
    * Updates ACK configuration at runtime
    *
@@ -948,9 +987,11 @@ export class OfflineProtocol {
    * @throws Error if update fails
    */
   async updateAckConfig(config: AckConfig): Promise<void> {
-    return await OfflineProtocolNativeModule.updateAckConfig(JSON.stringify(config));
+    return await OfflineProtocolNativeModule.updateAckConfig(
+      JSON.stringify(config)
+    );
   }
-  
+
   /**
    * Updates retry configuration at runtime
    *
@@ -958,9 +999,11 @@ export class OfflineProtocol {
    * @throws Error if update fails
    */
   async updateRetryConfig(config: RetryConfig): Promise<void> {
-    return await OfflineProtocolNativeModule.updateRetryConfig(JSON.stringify(config));
+    return await OfflineProtocolNativeModule.updateRetryConfig(
+      JSON.stringify(config)
+    );
   }
-  
+
   /**
    * Updates deduplication configuration at runtime
    *
@@ -968,9 +1011,11 @@ export class OfflineProtocol {
    * @throws Error if update fails
    */
   async updateDedupConfig(config: DedupConfig): Promise<void> {
-    return await OfflineProtocolNativeModule.updateDedupConfig(JSON.stringify(config));
+    return await OfflineProtocolNativeModule.updateDedupConfig(
+      JSON.stringify(config)
+    );
   }
-  
+
   /**
    * Gets deduplicator statistics for monitoring
    *
@@ -979,7 +1024,7 @@ export class OfflineProtocol {
   async getDedupStats(): Promise<DedupStats> {
     return await OfflineProtocolNativeModule.getDedupStats();
   }
-  
+
   /**
    * Gets the number of pending ACKs waiting for confirmation
    *
@@ -988,7 +1033,7 @@ export class OfflineProtocol {
   async getPendingAckCount(): Promise<number> {
     return await OfflineProtocolNativeModule.getPendingAckCount();
   }
-  
+
   /**
    * Gets the current retry queue size
    *
@@ -1324,7 +1369,9 @@ export class OfflineProtocol {
    * @returns The derived user ID string
    */
   async deriveUserIdFromPublicKey(publicKey: number[]): Promise<string> {
-    return await OfflineProtocolNativeModule.deriveUserIdFromPublicKey(publicKey);
+    return await OfflineProtocolNativeModule.deriveUserIdFromPublicKey(
+      publicKey
+    );
   }
 
   /**
@@ -1354,7 +1401,11 @@ export class OfflineProtocol {
     data: number[],
     signature: number[]
   ): Promise<boolean> {
-    return await OfflineProtocolNativeModule.verifySignature(publicKey, data, signature);
+    return await OfflineProtocolNativeModule.verifySignature(
+      publicKey,
+      data,
+      signature
+    );
   }
 
   /**
@@ -1398,7 +1449,8 @@ export class OfflineProtocol {
    * @returns Array of pending key packages
    */
   async mlsGetPendingKeyPackages(): Promise<MlsKeyPackage[]> {
-    const results = await OfflineProtocolNativeModule.mlsGetPendingKeyPackages();
+    const results =
+      await OfflineProtocolNativeModule.mlsGetPendingKeyPackages();
     return results.map((r: any) => ({
       packageId: r.packageId,
       userId: r.userId,
@@ -1426,8 +1478,14 @@ export class OfflineProtocol {
    * @param keyPackageData - Raw key package data
    * @throws Error if import fails
    */
-  async mlsImportKeyPackage(userId: string, keyPackageData: number[]): Promise<void> {
-    return await OfflineProtocolNativeModule.mlsImportKeyPackage(userId, keyPackageData);
+  async mlsImportKeyPackage(
+    userId: string,
+    keyPackageData: number[]
+  ): Promise<void> {
+    return await OfflineProtocolNativeModule.mlsImportKeyPackage(
+      userId,
+      keyPackageData
+    );
   }
 
   /**
@@ -1470,7 +1528,9 @@ export class OfflineProtocol {
    * @throws Error if no key package is available (peer hasn't completed key exchange)
    */
   async establishSecureSession(peerId: string): Promise<MlsWelcome | null> {
-    const result = await OfflineProtocolNativeModule.establishSecureSession(peerId);
+    const result = await OfflineProtocolNativeModule.establishSecureSession(
+      peerId
+    );
     if (!result) return null;
     return {
       groupId: result.groupId,
@@ -1493,7 +1553,9 @@ export class OfflineProtocol {
    * @throws Error if session creation fails
    */
   async mlsCreateSession(otherUserId: string): Promise<MlsWelcome> {
-    const result = await OfflineProtocolNativeModule.mlsCreateSession(otherUserId);
+    const result = await OfflineProtocolNativeModule.mlsCreateSession(
+      otherUserId
+    );
     return {
       groupId: result.groupId,
       welcomeData: result.welcomeData,
@@ -1516,7 +1578,9 @@ export class OfflineProtocol {
       inviterId: welcome.inviterId,
       timestampMs: welcome.timestampMs,
     });
-    const result = await OfflineProtocolNativeModule.mlsJoinSession(welcomeJson);
+    const result = await OfflineProtocolNativeModule.mlsJoinSession(
+      welcomeJson
+    );
     return {
       otherUserId: result.otherUserId,
       groupId: result.groupId,
@@ -1534,8 +1598,14 @@ export class OfflineProtocol {
    * @returns Encrypted message
    * @throws Error if encryption fails
    */
-  async mlsEncryptForUser(otherUserId: string, plaintext: number[]): Promise<MlsEncryptedMessage> {
-    const result = await OfflineProtocolNativeModule.mlsEncryptForUser(otherUserId, plaintext);
+  async mlsEncryptForUser(
+    otherUserId: string,
+    plaintext: number[]
+  ): Promise<MlsEncryptedMessage> {
+    const result = await OfflineProtocolNativeModule.mlsEncryptForUser(
+      otherUserId,
+      plaintext
+    );
     return {
       groupId: result.groupId,
       messageType: result.messageType,
@@ -1552,7 +1622,9 @@ export class OfflineProtocol {
    * @param encrypted - Encrypted message
    * @returns Decrypted plaintext as bytes, or null if decryption fails
    */
-  async mlsDecryptFromUser(encrypted: MlsEncryptedMessage): Promise<number[] | null> {
+  async mlsDecryptFromUser(
+    encrypted: MlsEncryptedMessage
+  ): Promise<number[] | null> {
     const encryptedJson = JSON.stringify({
       groupId: encrypted.groupId,
       messageType: encrypted.messageType,
@@ -1608,7 +1680,9 @@ export class OfflineProtocol {
    * @returns Session or group info
    * @throws Error if processing fails
    */
-  async mlsProcessWelcome(welcome: MlsWelcome): Promise<MlsSessionInfo | MlsGroupInfo> {
+  async mlsProcessWelcome(
+    welcome: MlsWelcome
+  ): Promise<MlsSessionInfo | MlsGroupInfo> {
     const welcomeJson = JSON.stringify({
       groupId: welcome.groupId,
       welcomeData: welcome.welcomeData,
@@ -1648,8 +1722,14 @@ export class OfflineProtocol {
    * @returns Welcome message to send to the new member
    * @throws Error if addition fails
    */
-  async mlsAddGroupMember(groupId: string, memberKeyPackage: number[]): Promise<MlsWelcome> {
-    const result = await OfflineProtocolNativeModule.mlsAddGroupMember(groupId, memberKeyPackage);
+  async mlsAddGroupMember(
+    groupId: string,
+    memberKeyPackage: number[]
+  ): Promise<MlsWelcome> {
+    const result = await OfflineProtocolNativeModule.mlsAddGroupMember(
+      groupId,
+      memberKeyPackage
+    );
     return {
       groupId: result.groupId,
       welcomeData: result.welcomeData,
@@ -1687,8 +1767,14 @@ export class OfflineProtocol {
    * @returns Encrypted message
    * @throws Error if encryption fails
    */
-  async mlsEncryptForGroup(groupId: string, plaintext: number[]): Promise<MlsEncryptedMessage> {
-    const result = await OfflineProtocolNativeModule.mlsEncryptForGroup(groupId, plaintext);
+  async mlsEncryptForGroup(
+    groupId: string,
+    plaintext: number[]
+  ): Promise<MlsEncryptedMessage> {
+    const result = await OfflineProtocolNativeModule.mlsEncryptForGroup(
+      groupId,
+      plaintext
+    );
     return {
       groupId: result.groupId,
       messageType: result.messageType,
@@ -1705,7 +1791,9 @@ export class OfflineProtocol {
    * @param encrypted - Encrypted message
    * @returns Decrypted plaintext as bytes, or null if decryption fails
    */
-  async mlsDecryptFromGroup(encrypted: MlsEncryptedMessage): Promise<number[] | null> {
+  async mlsDecryptFromGroup(
+    encrypted: MlsEncryptedMessage
+  ): Promise<number[] | null> {
     const encryptedJson = JSON.stringify({
       groupId: encrypted.groupId,
       messageType: encrypted.messageType,
@@ -1786,8 +1874,16 @@ export class OfflineProtocol {
    * Send encrypted message to a group. Content must be pre-encrypted by client.
    * Returns JSON string to send via WebSocket relay.
    */
-  async groupSendMessage(groupId: string, content: string, replyToMsg?: string | null): Promise<string> {
-    return await OfflineProtocolNativeModule.groupSendMessage(groupId, content, replyToMsg || null);
+  async groupSendMessage(
+    groupId: string,
+    content: string,
+    replyToMsg?: string | null
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.groupSendMessage(
+      groupId,
+      content,
+      replyToMsg || null
+    );
   }
 
   /**
@@ -1803,7 +1899,10 @@ export class OfflineProtocol {
    * Returns JSON string to send via WebSocket relay.
    */
   async groupRemoveMember(groupId: string, username: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupRemoveMember(groupId, username);
+    return await OfflineProtocolNativeModule.groupRemoveMember(
+      groupId,
+      username
+    );
   }
 
   /**
@@ -1819,7 +1918,10 @@ export class OfflineProtocol {
    * Returns JSON string to send via WebSocket relay.
    */
   async groupRemoveAdmin(groupId: string, username: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupRemoveAdmin(groupId, username);
+    return await OfflineProtocolNativeModule.groupRemoveAdmin(
+      groupId,
+      username
+    );
   }
 
   /**

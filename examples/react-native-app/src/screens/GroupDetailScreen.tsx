@@ -13,7 +13,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelay } from '../hooks/useWebSocketRelay';
+import { useContext } from 'react';
+import { WebSocketRelayContext } from '../providers/WebSocketRelayProvider';
 import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 
@@ -48,8 +49,18 @@ interface GroupMessage {
   replyToMsg?: string;
 }
 
-export function GroupDetailScreen({ groupId, groupName, onBack }: GroupDetailScreenProps) {
+export function GroupDetailScreen({
+  groupId,
+  groupName,
+  onBack,
+}: GroupDetailScreenProps) {
   const { theme } = useTheme();
+  const context = useContext(WebSocketRelayContext);
+  if (!context) {
+    throw new Error(
+      'GroupDetailScreen must be used within a WebSocketRelayProvider',
+    );
+  }
   const {
     send,
     authenticatedUser,
@@ -57,7 +68,7 @@ export function GroupDetailScreen({ groupId, groupName, onBack }: GroupDetailScr
     groupDetails,
     getGroupInfo,
     groupMessages,
-  } = useWebSocketRelay();
+  } = context;
   const { protocol, isInitialized } = useProtocol();
   const [activeTab, setActiveTab] = useState<Tab>('info');
   const [loading, setLoading] = useState(true);
@@ -244,7 +255,7 @@ export function GroupDetailScreen({ groupId, groupName, onBack }: GroupDetailScr
   // Listen for group messages via WebSocket
   // Note: GroupMessageReceived events will need to be handled by a callback
   // For now, messages sent by this user are added immediately
-  // Received messages would need to be added via a callback from useWebSocketRelay
+  // Received messages are handled by WebSocketRelayProvider
 
   // Auto-scroll chat to bottom
   useEffect(() => {

@@ -577,7 +577,7 @@ export function WebSocketRelayProvider({
       ws.onerror = _event => {
         // React Native's WebSocket error event is an Event-like object; logging it as an error
         // is noisy and not very actionable. Keep it concise.
-        console.warn('[WebSocketRelay] WebSocket error event');
+        console.warn('[WebSocketRelay] WebSocket error event', _event);
         setStatus('error');
         const msg = `WebSocket connection error. Check if server is running at ${DEFAULT_RELAY_SERVER_URL}`;
         setError(msg);
