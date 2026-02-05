@@ -2509,6 +2509,54 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // IDENTITY AND SIGNING OPERATIONS
+    // ========================================================================
+
+    /// Get the identity public key (Ed25519, 32 bytes).
+    ///
+    /// This is the public key used for MLS operations and can be shared with others
+    /// to establish identity and verify signatures.
+    pub fn get_identity_public_key(&self) -> Result<Vec<u8>, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .get_identity_public_key()
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Derive a deterministic user ID from a public key.
+    ///
+    /// Returns a base58-encoded string derived from SHA-256(publicKey)[0:20].
+    /// The same public key always produces the same user ID.
+    pub fn derive_user_id_from_public_key(&self, public_key: Vec<u8>) -> String {
+        CoreMlsManager::derive_user_id_from_public_key(&public_key)
+    }
+
+    /// Sign arbitrary data with the identity private key (Ed25519).
+    ///
+    /// Returns the signature as raw bytes (64 bytes).
+    pub fn sign_data(&self, data: Vec<u8>) -> Result<Vec<u8>, ProtocolError> {
+        let guard = self.get_mls_manager()?;
+        let manager = guard.as_ref().unwrap();
+        manager
+            .sign_data(&data)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// Verify a signature against a public key.
+    ///
+    /// Returns true if the signature is valid, false otherwise.
+    pub fn verify_signature(
+        &self,
+        public_key: Vec<u8>,
+        data: Vec<u8>,
+        signature: Vec<u8>,
+    ) -> Result<bool, ProtocolError> {
+        CoreMlsManager::verify_signature(&public_key, &data, &signature)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    // ========================================================================
     // PRESENCE AND KEY MANAGEMENT (RELAY SERVER API)
     // ========================================================================
 

@@ -1,6 +1,101 @@
 import Foundation
 import CryptoKit
 
+/// Signed identity data for cryptographic peer verification.
+/// Contains the public key and a signature over the advertisement data.
+/// Exchanged via GATT after connection to verify peer authenticity.
+struct SignedIdentityData {
+    /// Ed25519 public key (32 bytes)
+    let publicKey: Data
+    /// Ed25519 signature (64 bytes) over the advertisement data
+    let signature: Data
+    /// The advertisement data that was signed
+    let advertisementData: Data
+    
+    /// Total encoded size: 32 (pubkey) + 64 (signature) + advertisement data
+    static let publicKeySize = 32
+    static let signatureSize = 64
+    static let headerSize = publicKeySize + signatureSize
+    
+    init(publicKey: Data, signature: Data, advertisementData: Data) {
+        precondition(publicKey.count == SignedIdentityData.publicKeySize, "Public key must be 32 bytes")
+        precondition(signature.count == SignedIdentityData.signatureSize, "Signature must be 64 bytes")
+        self.publicKey = publicKey
+        self.signature = signature
+        self.advertisementData = advertisementData
+    }
+    
+    /// Encodes the signed identity data for GATT transmission.
+    /// Format: [publicKey (32 bytes)][signature (64 bytes)][advertisementData (variable)]
+    func encode() -> Data {
+        var buffer = Data(capacity: SignedIdentityData.headerSize + advertisementData.count)
+        buffer.append(publicKey)
+        buffer.append(signature)
+        buffer.append(advertisementData)
+        return buffer
+    }
+    
+    /// Decodes signed identity data from GATT transmission.
+    static func decode(_ data: Data?) -> SignedIdentityData? {
+        guard let data = data, data.count >= headerSize else { return nil }
+        
+        let publicKey = data[0..<publicKeySize]
+        let signature = data[publicKeySize..<headerSize]
+        let advertisementData = data[headerSize...]
+        
+        return SignedIdentityData(
+            publicKey: Data(publicKey),
+            signature: Data(signature),
+            advertisementData: Data(advertisementData)
+        )
+    }
+    
+    /// Derives a user ID from the public key using SHA256 and base58 encoding.
+    /// This produces the same result as the Rust derive_user_id_from_public_key function.
+    func deriveUserId() -> String {
+        let hash = SHA256.hash(data: publicKey)
+        let first20Bytes = Array(hash.prefix(20))
+        return Base58.encode(first20Bytes)
+    }
+}
+
+/// Base58 encoding for user ID derivation (Bitcoin alphabet).
+enum Base58 {
+    private static let alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    private static let base = UInt(alphabet.count)
+    
+    static func encode(_ bytes: [UInt8]) -> String {
+        var intBytes = bytes.map { UInt($0) }
+        var result = ""
+        
+        // Count leading zeros
+        var leadingZeros = 0
+        for byte in bytes {
+            if byte == 0 { leadingZeros += 1 }
+            else { break }
+        }
+        
+        // Convert to base58
+        while !intBytes.allSatisfy({ $0 == 0 }) {
+            var carry: UInt = 0
+            for i in 0..<intBytes.count {
+                let value = intBytes[i] + carry * 256
+                intBytes[i] = value / base
+                carry = value % base
+            }
+            let char = alphabet[alphabet.index(alphabet.startIndex, offsetBy: Int(carry))]
+            result = String(char) + result
+        }
+        
+        // Add '1' for each leading zero byte
+        for _ in 0..<leadingZeros {
+            result = "1" + result
+        }
+        
+        return result
+    }
+}
+
 /// Shared advertisement payload between iOS and Android mesh implementations.
 /// Layout mirrors `MeshAdvertisementData` on Android.
 struct MeshAdvertisementData {

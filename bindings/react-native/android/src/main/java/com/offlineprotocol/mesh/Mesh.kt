@@ -10,6 +10,119 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
+ * Signed identity data for cryptographic peer verification.
+ * Contains the public key and a signature over the advertisement data.
+ * Exchanged via GATT after connection to verify peer authenticity.
+ */
+data class SignedIdentityData(
+    /** Ed25519 public key (32 bytes) */
+    val publicKey: ByteArray,
+    /** Ed25519 signature (64 bytes) over the advertisement data */
+    val signature: ByteArray,
+    /** The advertisement data that was signed */
+    val advertisementData: ByteArray
+) {
+    init {
+        require(publicKey.size == PUBLIC_KEY_SIZE) { "Public key must be 32 bytes" }
+        require(signature.size == SIGNATURE_SIZE) { "Signature must be 64 bytes" }
+    }
+    
+    /**
+     * Encodes the signed identity data for GATT transmission.
+     * Format: [publicKey (32 bytes)][signature (64 bytes)][advertisementData (variable)]
+     */
+    fun encode(): ByteArray {
+        val buffer = ByteBuffer.allocate(HEADER_SIZE + advertisementData.size)
+        buffer.put(publicKey)
+        buffer.put(signature)
+        buffer.put(advertisementData)
+        return buffer.array()
+    }
+    
+    /**
+     * Derives a user ID from the public key using SHA256 and base58 encoding.
+     * This produces the same result as the Rust derive_user_id_from_public_key function.
+     */
+    fun deriveUserId(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hash = digest.digest(publicKey)
+        val first20Bytes = hash.copyOf(20)
+        return Base58.encode(first20Bytes)
+    }
+    
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as SignedIdentityData
+        return publicKey.contentEquals(other.publicKey) &&
+               signature.contentEquals(other.signature) &&
+               advertisementData.contentEquals(other.advertisementData)
+    }
+    
+    override fun hashCode(): Int {
+        var result = publicKey.contentHashCode()
+        result = 31 * result + signature.contentHashCode()
+        result = 31 * result + advertisementData.contentHashCode()
+        return result
+    }
+    
+    companion object {
+        const val PUBLIC_KEY_SIZE = 32
+        const val SIGNATURE_SIZE = 64
+        const val HEADER_SIZE = PUBLIC_KEY_SIZE + SIGNATURE_SIZE
+        
+        /**
+         * Decodes signed identity data from GATT transmission.
+         */
+        fun decode(bytes: ByteArray?): SignedIdentityData? {
+            if (bytes == null || bytes.size < HEADER_SIZE) return null
+            
+            val publicKey = bytes.copyOfRange(0, PUBLIC_KEY_SIZE)
+            val signature = bytes.copyOfRange(PUBLIC_KEY_SIZE, HEADER_SIZE)
+            val advertisementData = bytes.copyOfRange(HEADER_SIZE, bytes.size)
+            
+            return SignedIdentityData(publicKey, signature, advertisementData)
+        }
+    }
+}
+
+/**
+ * Base58 encoding for user ID derivation (Bitcoin alphabet).
+ */
+object Base58 {
+    private const val ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    private val BASE = ALPHABET.length.toBigInteger()
+    
+    fun encode(bytes: ByteArray): String {
+        if (bytes.isEmpty()) return ""
+        
+        // Count leading zeros
+        var leadingZeros = 0
+        for (byte in bytes) {
+            if (byte.toInt() == 0) leadingZeros++
+            else break
+        }
+        
+        // Convert bytes to a big integer
+        var value = java.math.BigInteger(1, bytes)
+        val result = StringBuilder()
+        
+        while (value > java.math.BigInteger.ZERO) {
+            val (quotient, remainder) = value.divideAndRemainder(BASE)
+            result.insert(0, ALPHABET[remainder.toInt()])
+            value = quotient
+        }
+        
+        // Add '1' for each leading zero byte
+        repeat(leadingZeros) {
+            result.insert(0, '1')
+        }
+        
+        return result.toString()
+    }
+}
+
+/**
  * Compact representation of node metadata encoded into BLE advertisement service data.
  *
  * Byte layout (big endian):

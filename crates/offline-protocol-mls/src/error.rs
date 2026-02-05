@@ -87,4 +87,16 @@ pub enum MlsError {
     /// OpenMLS library error.
     #[error("OpenMLS error: {0}")]
     OpenMls(String),
+
+    /// Signing operation failed.
+    #[error("Signing failed: {0}")]
+    Signing(String),
+
+    /// Signature verification failed.
+    #[error("Signature verification failed: {0}")]
+    VerificationFailed(String),
+
+    /// Invalid public key format.
+    #[error("Invalid public key: {0}")]
+    InvalidPublicKey(String),
 }

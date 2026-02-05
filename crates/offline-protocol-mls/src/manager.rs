@@ -860,6 +860,96 @@ impl MlsManager {
 
         Ok(count)
     }
+
+    // ========================================================================
+    // IDENTITY AND SIGNING OPERATIONS
+    // ========================================================================
+
+    /// Returns the identity public key as raw bytes.
+    ///
+    /// This is the Ed25519 public key used for MLS operations. It can be shared
+    /// with others to establish your identity and verify signatures.
+    pub fn get_identity_public_key(&self) -> Result<Vec<u8>> {
+        let credential = self.get_credential()?;
+        Ok(credential.signature_key.as_slice().to_vec())
+    }
+
+    /// Signs arbitrary data with the identity private key.
+    ///
+    /// Uses Ed25519 signatures (the same algorithm used for MLS operations).
+    /// The signature can be verified by anyone with the corresponding public key.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The data to sign
+    ///
+    /// # Returns
+    ///
+    /// Returns the signature as raw bytes.
+    pub fn sign_data(&self, data: &[u8]) -> Result<Vec<u8>> {
+        use openmls_traits::signatures::Signer;
+
+        let signer = self.get_signer()?;
+        let signature = signer
+            .sign(data)
+            .map_err(|e| MlsError::Signing(format!("Failed to sign data: {:?}", e)))?;
+        Ok(signature.as_slice().to_vec())
+    }
+
+    /// Verifies a signature against a public key.
+    ///
+    /// # Arguments
+    ///
+    /// * `public_key` - The Ed25519 public key bytes (32 bytes)
+    /// * `data` - The original data that was signed
+    /// * `signature` - The signature to verify (64 bytes)
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the signature is valid, `false` otherwise.
+    pub fn verify_signature(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<bool> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        // Parse the public key (Ed25519 public keys are 32 bytes)
+        let verifying_key = VerifyingKey::try_from(public_key).map_err(|e| {
+            MlsError::InvalidPublicKey(format!("Invalid Ed25519 public key: {}", e))
+        })?;
+
+        // Parse the signature (Ed25519 signatures are 64 bytes)
+        let sig = Signature::try_from(signature).map_err(|e| {
+            MlsError::VerificationFailed(format!("Invalid signature format: {}", e))
+        })?;
+
+        // Verify the signature
+        match verifying_key.verify(data, &sig) {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Derives a deterministic user ID from a public key.
+    ///
+    /// The user ID is derived by taking the SHA-256 hash of the public key
+    /// and encoding the first 20 bytes as base58. This produces a short,
+    /// human-readable identifier that is collision-resistant.
+    ///
+    /// # Arguments
+    ///
+    /// * `public_key` - The Ed25519 public key bytes
+    ///
+    /// # Returns
+    ///
+    /// Returns a base58-encoded string derived from the public key.
+    pub fn derive_user_id_from_public_key(public_key: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(public_key);
+        let hash = hasher.finalize();
+
+        // Take first 20 bytes and encode as base58
+        bs58::encode(&hash[..20]).into_string()
+    }
 }
 
 #[cfg(test)]

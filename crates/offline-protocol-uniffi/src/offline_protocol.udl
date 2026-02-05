@@ -614,6 +614,30 @@ interface OfflineProtocol {
     MlsGroupInfo mls_process_welcome(MlsWelcomeMessage welcome);
     
     // ========================================================================
+    // IDENTITY AND SIGNING OPERATIONS
+    // ========================================================================
+    
+    // Get the identity public key (Ed25519, 32 bytes).
+    // This is the public key used for MLS operations and can be shared with others.
+    [Throws=ProtocolError]
+    sequence<u8> get_identity_public_key();
+    
+    // Derive a deterministic user ID from a public key.
+    // Returns a base58-encoded string derived from SHA-256(publicKey)[0:20].
+    // The same public key always produces the same user ID.
+    string derive_user_id_from_public_key(sequence<u8> public_key);
+    
+    // Sign arbitrary data with the identity private key (Ed25519).
+    // Returns the signature as raw bytes (64 bytes).
+    [Throws=ProtocolError]
+    sequence<u8> sign_data(sequence<u8> data);
+    
+    // Verify a signature against a public key.
+    // Returns true if the signature is valid, false otherwise.
+    [Throws=ProtocolError]
+    boolean verify_signature(sequence<u8> public_key, sequence<u8> data, sequence<u8> signature);
+    
+    // ========================================================================
     // PRESENCE AND KEY MANAGEMENT (RELAY SERVER API)
     // ========================================================================
     
