@@ -115,6 +115,8 @@ class BleManager(
         private const val CONNECTION_MONITOR_INTERVAL_MS = 5_000L
         /** Initial aggressive discovery phase duration (ms) - more frequent scanning initially */
         private const val AGGRESSIVE_DISCOVERY_PHASE_MS = 30_000L
+        /** TTL for negative cache entries of verified non-mesh devices (ms) */
+        private const val NON_MESH_CACHE_TTL_MS = 300_000L // 5 minutes
     }
     
     // MARK: - Properties
@@ -190,6 +192,8 @@ class BleManager(
     private val recentAdvertisementHashes = ConcurrentHashMap<String, AdvertisementCacheEntry>()
     /** Tracks connected centrals (devices that connected to our GATT server) for connection count */
     private val connectedCentrals = ConcurrentHashMap<String, Long>()
+    /** Negative cache: devices verified via GATT as non-mesh (address -> timestamp) */
+    private val verifiedNonMeshDevices = ConcurrentHashMap<String, Long>()
     /** Counter for consecutive scan restarts without discoveries */
     @Volatile private var scanRestartCount = 0
     /** Last time we reset the BLE adapter */
@@ -507,6 +511,7 @@ class BleManager(
         pendingOutboundFragments.clear()
         lastSeenMeshAdvertisements.clear()
         unknownDeviceAttempts.clear()
+        verifiedNonMeshDevices.clear()
         recentAdvertisementHashes.clear()
         connectionRetryCount.clear()
         connectedCentrals.clear()
@@ -1258,6 +1263,16 @@ class BleManager(
         isConnectable: Boolean,
         now: Long
     ): Boolean {
+        // 0. Skip devices previously verified as non-mesh via GATT
+        val nonMeshTimestamp = verifiedNonMeshDevices[address]
+        if (nonMeshTimestamp != null) {
+            if (now - nonMeshTimestamp < NON_MESH_CACHE_TTL_MS) {
+                return false
+            }
+            // Entry expired, remove it and allow re-evaluation
+            verifiedNonMeshDevices.remove(address)
+        }
+        
         // 1. Check if device is advertising our service UUID
         val serviceUuids = scanRecord?.serviceUuids
         if (serviceUuids != null) {
@@ -1276,15 +1291,17 @@ class BleManager(
         // iOS sometimes advertises service UUIDs in a format Android's API doesn't parse correctly
         val scanRecordBytes = scanRecord?.bytes
         if (scanRecordBytes != null) {
-            // Convert UUID to byte array format used in BLE advertisements
+            // Convert UUID to byte array in little-endian format (BLE advertisement byte order).
+            // BLE stores 128-bit UUIDs with least-significant byte first.
             val uuidString = SERVICE_UUID.toString().uppercase().replace("-", "")
-            val uuidBytes = uuidString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            val bigEndianBytes = uuidString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            val uuidBytesLE = bigEndianBytes.reversedArray()
             // Check if UUID bytes appear in scan record (simple substring search)
             var found = false
-            for (i in 0..(scanRecordBytes.size - uuidBytes.size)) {
+            for (i in 0..(scanRecordBytes.size - uuidBytesLE.size)) {
                 var match = true
-                for (j in uuidBytes.indices) {
-                    if (scanRecordBytes[i + j] != uuidBytes[j]) {
+                for (j in uuidBytesLE.indices) {
+                    if (scanRecordBytes[i + j] != uuidBytesLE[j]) {
                         match = false
                         break
                     }
@@ -2494,10 +2511,27 @@ class BleManager(
                         "address" to gatt.device.address,
                         "serviceCount" to gatt.services.size
                     ))
+                    // Disconnect non-mesh device to free the connection slot
+                    verifiedNonMeshDevices[gatt.device.address] = System.currentTimeMillis()
+                    try {
+                        gatt.disconnect()
+                        gatt.close()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error disconnecting non-mesh device ${gatt.device.address}", e)
+                    }
+                    connections.removeGatt(gatt.device.address)
                 }
             } else {
                 Log.e(TAG, "❌ Service discovery FAILED for ${gatt.device.address}, status=$status")
                 emitDiagnostic("error", "Service discovery failed", mapOf("address" to gatt.device.address, "status" to status))
+                // Clean up failed GATT connection to free the slot
+                try {
+                    gatt.disconnect()
+                    gatt.close()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error disconnecting after failed service discovery on ${gatt.device.address}", e)
+                }
+                connections.removeGatt(gatt.device.address)
             }
         }
         

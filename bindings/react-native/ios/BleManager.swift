@@ -191,6 +191,9 @@ public class BleManager: NSObject, TransportManager {
     private let AGGRESSIVE_DISCOVERY_PHASE: TimeInterval = 30.0
     /// Tracks when aggressive discovery phase started
     private var aggressiveDiscoveryStarted: Date?
+    /// Negative cache: devices verified via GATT as non-mesh (identifier -> timestamp)
+    private var verifiedNonMeshDevices: [UUID: Date] = [:]
+    private let NON_MESH_CACHE_TTL: TimeInterval = 300.0 // 5 minutes
 
     // MARK: - Thread helpers
     @inline(__always)
@@ -418,6 +421,7 @@ public class BleManager: NSObject, TransportManager {
         pendingOutboundFragments.removeAll()
         lastSeenMeshAdvertisements.removeAll()
         unknownDeviceAttempts.removeAll()
+        verifiedNonMeshDevices.removeAll()
         recentAdvertisementHashes.removeAll()
         pendingAdvertiseRestart?.cancel()
         pendingAdvertiseRestart = nil
@@ -1691,6 +1695,15 @@ public class BleManager: NSObject, TransportManager {
         rssi: Int16,
         now: Date
     ) -> Bool {
+        // 0. Skip devices previously verified as non-mesh via GATT
+        if let nonMeshTimestamp = verifiedNonMeshDevices[peripheral.identifier] {
+            if now.timeIntervalSince(nonMeshTimestamp) < NON_MESH_CACHE_TTL {
+                return false
+            }
+            // Entry expired, remove it and allow re-evaluation
+            verifiedNonMeshDevices.removeValue(forKey: peripheral.identifier)
+        }
+        
         // 1. Check if device is advertising our service UUID
         if let serviceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] {
             if serviceUUIDs.contains(SERVICE_UUID) {
@@ -1762,12 +1775,16 @@ public class BleManager: NSObject, TransportManager {
             }
             
             // Use a tiered approach: stronger signals get priority
+            // Matches Android tiering for cross-platform discovery parity
             let shouldAttempt: Bool
             if rssi >= -70 {
                 // Strong signal - always try
                 shouldAttempt = true
+            } else if rssi >= -85 {
+                // Medium signal - be lenient for cross-platform discovery
+                shouldAttempt = true
             } else if rssi >= UNKNOWN_DEVICE_MIN_RSSI && recentUnknownAttempts < MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE / 2 {
-                // Moderate signal and we have budget
+                // Weaker signal and we have budget
                 shouldAttempt = true
             } else {
                 shouldAttempt = false
@@ -2293,15 +2310,33 @@ extension BleManager: CBPeripheralDelegate {
         if let error = error {
             print("[BleManager] Error discovering services: \(error)")
             emitDiagnostic("error", "Error discovering services", context: ["error": error.localizedDescription])
+            // Clean up failed connection to free the slot
+            centralManager?.cancelPeripheralConnection(peripheral)
+            _ = connections.removePeripheral(peripheral.identifier)
             return
         }
         
         guard let services = peripheral.services else { return }
         
-        for service in services where service.uuid == SERVICE_UUID {
-            peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
+        let hasOurService = services.contains { $0.uuid == SERVICE_UUID }
+        
+        if hasOurService {
+            for service in services where service.uuid == SERVICE_UUID {
+                peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
+            }
+            emitDiagnostic("info", "Discovered BLE services", context: ["peripheral": peripheral.identifier.uuidString])
+        } else {
+            // Non-mesh device: disconnect and add to negative cache
+            print("[BleManager] Service UUID not found on \(peripheral.identifier). Disconnecting non-mesh device.")
+            emitDiagnostic("warning", "Offline protocol service not found", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "serviceCount": services.count
+            ])
+            verifiedNonMeshDevices[peripheral.identifier] = Date()
+            centralManager?.cancelPeripheralConnection(peripheral)
+            _ = connections.removePeripheral(peripheral.identifier)
+            discoveredPeripherals.removeValue(forKey: peripheral.identifier)
         }
-        emitDiagnostic("info", "Discovered BLE services", context: ["peripheral": peripheral.identifier.uuidString])
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
