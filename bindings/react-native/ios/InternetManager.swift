@@ -112,9 +112,9 @@ public class InternetManager: NSObject, TransportManager {
             "wasAuthenticated": wasAuthenticated
         ])
         
-        // If already connected and authenticated, re-authenticate with new token
-        // If connected but not authenticated, try authenticating now
-        if isConnected && (wasAuthenticated || !isAuthenticated) {
+        // If already connected, (re-)authenticate with the latest token.
+        // This ensures token rotations take effect immediately.
+        if isConnected {
             sendAuthentication()
         }
     }

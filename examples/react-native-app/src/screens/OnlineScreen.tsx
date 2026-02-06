@@ -15,11 +15,8 @@ import {
 import LinearGradient from 'react-native-linear-gradient';
 import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
-import { useContext } from 'react';
-import {
-  WebSocketRelayContext,
-  type OnlineMessage,
-} from '../providers/WebSocketRelayProvider';
+import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
+import { type OnlineMessage } from '../providers/WebSocketRelayProvider';
 import { useProtocol } from '../hooks/useProtocol';
 
 type Tab = 'chat' | 'users' | 'groups';
@@ -34,14 +31,7 @@ export function OnlineScreen() {
   const [recipientId, setRecipientId] = useState('');
   const [messageInput, setMessageInput] = useState('');
   const [checkUserId, setCheckUserId] = useState('');
-  const hasAutoAuthenticatedRef = useRef(false);
 
-  const context = useContext(WebSocketRelayContext);
-  if (!context) {
-    throw new Error(
-      'OnlineScreen must be used within a WebSocketRelayProvider',
-    );
-  }
   const {
     status,
     authenticatedUser,
@@ -55,7 +45,7 @@ export function OnlineScreen() {
     sendMessage,
     checkPresence,
     clearMessages,
-  } = context;
+  } = useWebSocketRelayContext();
 
   const handleConnect = useCallback(() => {
     connect();

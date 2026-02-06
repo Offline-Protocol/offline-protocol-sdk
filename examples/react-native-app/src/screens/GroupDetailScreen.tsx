@@ -13,8 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useContext } from 'react';
-import { WebSocketRelayContext } from '../providers/WebSocketRelayProvider';
+import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
 import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 
@@ -55,12 +54,6 @@ export function GroupDetailScreen({
   onBack,
 }: GroupDetailScreenProps) {
   const { theme } = useTheme();
-  const context = useContext(WebSocketRelayContext);
-  if (!context) {
-    throw new Error(
-      'GroupDetailScreen must be used within a WebSocketRelayProvider',
-    );
-  }
   const {
     send,
     authenticatedUser,
@@ -68,7 +61,7 @@ export function GroupDetailScreen({
     groupDetails,
     getGroupInfo,
     groupMessages,
-  } = context;
+  } = useWebSocketRelayContext();
   const { protocol, isInitialized } = useProtocol();
   const [activeTab, setActiveTab] = useState<Tab>('info');
   const [loading, setLoading] = useState(true);

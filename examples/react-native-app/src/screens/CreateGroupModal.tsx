@@ -11,8 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useContext } from 'react';
-import { WebSocketRelayContext } from '../providers/WebSocketRelayProvider';
+import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
 import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 
@@ -23,13 +22,7 @@ interface CreateGroupModalProps {
 
 export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalProps) {
   const { theme } = useTheme();
-  const context = useContext(WebSocketRelayContext);
-  if (!context) {
-    throw new Error(
-      'CreateGroupModal must be used within a WebSocketRelayProvider',
-    );
-  }
-  const { send, authenticatedUser, status } = context;
+  const { send, authenticatedUser, status } = useWebSocketRelayContext();
   const { protocol, isInitialized } = useProtocol();
   const [groupName, setGroupName] = useState('');
   const [membersToAdd, setMembersToAdd] = useState<string[]>([]);

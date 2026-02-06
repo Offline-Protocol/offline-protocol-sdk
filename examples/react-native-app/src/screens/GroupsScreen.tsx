@@ -9,8 +9,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useContext } from 'react';
-import { WebSocketRelayContext } from '../providers/WebSocketRelayProvider';
+import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
 import { Icon } from '../components/Icon';
 import { CreateGroupModal } from './CreateGroupModal';
 import { GroupDetailScreen } from './GroupDetailScreen';
@@ -30,12 +29,6 @@ interface GroupsScreenProps {
 
 export function GroupsScreen({ onNavigateToGroupDetail }: GroupsScreenProps) {
   const { theme } = useTheme();
-  const context = useContext(WebSocketRelayContext);
-  if (!context) {
-    throw new Error(
-      'GroupsScreen must be used within a WebSocketRelayProvider',
-    );
-  }
   const {
     groups,
     authenticatedUser,
@@ -44,7 +37,7 @@ export function GroupsScreen({ onNavigateToGroupDetail }: GroupsScreenProps) {
     error,
     authenticate,
     connect,
-  } = context;
+  } = useWebSocketRelayContext();
   const [currentScreen, setCurrentScreen] = useState<Screen>('list');
   const [selectedGroup, setSelectedGroup] = useState<{ groupId: string; name: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
