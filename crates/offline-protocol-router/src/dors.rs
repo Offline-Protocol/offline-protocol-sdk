@@ -294,6 +294,8 @@ impl TransportSelector {
                     return Some(current);
                 }
 
+                // current_still_available is true here, so current is in available_transports,
+                // which means it was scored in scored_transports — the find always succeeds.
                 if let Some(current_score) = scored_transports
                     .iter()
                     .find(|(t, _)| *t == current)
@@ -302,8 +304,6 @@ impl TransportSelector {
                     if !self.should_switch(current, current_score, best_transport, best_score) {
                         return Some(current);
                     }
-                } else if !self.is_past_cooldown() {
-                    return Some(current);
                 }
             }
             // When current transport is unavailable, fall through to select the
