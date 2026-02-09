@@ -60,12 +60,15 @@ struct ConnectionRequestPayload {
 struct ConnectionAcceptedPayload {
     /// Display name of the accepting party.
     accepted_by_name: String,
+    /// Timestamp of the acceptance (Unix ms).
+    #[serde(default)]
+    timestamp_ms: i64,
     /// Optional MLS key package data for encrypted session setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     key_package: Option<Vec<u8>>,
 }
 
-/// Result of processing an internal MLS message.
+/// Result of processing an internal protocol message.
 enum InternalMessageResult {
     /// Message was consumed internally (don't surface to app).
     Consumed,
@@ -570,6 +573,56 @@ impl OfflineProtocol {
         state.emit_event(Event::message_sent(message));
         drop(state);
         Ok(())
+    }
+
+    /// Sends an internal protocol message (connection requests, etc.) via DORS.
+    ///
+    /// Handles the full send orchestration: state check, deduplication, transport send,
+    /// success/failure handling, and transport switch events. Does NOT emit a
+    /// `MessageSent` event — internal messages are not user-visible content.
+    fn send_internal_message(
+        &mut self,
+        recipient: &str,
+        content: String,
+        priority: MessagePriority,
+    ) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let message = self.create_message(recipient, content, Some(priority), None)?;
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    message_id = %message.id,
+                    recipient = %recipient,
+                    error = %err,
+                    "Internal message send failed, message deferred"
+                );
+            }
+        }
+
+        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        Ok(message_id)
     }
 
     /// Sends a message.
@@ -1296,13 +1349,6 @@ impl OfflineProtocol {
         sender_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
-        {
-            let state = lock_shared_state(&self.shared_state)?;
-            if state.state != ProtocolState::Running {
-                return Err(Error::NotStarted);
-            }
-        }
-
         let payload = ConnectionRequestPayload {
             sender_name: sender_name.to_string(),
             timestamp_ms: Utc::now().timestamp_millis(),
@@ -1313,35 +1359,8 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_REQUEST, serialized);
 
-        let message =
-            self.create_message(recipient, content, Some(MessagePriority::High), None)?;
-        let message_id = message.id.clone();
-
-        if self.deduplicator.is_duplicate(&message_id) {
-            return Err(crate::Error::Other("Duplicate message".to_string()));
-        }
-
-        self.deduplicator.mark_seen(message_id.clone());
-
-        let previous_transport = self.transport_manager.current_transport();
-        let send_result = self.transport_manager.send(&message);
-        let current_transport = self.transport_manager.current_transport();
-
-        match send_result {
-            Ok(()) => {
-                self.handle_send_success(&message, current_transport)?;
-            }
-            Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
-                warn!(
-                    recipient = %recipient,
-                    error = %err,
-                    "Connection request send failed, message deferred"
-                );
-            }
-        }
-
-        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        let message_id =
+            self.send_internal_message(recipient, content, MessagePriority::High)?;
         info!(recipient = %recipient, "Sent connection request");
         Ok(message_id)
     }
@@ -1361,15 +1380,9 @@ impl OfflineProtocol {
         accepter_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
-        {
-            let state = lock_shared_state(&self.shared_state)?;
-            if state.state != ProtocolState::Running {
-                return Err(Error::NotStarted);
-            }
-        }
-
         let payload = ConnectionAcceptedPayload {
             accepted_by_name: accepter_name.to_string(),
+            timestamp_ms: Utc::now().timestamp_millis(),
             key_package,
         };
 
@@ -1377,35 +1390,8 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_ACCEPT, serialized);
 
-        let message =
-            self.create_message(recipient, content, Some(MessagePriority::High), None)?;
-        let message_id = message.id.clone();
-
-        if self.deduplicator.is_duplicate(&message_id) {
-            return Err(crate::Error::Other("Duplicate message".to_string()));
-        }
-
-        self.deduplicator.mark_seen(message_id.clone());
-
-        let previous_transport = self.transport_manager.current_transport();
-        let send_result = self.transport_manager.send(&message);
-        let current_transport = self.transport_manager.current_transport();
-
-        match send_result {
-            Ok(()) => {
-                self.handle_send_success(&message, current_transport)?;
-            }
-            Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
-                warn!(
-                    recipient = %recipient,
-                    error = %err,
-                    "Connection accept send failed, message deferred"
-                );
-            }
-        }
-
-        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        let message_id =
+            self.send_internal_message(recipient, content, MessagePriority::High)?;
         info!(recipient = %recipient, "Accepted connection request");
         Ok(message_id)
     }
@@ -1418,44 +1404,10 @@ impl OfflineProtocol {
     ///
     /// * `recipient` - The user ID of the original requester
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
-        {
-            let state = lock_shared_state(&self.shared_state)?;
-            if state.state != ProtocolState::Running {
-                return Err(Error::NotStarted);
-            }
-        }
-
         let content = internal_prefixes::CONN_REJECT.to_string();
 
-        let message =
-            self.create_message(recipient, content, Some(MessagePriority::High), None)?;
-        let message_id = message.id.clone();
-
-        if self.deduplicator.is_duplicate(&message_id) {
-            return Err(crate::Error::Other("Duplicate message".to_string()));
-        }
-
-        self.deduplicator.mark_seen(message_id.clone());
-
-        let previous_transport = self.transport_manager.current_transport();
-        let send_result = self.transport_manager.send(&message);
-        let current_transport = self.transport_manager.current_transport();
-
-        match send_result {
-            Ok(()) => {
-                self.handle_send_success(&message, current_transport)?;
-            }
-            Err(err) => {
-                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
-                warn!(
-                    recipient = %recipient,
-                    error = %err,
-                    "Connection reject send failed, message deferred"
-                );
-            }
-        }
-
-        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        let message_id =
+            self.send_internal_message(recipient, content, MessagePriority::High)?;
         info!(recipient = %recipient, "Rejected connection request");
         Ok(message_id)
     }
@@ -1778,6 +1730,7 @@ impl OfflineProtocol {
                     state.emit_event(Event::connection_accepted(
                         sender.to_string(),
                         payload.accepted_by_name,
+                        payload.timestamp_ms,
                         payload.key_package,
                     ));
                 }
@@ -1788,7 +1741,7 @@ impl OfflineProtocol {
         }
 
         // Handle connection rejected messages
-        if content == internal_prefixes::CONN_REJECT {
+        if content.starts_with(internal_prefixes::CONN_REJECT) {
             info!(sender = %sender, "Connection request rejected");
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::connection_rejected(sender.to_string()));
@@ -2723,6 +2676,7 @@ mod tests {
 
         let payload = ConnectionAcceptedPayload {
             accepted_by_name: "Bob".to_string(),
+            timestamp_ms: 99999,
             key_package: Some(vec![1, 2, 3, 4]),
         };
         let content = format!(
@@ -2747,10 +2701,12 @@ mod tests {
             Event::ConnectionAccepted {
                 accepted_by,
                 accepted_by_name,
+                timestamp,
                 key_package,
             } => {
                 assert_eq!(accepted_by, "bob");
                 assert_eq!(accepted_by_name, "Bob");
+                assert_eq!(*timestamp, 99999);
                 assert_eq!(key_package.as_ref(), Some(&vec![1, 2, 3, 4]));
             }
             _ => panic!("Wrong event type"),
