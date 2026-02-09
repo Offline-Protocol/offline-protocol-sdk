@@ -511,6 +511,7 @@ export interface ConnectionAcceptedEvent extends BaseEvent {
   type: 'connection_accepted';
   accepted_by: string;
   accepted_by_name: string;
+  timestamp: number;
   key_package?: number[];
 }
 

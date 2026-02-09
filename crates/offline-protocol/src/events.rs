@@ -233,6 +233,8 @@ pub enum Event {
         accepted_by: String,
         /// Display name of the accepting party.
         accepted_by_name: String,
+        /// Timestamp of the acceptance (Unix ms).
+        timestamp: i64,
         /// MLS key package data (if provided for encrypted session setup).
         #[serde(skip_serializing_if = "Option::is_none")]
         key_package: Option<Vec<u8>>,
@@ -466,11 +468,13 @@ impl Event {
     pub fn connection_accepted(
         accepted_by: String,
         accepted_by_name: String,
+        timestamp: i64,
         key_package: Option<Vec<u8>>,
     ) -> Self {
         Self::ConnectionAccepted {
             accepted_by,
             accepted_by_name,
+            timestamp,
             key_package,
         }
     }
@@ -696,11 +700,13 @@ impl fmt::Debug for Event {
             Self::ConnectionAccepted {
                 accepted_by: _,
                 accepted_by_name: _,
+                timestamp,
                 key_package,
             } => f
                 .debug_struct("ConnectionAccepted")
                 .field("accepted_by", &"[REDACTED]")
                 .field("accepted_by_name", &"[REDACTED]")
+                .field("timestamp", timestamp)
                 .field("has_key_package", &key_package.is_some())
                 .finish(),
             Self::ConnectionRejected { rejected_by: _ } => f
