@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
-/// Internal message prefixes for MLS protocol messages.
+/// Internal message prefixes for protocol messages.
 mod internal_prefixes {
     /// Prefix for key package messages.
     pub const KEY_PACKAGE: &str = "__MLS_KEY_PKG__";
@@ -24,6 +24,12 @@ mod internal_prefixes {
     pub const WELCOME: &str = "__MLS_WELCOME__";
     /// Prefix for encrypted messages.
     pub const ENCRYPTED: &str = "__MLS_ENC__";
+    /// Prefix for connection request messages.
+    pub const CONN_REQUEST: &str = "__CONN_REQ__";
+    /// Prefix for connection accepted messages.
+    pub const CONN_ACCEPT: &str = "__CONN_ACC__";
+    /// Prefix for connection rejected messages.
+    pub const CONN_REJECT: &str = "__CONN_REJ__";
 }
 
 /// Payload for key package exchange.
@@ -35,6 +41,28 @@ struct KeyPackagePayload {
     key_package_data: Vec<u8>,
     /// Timestamp of creation.
     timestamp_ms: u64,
+}
+
+/// Payload for a connection request message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConnectionRequestPayload {
+    /// Display name of the sender.
+    sender_name: String,
+    /// Timestamp of the request (Unix ms).
+    timestamp_ms: i64,
+    /// Optional MLS key package data for encrypted session setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_package: Option<Vec<u8>>,
+}
+
+/// Payload for a connection accepted message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ConnectionAcceptedPayload {
+    /// Display name of the accepting party.
+    accepted_by_name: String,
+    /// Optional MLS key package data for encrypted session setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_package: Option<Vec<u8>>,
 }
 
 /// Result of processing an internal MLS message.
@@ -1253,6 +1281,185 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
+    /// Sends a connection request to another user via any available transport.
+    ///
+    /// The request is routed through DORS, so it works over Internet, BLE, or WiFi Direct.
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient` - The user ID of the recipient
+    /// * `sender_name` - Display name of the sender
+    /// * `key_package` - Optional MLS key package for encrypted session setup
+    pub fn send_connection_request(
+        &mut self,
+        recipient: &str,
+        sender_name: &str,
+        key_package: Option<Vec<u8>>,
+    ) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let payload = ConnectionRequestPayload {
+            sender_name: sender_name.to_string(),
+            timestamp_ms: Utc::now().timestamp_millis(),
+            key_package,
+        };
+
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
+        let content = format!("{}{}", internal_prefixes::CONN_REQUEST, serialized);
+
+        let message =
+            self.create_message(recipient, content, Some(MessagePriority::High), None)?;
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    recipient = %recipient,
+                    error = %err,
+                    "Connection request send failed, message deferred"
+                );
+            }
+        }
+
+        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        info!(recipient = %recipient, "Sent connection request");
+        Ok(message_id)
+    }
+
+    /// Accepts a connection request from another user via any available transport.
+    ///
+    /// The response is routed through DORS, so it works over Internet, BLE, or WiFi Direct.
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient` - The user ID of the original requester
+    /// * `accepter_name` - Display name of the accepting party
+    /// * `key_package` - Optional MLS key package for encrypted session setup
+    pub fn accept_connection_request(
+        &mut self,
+        recipient: &str,
+        accepter_name: &str,
+        key_package: Option<Vec<u8>>,
+    ) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let payload = ConnectionAcceptedPayload {
+            accepted_by_name: accepter_name.to_string(),
+            key_package,
+        };
+
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
+        let content = format!("{}{}", internal_prefixes::CONN_ACCEPT, serialized);
+
+        let message =
+            self.create_message(recipient, content, Some(MessagePriority::High), None)?;
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    recipient = %recipient,
+                    error = %err,
+                    "Connection accept send failed, message deferred"
+                );
+            }
+        }
+
+        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        info!(recipient = %recipient, "Accepted connection request");
+        Ok(message_id)
+    }
+
+    /// Rejects a connection request from another user via any available transport.
+    ///
+    /// The response is routed through DORS, so it works over Internet, BLE, or WiFi Direct.
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient` - The user ID of the original requester
+    pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let content = internal_prefixes::CONN_REJECT.to_string();
+
+        let message =
+            self.create_message(recipient, content, Some(MessagePriority::High), None)?;
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    recipient = %recipient,
+                    error = %err,
+                    "Connection reject send failed, message deferred"
+                );
+            }
+        }
+
+        self.emit_transport_switch_event(previous_transport, current_transport)?;
+        info!(recipient = %recipient, "Rejected connection request");
+        Ok(message_id)
+    }
+
     /// Receives the next available message.
     ///
     /// # Returns
@@ -1541,6 +1748,52 @@ impl OfflineProtocol {
                     }
                 }
             }
+        }
+
+        // Handle connection request messages
+        if content.starts_with(internal_prefixes::CONN_REQUEST) {
+            let data = &content[internal_prefixes::CONN_REQUEST.len()..];
+            if let Ok(payload) = serde_json::from_str::<ConnectionRequestPayload>(data) {
+                info!(sender = %sender, sender_name = %payload.sender_name, "Received connection request");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::connection_request_received(
+                        sender.to_string(),
+                        payload.sender_name,
+                        payload.timestamp_ms,
+                        payload.key_package,
+                    ));
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse connection request payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        // Handle connection accepted messages
+        if content.starts_with(internal_prefixes::CONN_ACCEPT) {
+            let data = &content[internal_prefixes::CONN_ACCEPT.len()..];
+            if let Ok(payload) = serde_json::from_str::<ConnectionAcceptedPayload>(data) {
+                info!(sender = %sender, accepted_by_name = %payload.accepted_by_name, "Connection request accepted");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::connection_accepted(
+                        sender.to_string(),
+                        payload.accepted_by_name,
+                        payload.key_package,
+                    ));
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse connection accepted payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        // Handle connection rejected messages
+        if content == internal_prefixes::CONN_REJECT {
+            info!(sender = %sender, "Connection request rejected");
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::connection_rejected(sender.to_string()));
+            }
+            return Some(InternalMessageResult::Consumed);
         }
 
         None // Not an internal message
@@ -2009,6 +2262,7 @@ impl OfflineProtocol {
 mod tests {
     use super::*;
     use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -2362,6 +2616,9 @@ mod tests {
         assert_eq!(internal_prefixes::KEY_PACKAGE, "__MLS_KEY_PKG__");
         assert_eq!(internal_prefixes::WELCOME, "__MLS_WELCOME__");
         assert_eq!(internal_prefixes::ENCRYPTED, "__MLS_ENC__");
+        assert_eq!(internal_prefixes::CONN_REQUEST, "__CONN_REQ__");
+        assert_eq!(internal_prefixes::CONN_ACCEPT, "__CONN_ACC__");
+        assert_eq!(internal_prefixes::CONN_REJECT, "__CONN_REJ__");
     }
 
     #[test]
@@ -2403,6 +2660,263 @@ mod tests {
             protocol.pending_key_packages.get("sender123").unwrap(),
             &vec![1u8, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn test_process_internal_message_connection_request_event() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let payload = ConnectionRequestPayload {
+            sender_name: "Alice".to_string(),
+            timestamp_ms: 12345,
+            key_package: Some(vec![9, 8, 7]),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::CONN_REQUEST,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            Event::ConnectionRequestReceived {
+                sender,
+                sender_name,
+                timestamp,
+                key_package,
+            } => {
+                assert_eq!(sender, "alice");
+                assert_eq!(sender_name, "Alice");
+                assert_eq!(*timestamp, 12345);
+                assert_eq!(key_package.as_ref(), Some(&vec![9, 8, 7]));
+            }
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_process_internal_message_connection_accepted_event() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let payload = ConnectionAcceptedPayload {
+            accepted_by_name: "Bob".to_string(),
+            key_package: Some(vec![1, 2, 3, 4]),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::CONN_ACCEPT,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let message = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            Event::ConnectionAccepted {
+                accepted_by,
+                accepted_by_name,
+                key_package,
+            } => {
+                assert_eq!(accepted_by, "bob");
+                assert_eq!(accepted_by_name, "Bob");
+                assert_eq!(key_package.as_ref(), Some(&vec![1, 2, 3, 4]));
+            }
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    #[test]
+    fn test_process_internal_message_connection_rejected_event() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let content = internal_prefixes::CONN_REJECT.to_string();
+        let message = Message::new(
+            UserId::new("carol").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            Event::ConnectionRejected { rejected_by } => {
+                assert_eq!(rejected_by, "carol");
+            }
+            _ => panic!("Wrong event type"),
+        }
+    }
+
+    // ========================================================================
+    // SENDER-SIDE CONNECTION REQUEST TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_send_connection_request_success() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.send_connection_request("bob", "Alice", None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_send_connection_request_not_started() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let result = protocol.send_connection_request("bob", "Alice", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_send_connection_request_with_key_package() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let key_package = vec![1, 2, 3, 4, 5];
+        let result = protocol.send_connection_request("bob", "Alice", Some(key_package));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_accept_connection_request_success() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.accept_connection_request("bob", "Alice", None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_accept_connection_request_not_started() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let result = protocol.accept_connection_request("bob", "Alice", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accept_connection_request_with_key_package() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let key_package = vec![10, 20, 30];
+        let result = protocol.accept_connection_request("bob", "Alice", Some(key_package));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_reject_connection_request_success() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.reject_connection_request("bob");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_reject_connection_request_not_started() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let result = protocol.reject_connection_request("bob");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_send_connection_request_returns_unique_ids() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let id1 = protocol
+            .send_connection_request("bob", "Alice", None)
+            .unwrap();
+        let id2 = protocol
+            .send_connection_request("carol", "Alice", None)
+            .unwrap();
+        assert_ne!(id1, id2);
     }
 
     #[test]

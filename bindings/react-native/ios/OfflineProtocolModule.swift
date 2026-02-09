@@ -593,6 +593,68 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_SEND", "Failed to send message: \(error.localizedDescription)", error)
         }
     }
+
+    @objc func sendConnectionRequest(_ recipient: String,
+                                     senderName: String,
+                                     keyPackage: [NSNumber]?,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+
+            let keyPackageData = keyPackage?.map { UInt8($0.intValue) }
+            let messageId = try proto.sendConnectionRequest(
+                recipient: recipient,
+                senderName: senderName,
+                keyPackage: keyPackageData
+            )
+            resolver(messageId)
+        } catch {
+            rejecter("ERROR_CONNECTION_REQUEST", "Failed to send connection request: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func acceptConnectionRequest(_ recipient: String,
+                                       accepterName: String,
+                                       keyPackage: [NSNumber]?,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+
+            let keyPackageData = keyPackage?.map { UInt8($0.intValue) }
+            let messageId = try proto.acceptConnectionRequest(
+                recipient: recipient,
+                accepterName: accepterName,
+                keyPackage: keyPackageData
+            )
+            resolver(messageId)
+        } catch {
+            rejecter("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func rejectConnectionRequest(_ recipient: String,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+
+            let messageId = try proto.rejectConnectionRequest(recipient: recipient)
+            resolver(messageId)
+        } catch {
+            rejecter("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: \(error.localizedDescription)", error)
+        }
+    }
     
     @objc func receiveMessage(_ resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {

@@ -541,6 +541,57 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun sendConnectionRequest(recipient: String, senderName: String, keyPackage: ReadableArray?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val keyPackageData = if (keyPackage != null) {
+                val data = mutableListOf<UByte>()
+                for (i in 0 until keyPackage.size()) {
+                    data.add(keyPackage.getInt(i).toUByte())
+                }
+                data
+            } else {
+                null
+            }
+            val messageId = proto.sendConnectionRequest(recipient, senderName, keyPackageData)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CONNECTION_REQUEST", "Failed to send connection request: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: ReadableArray?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val keyPackageData = if (keyPackage != null) {
+                val data = mutableListOf<UByte>()
+                for (i in 0 until keyPackage.size()) {
+                    data.add(keyPackage.getInt(i).toUByte())
+                }
+                data
+            } else {
+                null
+            }
+            val messageId = proto.acceptConnectionRequest(recipient, accepterName, keyPackageData)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun rejectConnectionRequest(recipient: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val messageId = proto.rejectConnectionRequest(recipient)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
     fun receiveMessage(promise: Promise) {
         val messageJson = protocol?.receiveMessage()
         promise.resolve(messageJson)

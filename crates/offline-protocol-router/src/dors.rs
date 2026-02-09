@@ -285,21 +285,29 @@ impl TransportSelector {
         let best_score = best.1.total;
 
         if let Some(current) = self.current_transport {
-            if current == best_transport {
-                return Some(current);
-            }
+            // If current transport is no longer available, switch immediately
+            // regardless of cooldown or hysteresis (e.g. Internet disconnected).
+            let current_still_available = available_transports.contains_key(&current);
 
-            if let Some(current_score) = scored_transports
-                .iter()
-                .find(|(t, _)| *t == current)
-                .map(|(_, s)| s.total)
-            {
-                if !self.should_switch(current, current_score, best_transport, best_score) {
+            if current_still_available {
+                if current == best_transport {
                     return Some(current);
                 }
-            } else if !self.is_past_cooldown() {
-                return Some(current);
+
+                if let Some(current_score) = scored_transports
+                    .iter()
+                    .find(|(t, _)| *t == current)
+                    .map(|(_, s)| s.total)
+                {
+                    if !self.should_switch(current, current_score, best_transport, best_score) {
+                        return Some(current);
+                    }
+                } else if !self.is_past_cooldown() {
+                    return Some(current);
+                }
             }
+            // When current transport is unavailable, fall through to select the
+            // best available transport without cooldown or hysteresis checks.
         }
 
         // Track switch
@@ -1241,5 +1249,43 @@ mod tests {
 
         let selected = selector.select_transport(&message, &transports).unwrap();
         assert_eq!(selected, TransportType::BLE);
+    }
+
+    #[test]
+    fn test_unavailable_transport_bypasses_cooldown() {
+        let config = DorsConfig {
+            prefer_online: true,
+            switch_cooldown_secs: 60, // Long cooldown
+            ..Default::default()
+        };
+        let mut selector = TransportSelector::with_config(config);
+        let message = create_test_message();
+
+        // First: select Internet while it's available
+        let mut transports_with_internet = HashMap::new();
+        transports_with_internet
+            .insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
+        transports_with_internet
+            .insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+
+        let selected = selector
+            .select_transport(&message, &transports_with_internet)
+            .unwrap();
+        assert_eq!(selected, TransportType::Internet);
+
+        // Now Internet disconnects (removed from available transports).
+        // Despite the 60s cooldown, DORS must switch to BLE immediately.
+        let mut transports_without_internet = HashMap::new();
+        transports_without_internet
+            .insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+
+        let selected = selector
+            .select_transport(&message, &transports_without_internet)
+            .unwrap();
+        assert_eq!(
+            selected,
+            TransportType::BLE,
+            "DORS must fall back to BLE when Internet is no longer available"
+        );
     }
 }

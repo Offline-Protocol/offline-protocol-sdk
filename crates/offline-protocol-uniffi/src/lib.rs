@@ -1021,6 +1021,47 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // CONNECTION REQUESTS (TRANSPORT-AGNOSTIC)
+    // ========================================================================
+
+    /// Sends a connection request to another user via any available transport (DORS-routed).
+    pub fn send_connection_request(
+        &self,
+        recipient: String,
+        sender_name: String,
+        key_package: Option<Vec<u8>>,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        let message_id = protocol
+            .send_connection_request(&recipient, &sender_name, key_package)
+            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+        Ok(message_id.as_str())
+    }
+
+    /// Accepts a connection request from another user via any available transport (DORS-routed).
+    pub fn accept_connection_request(
+        &self,
+        recipient: String,
+        accepter_name: String,
+        key_package: Option<Vec<u8>>,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        let message_id = protocol
+            .accept_connection_request(&recipient, &accepter_name, key_package)
+            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+        Ok(message_id.as_str())
+    }
+
+    /// Rejects a connection request from another user via any available transport (DORS-routed).
+    pub fn reject_connection_request(&self, recipient: String) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        let message_id = protocol
+            .reject_connection_request(&recipient)
+            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+        Ok(message_id.as_str())
+    }
+
+    // ========================================================================
     // BLE TRANSPORT OPERATIONS
     // ========================================================================
 
