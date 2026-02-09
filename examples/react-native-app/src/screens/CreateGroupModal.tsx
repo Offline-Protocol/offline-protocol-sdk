@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelay } from '../hooks/useWebSocketRelay';
+import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
 import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 
@@ -22,7 +22,7 @@ interface CreateGroupModalProps {
 
 export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalProps) {
   const { theme } = useTheme();
-  const { send, authenticatedUser, status } = useWebSocketRelay();
+  const { send, authenticatedUser, status } = useWebSocketRelayContext();
   const { protocol, isInitialized } = useProtocol();
   const [groupName, setGroupName] = useState('');
   const [membersToAdd, setMembersToAdd] = useState<string[]>([]);
@@ -74,14 +74,14 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
       // Create group using SDK
       const createGroupJson = await protocol.groupCreate(groupName.trim());
       const createGroupPayload = JSON.parse(createGroupJson);
-      
+
       // Send via WebSocket
       const sent = send(createGroupPayload);
       if (!sent) {
         throw new Error('Failed to send group creation request');
       }
 
-      // Wait for GroupCreated response (handled by useWebSocketRelay)
+      // Wait for GroupCreated response (handled by WebSocketRelayProvider)
       // Then add members if any
       if (membersToAdd.length > 0) {
         // We'll need to wait for the group_id from the response

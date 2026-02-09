@@ -687,6 +687,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             0
         }
         
+        // Set auth token if provided in config
+        val authToken = config?.getString("authToken")
+        if (authToken != null) {
+            manager.setAuthToken(authToken)
+        }
+        
         // Internet transport is already registered during protocol initialization
         // Just configure and start the WebSocket manager
         manager.configure(wsUrl, autoReconnect, maxRetries)
@@ -694,7 +700,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         
         emitDiagnostic("info", "Internet transport enabled", mapOf(
             "serverUrl" to wsUrl,
-            "autoReconnect" to autoReconnect
+            "autoReconnect" to autoReconnect,
+            "hasAuthToken" to (authToken != null)
         ))
     }
 
@@ -739,7 +746,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)
         }
     }
-
+    
+    
     @ReactMethod
     fun isBluetoothEnabled(promise: Promise) {
         try {

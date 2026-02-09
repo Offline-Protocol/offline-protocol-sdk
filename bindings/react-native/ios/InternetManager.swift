@@ -31,6 +31,7 @@ public class InternetManager: NSObject, TransportManager {
     
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
+    private var authToken: String? = nil
     private var serverUrl: URL?
     
     // WebSocket components
@@ -98,6 +99,24 @@ public class InternetManager: NSObject, TransportManager {
             "autoReconnect": autoReconnect,
             "maxReconnectAttempts": maxReconnectAttempts
         ])
+    }
+    
+    /// Set the auth token for authentication
+    /// If the WebSocket is already connected, this will trigger re-authentication
+    public func setAuthToken(_ token: String?) {
+        let wasAuthenticated = isAuthenticated
+        self.authToken = token
+        
+        emitDiagnostic("info", "Auth token updated", context: [
+            "hasToken": token != nil,
+            "wasAuthenticated": wasAuthenticated
+        ])
+        
+        // If already connected, (re-)authenticate with the latest token.
+        // This ensures token rotations take effect immediately.
+        if isConnected {
+            sendAuthentication()
+        }
     }
     
     // MARK: - TransportManager Implementation
@@ -232,10 +251,12 @@ public class InternetManager: NSObject, TransportManager {
     }
     
     private func sendAuthentication() {
-        // In test mode, the token becomes the user ID
+        // Use auth token if available, otherwise fall back to deviceId
+        let token = authToken ?? deviceId
+        
         let authMessage: [String: Any] = [
             "type": "Authenticate",
-            "token": deviceId
+            "token": token
         ]
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: authMessage),

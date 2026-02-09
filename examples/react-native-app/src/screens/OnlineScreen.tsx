@@ -15,7 +15,8 @@ import {
 import LinearGradient from 'react-native-linear-gradient';
 import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelay, type OnlineMessage } from '../hooks/useWebSocketRelay';
+import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
+import { type OnlineMessage } from '../providers/WebSocketRelayProvider';
 import { useProtocol } from '../hooks/useProtocol';
 
 type Tab = 'chat' | 'users' | 'groups';
@@ -30,7 +31,6 @@ export function OnlineScreen() {
   const [recipientId, setRecipientId] = useState('');
   const [messageInput, setMessageInput] = useState('');
   const [checkUserId, setCheckUserId] = useState('');
-  const hasAutoAuthenticatedRef = useRef(false);
 
   const {
     status,
@@ -45,14 +45,7 @@ export function OnlineScreen() {
     sendMessage,
     checkPresence,
     clearMessages,
-  } = useWebSocketRelay({
-    onMessageReceived: message => {
-      console.log('[OnlineScreen] Message received:', message);
-    },
-    onError: err => {
-      Alert.alert('Error', err);
-    },
-  });
+  } = useWebSocketRelayContext();
 
   const handleConnect = useCallback(() => {
     connect();
@@ -98,7 +91,7 @@ export function OnlineScreen() {
     }
   }, [currentUserName]);
 
-  // Auto-authenticate is now handled by useWebSocketRelay with hardcoded token
+  // Auto-authenticate is handled by WebSocketRelayProvider
   // This effect is no longer needed but kept for backwards compatibility
 
   useEffect(() => {

@@ -724,6 +724,11 @@ class OfflineProtocolModule: RCTEventEmitter {
         let autoReconnect = (config?["autoReconnect"] as? Bool) ?? true
         let maxRetries = (config?["maxReconnectAttempts"] as? Int) ?? 0
         
+        // Set auth token if provided in config
+        if let authToken = config?["authToken"] as? String {
+            manager.setAuthToken(authToken)
+        }
+        
         // Internet transport is already registered during protocol initialization
         // Just configure and start the WebSocket manager
         try manager.configure(serverUrl: wsUrl, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries)
@@ -731,7 +736,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         
         emitDiagnostic(level: "info", message: "Internet transport enabled", context: [
             "serverUrl": wsUrl,
-            "autoReconnect": autoReconnect
+            "autoReconnect": autoReconnect,
+            "hasAuthToken": config?["authToken"] != nil
         ])
     }
     
@@ -769,6 +775,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: \(error.localizedDescription)", error)
         }
     }
+    
     
     @objc func isBluetoothEnabled(_ resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {

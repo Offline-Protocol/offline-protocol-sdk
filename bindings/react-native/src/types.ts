@@ -116,6 +116,8 @@ export interface InternetTransportConfig {
   autoReconnect?: boolean;
   /** Reconnection delay in milliseconds */
   reconnectDelay?: number;
+  /** Auth token for authentication (if not provided, deviceId will be used) */
+  authToken?: string;
 }
 
 /**

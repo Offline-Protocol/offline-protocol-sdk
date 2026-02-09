@@ -20,6 +20,23 @@ export const DEFAULT_RELAY_SERVER_URL =
  */
 export const HARDCODED_TOKEN = ENV_RELAY_AUTH_TOKEN || '';
 
+if (__DEV__) {
+  console.log('[Constants] ENV_RELAY_SERVER_URL:', ENV_RELAY_SERVER_URL);
+  console.log(
+    '[Constants] ENV_RELAY_AUTH_TOKEN length:',
+    ENV_RELAY_AUTH_TOKEN?.length || 0,
+  );
+  console.log(
+    '[Constants] DEFAULT_RELAY_SERVER_URL:',
+    DEFAULT_RELAY_SERVER_URL,
+  );
+  console.log(
+    '[Constants] HARDCODED_TOKEN length:',
+    HARDCODED_TOKEN?.length || 0,
+  );
+  console.log('[Constants] HARDCODED_TOKEN:', HARDCODED_TOKEN || 0);
+}
+
 /**
  * Presence message prefix used to identify presence/status messages.
  */
