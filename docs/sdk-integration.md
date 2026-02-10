@@ -403,8 +403,9 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 |--------|-----------|-------------|
 | **internetStatusChanged** | `internetStatusChanged(isConnected: boolean): Promise<void>` | Notifies protocol of internet connection state. |
 | **internetMessageReceived** | `internetMessageReceived(senderId, data: number[]): Promise<void>` | Incoming internet message. |
-| **internetGetNextMessage** | `internetGetNextMessage(): Promise<{recipientId, data} \| null>` | Next outgoing internet message. |
-| **internetReturnMessage** | `internetReturnMessage(): Promise<void>` | Marks last internet message as sent. |
+| **internetGetNextMessage** | `internetGetNextMessage(): Promise<{messageId, recipientId, data} \| null>` | Next outgoing internet message. Use `messageId` to confirm or report failure. |
+| **internetConfirmSent** | `internetConfirmSent(messageId: string): Promise<void>` | Confirms a message was sent over the wire. Call after WebSocket send succeeds. |
+| **internetSendFailed** | `internetSendFailed(messageId: string): Promise<void>` | Reports a message failed to send. Call when WebSocket send fails. |
 
 ---
 

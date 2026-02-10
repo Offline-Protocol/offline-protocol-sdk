@@ -506,8 +506,12 @@ impl OfflineProtocol {
     /// EDGE CASE HANDLING:
     /// - Ensures message is persisted to outbox for recovery
     /// - Schedules retry with exponential backoff
-    /// - Records transport failure for DORS decision making
     /// - Handles case where all transports are unavailable
+    ///
+    /// NOTE: This does NOT call `record_retry_failure` — callers that need it
+    /// (e.g. `send_via_forced_transport`) must record the failure themselves.
+    /// `TransportManager::send()` already records failures internally, so
+    /// calling it here would double-count.
     fn handle_send_failure(
         &mut self,
         message: &Message,
@@ -524,10 +528,6 @@ impl OfflineProtocol {
                 error = %e,
                 "Failed to enqueue message for retry, message remains in outbox"
             );
-        }
-
-        if let Some(transport) = transport {
-            self.transport_manager.record_retry_failure(transport);
         }
 
         warn!(
@@ -740,6 +740,9 @@ impl OfflineProtocol {
         match send_result {
             Ok(()) => {
                 self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
             }
             Err(err) => {
                 self.handle_send_failure(&message, current_transport.or(previous_transport))?;
@@ -748,14 +751,12 @@ impl OfflineProtocol {
                     error = %err,
                     "Send failed, message deferred"
                 );
+                Err(Error::Other(format!(
+                    "Send failed (message {} deferred for retry): {}",
+                    message.id, err
+                )))
             }
         }
-
-        // Emit events
-        self.emit_transport_switch_event(previous_transport, current_transport)?;
-        self.emit_message_sent_event(&message)?;
-
-        Ok(message_id)
     }
 
     /// Encrypts content for a recipient, handling session creation if needed.
@@ -1315,23 +1316,27 @@ impl OfflineProtocol {
         match send_result {
             Ok(()) => {
                 self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
             }
             Err(err) => {
                 self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                // send_via_transport does not record retry failures internally
+                // (unlike TransportManager::send), so record explicitly here.
+                self.transport_manager.record_retry_failure(transport);
                 warn!(
                     message_id = %message.id,
                     transport = ?transport,
                     error = %err,
                     "Send via forced transport failed, message deferred"
                 );
+                Err(Error::Other(format!(
+                    "Send via {:?} failed (message {} deferred for retry): {}",
+                    transport, message.id, err
+                )))
             }
         }
-
-        // Emit events
-        self.emit_transport_switch_event(previous_transport, current_transport)?;
-        self.emit_message_sent_event(&message)?;
-
-        Ok(message_id)
     }
 
     /// Sends a connection request to another user via any available transport.

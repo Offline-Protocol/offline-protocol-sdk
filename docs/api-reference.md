@@ -203,18 +203,20 @@ pub fn send_message(
     recipient: impl Into<String>,
     content: impl Into<String>,
     priority: Option<MessagePriority>,
+    reply_to_msg: Option<impl Into<String>>,
 ) -> Result<MessageId>
 ```
 
-Sends a message. Returns message ID for tracking.
+Sends a message. Returns `Ok(message_id)` on success or `Err` if the transport
+send failed. On error the message is automatically deferred for retry — the
+caller should treat this as "queued, pending delivery" rather than "lost".
 
 **Example**:
 ```rust
-let msg_id = protocol.send_message(
-    "user456",
-    "Hello!",
-    Some(MessagePriority::High)
-)?;
+match protocol.send_message("user456", "Hello!", Some(MessagePriority::High), None::<String>) {
+    Ok(msg_id) => println!("Sent: {msg_id}"),
+    Err(e) => println!("Deferred for retry: {e}"),
+}
 ```
 
 ```rust

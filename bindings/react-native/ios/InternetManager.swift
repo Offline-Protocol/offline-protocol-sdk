@@ -645,7 +645,7 @@ public class InternetManager: NSObject, TransportManager {
                 break
             }
             
-            self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
+            self.sendMessage(messageId: message.messageId, recipientId: message.recipientId, data: Data(message.data))
             messagesSent += 1
         }
         
@@ -656,18 +656,19 @@ public class InternetManager: NSObject, TransportManager {
         }
     }
     
-    private func sendMessage(recipientId: String, data: Data) {
+    private func sendMessage(messageId: String, recipientId: String, data: Data) {
         // Re-check connection state right before sending
         // This handles race conditions where connection drops between poll and send
         guard isConnected, isAuthenticated, let task = webSocketTask else {
             emitDiagnostic("warning", "Cannot send message - not connected or not authenticated", context: [
+                "messageId": messageId,
                 "recipientId": recipientId,
                 "isConnected": isConnected,
                 "isAuthenticated": isAuthenticated,
                 "hasTask": webSocketTask != nil
             ])
-            // The message remains in the protocol's outbox and will be retried
-            // when connection is restored
+            // Report failure so DORS metrics stay accurate
+            protocolInstance.internetSendFailed(messageId: messageId)
             return
         }
         
@@ -708,6 +709,7 @@ public class InternetManager: NSObject, TransportManager {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: relayMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
             emitDiagnostic("error", "Failed to create relay message")
+            protocolInstance.internetSendFailed(messageId: messageId)
             return
         }
         
@@ -716,13 +718,14 @@ public class InternetManager: NSObject, TransportManager {
             
             if let error = error {
                 self.consecutiveSendFailures += 1
+                self.protocolInstance.internetSendFailed(messageId: messageId)
                 self.emitDiagnostic("error", "Failed to send WebSocket message", context: [
                     "error": error.localizedDescription,
+                    "messageId": messageId,
                     "recipientId": recipientId,
                     "consecutiveFailures": self.consecutiveSendFailures
                 ])
                 
-                // If send fails, the message stays in outbox and will be retried
                 // If too many consecutive send failures, the connection is likely dead
                 // Trigger disconnect so DORS can switch to another transport
                 if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {
@@ -738,8 +741,10 @@ public class InternetManager: NSObject, TransportManager {
                 self.consecutiveSendFailures = 0
                 self.bytesSent += UInt64(jsonData.count)
                 self.messagesSent += 1
+                self.protocolInstance.internetConfirmSent(messageId: messageId)
                 
                 self.emitDiagnostic("debug", "Message sent via relay", context: [
+                    "messageId": messageId,
                     "recipientId": recipientId,
                     "contentLength": content.count
                 ])

@@ -84,10 +84,22 @@ impl ObservedStats {
 
     fn apply_to_metrics(&self, metrics: &mut TransportMetrics) {
         if self.success_count + self.failure_count > 0 {
-            metrics.success_count = self.success_count;
-            metrics.failure_count = self.failure_count;
-            metrics.delivery_ratio = self.delivery_ratio();
-            metrics.drop_rate = self.drop_ratio();
+            // Only override delivery counts when the transport itself has not
+            // reported any.  Internet transport tracks wire-level outcomes via
+            // the confirmation loop; overwriting those would discard real data.
+            //
+            // NOTE: This check is value-based, not transport-type-based.  If
+            // BLE or WiFi Direct ever start reporting their own success/failure
+            // counts from the native layer (the way Internet does via the
+            // confirmation loop), the condition below will silently skip the
+            // local observations for those transports too.  At that point,
+            // consider switching to an explicit per-transport-type check.
+            if metrics.success_count + metrics.failure_count == 0 {
+                metrics.success_count = self.success_count;
+                metrics.failure_count = self.failure_count;
+                metrics.delivery_ratio = self.delivery_ratio();
+                metrics.drop_rate = self.drop_ratio();
+            }
         }
 
         if let Some(latency) = self.latency_ema {
@@ -130,61 +142,121 @@ impl TransportManager {
             .insert(transport_type, Arc::new(Mutex::new(transport)));
     }
 
-    /// Selects the best transport for sending a message.
+    /// Sends a message through the best available transport, with fallback.
     ///
-    /// # Arguments
+    /// DORS selects a primary transport (applying hysteresis, cooldown, and
+    /// stability checks). If the primary's `send()` fails synchronously, the
+    /// remaining transports are tried in descending score order before
+    /// returning an error. Each synchronous failure is recorded via
+    /// `record_retry_failure` so DORS can adjust future scoring.
     ///
-    /// * `message` - The message to send
+    /// # Internet transport — fallback does NOT apply
     ///
-    /// # Returns
-    ///
-    /// Returns the selected transport type, or None if no suitable transport.
-    pub fn select_transport(&mut self, message: &Message) -> Option<TransportType> {
-        let available_transports = self.get_available_transports();
-        self.selector
-            .select_transport(message, &available_transports)
-    }
-
-    /// Sends a message through the appropriate transport.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to send
-    ///
-    /// # Returns
-    ///
-    /// Returns Ok(()) if sent successfully, Err otherwise.
+    /// Internet `send()` enqueues the message and returns `Ok(())`
+    /// immediately. The actual wire-level outcome is reported asynchronously
+    /// via the `confirm_sent` / `report_send_failure` confirmation loop on
+    /// `InternetTransport`. Because `send()` never fails synchronously, the
+    /// fallback loop below will **not** trigger for Internet. If the
+    /// WebSocket is silently broken (status still `Available` but sends
+    /// fail), messages will be enqueued, detected as failures by the
+    /// confirmation-loop timeout, and counted in DORS metrics — but they
+    /// are **not** retried on an alternative transport by this method.
+    /// Retry/re-routing for those messages is handled by the higher-level
+    /// outbox retry mechanism.
     pub fn send(&mut self, message: &Message) -> Result<()> {
-        // Select transport
-        let transport_type = self
-            .select_transport(message)
+        let available = self.get_available_transports();
+        if available.is_empty() {
+            return Err(Error::Other(
+                "No available transport. Ensure at least one transport (BLE, WiFi Direct, or Internet) is enabled and available.".to_string(),
+            ));
+        }
+
+        // DORS selects the primary transport (applies hysteresis/cooldown/stability).
+        let primary = self
+            .selector
+            .select_transport(message, &available)
             .ok_or_else(|| {
-                // If no transport was selected, provide a helpful error message
-                let available = self.get_available_transports();
-                if available.is_empty() {
-                    Error::Other("No available transport. Ensure at least one transport (BLE, WiFi Direct, or Internet) is enabled and available.".to_string())
-                } else {
-                    Error::Other(format!("No suitable transport selected. Available transports: {:?}", available.keys().collect::<Vec<_>>()))
-                }
+                Error::Other(
+                    "No suitable transport selected from available transports.".to_string(),
+                )
             })?;
 
-        // Update current transport
-        self.current_transport = Some(transport_type);
+        // Try the primary transport first.
+        let primary_result = {
+            let transport = self.transports.get(&primary).ok_or_else(|| {
+                Error::Other(format!("Transport {:?} not found", primary))
+            })?;
+            let transport_lock = transport.lock().map_err(|_| {
+                Error::Other(format!("Transport mutex poisoned for {:?}", primary))
+            })?;
+            transport_lock.send(message)
+        };
 
-        // Get transport and send
-        let transport = self
-            .transports
-            .get(&transport_type)
-            .ok_or_else(|| Error::Other("Transport not found".to_string()))?;
+        match primary_result {
+            Ok(()) => {
+                self.current_transport = Some(primary);
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    transport = ?primary,
+                    error = %e,
+                    "Primary transport send failed, trying fallback"
+                );
+                self.selector.record_retry_failure(primary);
+            }
+        }
 
-        let transport_lock = transport.lock().map_err(|_| {
-            Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
-        })?;
-        transport_lock
-            .send(message)
-            .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
+        // Primary failed — try remaining transports in score order.
+        // score_and_rank re-evaluates without hysteresis so every candidate
+        // is considered. The re-scoring on the failure path is harmless.
+        let scored = self.selector.score_and_rank(message, &available);
+        let mut last_error = None;
+        let mut attempted: Vec<TransportType> = vec![primary];
 
-        Ok(())
+        for (transport_type, _score) in &scored {
+            if *transport_type == primary {
+                continue;
+            }
+
+            let transport = match self.transports.get(transport_type) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let transport_lock = match transport.lock() {
+                Ok(lock) => lock,
+                Err(_) => {
+                    warn!(transport = ?transport_type, "Transport mutex poisoned, skipping");
+                    continue;
+                }
+            };
+
+            attempted.push(*transport_type);
+
+            match transport_lock.send(message) {
+                Ok(()) => {
+                    self.current_transport = Some(*transport_type);
+                    self.selector.set_current_transport(*transport_type);
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        transport = ?transport_type,
+                        error = %e,
+                        "Fallback transport send failed, trying next"
+                    );
+                    self.selector.record_retry_failure(*transport_type);
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(Error::Other(format!(
+            "All transports failed (tried {:?}). Last error: {}",
+            attempted,
+            last_error.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 
     /// Sends a message via a specific transport, bypassing DORS selection.
@@ -202,10 +274,6 @@ impl TransportManager {
         message: &Message,
         transport_type: TransportType,
     ) -> Result<()> {
-        // Update current transport
-        self.current_transport = Some(transport_type);
-
-        // Get transport and send
         let transport = self
             .transports
             .get(&transport_type)
@@ -215,7 +283,6 @@ impl TransportManager {
             Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
         })?;
 
-        // Check transport is available
         if transport_lock.status() != TransportStatus::Available {
             return Err(Error::Other(format!(
                 "Transport {:?} is not available",
@@ -226,6 +293,9 @@ impl TransportManager {
         transport_lock
             .send(message)
             .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
+
+        // Only update current transport after successful send
+        self.current_transport = Some(transport_type);
 
         Ok(())
     }
@@ -287,9 +357,15 @@ impl TransportManager {
                         continue;
                     }
                 };
-                if transport_lock.status() == TransportStatus::Available {
+                let status = transport_lock.status();
+                if status == TransportStatus::Available {
                     Some(transport_lock.metrics())
                 } else {
+                    debug!(
+                        transport = ?transport_type,
+                        status = ?status,
+                        "Transport excluded from available set"
+                    );
                     None
                 }
             };

@@ -731,9 +731,14 @@ export interface WifiDirectMessage {
 // ============================================================================
 
 /**
- * Internet transport outgoing message
+ * Internet transport outgoing message.
+ *
+ * After sending the data over the wire, report the outcome by calling
+ * `internetConfirmSent(messageId)` or `internetSendFailed(messageId)`.
  */
 export interface InternetMessage {
+  /** Unique message identifier — pass to `internetConfirmSent` / `internetSendFailed` */
+  messageId: string;
   /** Recipient ID */
   recipientId: string;
   /** Message data as array of bytes */

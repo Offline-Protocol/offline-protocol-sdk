@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use offline_protocol_core::Message;
 use offline_protocol_transport::{TransportMetrics, TransportType};
 use std::collections::{HashMap, VecDeque};
+use tracing::debug;
 
 /// Configuration for DORS transport selection.
 #[derive(Debug, Clone)]
@@ -284,6 +285,22 @@ impl TransportSelector {
         let best_transport = best.0;
         let best_score = best.1.total;
 
+        // Log all scored transports for observability.
+        // Guard allocation behind level check to avoid Vec<String> on every call.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let scores_summary: Vec<_> = scored_transports
+                .iter()
+                .map(|(t, s)| format!("{:?}={:.1}", t, s.total))
+                .collect();
+            debug!(
+                scores = %scores_summary.join(", "),
+                best = ?best_transport,
+                previous = ?self.current_transport,
+                prefer_online = self.config.prefer_online,
+                "DORS scored transports"
+            );
+        }
+
         if let Some(current) = self.current_transport {
             // If current transport is no longer available, switch immediately
             // regardless of cooldown or hysteresis (e.g. Internet disconnected).
@@ -294,27 +311,71 @@ impl TransportSelector {
                     return Some(current);
                 }
 
-                // current_still_available is true here, so current is in available_transports,
-                // which means it was scored in scored_transports — the find always succeeds.
                 if let Some(current_score) = scored_transports
                     .iter()
                     .find(|(t, _)| *t == current)
                     .map(|(_, s)| s.total)
                 {
                     if !self.should_switch(current, current_score, best_transport, best_score) {
+                        debug!(
+                            current = ?current,
+                            current_score = current_score,
+                            candidate = ?best_transport,
+                            candidate_score = best_score,
+                            "DORS: switch blocked by hysteresis/cooldown/stability"
+                        );
                         return Some(current);
                     }
                 }
+            } else {
+                debug!(
+                    lost = ?current,
+                    fallback = ?best_transport,
+                    "DORS: current transport unavailable, switching immediately"
+                );
             }
-            // When current transport is unavailable, fall through to select the
-            // best available transport without cooldown or hysteresis checks.
         }
 
         // Track switch
+        debug!(
+            from = ?self.current_transport,
+            to = ?best_transport,
+            score = best_score,
+            "DORS: transport switched"
+        );
         self.last_switch_time = Some(Utc::now());
         self.current_transport = Some(best_transport);
 
         Some(best_transport)
+    }
+
+    /// Scores all available transports and returns them ranked by score (descending).
+    ///
+    /// Unlike `select_transport`, this is read-only: it does not record metrics,
+    /// update history, or mutate selector state. It is used by
+    /// `TransportManager::send()` to build a fallback list when the primary
+    /// transport's send fails — at that point `select_transport` has already
+    /// recorded the state for this scoring cycle.
+    ///
+    /// **Important**: This method reads `transport_history` for reliability and
+    /// load scores but does not update it. If called independently of a prior
+    /// `select_transport` in the same cycle, the scores may reflect stale
+    /// history. Always call `select_transport` first in any given scoring
+    /// cycle.
+    pub fn score_and_rank(
+        &self,
+        message: &Message,
+        available_transports: &HashMap<TransportType, TransportMetrics>,
+    ) -> Vec<(TransportType, f32)> {
+        let mut scored: Vec<(TransportType, f32)> = Vec::new();
+
+        for (transport_type, metrics) in available_transports.iter() {
+            let score = self.calculate_transport_score(message, *transport_type, metrics);
+            scored.push((*transport_type, score.total));
+        }
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored
     }
 
     /// Calculates the transport score based on multiple factors.
@@ -332,12 +393,21 @@ impl TransportSelector {
         let reliability_score = self.calculate_reliability_score(transport_type, metrics);
         let load_score = self.calculate_load_score(transport_type, metrics);
 
-        // Weighted combination based on DORS specification
+        // Weighted combination based on DORS specification.
+        //
+        // Score ranges (each sub-score is 0–100):
+        //   BLE / WiFi Direct : 0–100 (pure weighted sum, weights sum to 1.0)
+        //   Internet           : baseline + 0–100
+        //     baseline = 10 (default) or 25 (prefer_online)
+        //     → max ≈ 110 or 125
+        //
+        // The Internet baseline intentionally exceeds the 0–100 range of
+        // offline transports so that the gap comfortably exceeds the default
+        // switch hysteresis (10). Increasing hysteresis beyond ~20 may
+        // prevent DORS from switching *to* Internet even when prefer_online
+        // is set.
         let total = match transport_type {
             TransportType::Internet => {
-                // Internet prioritises bandwidth and reliability.
-                // Give Internet a baseline advantage when connected to ensure it's competitive.
-                // Additional boost when prefer_online is enabled.
                 let baseline = if self.config.prefer_online {
                     25.0
                 } else {
@@ -351,7 +421,6 @@ impl TransportSelector {
                     + (load_score * 0.1)
             }
             TransportType::BLE => {
-                // BLE: balanced for signal, energy, congestion, proximity, reliability, and available capacity
                 (signal_score * 0.3)
                     + (energy_score * 0.3)
                     + (congestion_score * 0.15)
@@ -360,7 +429,6 @@ impl TransportSelector {
                     + (load_score * 0.05)
             }
             TransportType::WiFiDirect => {
-                // Wi-Fi Direct: prefer bandwidth, proximity, congestion, reliability, and available capacity
                 (bandwidth_score * 0.35)
                     + (proximity_score * 0.2)
                     + (congestion_score * 0.2)
@@ -369,7 +437,7 @@ impl TransportSelector {
             }
         };
 
-        let total = total.clamp(0.0, 100.0);
+        let total = total.max(0.0);
 
         TransportScore {
             signal: signal_score,
@@ -1030,6 +1098,29 @@ impl TransportSelector {
     /// Gets the current transport.
     pub fn current_transport(&self) -> Option<TransportType> {
         self.current_transport
+    }
+
+    /// Updates the current transport tracked by the selector.
+    ///
+    /// Used by `TransportManager` when a fallback transport succeeds so that
+    /// subsequent `select_transport` calls apply hysteresis against the
+    /// transport that actually carried the last message. Also resets the
+    /// switch cooldown timer so the next selection uses a full cooldown
+    /// window measured from this fallback, not from the original primary
+    /// selection.
+    ///
+    /// The caller is responsible for ensuring `transport` is currently
+    /// available. Setting a transport that has since become unavailable is
+    /// safe — `select_transport` handles the `!current_still_available`
+    /// case — but may cause one wasted hysteresis evaluation.
+    pub fn set_current_transport(&mut self, transport: TransportType) {
+        debug!(
+            previous = ?self.current_transport,
+            new = ?transport,
+            "DORS: current transport overridden by fallback"
+        );
+        self.current_transport = Some(transport);
+        self.last_switch_time = Some(Utc::now());
     }
 }
 

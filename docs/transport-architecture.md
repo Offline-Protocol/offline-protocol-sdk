@@ -153,21 +153,19 @@ interface TransportManager {
 
 ### Internet (Relay Server)
 
-**Status**: 🚧 Planned
+**Status**: ✅ Implemented
 
 **Use Case**: Communication when devices are far apart via a relay server
-
-**Implementation Requirements**:
-1. Create `InternetManager.swift` (iOS) and `InternetManager.kt` (Android)
-2. Implement `TransportManager` interface
-3. WebSocket connection to relay server
-4. Message routing through server
-5. Handle reconnection and offline queuing
 
 **Architecture**:
 ```
 Device A ←→ WebSocket ←→ Relay Server ←→ WebSocket ←→ Device B
 ```
+
+**Send confirmation loop**: The platform drains the SDK's outgoing queue via
+`internetGetNextMessage()`, sends bytes over the WebSocket, and **must** report
+the outcome via `internetConfirmSent(messageId)` or `internetSendFailed(messageId)`.
+This feeds real delivery data into DORS so it can make accurate routing decisions.
 
 ## Adding a New Transport
 
@@ -396,13 +394,17 @@ Update `AndroidManifest.xml` with required permissions.
 
 ```
 1. App calls sendMessage()
-2. Rust core creates message and fragments it
-3. Rust core stores fragments in transport queues
-4. Native transport managers poll for fragments via bleGetNextFragment()
-5. Transport sends fragment over platform-specific channel
-6. Remote device receives fragment
-7. Remote device passes to Rust core via bleFragmentReceived()
-8. Rust core reassembles and delivers message
+2. DORS selects the best transport (with fallback on failure)
+3. Rust core creates message and stores in transport queue
+4. Native transport managers poll:
+   - BLE: bleGetNextFragment()
+   - Internet: internetGetNextMessage() → returns messageId + bytes
+5. Transport sends data over platform-specific channel
+6. Platform reports outcome:
+   - BLE: implicit (fragment send is synchronous)
+   - Internet: internetConfirmSent(messageId) or internetSendFailed(messageId)
+7. Remote device receives data and passes to Rust core
+8. Rust core delivers message and sends ACK
 ```
 
 ### Incoming Messages

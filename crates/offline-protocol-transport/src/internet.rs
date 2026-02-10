@@ -5,13 +5,23 @@
 
 use crate::constants::{
     INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
-    INTERNET_HEARTBEAT_INTERVAL_SECS,
+    INTERNET_HEARTBEAT_INTERVAL_SECS, INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Recalculates `delivery_ratio` and `drop_rate` from the current success/failure counts.
+fn recalculate_delivery_ratios(metrics: &mut TransportMetrics) {
+    let total = metrics.success_count + metrics.failure_count;
+    if total > 0 {
+        let ratio = metrics.success_count as f32 / total as f32;
+        metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
+        metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+    }
+}
 
 /// Internet transport configuration
 #[derive(Debug, Clone)]
@@ -44,6 +54,21 @@ impl Default for InternetConfig {
 ///
 /// This provides connectivity via TCP/WebSocket to a central relay server.
 /// Useful for hybrid online/offline scenarios.
+///
+/// ## Lock ordering
+///
+/// When acquiring more than one lock in a single scope, follow this order to
+/// prevent deadlocks:
+///
+/// 1. `status`
+/// 2. `pending_confirmation`
+/// 3. `send_queue`
+/// 4. `metrics`
+/// 5. `receive_queue`
+/// 6. `reconnect_attempts` / `last_heartbeat` / `platform_handle`
+///
+/// Not every method needs all of these — the ordering only matters when
+/// multiple locks are held simultaneously.
 pub struct InternetTransport {
     /// Local device ID
     device_id: String,
@@ -53,8 +78,18 @@ pub struct InternetTransport {
     status: Arc<Mutex<TransportStatus>>,
     /// Received message queue
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
-    /// Send queue
+    /// Send queue — messages waiting to be polled by the platform via `get_next_message()`
     send_queue: Arc<Mutex<VecDeque<Message>>>,
+    /// Messages dequeued by the platform but not yet confirmed as sent.
+    /// Key: message_id string, Value: when the message was dequeued.
+    ///
+    /// Bounded by: (a) `drain_expired_pending()` which runs on every
+    /// `get_next_message()` poll, and (b) `fail_all_pending()` which runs
+    /// on transport disconnect. If the platform stops polling *and* the
+    /// transport status stays `Available`, entries accumulate up to the
+    /// number of messages enqueued during that window. Under normal
+    /// operation (platform polls at ≥1 Hz) the map stays small.
+    pending_confirmation: Arc<Mutex<HashMap<String, Instant>>>,
     /// Transport metrics
     metrics: Arc<Mutex<TransportMetrics>>,
     /// Last heartbeat time
@@ -79,6 +114,7 @@ impl InternetTransport {
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
+            pending_confirmation: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             last_heartbeat: Arc::new(Mutex::new(None)),
             reconnect_attempts: Arc::new(Mutex::new(0)),
@@ -113,15 +149,20 @@ impl InternetTransport {
     /// - They will be sent when transport becomes available again
     /// - Reconnect counter is reset on successful connection
     pub fn on_status_changed(&self, status: TransportStatus) {
-        let previous_status = *self.status.lock().unwrap();
-        *self.status.lock().unwrap() = status;
+        let previous_status = {
+            let mut guard = self.status.lock().unwrap();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
 
         // Reset reconnect counter on successful connection
         if status == TransportStatus::Available {
+            // Acquire send_queue before reconnect_attempts to respect lock
+            // ordering (send_queue is #3, reconnect_attempts is #6).
+            let queue_len = self.send_queue.lock().unwrap().len();
             *self.reconnect_attempts.lock().unwrap() = 0;
 
-            // Log if we have pending messages to send after reconnection
-            let queue_len = self.send_queue.lock().unwrap().len();
             if queue_len > 0 {
                 tracing::info!(
                     pending_messages = queue_len,
@@ -132,7 +173,10 @@ impl InternetTransport {
         } else if previous_status == TransportStatus::Available
             && status != TransportStatus::Available
         {
-            // Log disconnection with pending messages
+            // Fail all pending confirmations — the connection is gone so the
+            // platform can no longer report outcomes for in-flight messages.
+            self.fail_all_pending();
+
             let queue_len = self.send_queue.lock().unwrap().len();
             if queue_len > 0 {
                 tracing::warn!(
@@ -184,19 +228,160 @@ impl InternetTransport {
 
     /// Gets the next message to send (for platform implementation).
     ///
-    /// Returns serialized message bytes or None if no messages to send.
-    pub fn get_next_message(&self) -> Result<Option<Vec<u8>>> {
-        let message = {
+    /// Returns the message_id and serialized bytes, or None if no messages to send.
+    /// The message enters the pending-confirmation state until the platform calls
+    /// `confirm_sent()` or `report_send_failure()`.
+    ///
+    /// Also drains any pending confirmations that have exceeded the timeout,
+    /// recording them as failures to keep DORS metrics accurate.
+    pub fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
+        // Expire stale pending confirmations before processing the next message.
+        // This is the only call site — it runs each time the platform polls, which
+        // is frequent enough to bound the pending map and keep metrics fresh.
+        self.drain_expired_pending();
+
+        let (message, queue_depth) = {
             let mut queue = self.send_queue.lock().unwrap();
             match queue.pop_front() {
-                Some(m) => m,
+                Some(m) => {
+                    let depth = queue.len();
+                    (m, depth)
+                }
                 None => return Ok(None),
             }
         };
 
-        // Serialize the message
+        let message_id = message.id.as_str().to_string();
+
+        // Serialize before inserting into pending_confirmation so a
+        // serialization failure does not orphan an entry that the platform
+        // can never confirm or fail.
         let data = self.serialize_message(&message)?;
-        Ok(Some(data))
+
+        {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.insert(message_id.clone(), Instant::now());
+        }
+
+        {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.queue_depth = queue_depth;
+        }
+
+        Ok(Some((message_id, data)))
+    }
+
+    /// Platform confirms that a message was successfully sent over the wire (e.g., WebSocket).
+    ///
+    /// This updates transport metrics to reflect real delivery outcomes,
+    /// enabling DORS to make accurate routing decisions.
+    pub fn confirm_sent(&self, message_id: &str) {
+        let was_pending = {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.remove(message_id).is_some()
+        };
+
+        if was_pending {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.success_count = metrics.success_count.saturating_add(1);
+            recalculate_delivery_ratios(&mut metrics);
+            tracing::trace!(
+                message_id = message_id,
+                success_count = metrics.success_count,
+                "confirm_sent: recorded success"
+            );
+        } else {
+            tracing::debug!(
+                message_id = message_id,
+                "confirm_sent: unknown or already-resolved message"
+            );
+        }
+    }
+
+    /// Platform reports that a message failed to send (e.g., WebSocket error).
+    pub fn report_send_failure(&self, message_id: &str) {
+        let was_pending = {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.remove(message_id).is_some()
+        };
+
+        if was_pending {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.failure_count = metrics.failure_count.saturating_add(1);
+            recalculate_delivery_ratios(&mut metrics);
+            tracing::trace!(
+                message_id = message_id,
+                failure_count = metrics.failure_count,
+                "report_send_failure: recorded failure"
+            );
+        } else {
+            tracing::debug!(
+                message_id = message_id,
+                "report_send_failure: unknown or already-resolved message"
+            );
+        }
+    }
+
+    /// Drains messages that have been pending confirmation longer than the timeout,
+    /// recording each as a failure.
+    fn drain_expired_pending(&self) {
+        let timeout = Duration::from_secs(INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS);
+        let now = Instant::now();
+        let mut expired_count: u32 = 0;
+
+        {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.retain(|_id, enqueued_at| {
+                if now.duration_since(*enqueued_at) >= timeout {
+                    expired_count += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        if expired_count > 0 {
+            tracing::warn!(
+                expired_count = expired_count,
+                "Pending confirmations expired, recorded as failures"
+            );
+            self.record_bulk_failures(expired_count);
+        }
+    }
+
+    /// Fails all pending confirmations immediately.
+    ///
+    /// Called when the transport disconnects or the transport is stopped so
+    /// that metrics reflect the loss right away rather than waiting for the
+    /// per-message expiry timeout.
+    fn fail_all_pending(&self) {
+        let count = {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            let count = u32::try_from(pending.len()).unwrap_or(u32::MAX);
+            pending.clear();
+            count
+        };
+
+        if count > 0 {
+            tracing::warn!(
+                count = count,
+                "Failing all pending confirmations due to transport disconnect"
+            );
+            self.record_bulk_failures(count);
+        }
+    }
+
+    /// Records `count` delivery failures in transport metrics.
+    fn record_bulk_failures(&self, count: u32) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.failure_count = metrics.failure_count.saturating_add(count);
+        recalculate_delivery_ratios(&mut metrics);
+    }
+
+    /// Returns the count of messages currently awaiting confirmation from the platform.
+    pub fn pending_confirmation_count(&self) -> usize {
+        self.pending_confirmation.lock().unwrap().len()
     }
 
     /// Checks if reconnection should be attempted.
@@ -232,9 +417,26 @@ impl InternetTransport {
         }
     }
 
-    /// Updates transport metrics.
-    pub fn update_metrics(&self, metrics: TransportMetrics) {
-        *self.metrics.lock().unwrap() = metrics;
+    /// Updates transport metrics while preserving confirmation-loop delivery counts.
+    ///
+    /// The confirmation loop (`confirm_sent` / `report_send_failure`) owns
+    /// `success_count`, `failure_count`, `delivery_ratio`, and `drop_rate`.
+    /// This method only copies externally-managed fields from `incoming`,
+    /// so adding a new confirmation-loop field doesn't require updating this
+    /// function — it's preserved by default.
+    pub fn update_metrics(&self, incoming: TransportMetrics) {
+        let mut current = self.metrics.lock().unwrap();
+        current.rssi = incoming.rssi;
+        current.latency_ms = incoming.latency_ms;
+        current.bandwidth_bps = incoming.bandwidth_bps;
+        current.congestion = incoming.congestion;
+        current.queue_depth = incoming.queue_depth;
+        current.battery_level = incoming.battery_level;
+        current.is_charging = incoming.is_charging;
+        current.relay_connection_count = incoming.relay_connection_count;
+        current.is_active_relay = incoming.is_active_relay;
+        current.average_hop_count = incoming.average_hop_count;
+        current.energy_cost = incoming.energy_cost;
     }
 }
 
@@ -287,6 +489,7 @@ impl Transport for InternetTransport {
     }
 
     fn stop(&mut self) -> Result<()> {
+        self.fail_all_pending();
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
         Ok(())
     }
@@ -390,11 +593,96 @@ mod tests {
 
         // Send message
         let message = create_test_message();
+        let message_id = message.id.as_str().to_string();
         assert!(transport.send(&message).is_ok());
 
-        // Should have message in queue
+        // Should have message in queue; get_next_message returns (id, bytes)
         let next = transport.get_next_message().unwrap();
         assert!(next.is_some());
+        let (returned_id, data) = next.unwrap();
+        assert_eq!(returned_id, message_id);
+        assert!(!data.is_empty());
+
+        // Message should now be in pending confirmation
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        // Confirm sent — should update success metrics
+        transport.confirm_sent(&returned_id);
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.success_count, 1);
+    }
+
+    #[test]
+    fn test_send_failure_tracking() {
+        let transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let message = create_test_message();
+        assert!(transport.send(&message).is_ok());
+
+        let (msg_id, _data) = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        // Report failure
+        transport.report_send_failure(&msg_id);
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.failure_count, 1);
+        assert_eq!(metrics.success_count, 0);
+    }
+
+    #[test]
+    fn test_pending_expiry_on_drain() {
+        let transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let message = create_test_message();
+        assert!(transport.send(&message).is_ok());
+
+        let (msg_id, _data) = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        // Backdate the pending entry so it appears expired.
+        {
+            let mut pending = transport.pending_confirmation.lock().unwrap();
+            let expired_time = Instant::now()
+                - Duration::from_secs(INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS + 1);
+            pending.insert(msg_id.clone(), expired_time);
+        }
+
+        // Calling get_next_message (even with an empty queue) triggers drain.
+        let next = transport.get_next_message().unwrap();
+        assert!(next.is_none());
+
+        // The expired entry should have been drained and counted as a failure.
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.failure_count, 1);
+        assert_eq!(metrics.success_count, 0);
+    }
+
+    #[test]
+    fn test_fail_all_pending_on_disconnect() {
+        let transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        // Enqueue and dequeue two messages to put them in pending state.
+        let msg1 = create_test_message();
+        let msg2 = create_test_message();
+        assert!(transport.send(&msg1).is_ok());
+        assert!(transport.send(&msg2).is_ok());
+
+        let _ = transport.get_next_message().unwrap().unwrap();
+        let _ = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 2);
+
+        // Simulate disconnect — should fail all pending.
+        transport.on_status_changed(TransportStatus::Disconnected);
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.failure_count, 2);
+        assert_eq!(metrics.success_count, 0);
     }
 
     #[test]
@@ -435,5 +723,54 @@ mod tests {
 
         transport.update_heartbeat();
         assert!(!transport.needs_heartbeat());
+    }
+
+    #[test]
+    fn test_stop_fails_pending() {
+        let mut transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = create_test_message();
+        assert!(transport.send(&msg).is_ok());
+        let _ = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        transport.stop().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        assert_eq!(transport.metrics().failure_count, 1);
+    }
+
+    /// Exhaustive destructuring guard for `update_metrics`.
+    ///
+    /// When a field is added to `TransportMetrics`, this test will fail to
+    /// compile — forcing the developer to decide whether
+    /// `InternetTransport::update_metrics` should copy the new field (platform-
+    /// reported) or leave it alone (confirmation-loop-managed).
+    #[test]
+    fn update_metrics_covers_all_fields() {
+        let m = TransportMetrics::default();
+        // Confirmation-loop-managed fields (preserved by update_metrics):
+        //   success_count, failure_count, delivery_ratio, drop_rate
+        // Platform-reported fields (copied by update_metrics):
+        //   rssi, latency_ms, bandwidth_bps, congestion, queue_depth,
+        //   battery_level, is_charging, relay_connection_count,
+        //   is_active_relay, average_hop_count, energy_cost
+        let TransportMetrics {
+            rssi: _,
+            latency_ms: _,
+            bandwidth_bps: _,
+            congestion: _,
+            queue_depth: _,
+            success_count: _,
+            failure_count: _,
+            battery_level: _,
+            is_charging: _,
+            relay_connection_count: _,
+            is_active_relay: _,
+            delivery_ratio: _,
+            drop_rate: _,
+            average_hop_count: _,
+            energy_cost: _,
+        } = m;
     }
 }

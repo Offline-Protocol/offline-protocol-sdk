@@ -1777,6 +1777,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         if let message = proto.internetGetNextMessage() {
             let dict: [String: Any] = [
+                "messageId": message.messageId,
                 "recipientId": message.recipientId,
                 "data": message.data.map { NSNumber(value: $0) }
             ]
@@ -1786,13 +1787,25 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
-    @objc func internetReturnMessage(_ resolver: @escaping RCTPromiseResolveBlock,
-                                     rejecter: @escaping RCTPromiseRejectBlock) {
+    @objc func internetConfirmSent(_ messageId: String,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
             rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
             return
         }
-        proto.internetReturnMessage()
+        proto.internetConfirmSent(messageId: messageId)
+        resolver(nil)
+    }
+    
+    @objc func internetSendFailed(_ messageId: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
+            return
+        }
+        proto.internetSendFailed(messageId: messageId)
         resolver(nil)
     }
     
