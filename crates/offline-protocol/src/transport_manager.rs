@@ -84,10 +84,15 @@ impl ObservedStats {
 
     fn apply_to_metrics(&self, metrics: &mut TransportMetrics) {
         if self.success_count + self.failure_count > 0 {
-            metrics.success_count = self.success_count;
-            metrics.failure_count = self.failure_count;
-            metrics.delivery_ratio = self.delivery_ratio();
-            metrics.drop_rate = self.drop_ratio();
+            // Only override delivery counts when the transport itself has not
+            // reported any.  Internet transport tracks wire-level outcomes via
+            // the confirmation loop; overwriting those would discard real data.
+            if metrics.success_count + metrics.failure_count == 0 {
+                metrics.success_count = self.success_count;
+                metrics.failure_count = self.failure_count;
+                metrics.delivery_ratio = self.delivery_ratio();
+                metrics.drop_rate = self.drop_ratio();
+            }
         }
 
         if let Some(latency) = self.latency_ema {
@@ -132,11 +137,11 @@ impl TransportManager {
 
     /// Sends a message through the best available transport, with fallback.
     ///
-    /// DORS scores all available transports. The highest-scored transport is
-    /// tried first. If its `send()` fails synchronously, the remaining
-    /// transports are tried in descending score order before returning an error.
-    /// Each synchronous failure is recorded via `record_retry_failure` so DORS
-    /// can adjust future scoring.
+    /// DORS selects a primary transport (applying hysteresis, cooldown, and
+    /// stability checks). If the primary's `send()` fails synchronously, the
+    /// remaining transports are tried in descending score order before
+    /// returning an error. Each synchronous failure is recorded via
+    /// `record_retry_failure` so DORS can adjust future scoring.
     ///
     /// **Note on Internet transport**: Internet `send()` is asynchronous — it
     /// enqueues the message and returns `Ok(())` immediately. Actual delivery
@@ -151,18 +156,53 @@ impl TransportManager {
             ));
         }
 
-        // score_and_rank returns transports already sorted by score descending
-        let scored = self.selector.score_and_rank(message, &available);
+        // DORS selects the primary transport (applies hysteresis/cooldown/stability).
+        let primary = self
+            .selector
+            .select_transport(message, &available)
+            .ok_or_else(|| {
+                Error::Other(
+                    "No suitable transport selected from available transports.".to_string(),
+                )
+            })?;
 
-        if scored.is_empty() {
-            return Err(Error::Other(
-                "No suitable transport selected from available transports.".to_string(),
-            ));
+        // Try the primary transport first.
+        let primary_result = {
+            let transport = self.transports.get(&primary).ok_or_else(|| {
+                Error::Other(format!("Transport {:?} not found", primary))
+            })?;
+            let transport_lock = transport.lock().map_err(|_| {
+                Error::Other(format!("Transport mutex poisoned for {:?}", primary))
+            })?;
+            transport_lock.send(message)
+        };
+
+        match primary_result {
+            Ok(()) => {
+                self.current_transport = Some(primary);
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    transport = ?primary,
+                    error = %e,
+                    "Primary transport send failed, trying fallback"
+                );
+                self.selector.record_retry_failure(primary);
+            }
         }
 
+        // Primary failed — try remaining transports in score order.
+        // score_and_rank re-evaluates without hysteresis so every candidate
+        // is considered. The re-scoring on the failure path is harmless.
+        let scored = self.selector.score_and_rank(message, &available);
         let mut last_error = None;
 
         for (transport_type, _score) in &scored {
+            if *transport_type == primary {
+                continue;
+            }
+
             let transport = match self.transports.get(transport_type) {
                 Some(t) => t,
                 None => continue,
@@ -179,13 +219,14 @@ impl TransportManager {
             match transport_lock.send(message) {
                 Ok(()) => {
                     self.current_transport = Some(*transport_type);
+                    self.selector.set_current_transport(*transport_type);
                     return Ok(());
                 }
                 Err(e) => {
                     warn!(
                         transport = ?transport_type,
                         error = %e,
-                        "Transport send failed, trying next"
+                        "Fallback transport send failed, trying next"
                     );
                     self.selector.record_retry_failure(*transport_type);
                     last_error = Some(e);

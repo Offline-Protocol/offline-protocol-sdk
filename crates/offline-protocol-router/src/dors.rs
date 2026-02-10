@@ -1095,6 +1095,15 @@ impl TransportSelector {
     pub fn current_transport(&self) -> Option<TransportType> {
         self.current_transport
     }
+
+    /// Updates the current transport tracked by the selector.
+    ///
+    /// Used by `TransportManager` when a fallback transport succeeds so that
+    /// subsequent `select_transport` calls apply hysteresis against the
+    /// transport that actually carried the last message.
+    pub fn set_current_transport(&mut self, transport: TransportType) {
+        self.current_transport = Some(transport);
+    }
 }
 
 impl Default for TransportSelector {

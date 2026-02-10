@@ -146,7 +146,10 @@ impl InternetTransport {
         } else if previous_status == TransportStatus::Available
             && status != TransportStatus::Available
         {
-            // Log disconnection with pending messages
+            // Fail all pending confirmations — the connection is gone so the
+            // platform can no longer report outcomes for in-flight messages.
+            self.fail_all_pending();
+
             let queue_len = self.send_queue.lock().unwrap().len();
             if queue_len > 0 {
                 tracing::warn!(
@@ -252,6 +255,11 @@ impl InternetTransport {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
+        } else {
+            tracing::debug!(
+                message_id = message_id,
+                "confirm_sent: unknown or already-resolved message"
+            );
         }
     }
 
@@ -266,36 +274,60 @@ impl InternetTransport {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
+        } else {
+            tracing::debug!(
+                message_id = message_id,
+                "report_send_failure: unknown or already-resolved message"
+            );
         }
     }
 
-    /// Drains messages that have been pending confirmation longer than the timeout.
-    ///
-    /// Returns the message_ids of expired pending messages, recorded as failures.
-    fn drain_expired_pending(&self) -> Vec<String> {
+    /// Drains messages that have been pending confirmation longer than the timeout,
+    /// recording each as a failure.
+    fn drain_expired_pending(&self) {
         let timeout = Duration::from_secs(INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS);
         let now = Instant::now();
-        let mut expired = Vec::new();
+        let mut expired_count: u32 = 0;
 
         let mut pending = self.pending_confirmation.lock().unwrap();
-        pending.retain(|id, enqueued_at| {
+        pending.retain(|_id, enqueued_at| {
             if now.duration_since(*enqueued_at) >= timeout {
-                expired.push(id.clone());
+                expired_count += 1;
                 false
             } else {
                 true
             }
         });
 
-        if !expired.is_empty() {
+        if expired_count > 0 {
+            tracing::warn!(
+                expired_count = expired_count,
+                "Pending confirmations expired, recorded as failures"
+            );
             let mut metrics = self.metrics.lock().unwrap();
-            metrics.failure_count = metrics
-                .failure_count
-                .saturating_add(expired.len() as u32);
+            metrics.failure_count = metrics.failure_count.saturating_add(expired_count);
             recalculate_delivery_ratios(&mut metrics);
         }
+    }
 
-        expired
+    /// Fails all pending confirmations immediately.
+    ///
+    /// Called when the transport disconnects so that metrics reflect the loss
+    /// right away rather than waiting for the per-message expiry timeout.
+    fn fail_all_pending(&self) {
+        let mut pending = self.pending_confirmation.lock().unwrap();
+        let count = pending.len() as u32;
+        if count > 0 {
+            tracing::warn!(
+                count = count,
+                "Failing all pending confirmations due to transport disconnect"
+            );
+            pending.clear();
+
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.failure_count = metrics.failure_count.saturating_add(count);
+            recalculate_delivery_ratios(&mut metrics);
+        }
     }
 
     /// Returns the count of messages currently awaiting confirmation from the platform.
