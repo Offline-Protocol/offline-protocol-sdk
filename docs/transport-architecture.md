@@ -166,7 +166,6 @@ Device A ←→ WebSocket ←→ Relay Server ←→ WebSocket ←→ Device B
 `internetGetNextMessage()`, sends bytes over the WebSocket, and **must** report
 the outcome via `internetConfirmSent(messageId)` or `internetSendFailed(messageId)`.
 This feeds real delivery data into DORS so it can make accurate routing decisions.
-See [`docs/migration-internet-transport.md`](migration-internet-transport.md).
 
 ## Adding a New Transport
 

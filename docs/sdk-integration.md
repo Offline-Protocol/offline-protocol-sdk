@@ -400,7 +400,8 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 ### 11.11 Internet Transport (Low-Level)
 
 > **Migration note**: `internetGetNextMessage` now returns a `messageId` field and
-> `internetReturnMessage` is deprecated. See [`docs/migration-internet-transport.md`](migration-internet-transport.md) for full details.
+> `internetReturnMessage` is deprecated. Use `internetConfirmSent(messageId)` or
+> `internetSendFailed(messageId)` to report the send outcome.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|

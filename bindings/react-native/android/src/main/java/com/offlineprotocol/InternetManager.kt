@@ -780,7 +780,7 @@ class InternetManager(
                 "hasSocket" to (ws != null)
             ))
             // Report failure so DORS metrics stay accurate
-            try { protocol.internetSendFailed(messageId) } catch (_: Exception) {}
+            try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
             return
         }
         
@@ -806,7 +806,7 @@ class InternetManager(
             consecutiveSendFailures.set(0)
             bytesSent += jsonString.length
             messagesSent++
-            try { protocol.internetConfirmSent(messageId) } catch (_: Exception) {}
+            try { protocol.internetConfirmSent(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to confirm send for $messageId", e) }
             
             emitDiagnostic("debug", "Message sent via relay", mapOf(
                 "messageId" to messageId,
@@ -815,7 +815,7 @@ class InternetManager(
             ))
         } else {
             val failures = consecutiveSendFailures.incrementAndGet()
-            try { protocol.internetSendFailed(messageId) } catch (_: Exception) {}
+            try { protocol.internetSendFailed(messageId) } catch (e: Exception) { Log.e(TAG, "Failed to report send failure for $messageId", e) }
             emitDiagnostic("error", "Failed to send WebSocket message", mapOf(
                 "messageId" to messageId,
                 "recipientId" to recipientId,

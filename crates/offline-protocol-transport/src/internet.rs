@@ -13,6 +13,16 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Recalculates `delivery_ratio` and `drop_rate` from the current success/failure counts.
+fn recalculate_delivery_ratios(metrics: &mut TransportMetrics) {
+    let total = metrics.success_count + metrics.failure_count;
+    if total > 0 {
+        let ratio = metrics.success_count as f32 / total as f32;
+        metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
+        metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+    }
+}
+
 /// Internet transport configuration
 #[derive(Debug, Clone)]
 pub struct InternetConfig {
@@ -191,7 +201,15 @@ impl InternetTransport {
     /// Returns the message_id and serialized bytes, or None if no messages to send.
     /// The message enters the pending-confirmation state until the platform calls
     /// `confirm_sent()` or `report_send_failure()`.
+    ///
+    /// Also drains any pending confirmations that have exceeded the timeout,
+    /// recording them as failures to keep DORS metrics accurate.
     pub fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
+        // Expire stale pending confirmations before processing the next message.
+        // This is the only call site — it runs each time the platform polls, which
+        // is frequent enough to bound the pending map and keep metrics fresh.
+        self.drain_expired_pending();
+
         let message = {
             let mut queue = self.send_queue.lock().unwrap();
             match queue.pop_front() {
@@ -233,12 +251,7 @@ impl InternetTransport {
         if was_pending {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.success_count = metrics.success_count.saturating_add(1);
-            let total = metrics.success_count + metrics.failure_count;
-            if total > 0 {
-                let ratio = metrics.success_count as f32 / total as f32;
-                metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
-                metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
-            }
+            recalculate_delivery_ratios(&mut metrics);
         }
     }
 
@@ -252,20 +265,14 @@ impl InternetTransport {
         if was_pending {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
-            let total = metrics.success_count + metrics.failure_count;
-            if total > 0 {
-                let ratio = metrics.success_count as f32 / total as f32;
-                metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
-                metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
-            }
+            recalculate_delivery_ratios(&mut metrics);
         }
     }
 
     /// Drains messages that have been pending confirmation longer than the timeout.
     ///
-    /// Returns the message_ids of expired pending messages. The caller should
-    /// treat these as send failures.
-    pub fn drain_expired_pending(&self) -> Vec<String> {
+    /// Returns the message_ids of expired pending messages, recorded as failures.
+    fn drain_expired_pending(&self) -> Vec<String> {
         let timeout = Duration::from_secs(INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS);
         let now = Instant::now();
         let mut expired = Vec::new();
@@ -280,18 +287,12 @@ impl InternetTransport {
             }
         });
 
-        // Record expired as failures
         if !expired.is_empty() {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.failure_count = metrics
                 .failure_count
                 .saturating_add(expired.len() as u32);
-            let total = metrics.success_count + metrics.failure_count;
-            if total > 0 {
-                let ratio = metrics.success_count as f32 / total as f32;
-                metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
-                metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
-            }
+            recalculate_delivery_ratios(&mut metrics);
         }
 
         expired

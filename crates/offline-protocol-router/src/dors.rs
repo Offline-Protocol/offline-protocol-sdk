@@ -285,18 +285,21 @@ impl TransportSelector {
         let best_transport = best.0;
         let best_score = best.1.total;
 
-        // Log all scored transports for observability
-        let scores_summary: Vec<_> = scored_transports
-            .iter()
-            .map(|(t, s)| format!("{:?}={:.1}", t, s.total))
-            .collect();
-        debug!(
-            scores = %scores_summary.join(", "),
-            best = ?best_transport,
-            previous = ?self.current_transport,
-            prefer_online = self.config.prefer_online,
-            "DORS scored transports"
-        );
+        // Log all scored transports for observability.
+        // Guard allocation behind level check to avoid Vec<String> on every call.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let scores_summary: Vec<_> = scored_transports
+                .iter()
+                .map(|(t, s)| format!("{:?}={:.1}", t, s.total))
+                .collect();
+            debug!(
+                scores = %scores_summary.join(", "),
+                best = ?best_transport,
+                previous = ?self.current_transport,
+                prefer_online = self.config.prefer_online,
+                "DORS scored transports"
+            );
+        }
 
         if let Some(current) = self.current_transport {
             // If current transport is no longer available, switch immediately

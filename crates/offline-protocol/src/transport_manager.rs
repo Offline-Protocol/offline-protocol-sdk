@@ -130,26 +130,19 @@ impl TransportManager {
             .insert(transport_type, Arc::new(Mutex::new(transport)));
     }
 
-    /// Selects the best transport for sending a message.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to send
-    ///
-    /// # Returns
-    ///
-    /// Returns the selected transport type, or None if no suitable transport.
-    pub fn select_transport(&mut self, message: &Message) -> Option<TransportType> {
-        let available_transports = self.get_available_transports();
-        self.selector
-            .select_transport(message, &available_transports)
-    }
-
     /// Sends a message through the best available transport, with fallback.
     ///
-    /// DORS selects the best transport. If that transport's `send()` fails,
-    /// remaining transports are tried in descending score order before
-    /// returning an error. Failures are recorded for DORS scoring.
+    /// DORS scores all available transports. The highest-scored transport is
+    /// tried first. If its `send()` fails synchronously, the remaining
+    /// transports are tried in descending score order before returning an error.
+    /// Each synchronous failure is recorded via `record_retry_failure` so DORS
+    /// can adjust future scoring.
+    ///
+    /// **Note on Internet transport**: Internet `send()` is asynchronous — it
+    /// enqueues the message and returns `Ok(())` immediately. Actual delivery
+    /// failures are reported later via the `confirm_sent` / `report_send_failure`
+    /// confirmation loop. Therefore the fallback mechanism here only triggers
+    /// for transports whose `send()` can fail synchronously (BLE, WiFi Direct).
     pub fn send(&mut self, message: &Message) -> Result<()> {
         let available = self.get_available_transports();
         if available.is_empty() {
@@ -158,12 +151,8 @@ impl TransportManager {
             ));
         }
 
-        // Score all transports and sort by score descending
-        let mut scored: Vec<(TransportType, f32)> = {
-            let scored_types = self.selector.score_and_rank(message, &available);
-            scored_types
-        };
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // score_and_rank returns transports already sorted by score descending
+        let scored = self.selector.score_and_rank(message, &available);
 
         if scored.is_empty() {
             return Err(Error::Other(

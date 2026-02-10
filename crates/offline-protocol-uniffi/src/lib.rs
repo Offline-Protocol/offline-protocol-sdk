@@ -1370,31 +1370,33 @@ impl OfflineProtocol {
         // Fallback to local queue
         let mut internet_state = self.internet_state.lock().unwrap();
         if let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
-            let (reply_to_msg, msg_id) =
-                if let Some(transport_arc) = protocol
-                    .transport_manager()
-                    .get_transport(CoreTransportType::Internet)
-                {
-                    let transport = transport_arc.lock().unwrap();
-                    if let Some(internet_transport) = transport
-                        .as_any()
-                        .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-                    {
-                        let parsed = internet_transport.deserialize_message(&data).ok();
-                        let reply = parsed
-                            .as_ref()
-                            .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()));
-                        let id = parsed
-                            .as_ref()
-                            .map(|msg| msg.id.as_str().to_string())
-                            .unwrap_or_default();
-                        (reply, id)
-                    } else {
-                        (None, String::new())
-                    }
-                } else {
-                    (None, String::new())
-                };
+            let parsed = if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::Internet)
+            {
+                let transport = transport_arc.lock().unwrap();
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+                    .and_then(|it| it.deserialize_message(&data).ok())
+            } else {
+                None
+            };
+
+            let msg_id = parsed
+                .as_ref()
+                .map(|msg| msg.id.as_str().to_string())
+                .unwrap_or_default();
+
+            // An empty message_id would break the confirm/fail feedback loop — skip it.
+            if msg_id.is_empty() {
+                tracing::warn!("Dropping fallback internet message with unrecoverable message_id");
+                return None;
+            }
+
+            let reply_to_msg = parsed
+                .as_ref()
+                .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()));
 
             return Some(InternetMessage {
                 message_id: msg_id,

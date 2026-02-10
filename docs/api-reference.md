@@ -211,8 +211,6 @@ Sends a message. Returns `Ok(message_id)` on success or `Err` if the transport
 send failed. On error the message is automatically deferred for retry — the
 caller should treat this as "queued, pending delivery" rather than "lost".
 
-See [`docs/migration-internet-transport.md`](migration-internet-transport.md) for migration details.
-
 **Example**:
 ```rust
 match protocol.send_message("user456", "Hello!", Some(MessagePriority::High), None::<String>) {
