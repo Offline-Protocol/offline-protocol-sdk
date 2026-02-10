@@ -282,6 +282,14 @@ RCT_EXTERN_METHOD(internetMessageReceived:(NSString *)senderId
 RCT_EXTERN_METHOD(internetGetNextMessage:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(internetConfirmSent:(NSString *)messageId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(internetSendFailed:(NSString *)messageId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(internetReturnMessage:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

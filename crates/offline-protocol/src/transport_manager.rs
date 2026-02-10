@@ -145,46 +145,69 @@ impl TransportManager {
             .select_transport(message, &available_transports)
     }
 
-    /// Sends a message through the appropriate transport.
+    /// Sends a message through the best available transport, with fallback.
     ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to send
-    ///
-    /// # Returns
-    ///
-    /// Returns Ok(()) if sent successfully, Err otherwise.
+    /// DORS selects the best transport. If that transport's `send()` fails,
+    /// remaining transports are tried in descending score order before
+    /// returning an error. Failures are recorded for DORS scoring.
     pub fn send(&mut self, message: &Message) -> Result<()> {
-        // Select transport
-        let transport_type = self
-            .select_transport(message)
-            .ok_or_else(|| {
-                // If no transport was selected, provide a helpful error message
-                let available = self.get_available_transports();
-                if available.is_empty() {
-                    Error::Other("No available transport. Ensure at least one transport (BLE, WiFi Direct, or Internet) is enabled and available.".to_string())
-                } else {
-                    Error::Other(format!("No suitable transport selected. Available transports: {:?}", available.keys().collect::<Vec<_>>()))
+        let available = self.get_available_transports();
+        if available.is_empty() {
+            return Err(Error::Other(
+                "No available transport. Ensure at least one transport (BLE, WiFi Direct, or Internet) is enabled and available.".to_string(),
+            ));
+        }
+
+        // Score all transports and sort by score descending
+        let mut scored: Vec<(TransportType, f32)> = {
+            let scored_types = self.selector.score_and_rank(message, &available);
+            scored_types
+        };
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        if scored.is_empty() {
+            return Err(Error::Other(
+                "No suitable transport selected from available transports.".to_string(),
+            ));
+        }
+
+        let mut last_error = None;
+
+        for (transport_type, _score) in &scored {
+            let transport = match self.transports.get(transport_type) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let transport_lock = match transport.lock() {
+                Ok(lock) => lock,
+                Err(_) => {
+                    warn!(transport = ?transport_type, "Transport mutex poisoned, skipping");
+                    continue;
                 }
-            })?;
+            };
 
-        // Update current transport
-        self.current_transport = Some(transport_type);
+            match transport_lock.send(message) {
+                Ok(()) => {
+                    self.current_transport = Some(*transport_type);
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(
+                        transport = ?transport_type,
+                        error = %e,
+                        "Transport send failed, trying next"
+                    );
+                    self.selector.record_retry_failure(*transport_type);
+                    last_error = Some(e);
+                }
+            }
+        }
 
-        // Get transport and send
-        let transport = self
-            .transports
-            .get(&transport_type)
-            .ok_or_else(|| Error::Other("Transport not found".to_string()))?;
-
-        let transport_lock = transport.lock().map_err(|_| {
-            Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
-        })?;
-        transport_lock
-            .send(message)
-            .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
-
-        Ok(())
+        Err(Error::Other(format!(
+            "All transports failed. Last error: {}",
+            last_error.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 
     /// Sends a message via a specific transport, bypassing DORS selection.
@@ -202,10 +225,6 @@ impl TransportManager {
         message: &Message,
         transport_type: TransportType,
     ) -> Result<()> {
-        // Update current transport
-        self.current_transport = Some(transport_type);
-
-        // Get transport and send
         let transport = self
             .transports
             .get(&transport_type)
@@ -215,7 +234,6 @@ impl TransportManager {
             Error::Other(format!("Transport mutex poisoned for {:?}", transport_type))
         })?;
 
-        // Check transport is available
         if transport_lock.status() != TransportStatus::Available {
             return Err(Error::Other(format!(
                 "Transport {:?} is not available",
@@ -226,6 +244,9 @@ impl TransportManager {
         transport_lock
             .send(message)
             .map_err(|e| Error::Other(format!("Transport send failed: {}", e)))?;
+
+        // Only update current transport after successful send
+        self.current_transport = Some(transport_type);
 
         Ok(())
     }
@@ -287,9 +308,15 @@ impl TransportManager {
                         continue;
                     }
                 };
-                if transport_lock.status() == TransportStatus::Available {
+                let status = transport_lock.status();
+                if status == TransportStatus::Available {
                     Some(transport_lock.metrics())
                 } else {
+                    debug!(
+                        transport = ?transport_type,
+                        status = ?status,
+                        "Transport excluded from available set"
+                    );
                     None
                 }
             };

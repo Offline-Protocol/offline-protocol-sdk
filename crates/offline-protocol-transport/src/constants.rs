@@ -71,3 +71,7 @@ pub const INTERNET_CONNECTION_TIMEOUT_SECS: u64 = 30;
 /// Heartbeat interval for Internet transport in seconds.
 /// Used to keep the connection alive and detect disconnections.
 pub const INTERNET_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+
+/// Timeout for pending Internet send confirmations in seconds.
+/// Messages awaiting platform confirmation beyond this duration are treated as failed.
+pub const INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 15;

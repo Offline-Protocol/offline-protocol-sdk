@@ -1352,9 +1352,13 @@ export class OfflineProtocol {
   /**
    * Gets the next outgoing internet message.
    *
-   * @returns Message to send or null if queue is empty
+   * After sending over the wire, you **must** call either
+   * `internetConfirmSent(messageId)` or `internetSendFailed(messageId)`.
+   *
+   * @returns Message to send (with messageId) or null if queue is empty
    */
   async internetGetNextMessage(): Promise<{
+    messageId: string;
     recipientId: string;
     data: number[];
   } | null> {
@@ -1362,7 +1366,30 @@ export class OfflineProtocol {
   }
 
   /**
-   * Marks the last internet message as sent.
+   * Confirms that a message was successfully sent over the wire (e.g., WebSocket).
+   *
+   * Call this after the WebSocket `send()` completes successfully.
+   * This feeds real delivery data into transport metrics for DORS routing.
+   *
+   * @param messageId - The messageId from `internetGetNextMessage()`
+   */
+  async internetConfirmSent(messageId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.internetConfirmSent(messageId);
+  }
+
+  /**
+   * Reports that a message failed to send over the wire.
+   *
+   * Call this when the WebSocket `send()` fails or the connection drops.
+   *
+   * @param messageId - The messageId from `internetGetNextMessage()`
+   */
+  async internetSendFailed(messageId: string): Promise<void> {
+    return await OfflineProtocolNativeModule.internetSendFailed(messageId);
+  }
+
+  /**
+   * @deprecated Use `internetConfirmSent(messageId)` / `internetSendFailed(messageId)` instead.
    */
   async internetReturnMessage(): Promise<void> {
     return await OfflineProtocolNativeModule.internetReturnMessage();

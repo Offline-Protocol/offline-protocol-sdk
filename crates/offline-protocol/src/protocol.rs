@@ -740,6 +740,9 @@ impl OfflineProtocol {
         match send_result {
             Ok(()) => {
                 self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
             }
             Err(err) => {
                 self.handle_send_failure(&message, current_transport.or(previous_transport))?;
@@ -748,14 +751,12 @@ impl OfflineProtocol {
                     error = %err,
                     "Send failed, message deferred"
                 );
+                Err(Error::Other(format!(
+                    "Send failed (message {} deferred for retry): {}",
+                    message.id, err
+                )))
             }
         }
-
-        // Emit events
-        self.emit_transport_switch_event(previous_transport, current_transport)?;
-        self.emit_message_sent_event(&message)?;
-
-        Ok(message_id)
     }
 
     /// Encrypts content for a recipient, handling session creation if needed.
@@ -1315,6 +1316,9 @@ impl OfflineProtocol {
         match send_result {
             Ok(()) => {
                 self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
             }
             Err(err) => {
                 self.handle_send_failure(&message, current_transport.or(previous_transport))?;
@@ -1324,14 +1328,12 @@ impl OfflineProtocol {
                     error = %err,
                     "Send via forced transport failed, message deferred"
                 );
+                Err(Error::Other(format!(
+                    "Send via {:?} failed (message {} deferred for retry): {}",
+                    transport, message.id, err
+                )))
             }
         }
-
-        // Emit events
-        self.emit_transport_switch_event(previous_transport, current_transport)?;
-        self.emit_message_sent_event(&message)?;
-
-        Ok(message_id)
     }
 
     /// Sends a connection request to another user via any available transport.

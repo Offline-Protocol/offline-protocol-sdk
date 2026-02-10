@@ -384,6 +384,10 @@ interface OfflineProtocol {
     
     InternetMessage? internet_get_next_message();
     
+    void internet_confirm_sent(string message_id);
+    
+    void internet_send_failed(string message_id);
+    
     void internet_return_message();
     
     // WiFi Direct transport operations
@@ -744,6 +748,7 @@ dictionary BleFragment {
 
 // Internet message for outgoing data
 dictionary InternetMessage {
+    string message_id;
     string recipient_id;
     sequence<u8> data;
     string? reply_to_msg;

@@ -1619,6 +1619,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val message = proto.internetGetNextMessage()
             if (message != null) {
                 val map = Arguments.createMap()
+                map.putString("messageId", message.messageId)
                 map.putString("recipientId", message.recipientId)
                 val array = Arguments.createArray()
                 message.data.forEach { array.pushInt(it.toInt()) }
@@ -1629,6 +1630,28 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
         } catch (e: Exception) {
             promise.reject("ERROR_INTERNET", "Internet get next message failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun internetConfirmSent(messageId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.internetConfirmSent(messageId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_INTERNET", "Internet confirm sent failed: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun internetSendFailed(messageId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.internetSendFailed(messageId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_INTERNET", "Internet send failed report failed: ${e.message}", e)
         }
     }
 

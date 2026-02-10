@@ -5,11 +5,11 @@
 
 use crate::constants::{
     INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
-    INTERNET_HEARTBEAT_INTERVAL_SECS,
+    INTERNET_HEARTBEAT_INTERVAL_SECS, INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,8 +53,11 @@ pub struct InternetTransport {
     status: Arc<Mutex<TransportStatus>>,
     /// Received message queue
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
-    /// Send queue
+    /// Send queue — messages waiting to be polled by the platform via `get_next_message()`
     send_queue: Arc<Mutex<VecDeque<Message>>>,
+    /// Messages dequeued by the platform but not yet confirmed as sent.
+    /// Key: message_id string, Value: when the message was dequeued.
+    pending_confirmation: Arc<Mutex<HashMap<String, Instant>>>,
     /// Transport metrics
     metrics: Arc<Mutex<TransportMetrics>>,
     /// Last heartbeat time
@@ -79,6 +82,7 @@ impl InternetTransport {
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
+            pending_confirmation: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             last_heartbeat: Arc::new(Mutex::new(None)),
             reconnect_attempts: Arc::new(Mutex::new(0)),
@@ -184,8 +188,10 @@ impl InternetTransport {
 
     /// Gets the next message to send (for platform implementation).
     ///
-    /// Returns serialized message bytes or None if no messages to send.
-    pub fn get_next_message(&self) -> Result<Option<Vec<u8>>> {
+    /// Returns the message_id and serialized bytes, or None if no messages to send.
+    /// The message enters the pending-confirmation state until the platform calls
+    /// `confirm_sent()` or `report_send_failure()`.
+    pub fn get_next_message(&self) -> Result<Option<(String, Vec<u8>)>> {
         let message = {
             let mut queue = self.send_queue.lock().unwrap();
             match queue.pop_front() {
@@ -194,9 +200,106 @@ impl InternetTransport {
             }
         };
 
-        // Serialize the message
+        let message_id = message.id.as_str().to_string();
+
+        // Track as pending confirmation
+        {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.insert(message_id.clone(), Instant::now());
+        }
+
         let data = self.serialize_message(&message)?;
-        Ok(Some(data))
+
+        // Update queue depth metric
+        {
+            let queue = self.send_queue.lock().unwrap();
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.queue_depth = queue.len();
+        }
+
+        Ok(Some((message_id, data)))
+    }
+
+    /// Platform confirms that a message was successfully sent over the wire (e.g., WebSocket).
+    ///
+    /// This updates transport metrics to reflect real delivery outcomes,
+    /// enabling DORS to make accurate routing decisions.
+    pub fn confirm_sent(&self, message_id: &str) {
+        let was_pending = {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.remove(message_id).is_some()
+        };
+
+        if was_pending {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.success_count = metrics.success_count.saturating_add(1);
+            let total = metrics.success_count + metrics.failure_count;
+            if total > 0 {
+                let ratio = metrics.success_count as f32 / total as f32;
+                metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
+                metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// Platform reports that a message failed to send (e.g., WebSocket error).
+    pub fn report_send_failure(&self, message_id: &str) {
+        let was_pending = {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.remove(message_id).is_some()
+        };
+
+        if was_pending {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.failure_count = metrics.failure_count.saturating_add(1);
+            let total = metrics.success_count + metrics.failure_count;
+            if total > 0 {
+                let ratio = metrics.success_count as f32 / total as f32;
+                metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
+                metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// Drains messages that have been pending confirmation longer than the timeout.
+    ///
+    /// Returns the message_ids of expired pending messages. The caller should
+    /// treat these as send failures.
+    pub fn drain_expired_pending(&self) -> Vec<String> {
+        let timeout = Duration::from_secs(INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS);
+        let now = Instant::now();
+        let mut expired = Vec::new();
+
+        let mut pending = self.pending_confirmation.lock().unwrap();
+        pending.retain(|id, enqueued_at| {
+            if now.duration_since(*enqueued_at) >= timeout {
+                expired.push(id.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        // Record expired as failures
+        if !expired.is_empty() {
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.failure_count = metrics
+                .failure_count
+                .saturating_add(expired.len() as u32);
+            let total = metrics.success_count + metrics.failure_count;
+            if total > 0 {
+                let ratio = metrics.success_count as f32 / total as f32;
+                metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
+                metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+            }
+        }
+
+        expired
+    }
+
+    /// Returns the count of messages currently awaiting confirmation from the platform.
+    pub fn pending_confirmation_count(&self) -> usize {
+        self.pending_confirmation.lock().unwrap().len()
     }
 
     /// Checks if reconnection should be attempted.
@@ -390,11 +493,43 @@ mod tests {
 
         // Send message
         let message = create_test_message();
+        let message_id = message.id.as_str().to_string();
         assert!(transport.send(&message).is_ok());
 
-        // Should have message in queue
+        // Should have message in queue; get_next_message returns (id, bytes)
         let next = transport.get_next_message().unwrap();
         assert!(next.is_some());
+        let (returned_id, data) = next.unwrap();
+        assert_eq!(returned_id, message_id);
+        assert!(!data.is_empty());
+
+        // Message should now be in pending confirmation
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        // Confirm sent — should update success metrics
+        transport.confirm_sent(&returned_id);
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.success_count, 1);
+    }
+
+    #[test]
+    fn test_send_failure_tracking() {
+        let transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let message = create_test_message();
+        assert!(transport.send(&message).is_ok());
+
+        let (msg_id, _data) = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        // Report failure
+        transport.report_send_failure(&msg_id);
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.failure_count, 1);
+        assert_eq!(metrics.success_count, 0);
     }
 
     #[test]

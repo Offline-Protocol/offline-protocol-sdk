@@ -664,6 +664,9 @@ pub struct BleFragment {
 /// Internet message for outgoing data
 #[derive(Debug, Clone)]
 pub struct InternetMessage {
+    /// Unique message identifier. Use this with `internet_confirm_sent()` or
+    /// `internet_send_failed()` to report the send outcome.
+    pub message_id: String,
     pub recipient_id: String,
     pub data: Vec<u8>,
     pub reply_to_msg: Option<String>,
@@ -826,20 +829,6 @@ impl OfflineProtocol {
         protocol.start().map_err(ProtocolError::from)?;
         *self.state.write().unwrap() = ProtocolState::Running;
 
-        // Ensure BLE transport is set to Available immediately when protocol starts
-        // This fixes the issue where messages get stuck because BLE transport status is Unavailable
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = transport_arc.lock().unwrap();
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                // Force BLE transport to Available status - the native layer will manage actual BLE availability
-                ble_transport
-                    .on_status_changed(offline_protocol_transport::TransportStatus::Available);
-            }
-        }
-
         drop(protocol);
 
         // Emit a network metrics event when started to verify event system is working
@@ -958,27 +947,7 @@ impl OfflineProtocol {
         // Check if a transport is forced (bypasses DORS)
         let forced = *self.forced_transport.read().unwrap();
 
-        //  Ensure BLE transport is available before attempting to send
-        // This is especially important when BLE is the only transport enabled (Internet/WiFi disabled)
-        // BLE should work independently and be available for message sending
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::BLE)
-        {
-            let transport = transport_arc.lock().unwrap();
-            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                let current_status = ble_transport.status();
-                if current_status != offline_protocol_transport::TransportStatus::Available {
-                    // Force status to Available if BLE transport exists
-                    // This ensures BLE is included in get_available_transports() for DORS selection
-                    ble_transport
-                        .on_status_changed(offline_protocol_transport::TransportStatus::Available);
-                }
-            }
-        }
-
         // If a transport is forced, use it directly; otherwise use DORS selection
-        // DORS will select BLE if it's the only available transport
         let message_id = if let Some(forced_type) = forced {
             let core_transport = match forced_type {
                 TransportType::Internet => CoreTransportType::Internet,
@@ -1358,9 +1327,12 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Internet: Get next message to send via WebSocket
+    /// Internet: Get next message to send via WebSocket.
+    ///
+    /// Returns the next queued message with its `message_id`. After sending
+    /// over the wire, the platform **must** call either `internet_confirm_sent(message_id)`
+    /// or `internet_send_failed(message_id)` to close the feedback loop.
     pub fn internet_get_next_message(&self) -> Option<InternetMessage> {
-        // Check if connected
         {
             let internet_state = self.internet_state.lock().unwrap();
             if !internet_state.is_connected {
@@ -1368,7 +1340,6 @@ impl OfflineProtocol {
             }
         }
 
-        // Try to get message from the Internet transport
         let protocol = self.inner.lock().unwrap();
         if let Some(transport_arc) = protocol
             .transport_manager()
@@ -1380,10 +1351,10 @@ impl OfflineProtocol {
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
-                if let Ok(Some(data)) = internet_transport.get_next_message() {
-                    // Deserialize to get recipient and reply_to_msg
+                if let Ok(Some((message_id, data))) = internet_transport.get_next_message() {
                     if let Ok(message) = internet_transport.deserialize_message(&data) {
                         return Some(InternetMessage {
+                            message_id,
                             recipient_id: message.recipient.as_str().to_string(),
                             data,
                             reply_to_msg: message
@@ -1399,28 +1370,34 @@ impl OfflineProtocol {
         // Fallback to local queue
         let mut internet_state = self.internet_state.lock().unwrap();
         if let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
-            // Try to deserialize to extract reply_to_msg
-            let reply_to_msg =
+            let (reply_to_msg, msg_id) =
                 if let Some(transport_arc) = protocol
                     .transport_manager()
                     .get_transport(CoreTransportType::Internet)
                 {
                     let transport = transport_arc.lock().unwrap();
                     if let Some(internet_transport) = transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
-                {
-                    internet_transport.deserialize_message(&data)
-                        .ok()
-                        .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()))
+                        .as_any()
+                        .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+                    {
+                        let parsed = internet_transport.deserialize_message(&data).ok();
+                        let reply = parsed
+                            .as_ref()
+                            .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()));
+                        let id = parsed
+                            .as_ref()
+                            .map(|msg| msg.id.as_str().to_string())
+                            .unwrap_or_default();
+                        (reply, id)
+                    } else {
+                        (None, String::new())
+                    }
                 } else {
-                    None
-                }
-                } else {
-                    None
+                    (None, String::new())
                 };
 
             return Some(InternetMessage {
+                message_id: msg_id,
                 recipient_id: recipient,
                 data,
                 reply_to_msg,
@@ -1430,9 +1407,51 @@ impl OfflineProtocol {
         None
     }
 
-    /// Internet: Return message (marks last message as sent)
+    /// Internet: Confirm that a message was successfully sent over the wire.
+    ///
+    /// The platform must call this after the WebSocket send completes successfully.
+    /// This feeds real delivery data into transport metrics so DORS can make
+    /// accurate routing decisions.
+    pub fn internet_confirm_sent(&self, message_id: String) {
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Internet)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(internet_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            {
+                internet_transport.confirm_sent(&message_id);
+            }
+        }
+    }
+
+    /// Internet: Report that a message failed to send over the wire.
+    ///
+    /// The platform must call this when the WebSocket send fails.
+    pub fn internet_send_failed(&self, message_id: String) {
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Internet)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(internet_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
+            {
+                internet_transport.report_send_failure(&message_id);
+            }
+        }
+    }
+
+    /// Internet: Return message (deprecated — use `internet_confirm_sent` instead).
     pub fn internet_return_message(&self) {
-        // No-op for now - message sending confirmation is handled by WebSocket
+        // Kept for backward compatibility. New code should use internet_confirm_sent/internet_send_failed.
     }
 
     // ========================================================================

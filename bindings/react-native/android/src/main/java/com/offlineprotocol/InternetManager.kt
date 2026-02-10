@@ -751,7 +751,7 @@ class InternetManager(
                 }
                 
                 val message = protocol.internetGetNextMessage() ?: break
-                sendMessage(message.recipientId, message.data.map { it.toByte() }.toByteArray(), message.replyToMsg)
+                sendMessage(message.messageId, message.recipientId, message.data.map { it.toByte() }.toByteArray(), message.replyToMsg)
                 messagesSent++
             }
             
@@ -767,19 +767,20 @@ class InternetManager(
         }
     }
     
-    private fun sendMessage(recipientId: String, data: ByteArray, replyToMsg: String? = null) {
+    private fun sendMessage(messageId: String, recipientId: String, data: ByteArray, replyToMsg: String? = null) {
         val ws = webSocket
         // Re-check connection state right before sending
         // This handles race conditions where connection drops between poll and send
         if (!isConnected.get() || !isAuthenticated.get() || ws == null) {
             emitDiagnostic("warning", "Cannot send message - not connected or not authenticated", mapOf(
+                "messageId" to messageId,
                 "recipientId" to recipientId,
                 "isConnected" to isConnected.get(),
                 "isAuthenticated" to isAuthenticated.get(),
                 "hasSocket" to (ws != null)
             ))
-            // The message remains in the protocol's outbox and will be retried
-            // when connection is restored
+            // Report failure so DORS metrics stay accurate
+            try { protocol.internetSendFailed(messageId) } catch (_: Exception) {}
             return
         }
         
@@ -805,19 +806,22 @@ class InternetManager(
             consecutiveSendFailures.set(0)
             bytesSent += jsonString.length
             messagesSent++
+            try { protocol.internetConfirmSent(messageId) } catch (_: Exception) {}
             
             emitDiagnostic("debug", "Message sent via relay", mapOf(
+                "messageId" to messageId,
                 "recipientId" to recipientId,
                 "contentLength" to content.length
             ))
         } else {
             val failures = consecutiveSendFailures.incrementAndGet()
+            try { protocol.internetSendFailed(messageId) } catch (_: Exception) {}
             emitDiagnostic("error", "Failed to send WebSocket message", mapOf(
+                "messageId" to messageId,
                 "recipientId" to recipientId,
                 "consecutiveFailures" to failures
             ))
             
-            // If send fails, the message stays in outbox and will be retried
             // If too many consecutive send failures, the connection is likely dead
             // Trigger disconnect so DORS can switch to another transport
             if (failures >= MAX_CONSECUTIVE_FAILURES) {

@@ -1064,11 +1064,15 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_return_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -2285,11 +2289,15 @@ public interface OfflineProtocolInterface {
     
     fun `initializeMls`(`storage`: MlsStorageProvider)
     
+    fun `internetConfirmSent`(`messageId`: kotlin.String)
+    
     fun `internetGetNextMessage`(): InternetMessage?
     
     fun `internetMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
     
     fun `internetReturnMessage`()
+    
+    fun `internetSendFailed`(`messageId`: kotlin.String)
     
     fun `internetStatusChanged`(`isConnected`: kotlin.Boolean)
     
@@ -3184,6 +3192,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    override fun `internetConfirmSent`(`messageId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(
+        it,
+        FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    
+    
+
     override fun `internetGetNextMessage`(): InternetMessage? {
             return FfiConverterOptionalTypeInternetMessage.lift(
     callWithHandle {
@@ -3217,6 +3237,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_return_message(
         it,
         _status)
+}
+    }
+    
+    
+
+    override fun `internetSendFailed`(`messageId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(
+        it,
+        FfiConverterString.lower(`messageId`),_status)
 }
     }
     
@@ -4454,6 +4486,8 @@ public object FfiConverterTypeGradientRoutingConfig: FfiConverterRustBuffer<Grad
 
 
 data class InternetMessage (
+    var `messageId`: kotlin.String
+    , 
     var `recipientId`: kotlin.String
     , 
     var `data`: List<kotlin.UByte>
@@ -4474,18 +4508,21 @@ public object FfiConverterTypeInternetMessage: FfiConverterRustBuffer<InternetMe
     override fun read(buf: ByteBuffer): InternetMessage {
         return InternetMessage(
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterSequenceUByte.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: InternetMessage) = (
+            FfiConverterString.allocationSize(value.`messageId`) +
             FfiConverterString.allocationSize(value.`recipientId`) +
             FfiConverterSequenceUByte.allocationSize(value.`data`) +
             FfiConverterOptionalString.allocationSize(value.`replyToMsg`)
     )
 
     override fun write(value: InternetMessage, buf: ByteBuffer) {
+            FfiConverterString.write(value.`messageId`, buf)
             FfiConverterString.write(value.`recipientId`, buf)
             FfiConverterSequenceUByte.write(value.`data`, buf)
             FfiConverterOptionalString.write(value.`replyToMsg`, buf)

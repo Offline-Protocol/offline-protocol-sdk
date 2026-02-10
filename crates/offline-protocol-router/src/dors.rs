@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use offline_protocol_core::Message;
 use offline_protocol_transport::{TransportMetrics, TransportType};
 use std::collections::{HashMap, VecDeque};
+use tracing::debug;
 
 /// Configuration for DORS transport selection.
 #[derive(Debug, Clone)]
@@ -284,6 +285,19 @@ impl TransportSelector {
         let best_transport = best.0;
         let best_score = best.1.total;
 
+        // Log all scored transports for observability
+        let scores_summary: Vec<_> = scored_transports
+            .iter()
+            .map(|(t, s)| format!("{:?}={:.1}", t, s.total))
+            .collect();
+        debug!(
+            scores = %scores_summary.join(", "),
+            best = ?best_transport,
+            previous = ?self.current_transport,
+            prefer_online = self.config.prefer_online,
+            "DORS scored transports"
+        );
+
         if let Some(current) = self.current_transport {
             // If current transport is no longer available, switch immediately
             // regardless of cooldown or hysteresis (e.g. Internet disconnected).
@@ -294,27 +308,71 @@ impl TransportSelector {
                     return Some(current);
                 }
 
-                // current_still_available is true here, so current is in available_transports,
-                // which means it was scored in scored_transports — the find always succeeds.
                 if let Some(current_score) = scored_transports
                     .iter()
                     .find(|(t, _)| *t == current)
                     .map(|(_, s)| s.total)
                 {
                     if !self.should_switch(current, current_score, best_transport, best_score) {
+                        debug!(
+                            current = ?current,
+                            current_score = current_score,
+                            candidate = ?best_transport,
+                            candidate_score = best_score,
+                            "DORS: switch blocked by hysteresis/cooldown/stability"
+                        );
                         return Some(current);
                     }
                 }
+            } else {
+                debug!(
+                    lost = ?current,
+                    fallback = ?best_transport,
+                    "DORS: current transport unavailable, switching immediately"
+                );
             }
-            // When current transport is unavailable, fall through to select the
-            // best available transport without cooldown or hysteresis checks.
         }
 
         // Track switch
+        debug!(
+            from = ?self.current_transport,
+            to = ?best_transport,
+            score = best_score,
+            "DORS: transport switched"
+        );
         self.last_switch_time = Some(Utc::now());
         self.current_transport = Some(best_transport);
 
         Some(best_transport)
+    }
+
+    /// Scores all available transports and returns them ranked by score (descending).
+    ///
+    /// Unlike `select_transport`, this does not apply hysteresis or switch the
+    /// current transport. It is used by `TransportManager::send()` to build a
+    /// fallback list when the primary transport's send fails.
+    pub fn score_and_rank(
+        &mut self,
+        message: &Message,
+        available_transports: &HashMap<TransportType, TransportMetrics>,
+    ) -> Vec<(TransportType, f32)> {
+        let mut scored: Vec<(TransportType, f32)> = Vec::new();
+
+        for (transport_type, metrics) in available_transports.iter() {
+            self.record_metrics(*transport_type, metrics);
+            self.update_history(*transport_type, metrics);
+
+            if *transport_type == TransportType::BLE {
+                self.update_ble_conditions(message, metrics);
+            }
+
+            let score = self.calculate_transport_score(message, *transport_type, metrics);
+            self.record_score(*transport_type, score.total);
+            scored.push((*transport_type, score.total));
+        }
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored
     }
 
     /// Calculates the transport score based on multiple factors.
@@ -369,7 +427,10 @@ impl TransportSelector {
             }
         };
 
-        let total = total.clamp(0.0, 100.0);
+        // Floor at 0 but do not cap at 100 — the prefer_online baseline
+        // intentionally pushes Internet above the weighted-sum ceiling so
+        // the gap exceeds the switch hysteresis.
+        let total = total.max(0.0);
 
         TransportScore {
             signal: signal_score,
