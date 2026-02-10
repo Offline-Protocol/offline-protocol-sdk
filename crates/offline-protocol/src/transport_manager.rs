@@ -87,6 +87,13 @@ impl ObservedStats {
             // Only override delivery counts when the transport itself has not
             // reported any.  Internet transport tracks wire-level outcomes via
             // the confirmation loop; overwriting those would discard real data.
+            //
+            // NOTE: This check is value-based, not transport-type-based.  If
+            // BLE or WiFi Direct ever start reporting their own success/failure
+            // counts from the native layer (the way Internet does via the
+            // confirmation loop), the condition below will silently skip the
+            // local observations for those transports too.  At that point,
+            // consider switching to an explicit per-transport-type check.
             if metrics.success_count + metrics.failure_count == 0 {
                 metrics.success_count = self.success_count;
                 metrics.failure_count = self.failure_count;
@@ -205,6 +212,7 @@ impl TransportManager {
         // is considered. The re-scoring on the failure path is harmless.
         let scored = self.selector.score_and_rank(message, &available);
         let mut last_error = None;
+        let mut attempted: Vec<TransportType> = vec![primary];
 
         for (transport_type, _score) in &scored {
             if *transport_type == primary {
@@ -223,6 +231,8 @@ impl TransportManager {
                     continue;
                 }
             };
+
+            attempted.push(*transport_type);
 
             match transport_lock.send(message) {
                 Ok(()) => {
@@ -243,7 +253,8 @@ impl TransportManager {
         }
 
         Err(Error::Other(format!(
-            "All transports failed. Last error: {}",
+            "All transports failed (tried {:?}). Last error: {}",
+            attempted,
             last_error.map(|e| e.to_string()).unwrap_or_default()
         )))
     }

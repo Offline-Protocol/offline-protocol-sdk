@@ -1391,12 +1391,14 @@ impl OfflineProtocol {
                 .unwrap_or_default();
 
             // An empty message_id would break the confirm/fail feedback loop — skip it
-            // and try the next entry.
+            // and try the next entry.  These messages are permanently lost (no outbox
+            // entry, no retry).  If this fires systematically it indicates a
+            // serialization schema mismatch that must be investigated.
             if msg_id.is_empty() {
                 tracing::warn!(
                     recipient = %recipient,
                     data_len = data.len(),
-                    "Dropping fallback internet message: could not recover message_id from deserialization"
+                    "Dropping fallback internet message: could not recover message_id from deserialization — message is permanently lost"
                 );
                 continue;
             }

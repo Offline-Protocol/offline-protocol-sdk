@@ -158,10 +158,11 @@ impl InternetTransport {
 
         // Reset reconnect counter on successful connection
         if status == TransportStatus::Available {
+            // Acquire send_queue before reconnect_attempts to respect lock
+            // ordering (send_queue is #3, reconnect_attempts is #6).
+            let queue_len = self.send_queue.lock().unwrap().len();
             *self.reconnect_attempts.lock().unwrap() = 0;
 
-            // Log if we have pending messages to send after reconnection
-            let queue_len = self.send_queue.lock().unwrap().len();
             if queue_len > 0 {
                 tracing::info!(
                     pending_messages = queue_len,
@@ -345,16 +346,15 @@ impl InternetTransport {
                 expired_count = expired_count,
                 "Pending confirmations expired, recorded as failures"
             );
-            let mut metrics = self.metrics.lock().unwrap();
-            metrics.failure_count = metrics.failure_count.saturating_add(expired_count);
-            recalculate_delivery_ratios(&mut metrics);
+            self.record_bulk_failures(expired_count);
         }
     }
 
     /// Fails all pending confirmations immediately.
     ///
-    /// Called when the transport disconnects so that metrics reflect the loss
-    /// right away rather than waiting for the per-message expiry timeout.
+    /// Called when the transport disconnects or the transport is stopped so
+    /// that metrics reflect the loss right away rather than waiting for the
+    /// per-message expiry timeout.
     fn fail_all_pending(&self) {
         let count = {
             let mut pending = self.pending_confirmation.lock().unwrap();
@@ -368,10 +368,15 @@ impl InternetTransport {
                 count = count,
                 "Failing all pending confirmations due to transport disconnect"
             );
-            let mut metrics = self.metrics.lock().unwrap();
-            metrics.failure_count = metrics.failure_count.saturating_add(count);
-            recalculate_delivery_ratios(&mut metrics);
+            self.record_bulk_failures(count);
         }
+    }
+
+    /// Records `count` delivery failures in transport metrics.
+    fn record_bulk_failures(&self, count: u32) {
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.failure_count = metrics.failure_count.saturating_add(count);
+        recalculate_delivery_ratios(&mut metrics);
     }
 
     /// Returns the count of messages currently awaiting confirmation from the platform.
@@ -484,6 +489,7 @@ impl Transport for InternetTransport {
     }
 
     fn stop(&mut self) -> Result<()> {
+        self.fail_all_pending();
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
         Ok(())
     }
@@ -717,5 +723,54 @@ mod tests {
 
         transport.update_heartbeat();
         assert!(!transport.needs_heartbeat());
+    }
+
+    #[test]
+    fn test_stop_fails_pending() {
+        let mut transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = create_test_message();
+        assert!(transport.send(&msg).is_ok());
+        let _ = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        transport.stop().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        assert_eq!(transport.metrics().failure_count, 1);
+    }
+
+    /// Exhaustive destructuring guard for `update_metrics`.
+    ///
+    /// When a field is added to `TransportMetrics`, this test will fail to
+    /// compile — forcing the developer to decide whether
+    /// `InternetTransport::update_metrics` should copy the new field (platform-
+    /// reported) or leave it alone (confirmation-loop-managed).
+    #[test]
+    fn update_metrics_covers_all_fields() {
+        let m = TransportMetrics::default();
+        // Confirmation-loop-managed fields (preserved by update_metrics):
+        //   success_count, failure_count, delivery_ratio, drop_rate
+        // Platform-reported fields (copied by update_metrics):
+        //   rssi, latency_ms, bandwidth_bps, congestion, queue_depth,
+        //   battery_level, is_charging, relay_connection_count,
+        //   is_active_relay, average_hop_count, energy_cost
+        let TransportMetrics {
+            rssi: _,
+            latency_ms: _,
+            bandwidth_bps: _,
+            congestion: _,
+            queue_depth: _,
+            success_count: _,
+            failure_count: _,
+            battery_level: _,
+            is_charging: _,
+            relay_connection_count: _,
+            is_active_relay: _,
+            delivery_ratio: _,
+            drop_rate: _,
+            average_hop_count: _,
+            energy_cost: _,
+        } = m;
     }
 }
