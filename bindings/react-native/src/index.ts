@@ -1388,13 +1388,6 @@ export class OfflineProtocol {
     return await OfflineProtocolNativeModule.internetSendFailed(messageId);
   }
 
-  /**
-   * @deprecated Use `internetConfirmSent(messageId)` / `internetSendFailed(messageId)` instead.
-   */
-  async internetReturnMessage(): Promise<void> {
-    return await OfflineProtocolNativeModule.internetReturnMessage();
-  }
-
   // ============================================================================
   // MLS (END-TO-END ENCRYPTION) METHODS
   // ============================================================================

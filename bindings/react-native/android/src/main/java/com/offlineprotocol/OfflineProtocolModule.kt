@@ -1655,17 +1655,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @ReactMethod
-    fun internetReturnMessage(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.internetReturnMessage()
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_INTERNET", "Internet return message failed: ${e.message}", e)
-        }
-    }
-
     // ========================================================================
     // MLS (END-TO-END ENCRYPTION)
     // ========================================================================

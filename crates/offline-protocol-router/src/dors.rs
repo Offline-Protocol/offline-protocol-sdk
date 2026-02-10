@@ -351,26 +351,20 @@ impl TransportSelector {
 
     /// Scores all available transports and returns them ranked by score (descending).
     ///
-    /// Unlike `select_transport`, this does not apply hysteresis or switch the
-    /// current transport. It is used by `TransportManager::send()` to build a
-    /// fallback list when the primary transport's send fails.
+    /// Unlike `select_transport`, this is read-only: it does not record metrics,
+    /// update history, or mutate selector state. It is used by
+    /// `TransportManager::send()` to build a fallback list when the primary
+    /// transport's send fails — at that point `select_transport` has already
+    /// recorded the state for this scoring cycle.
     pub fn score_and_rank(
-        &mut self,
+        &self,
         message: &Message,
         available_transports: &HashMap<TransportType, TransportMetrics>,
     ) -> Vec<(TransportType, f32)> {
         let mut scored: Vec<(TransportType, f32)> = Vec::new();
 
         for (transport_type, metrics) in available_transports.iter() {
-            self.record_metrics(*transport_type, metrics);
-            self.update_history(*transport_type, metrics);
-
-            if *transport_type == TransportType::BLE {
-                self.update_ble_conditions(message, metrics);
-            }
-
             let score = self.calculate_transport_score(message, *transport_type, metrics);
-            self.record_score(*transport_type, score.total);
             scored.push((*transport_type, score.total));
         }
 

@@ -388,8 +388,6 @@ interface OfflineProtocol {
     
     void internet_send_failed(string message_id);
     
-    void internet_return_message();
-    
     // WiFi Direct transport operations
     [Throws=ProtocolError]
     void wifi_direct_status_changed(boolean is_connected);

@@ -316,7 +316,7 @@ impl InternetTransport {
     /// right away rather than waiting for the per-message expiry timeout.
     fn fail_all_pending(&self) {
         let mut pending = self.pending_confirmation.lock().unwrap();
-        let count = pending.len() as u32;
+        let count = u32::try_from(pending.len()).unwrap_or(u32::MAX);
         if count > 0 {
             tracing::warn!(
                 count = count,
@@ -368,9 +368,26 @@ impl InternetTransport {
         }
     }
 
-    /// Updates transport metrics.
-    pub fn update_metrics(&self, metrics: TransportMetrics) {
-        *self.metrics.lock().unwrap() = metrics;
+    /// Updates transport metrics while preserving confirmation-loop delivery counts.
+    ///
+    /// The confirmation loop (`confirm_sent` / `report_send_failure`) tracks real
+    /// wire-level delivery outcomes. An external `update_metrics` call must not
+    /// overwrite those counts, so `success_count`, `failure_count`,
+    /// `delivery_ratio`, and `drop_rate` from the incoming struct are ignored.
+    pub fn update_metrics(&self, incoming: TransportMetrics) {
+        let mut current = self.metrics.lock().unwrap();
+        // Preserve confirmation-loop delivery counts
+        let success = current.success_count;
+        let failure = current.failure_count;
+        let delivery_ratio = current.delivery_ratio;
+        let drop_rate = current.drop_rate;
+
+        *current = incoming;
+
+        current.success_count = success;
+        current.failure_count = failure;
+        current.delivery_ratio = delivery_ratio;
+        current.drop_rate = drop_rate;
     }
 }
 

@@ -800,8 +800,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_inte
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_return_message(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized(
@@ -1069,8 +1067,6 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_c
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_return_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1475,9 +1471,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_return_message() != 33628.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243.toShort()) {
@@ -2294,8 +2287,6 @@ public interface OfflineProtocolInterface {
     fun `internetGetNextMessage`(): InternetMessage?
     
     fun `internetMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
-    
-    fun `internetReturnMessage`()
     
     fun `internetSendFailed`(`messageId`: kotlin.String)
     
@@ -3225,18 +3216,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(
         it,
         FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
-}
-    }
-    
-    
-
-    override fun `internetReturnMessage`()
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_return_message(
-        it,
-        _status)
 }
     }
     

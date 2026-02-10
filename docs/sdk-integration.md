@@ -399,10 +399,6 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 ### 11.11 Internet Transport (Low-Level)
 
-> **Migration note**: `internetGetNextMessage` now returns a `messageId` field and
-> `internetReturnMessage` is deprecated. Use `internetConfirmSent(messageId)` or
-> `internetSendFailed(messageId)` to report the send outcome.
-
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | **internetStatusChanged** | `internetStatusChanged(isConnected: boolean): Promise<void>` | Notifies protocol of internet connection state. |
@@ -410,7 +406,6 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 | **internetGetNextMessage** | `internetGetNextMessage(): Promise<{messageId, recipientId, data} \| null>` | Next outgoing internet message. Use `messageId` to confirm or report failure. |
 | **internetConfirmSent** | `internetConfirmSent(messageId: string): Promise<void>` | Confirms a message was sent over the wire. Call after WebSocket send succeeds. |
 | **internetSendFailed** | `internetSendFailed(messageId: string): Promise<void>` | Reports a message failed to send. Call when WebSocket send fails. |
-| **internetReturnMessage** | `internetReturnMessage(): Promise<void>` | **Deprecated.** No-op kept for backward compatibility. Use `internetConfirmSent`/`internetSendFailed` instead. |
 
 ---
 

@@ -290,9 +290,6 @@ RCT_EXTERN_METHOD(internetSendFailed:(NSString *)messageId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(internetReturnMessage:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
 // MLS (End-to-End Encryption) Methods
 RCT_EXTERN_METHOD(initializeMlsWithSecureStorage:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

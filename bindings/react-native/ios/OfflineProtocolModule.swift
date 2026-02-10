@@ -1809,16 +1809,6 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(nil)
     }
     
-    @objc func internetReturnMessage(_ resolver: @escaping RCTPromiseResolveBlock,
-                                     rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_INTERNET", "Protocol not initialized", nil)
-            return
-        }
-        proto.internetReturnMessage()
-        resolver(nil)
-    }
-    
     // MARK: - MLS (End-to-End Encryption)
     
     /// Initialize MLS with built-in secure storage (Keychain)

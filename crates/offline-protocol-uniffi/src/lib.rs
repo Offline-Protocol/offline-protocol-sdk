@@ -1390,7 +1390,11 @@ impl OfflineProtocol {
 
             // An empty message_id would break the confirm/fail feedback loop — skip it.
             if msg_id.is_empty() {
-                tracing::warn!("Dropping fallback internet message with unrecoverable message_id");
+                tracing::warn!(
+                    recipient = %recipient,
+                    data_len = data.len(),
+                    "Dropping fallback internet message: could not recover message_id from deserialization"
+                );
                 return None;
             }
 
@@ -1449,11 +1453,6 @@ impl OfflineProtocol {
                 internet_transport.report_send_failure(&message_id);
             }
         }
-    }
-
-    /// Internet: Return message (deprecated — use `internet_confirm_sent` instead).
-    pub fn internet_return_message(&self) {
-        // Kept for backward compatibility. New code should use internet_confirm_sent/internet_send_failed.
     }
 
     // ========================================================================
