@@ -213,6 +213,38 @@ pub enum Event {
         /// Reason for the failure.
         reason: String,
     },
+
+    /// A connection request was received from another user.
+    ConnectionRequestReceived {
+        /// User ID of the sender.
+        sender: String,
+        /// Display name of the sender.
+        sender_name: String,
+        /// Timestamp of the request (Unix ms).
+        timestamp: i64,
+        /// MLS key package data (if provided for encrypted session setup).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key_package: Option<Vec<u8>>,
+    },
+
+    /// A previously sent connection request was accepted.
+    ConnectionAccepted {
+        /// User ID of the accepting party.
+        accepted_by: String,
+        /// Display name of the accepting party.
+        accepted_by_name: String,
+        /// Timestamp of the acceptance (Unix ms).
+        timestamp: i64,
+        /// MLS key package data (if provided for encrypted session setup).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key_package: Option<Vec<u8>>,
+    },
+
+    /// A previously sent connection request was rejected.
+    ConnectionRejected {
+        /// User ID of the rejecting party.
+        rejected_by: String,
+    },
 }
 
 impl Event {
@@ -417,6 +449,41 @@ impl Event {
         Self::SecureSessionFailed { peer_id, reason }
     }
 
+    /// Creates a ConnectionRequestReceived event.
+    pub fn connection_request_received(
+        sender: String,
+        sender_name: String,
+        timestamp: i64,
+        key_package: Option<Vec<u8>>,
+    ) -> Self {
+        Self::ConnectionRequestReceived {
+            sender,
+            sender_name,
+            timestamp,
+            key_package,
+        }
+    }
+
+    /// Creates a ConnectionAccepted event.
+    pub fn connection_accepted(
+        accepted_by: String,
+        accepted_by_name: String,
+        timestamp: i64,
+        key_package: Option<Vec<u8>>,
+    ) -> Self {
+        Self::ConnectionAccepted {
+            accepted_by,
+            accepted_by_name,
+            timestamp,
+            key_package,
+        }
+    }
+
+    /// Creates a ConnectionRejected event.
+    pub fn connection_rejected(rejected_by: String) -> Self {
+        Self::ConnectionRejected { rejected_by }
+    }
+
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -617,6 +684,34 @@ impl fmt::Debug for Event {
                 .debug_struct("SecureSessionFailed")
                 .field("peer_id", &"[REDACTED]")
                 .field("reason", reason)
+                .finish(),
+            Self::ConnectionRequestReceived {
+                sender: _,
+                sender_name: _,
+                timestamp,
+                key_package,
+            } => f
+                .debug_struct("ConnectionRequestReceived")
+                .field("sender", &"[REDACTED]")
+                .field("sender_name", &"[REDACTED]")
+                .field("timestamp", timestamp)
+                .field("has_key_package", &key_package.is_some())
+                .finish(),
+            Self::ConnectionAccepted {
+                accepted_by: _,
+                accepted_by_name: _,
+                timestamp,
+                key_package,
+            } => f
+                .debug_struct("ConnectionAccepted")
+                .field("accepted_by", &"[REDACTED]")
+                .field("accepted_by_name", &"[REDACTED]")
+                .field("timestamp", timestamp)
+                .field("has_key_package", &key_package.is_some())
+                .finish(),
+            Self::ConnectionRejected { rejected_by: _ } => f
+                .debug_struct("ConnectionRejected")
+                .field("rejected_by", &"[REDACTED]")
                 .finish(),
         }
     }

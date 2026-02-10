@@ -34,6 +34,22 @@ RCT_EXTERN_METHOD(sendMessage:(NSString *)recipient
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(sendConnectionRequest:(NSString *)recipient
+                  senderName:(NSString *)senderName
+                  keyPackage:(NSArray *)keyPackage
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(acceptConnectionRequest:(NSString *)recipient
+                  accepterName:(NSString *)accepterName
+                  keyPackage:(NSArray *)keyPackage
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(rejectConnectionRequest:(NSString *)recipient
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(getTopology:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

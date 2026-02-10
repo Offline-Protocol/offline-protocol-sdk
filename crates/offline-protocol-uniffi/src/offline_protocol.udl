@@ -346,6 +346,16 @@ interface OfflineProtocol {
     
     string? receive_message();
     
+    // Connection requests (transport-agnostic, routed via DORS)
+    [Throws=ProtocolError]
+    string send_connection_request(string recipient, string sender_name, sequence<u8>? key_package);
+    
+    [Throws=ProtocolError]
+    string accept_connection_request(string recipient, string accepter_name, sequence<u8>? key_package);
+    
+    [Throws=ProtocolError]
+    string reject_connection_request(string recipient);
+    
     // BLE transport operations
     [Throws=ProtocolError]
     void ble_peer_discovered(string peer_id, i16 rssi);

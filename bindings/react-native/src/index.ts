@@ -8,6 +8,9 @@ import { NativeModules, NativeEventEmitter, EmitterSubscription } from 'react-na
 import type {
   ProtocolConfig,
   SendMessageParams,
+  SendConnectionRequestParams,
+  AcceptConnectionRequestParams,
+  RejectConnectionRequestParams,
   SendFileParams,
   ProtocolEvent,
   EventListener,
@@ -618,6 +621,56 @@ export class OfflineProtocol {
       params.content,
       priority,
       params.replyToMsg ?? null
+    );
+    return messageId;
+  }
+
+  /**
+   * Sends a connection request
+   *
+   * @param params - Connection request parameters
+   * @returns Message ID
+   * @throws Error if request fails to send
+   */
+  async sendConnectionRequest(params: SendConnectionRequestParams): Promise<string> {
+    const messageId = await OfflineProtocolNativeModule.sendConnectionRequest(
+      params.recipient,
+      params.senderName,
+      params.keyPackage ?? null
+    );
+    return messageId;
+  }
+
+  /**
+   * Accepts a connection request
+   *
+   * @param params - Connection acceptance parameters
+   * @returns Message ID
+   * @throws Error if acceptance fails to send
+   */
+  async acceptConnectionRequest(
+    params: AcceptConnectionRequestParams
+  ): Promise<string> {
+    const messageId = await OfflineProtocolNativeModule.acceptConnectionRequest(
+      params.recipient,
+      params.accepterName,
+      params.keyPackage ?? null
+    );
+    return messageId;
+  }
+
+  /**
+   * Rejects a connection request
+   *
+   * @param params - Connection rejection parameters
+   * @returns Message ID
+   * @throws Error if rejection fails to send
+   */
+  async rejectConnectionRequest(
+    params: RejectConnectionRequestParams
+  ): Promise<string> {
+    const messageId = await OfflineProtocolNativeModule.rejectConnectionRequest(
+      params.recipient
     );
     return messageId;
   }

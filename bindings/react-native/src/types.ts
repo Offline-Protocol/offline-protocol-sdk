@@ -272,6 +272,38 @@ export interface SendMessageParams {
 }
 
 /**
+ * Parameters for sending a connection request
+ */
+export interface SendConnectionRequestParams {
+  /** Recipient's user ID */
+  recipient: string;
+  /** Display name of the sender */
+  senderName: string;
+  /** Optional MLS key package bytes */
+  keyPackage?: number[];
+}
+
+/**
+ * Parameters for accepting a connection request
+ */
+export interface AcceptConnectionRequestParams {
+  /** Recipient's user ID */
+  recipient: string;
+  /** Display name of the accepting party */
+  accepterName: string;
+  /** Optional MLS key package bytes */
+  keyPackage?: number[];
+}
+
+/**
+ * Parameters for rejecting a connection request
+ */
+export interface RejectConnectionRequestParams {
+  /** Recipient's user ID */
+  recipient: string;
+}
+
+/**
  * Parameters for sending a file
  */
 export interface SendFileParams {
@@ -464,6 +496,36 @@ export interface SecureSessionFailedEvent extends BaseEvent {
 }
 
 /**
+ * Connection request received event
+ */
+export interface ConnectionRequestReceivedEvent extends BaseEvent {
+  type: 'connection_request_received';
+  sender: string;
+  sender_name: string;
+  timestamp: number;
+  key_package?: number[];
+}
+
+/**
+ * Connection accepted event
+ */
+export interface ConnectionAcceptedEvent extends BaseEvent {
+  type: 'connection_accepted';
+  accepted_by: string;
+  accepted_by_name: string;
+  timestamp: number;
+  key_package?: number[];
+}
+
+/**
+ * Connection rejected event
+ */
+export interface ConnectionRejectedEvent extends BaseEvent {
+  type: 'connection_rejected';
+  rejected_by: string;
+}
+
+/**
  * Union type of all events
  */
 export type ProtocolEvent =
@@ -481,7 +543,10 @@ export type ProtocolEvent =
   | FileReceivedEvent
   | DiagnosticEvent
   | SecureSessionEstablishedEvent
-  | SecureSessionFailedEvent;
+  | SecureSessionFailedEvent
+  | ConnectionRequestReceivedEvent
+  | ConnectionAcceptedEvent
+  | ConnectionRejectedEvent;
 
 /**
  * Event listener type
