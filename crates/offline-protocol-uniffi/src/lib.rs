@@ -1367,9 +1367,11 @@ impl OfflineProtocol {
             }
         }
 
-        // Fallback to local queue
+        // Fallback to local queue.
+        // Loop so that un-deserializable entries are skipped rather than
+        // blocking the rest of the queue.
         let mut internet_state = self.internet_state.lock().unwrap();
-        if let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
+        while let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
             let parsed = if let Some(transport_arc) = protocol
                 .transport_manager()
                 .get_transport(CoreTransportType::Internet)
@@ -1388,14 +1390,15 @@ impl OfflineProtocol {
                 .map(|msg| msg.id.as_str().to_string())
                 .unwrap_or_default();
 
-            // An empty message_id would break the confirm/fail feedback loop — skip it.
+            // An empty message_id would break the confirm/fail feedback loop — skip it
+            // and try the next entry.
             if msg_id.is_empty() {
                 tracing::warn!(
                     recipient = %recipient,
                     data_len = data.len(),
                     "Dropping fallback internet message: could not recover message_id from deserialization"
                 );
-                return None;
+                continue;
             }
 
             let reply_to_msg = parsed

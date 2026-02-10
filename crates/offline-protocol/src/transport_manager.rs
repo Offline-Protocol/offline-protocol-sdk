@@ -143,11 +143,19 @@ impl TransportManager {
     /// returning an error. Each synchronous failure is recorded via
     /// `record_retry_failure` so DORS can adjust future scoring.
     ///
-    /// **Note on Internet transport**: Internet `send()` is asynchronous — it
-    /// enqueues the message and returns `Ok(())` immediately. Actual delivery
-    /// failures are reported later via the `confirm_sent` / `report_send_failure`
-    /// confirmation loop. Therefore the fallback mechanism here only triggers
-    /// for transports whose `send()` can fail synchronously (BLE, WiFi Direct).
+    /// # Internet transport — fallback does NOT apply
+    ///
+    /// Internet `send()` enqueues the message and returns `Ok(())`
+    /// immediately. The actual wire-level outcome is reported asynchronously
+    /// via the `confirm_sent` / `report_send_failure` confirmation loop on
+    /// `InternetTransport`. Because `send()` never fails synchronously, the
+    /// fallback loop below will **not** trigger for Internet. If the
+    /// WebSocket is silently broken (status still `Available` but sends
+    /// fail), messages will be enqueued, detected as failures by the
+    /// confirmation-loop timeout, and counted in DORS metrics — but they
+    /// are **not** retried on an alternative transport by this method.
+    /// Retry/re-routing for those messages is handled by the higher-level
+    /// outbox retry mechanism.
     pub fn send(&mut self, message: &Message) -> Result<()> {
         let available = self.get_available_transports();
         if available.is_empty() {

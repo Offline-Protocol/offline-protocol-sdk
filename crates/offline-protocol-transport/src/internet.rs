@@ -54,6 +54,21 @@ impl Default for InternetConfig {
 ///
 /// This provides connectivity via TCP/WebSocket to a central relay server.
 /// Useful for hybrid online/offline scenarios.
+///
+/// ## Lock ordering
+///
+/// When acquiring more than one lock in a single scope, follow this order to
+/// prevent deadlocks:
+///
+/// 1. `status`
+/// 2. `pending_confirmation`
+/// 3. `send_queue`
+/// 4. `metrics`
+/// 5. `receive_queue`
+/// 6. `reconnect_attempts` / `last_heartbeat` / `platform_handle`
+///
+/// Not every method needs all of these — the ordering only matters when
+/// multiple locks are held simultaneously.
 pub struct InternetTransport {
     /// Local device ID
     device_id: String,
@@ -67,6 +82,13 @@ pub struct InternetTransport {
     send_queue: Arc<Mutex<VecDeque<Message>>>,
     /// Messages dequeued by the platform but not yet confirmed as sent.
     /// Key: message_id string, Value: when the message was dequeued.
+    ///
+    /// Bounded by: (a) `drain_expired_pending()` which runs on every
+    /// `get_next_message()` poll, and (b) `fail_all_pending()` which runs
+    /// on transport disconnect. If the platform stops polling *and* the
+    /// transport status stays `Available`, entries accumulate up to the
+    /// number of messages enqueued during that window. Under normal
+    /// operation (platform polls at ≥1 Hz) the map stays small.
     pending_confirmation: Arc<Mutex<HashMap<String, Instant>>>,
     /// Transport metrics
     metrics: Arc<Mutex<TransportMetrics>>,
@@ -127,8 +149,12 @@ impl InternetTransport {
     /// - They will be sent when transport becomes available again
     /// - Reconnect counter is reset on successful connection
     pub fn on_status_changed(&self, status: TransportStatus) {
-        let previous_status = *self.status.lock().unwrap();
-        *self.status.lock().unwrap() = status;
+        let previous_status = {
+            let mut guard = self.status.lock().unwrap();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
 
         // Reset reconnect counter on successful connection
         if status == TransportStatus::Available {
@@ -258,6 +284,11 @@ impl InternetTransport {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.success_count = metrics.success_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
+            tracing::trace!(
+                message_id = message_id,
+                success_count = metrics.success_count,
+                "confirm_sent: recorded success"
+            );
         } else {
             tracing::debug!(
                 message_id = message_id,
@@ -277,6 +308,11 @@ impl InternetTransport {
             let mut metrics = self.metrics.lock().unwrap();
             metrics.failure_count = metrics.failure_count.saturating_add(1);
             recalculate_delivery_ratios(&mut metrics);
+            tracing::trace!(
+                message_id = message_id,
+                failure_count = metrics.failure_count,
+                "report_send_failure: recorded failure"
+            );
         } else {
             tracing::debug!(
                 message_id = message_id,
