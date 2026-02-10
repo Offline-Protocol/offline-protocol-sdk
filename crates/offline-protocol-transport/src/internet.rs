@@ -213,29 +213,32 @@ impl InternetTransport {
         // is frequent enough to bound the pending map and keep metrics fresh.
         self.drain_expired_pending();
 
-        let message = {
+        let (message, queue_depth) = {
             let mut queue = self.send_queue.lock().unwrap();
             match queue.pop_front() {
-                Some(m) => m,
+                Some(m) => {
+                    let depth = queue.len();
+                    (m, depth)
+                }
                 None => return Ok(None),
             }
         };
 
         let message_id = message.id.as_str().to_string();
 
-        // Track as pending confirmation
+        // Serialize before inserting into pending_confirmation so a
+        // serialization failure does not orphan an entry that the platform
+        // can never confirm or fail.
+        let data = self.serialize_message(&message)?;
+
         {
             let mut pending = self.pending_confirmation.lock().unwrap();
             pending.insert(message_id.clone(), Instant::now());
         }
 
-        let data = self.serialize_message(&message)?;
-
-        // Update queue depth metric
         {
-            let queue = self.send_queue.lock().unwrap();
             let mut metrics = self.metrics.lock().unwrap();
-            metrics.queue_depth = queue.len();
+            metrics.queue_depth = queue_depth;
         }
 
         Ok(Some((message_id, data)))
@@ -289,15 +292,17 @@ impl InternetTransport {
         let now = Instant::now();
         let mut expired_count: u32 = 0;
 
-        let mut pending = self.pending_confirmation.lock().unwrap();
-        pending.retain(|_id, enqueued_at| {
-            if now.duration_since(*enqueued_at) >= timeout {
-                expired_count += 1;
-                false
-            } else {
-                true
-            }
-        });
+        {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            pending.retain(|_id, enqueued_at| {
+                if now.duration_since(*enqueued_at) >= timeout {
+                    expired_count += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
 
         if expired_count > 0 {
             tracing::warn!(
@@ -315,15 +320,18 @@ impl InternetTransport {
     /// Called when the transport disconnects so that metrics reflect the loss
     /// right away rather than waiting for the per-message expiry timeout.
     fn fail_all_pending(&self) {
-        let mut pending = self.pending_confirmation.lock().unwrap();
-        let count = u32::try_from(pending.len()).unwrap_or(u32::MAX);
+        let count = {
+            let mut pending = self.pending_confirmation.lock().unwrap();
+            let count = u32::try_from(pending.len()).unwrap_or(u32::MAX);
+            pending.clear();
+            count
+        };
+
         if count > 0 {
             tracing::warn!(
                 count = count,
                 "Failing all pending confirmations due to transport disconnect"
             );
-            pending.clear();
-
             let mut metrics = self.metrics.lock().unwrap();
             metrics.failure_count = metrics.failure_count.saturating_add(count);
             recalculate_delivery_ratios(&mut metrics);
@@ -370,24 +378,24 @@ impl InternetTransport {
 
     /// Updates transport metrics while preserving confirmation-loop delivery counts.
     ///
-    /// The confirmation loop (`confirm_sent` / `report_send_failure`) tracks real
-    /// wire-level delivery outcomes. An external `update_metrics` call must not
-    /// overwrite those counts, so `success_count`, `failure_count`,
-    /// `delivery_ratio`, and `drop_rate` from the incoming struct are ignored.
+    /// The confirmation loop (`confirm_sent` / `report_send_failure`) owns
+    /// `success_count`, `failure_count`, `delivery_ratio`, and `drop_rate`.
+    /// This method only copies externally-managed fields from `incoming`,
+    /// so adding a new confirmation-loop field doesn't require updating this
+    /// function — it's preserved by default.
     pub fn update_metrics(&self, incoming: TransportMetrics) {
         let mut current = self.metrics.lock().unwrap();
-        // Preserve confirmation-loop delivery counts
-        let success = current.success_count;
-        let failure = current.failure_count;
-        let delivery_ratio = current.delivery_ratio;
-        let drop_rate = current.drop_rate;
-
-        *current = incoming;
-
-        current.success_count = success;
-        current.failure_count = failure;
-        current.delivery_ratio = delivery_ratio;
-        current.drop_rate = drop_rate;
+        current.rssi = incoming.rssi;
+        current.latency_ms = incoming.latency_ms;
+        current.bandwidth_bps = incoming.bandwidth_bps;
+        current.congestion = incoming.congestion;
+        current.queue_depth = incoming.queue_depth;
+        current.battery_level = incoming.battery_level;
+        current.is_charging = incoming.is_charging;
+        current.relay_connection_count = incoming.relay_connection_count;
+        current.is_active_relay = incoming.is_active_relay;
+        current.average_hop_count = incoming.average_hop_count;
+        current.energy_cost = incoming.energy_cost;
     }
 }
 
@@ -579,6 +587,59 @@ mod tests {
         assert_eq!(transport.pending_confirmation_count(), 0);
         let metrics = transport.metrics();
         assert_eq!(metrics.failure_count, 1);
+        assert_eq!(metrics.success_count, 0);
+    }
+
+    #[test]
+    fn test_pending_expiry_on_drain() {
+        let transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let message = create_test_message();
+        assert!(transport.send(&message).is_ok());
+
+        let (msg_id, _data) = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        // Backdate the pending entry so it appears expired.
+        {
+            let mut pending = transport.pending_confirmation.lock().unwrap();
+            let expired_time = Instant::now()
+                - Duration::from_secs(INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS + 1);
+            pending.insert(msg_id.clone(), expired_time);
+        }
+
+        // Calling get_next_message (even with an empty queue) triggers drain.
+        let next = transport.get_next_message().unwrap();
+        assert!(next.is_none());
+
+        // The expired entry should have been drained and counted as a failure.
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.failure_count, 1);
+        assert_eq!(metrics.success_count, 0);
+    }
+
+    #[test]
+    fn test_fail_all_pending_on_disconnect() {
+        let transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        // Enqueue and dequeue two messages to put them in pending state.
+        let msg1 = create_test_message();
+        let msg2 = create_test_message();
+        assert!(transport.send(&msg1).is_ok());
+        assert!(transport.send(&msg2).is_ok());
+
+        let _ = transport.get_next_message().unwrap().unwrap();
+        let _ = transport.get_next_message().unwrap().unwrap();
+        assert_eq!(transport.pending_confirmation_count(), 2);
+
+        // Simulate disconnect — should fail all pending.
+        transport.on_status_changed(TransportStatus::Disconnected);
+        assert_eq!(transport.pending_confirmation_count(), 0);
+        let metrics = transport.metrics();
+        assert_eq!(metrics.failure_count, 2);
         assert_eq!(metrics.success_count, 0);
     }
 

@@ -1094,9 +1094,13 @@ impl TransportSelector {
     ///
     /// Used by `TransportManager` when a fallback transport succeeds so that
     /// subsequent `select_transport` calls apply hysteresis against the
-    /// transport that actually carried the last message.
+    /// transport that actually carried the last message. Also resets the
+    /// switch cooldown timer so the next selection uses a full cooldown
+    /// window measured from this fallback, not from the original primary
+    /// selection.
     pub fn set_current_transport(&mut self, transport: TransportType) {
         self.current_transport = Some(transport);
+        self.last_switch_time = Some(Utc::now());
     }
 }
 
