@@ -48,7 +48,6 @@ public class BleManager: NSObject, TransportManager {
     private let DEVICE_ID_CHAR_UUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
     private let IDENTITY_CHAR_UUID = CBUUID(string: "6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
     
-    private let FRAGMENT_POLL_INTERVAL: TimeInterval = 0.1 // 100ms
     private let MAX_FRAGMENT_SIZE = 185
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
     private let MAX_CONNECTIONS_PER_DEVICE = 4
@@ -102,8 +101,7 @@ public class BleManager: NSObject, TransportManager {
     /// Verified peer identities (peripheral UUID -> SignedIdentityData)
     private var verifiedPeerIdentities: [UUID: SignedIdentityData] = [:]
     
-    // Fragment polling
-    private var fragmentTimer: Timer?
+    // Fragment sending (event-driven, no polling)
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
     
     // Gradient routing cleanup
@@ -365,22 +363,28 @@ public class BleManager: NSObject, TransportManager {
         updateState(.starting)
         transportStartAt = Date()
         
-        // Initialize Central Manager (for scanning)
-        // This will trigger permission prompt if not yet determined
+        // Initialize Central Manager (for scanning) with state restoration support.
+        // The restore identifier allows iOS to relaunch the app and restore BLE
+        // connections after the app has been terminated by the OS.
         print("[BleManager] 📱 Initializing Central Manager...")
         centralManager = CBCentralManager(
             delegate: self,
             queue: nil,
-            options: [CBCentralManagerOptionShowPowerAlertKey: true]
+            options: [
+                CBCentralManagerOptionShowPowerAlertKey: true,
+                CBCentralManagerOptionRestoreIdentifierKey: "com.offlineprotocol.central"
+            ]
         )
         
-        // Initialize Peripheral Manager (for advertising)
-        // This will trigger permission prompt if not yet determined
+        // Initialize Peripheral Manager (for advertising) with state restoration.
         print("[BleManager] 📡 Initializing Peripheral Manager...")
         peripheralManager = CBPeripheralManager(
             delegate: self,
             queue: nil,
-            options: [CBPeripheralManagerOptionShowPowerAlertKey: true]
+            options: [
+                CBPeripheralManagerOptionShowPowerAlertKey: true,
+                CBPeripheralManagerOptionRestoreIdentifierKey: "com.offlineprotocol.peripheral"
+            ]
         )
         
         print("[BleManager] ⏳ Waiting for Bluetooth to power on and permissions to be granted...")
@@ -401,8 +405,8 @@ public class BleManager: NSObject, TransportManager {
         
         updateState(.stopping)
         
-        // Stop fragment polling
-        stopFragmentPolling()
+        // Stop routing cleanup
+        stopRoutingCleanup()
         
         // Stop scanning
         stopScanning(reason: "stop")
@@ -452,9 +456,10 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func pauseUnsafe() {
-        // For iOS background mode
+        // For iOS background mode — stop scanning but keep connections alive.
+        // Fragment sending remains event-driven via the Rust callback and
+        // CoreBluetooth delegate methods, which iOS delivers even in background.
         stopScanning(reason: "pause")
-        stopFragmentPolling()
     }
     
     public func resume() {
@@ -464,10 +469,12 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func resumeUnsafe() {
-        // Resume from background
+        // Resume from background — restart scanning.
+        // Fragment sending is event-driven and does not need restart.
         if state == .running {
             startScanning(reason: "resume")
-            startFragmentPolling()
+            // Drain any fragments that accumulated while backgrounded
+            drainAndSendFragments()
         }
     }
     
@@ -702,7 +709,10 @@ public class BleManager: NSObject, TransportManager {
         centralManager = CBCentralManager(
             delegate: self,
             queue: nil,
-            options: [CBCentralManagerOptionShowPowerAlertKey: true]
+            options: [
+                CBCentralManagerOptionShowPowerAlertKey: true,
+                CBCentralManagerOptionRestoreIdentifierKey: "com.offlineprotocol.central"
+            ]
         )
         lastCentralReset = now
         scanRestartCount = 0
@@ -1036,28 +1046,39 @@ public class BleManager: NSObject, TransportManager {
         }
     }
     
-    private func startFragmentPolling() {
-        stopFragmentPolling()
-        
-        fragmentTimer = Timer.scheduledTimer(
-            withTimeInterval: FRAGMENT_POLL_INTERVAL,
-            repeats: true
-        ) { [weak self] _ in
-            self?.pollAndSendFragments()
+    /// Called by the Rust transport callback when new outgoing fragments are available.
+    /// This replaces the timer-based `startFragmentPolling` — iOS delivers this callback
+    /// even in background because it originates from within the process (no RunLoop dependency).
+    public func onFragmentsAvailable() {
+        DispatchQueue.main.async { [weak self] in
+            self?.drainAndSendFragments()
         }
-        
-        RunLoop.current.add(fragmentTimer!, forMode: .common)
-        print("[BleManager] Fragment polling started")
-        emitDiagnostic("info", "Fragment polling started")
-        
-        startRoutingCleanup()
     }
     
-    private func stopFragmentPolling() {
-        fragmentTimer?.invalidate()
-        fragmentTimer = nil
-        stopRoutingCleanup()
-        emitDiagnostic("info", "Fragment polling stopped")
+    /// Drains the Rust fragment queue and sends each fragment over BLE.
+    /// Stops when the queue is empty or all target peers are flow-controlled.
+    /// Called from `onFragmentsAvailable()` and from CoreBluetooth flow-control delegates.
+    private func drainAndSendFragments() {
+        guard state == .running else { return }
+        
+        fragmentQueue.async { [weak self] in
+            guard let self = self else { return }
+            _ = self.flushPendingOutboundFragments()
+            
+            while let fragment = self.protocolInstance.bleGetNextFragment() {
+                let recipientId = fragment.recipientId
+                let data = Data(fragment.data)
+                
+                let sent = self.sendFragmentData(recipientId: recipientId, data: data)
+                if sent {
+                    self.emitDiagnostic("debug", "Fragment sent successfully", context: ["recipientId": recipientId])
+                } else {
+                    // Peer flow-controlled or disconnected — queue for retry
+                    self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
+                    break
+                }
+            }
+        }
     }
     
     // MARK: - Gradient Routing
@@ -1115,51 +1136,8 @@ public class BleManager: NSObject, TransportManager {
         )
     }
     
-    private func pollAndSendFragments() {
-        fragmentQueue.async { [weak self] in
-            guard let self = self else { return }
-            let hasUnsentFragments = self.flushPendingOutboundFragments()
-            
-            // Poll for new fragments even if there are unsent pending ones
-            // This prevents deadlock where old fragments block new ones
-            // Poll for next fragment from protocol
-            if let fragment = self.protocolInstance.bleGetNextFragment() {
-                print("[BleManager] Got fragment for recipient: \(fragment.recipientId), size: \(fragment.data.count)")
-                self.emitDiagnostic("debug", "Polling got fragment", context: [
-                    "recipientId": fragment.recipientId,
-                    "fragmentSize": fragment.data.count
-                ])
-                self.sendFragment(fragment)
-            } else if hasUnsentFragments {
-                // Log when we have unsent fragments but no new ones to poll
-                // This helps diagnose connection issues
-                if self.logThrottler.shouldLog(key: "unsent_fragments_no_new", interval: 5.0) {
-                    let recipientCount = self.pendingOutboundFragments.count
-                    print("[BleManager] ⚠️ Have \(recipientCount) recipients with unsent fragments, but no new fragments to poll")
-                    self.emitDiagnostic("warning", "Unsent fragments blocking", context: [
-                        "recipientCount": recipientCount,
-                        "recipients": Array(self.pendingOutboundFragments.keys)
-                    ])
-                }
-            }
-        }
-    }
-    
-    private func sendFragment(_ fragment: BleFragment) {
-        let recipientId = fragment.recipientId
-        let data = Data(fragment.data)
-        
-        let sendResult = sendFragmentData(recipientId: recipientId, data: data)
-        print("[BleManager] Fragment send result for \(recipientId): \(sendResult)")
-        
-        if !sendResult {
-            print("[BleManager] Failed to send fragment immediately, queuing for retry")
-            enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
-        } else {
-            print("[BleManager] Fragment sent successfully to \(recipientId)")
-            emitDiagnostic("debug", "Fragment sent successfully", context: ["recipientId": recipientId])
-        }
-    }
+    // pollAndSendFragments and sendFragment removed — replaced by
+    // event-driven drainAndSendFragments() triggered via onFragmentsAvailable().
 
     private func flushPendingOutboundFragments() -> Bool {
         var hasUnsentFragments = false
@@ -1876,6 +1854,38 @@ public class BleManager: NSObject, TransportManager {
 
 extension BleManager: CBCentralManagerDelegate {
     
+    /// State restoration: called before `centralManagerDidUpdateState` when iOS
+    /// relaunches the app after termination. Restores previously connected peripherals
+    /// so the mesh can resume without waiting for new advertisements.
+    public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        print("[BleManager] Restoring central manager state")
+        emitDiagnostic("info", "Central manager restoring state", context: [
+            "keys": Array(dict.keys)
+        ])
+        
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
+            for peripheral in peripherals {
+                peripheral.delegate = self
+                discoveredPeripherals[peripheral.identifier] = peripheral
+                connections.registerPeripheral(peripheral)
+                
+                print("[BleManager] Restored peripheral: \(peripheral.identifier), state: \(peripheral.state.rawValue)")
+                emitDiagnostic("info", "Restored peripheral from state restoration", context: [
+                    "identifier": peripheral.identifier.uuidString,
+                    "state": peripheral.state.rawValue
+                ])
+                
+                // If the peripheral was connected, rediscover services
+                if peripheral.state == .connected {
+                    peripheral.discoverServices([SERVICE_UUID])
+                } else {
+                    // Try to reconnect
+                    central.connect(peripheral, options: nil)
+                }
+            }
+        }
+    }
+    
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         let stateString: String
         var authStatus = "unknown"
@@ -1953,8 +1963,11 @@ extension BleManager: CBCentralManagerDelegate {
             
             centralReady = true
             startScanning(reason: "central_powered_on")
-            startFragmentPolling()
+            startRoutingCleanup()
             emitDiagnostic("info", "Central manager powered on and ready")
+            
+            // Drain any fragments that may have queued while BLE was unavailable
+            drainAndSendFragments()
             
             // If both central and peripheral are ready, mark as running
             if peripheralReady && state == .starting {
@@ -2479,11 +2492,40 @@ extension BleManager: CBPeripheralDelegate {
             emitDiagnostic("error", "Error writing characteristic", context: ["error": error.localizedDescription])
         }
     }
+    
+    /// Flow-control signal: the BLE write buffer has drained for this peripheral.
+    /// Resume sending queued fragments instead of waiting for a timer tick.
+    public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        guard let recipientId = connections.peripheralDeviceId(for: peripheral.identifier) else { return }
+        if logThrottler.shouldLog(key: "flow_ready_\(recipientId)", interval: 1.0) {
+            emitDiagnostic("debug", "BLE write buffer drained, resuming sends", context: ["recipientId": recipientId])
+        }
+        drainAndSendFragments()
+    }
 }
 
 // MARK: - CBPeripheralManagerDelegate
 
 extension BleManager: CBPeripheralManagerDelegate {
+    
+    /// State restoration for the peripheral (GATT server) side.
+    /// Re-registers services if needed after app relaunch.
+    public func peripheralManager(_ peripheral: CBPeripheralManager, willRestoreState dict: [String: Any]) {
+        print("[BleManager] Restoring peripheral manager state")
+        emitDiagnostic("info", "Peripheral manager restoring state", context: [
+            "keys": Array(dict.keys)
+        ])
+        
+        // If services were restored, mark GATT as ready
+        if let services = dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService] {
+            let hasOurService = services.contains { $0.uuid == SERVICE_UUID }
+            if hasOurService {
+                isGattServiceReady = true
+                print("[BleManager] GATT service restored from state restoration")
+                emitDiagnostic("info", "GATT service restored")
+            }
+        }
+    }
     
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         let stateString: String

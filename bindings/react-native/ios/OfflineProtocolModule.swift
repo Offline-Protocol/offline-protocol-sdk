@@ -250,8 +250,14 @@ class OfflineProtocolModule: RCTEventEmitter {
             
             // Initialize BLE manager if BLE is enabled
             if config.bleEnabled {
-                bleManager = BleManager(protocol: proto, deviceId: config.userId)
-                bleManager?.delegate = self
+                let manager = BleManager(protocol: proto, deviceId: config.userId)
+                manager.delegate = self
+                bleManager = manager
+                
+                // Register event-driven transport callback — replaces timer-based polling.
+                // When Rust enqueues a fragment, this callback fires and Swift sends immediately.
+                proto.setBleTransportCallback(callback: BleTransportCallbackImpl(bleManager: manager))
+                
                 print("[OfflineProtocolModule] BLE Manager initialized for user: \(config.userId)")
                 emitDiagnostic(level: "info", message: "BLE manager initialized", context: [
                     "userId": config.userId
@@ -721,6 +727,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     let newManager = WifiDirectManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
                     newManager.delegate = self
                     wifiDirectManager = newManager
+                    proto.setWifiDirectTransportCallback(callback: WifiDirectTransportCallbackImpl(wifiDirectManager: newManager))
                     emitDiagnostic(level: "info", message: "WiFi Direct manager created on demand")
                 }
                 
@@ -742,6 +749,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     let newManager = BleManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
                     newManager.delegate = self
                     bleManager = newManager
+                    proto.setBleTransportCallback(callback: BleTransportCallbackImpl(bleManager: newManager))
                     emitDiagnostic(level: "info", message: "BLE manager created on demand")
                 }
                 
@@ -2912,6 +2920,34 @@ class EventCallbackImpl: EventCallback, @unchecked Sendable {
     
     func onEvent(eventJson: String) {
         emitter?.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: ["eventJson": eventJson])
+    }
+}
+
+// MARK: - BLE Transport Callback (Event-Driven Sending)
+
+class BleTransportCallbackImpl: BleTransportCallback, @unchecked Sendable {
+    weak var bleManager: BleManager?
+    
+    init(bleManager: BleManager) {
+        self.bleManager = bleManager
+    }
+    
+    func onFragmentsAvailable() {
+        bleManager?.onFragmentsAvailable()
+    }
+}
+
+// MARK: - WiFi Direct Transport Callback (Event-Driven Sending)
+
+class WifiDirectTransportCallbackImpl: WifiDirectTransportCallback, @unchecked Sendable {
+    weak var wifiDirectManager: WifiDirectManager?
+    
+    init(wifiDirectManager: WifiDirectManager) {
+        self.wifiDirectManager = wifiDirectManager
+    }
+    
+    func onMessagesAvailable() {
+        wifiDirectManager?.onMessagesAvailable()
     }
 }
 

@@ -105,6 +105,10 @@ pub struct BleTransport {
     fragment_buffers: Arc<Mutex<HashMap<String, FragmentAssembly>>>,
     /// Negotiated MTU size (set by platform)
     mtu_size: Arc<Mutex<usize>>,
+    /// Platform callback invoked when new fragments are available to send.
+    /// Called from `send()` after enqueueing — the platform layer should
+    /// respond by calling `get_next_fragment()` and performing the BLE write.
+    on_fragments_available: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl BleTransport {
@@ -121,6 +125,23 @@ impl BleTransport {
             platform_handle: Arc::new(Mutex::new(None)),
             fragment_buffers: Arc::new(Mutex::new(HashMap::new())),
             mtu_size: Arc::new(Mutex::new(BLE_MAX_FRAGMENT_SIZE)),
+            on_fragments_available: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Registers a callback that fires when new outgoing fragments become available.
+    ///
+    /// The platform layer (Swift/Kotlin) implements this to wake up and call
+    /// `get_next_fragment()` instead of polling on a timer.
+    pub fn set_on_fragments_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_fragments_available.lock().unwrap() = Some(callback);
+    }
+
+    /// Notifies the platform that fragments are ready to send.
+    fn notify_fragments_available(&self) {
+        let callback = self.on_fragments_available.lock().unwrap().clone();
+        if let Some(cb) = callback {
+            cb();
         }
     }
 
@@ -677,6 +698,11 @@ impl Transport for BleTransport {
         }
 
         self.update_queue_metric();
+
+        // Notify platform that fragments are available to send.
+        // This replaces timer-based polling — the platform will call
+        // get_next_fragment() in response to this callback.
+        self.notify_fragments_available();
 
         Ok(())
     }
