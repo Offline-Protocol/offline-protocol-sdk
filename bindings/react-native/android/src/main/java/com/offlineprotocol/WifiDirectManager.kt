@@ -43,7 +43,9 @@ class WifiDirectManager(
     companion object {
         private const val TAG = "WifiDirectManager"
         
-        private const val MESSAGE_POLL_INTERVAL_MS = 100L
+        // Fallback interval for message polling. Primary send path is event-driven
+        // via onMessagesAvailable(); this timer only catches edge cases.
+        private const val MESSAGE_POLL_INTERVAL_MS = 2000L
         private const val CONNECTION_TIMEOUT_MS = 30000L
         private const val SERVER_PORT = 8988
         private const val SOCKET_TIMEOUT_MS = 5000
@@ -566,7 +568,34 @@ class WifiDirectManager(
         connectedPeers.clear()
     }
 
-    // MARK: - Message Handling
+    // MARK: - Message Handling (Event-Driven)
+
+    /**
+     * Called by the Rust transport callback when new outgoing messages are available.
+     * This is the primary send path, replacing the 100ms polling loop.
+     */
+    fun onMessagesAvailable() {
+        mainHandler.post { drainAndSendMessages() }
+    }
+
+    /**
+     * Drains the Rust message queue and sends each message over WiFi Direct.
+     * Called from onMessagesAvailable() and from the fallback polling timer.
+     */
+    private fun drainAndSendMessages() {
+        if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return
+
+        try {
+            while (true) {
+                val message = protocol.wifiDirectGetNextMessage() ?: break
+                sendMessage(message.recipientId, message.data.map { it.toByte() }.toByteArray())
+            }
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Error in drainAndSendMessages", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+        }
+    }
 
     private fun pollAndSendMessages() {
         if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return

@@ -41,7 +41,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         const val MIN_HISTORY_WINDOW = 1L
         const val MAX_HISTORY_WINDOW = 100L
         const val BLE_RESTART_DELAY_MS = 1000L
-        const val PROCESS_INTERVAL_MS = 100L
+        // Reduced from 100ms; latency-sensitive work is now event-driven.
+        // This tick handles retries, ACK timeouts, and DORS only.
+        const val PROCESS_INTERVAL_MS = 500L
         const val LOG_INTERVAL_MS = 5000L
         const val LOG_INTERVAL_THRESHOLD_MS = 100L
         const val DEFAULT_RSSI_THRESHOLD: Short = -85
@@ -65,6 +67,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         wifiDirectManager?.stop()
         wifiDirectManager = null
         protocol = null
+        stopForegroundService()
     }
 
     @ReactMethod
@@ -331,6 +334,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 ))
             }
             
+            // Wire Rust transport callbacks for event-driven sending.
+            // These replace the 100ms polling loops; the Rust core calls back into
+            // Kotlin when outgoing data is enqueued, and the manager drains the queue
+            // immediately. Requires regenerated UniFFI Android bindings that include
+            // BleTransportCallback / WifiDirectTransportCallback interfaces.
+            wireTransportCallbacks(proto)
+
             // Start process scheduler
             startProcessScheduler()
             emitDiagnostic("info", "Protocol process scheduler started")
@@ -389,6 +399,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             emitDiagnostic("info", "Starting protocol")
             protocol?.start()
             emitDiagnostic("info", "Protocol core started")
+
+            // Start foreground service to protect the process from being killed
+            startForegroundService()
             
             //  Start BLE manager if available - BLE should work independently
             // BLE peer discovery and messaging must work even when Internet/WiFi are disabled
@@ -406,27 +419,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         "advertising" to true
                     ))
                     
-                    //  Ensure bleStatusChanged(true) is called immediately and as backup
-                    // This ensures BLE transport is marked as Available for message sending
-                    try {
-                        protocol?.bleStatusChanged(true)
-                        android.util.Log.i(NAME, "✅ Called protocol.bleStatusChanged(true) immediately")
-                        emitDiagnostic("info", "BLE status set to available")
-                    } catch (e: Exception) {
-                        android.util.Log.w(NAME, "Immediate bleStatusChanged failed: ${e.message}", e)
-                    }
-                    
-                    // Backup call in case timing is off
-                    mainHandler.postDelayed({
-                        android.util.Log.i(NAME, "Backup bleStatusChanged(true) call")
-                        emitDiagnostic("info", "Backup call to protocol.bleStatusChanged(true)")
-                        try {
-                            protocol?.bleStatusChanged(true)
-                            emitDiagnostic("info", "Backup bleStatusChanged(true) completed")
-                        } catch (e: Exception) {
-                            android.util.Log.w(NAME, "Backup bleStatusChanged failed: ${e.message}", e)
-                        }
-                    }, Constants.BLE_RESTART_DELAY_MS)
+                    // bleStatusChanged(true) is called inside BleManager.start() after
+                    // advertising and scanning are both active — no backup timer needed.
                 } catch (e: Exception) {
                     android.util.Log.e(NAME, "❌ FAILED to start BLE Manager!", e)
                     android.util.Log.e(NAME, "Error type: ${e.javaClass.simpleName}")
@@ -480,6 +474,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         internetManager?.stop()
         android.util.Log.i(NAME, "Internet Manager stopped")
         emitDiagnostic("info", "Internet manager stopped")
+
+        // Stop WiFi Direct manager
+        wifiDirectManager?.stop()
+        android.util.Log.i(NAME, "WiFi Direct Manager stopped")
+        emitDiagnostic("info", "WiFi Direct manager stopped")
+
+        // Stop foreground service
+        stopForegroundService()
         
         try {
             protocol?.stop()
@@ -497,8 +499,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun pause(promise: Promise) {
         try {
-            // Pause BLE manager for background mode
+            // Stop the process scheduler so process() doesn't tick while paused
+            stopProcessScheduler()
+
+            // Pause all transports consistently
             bleManager?.pause()
+            internetManager?.pause()
+            wifiDirectManager?.pause()
             
             protocol?.pause()
             promise.resolve(null)
@@ -512,8 +519,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             protocol?.resume()
             
-            // Resume BLE manager
+            // Resume all transports consistently
             bleManager?.resume()
+            internetManager?.resume()
+            wifiDirectManager?.resume()
+
+            // Restart the process scheduler
+            if (protocol?.getState() == ProtocolState.RUNNING) {
+                startProcessScheduler()
+            }
             
             promise.resolve(null)
         } catch (e: Exception) {
@@ -2509,7 +2523,97 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Start background process scheduler
+     * Wire Rust transport callbacks for event-driven sending.
+     *
+     * Requires regenerated UniFFI Android bindings that expose
+     * BleTransportCallback / WifiDirectTransportCallback interfaces and
+     * setBleTransportCallback / setWifiDirectTransportCallback methods.
+     *
+     * Uses reflection so the build succeeds even with stale bindings;
+     * the fallback polling timer covers sending until callbacks are wired.
+     *
+     * Once the UniFFI bindings are regenerated, this method can be simplified
+     * to direct calls (see iOS OfflineProtocolModule.swift for reference).
+     */
+    private fun wireTransportCallbacks(proto: OfflineProtocol) {
+        // BLE callback
+        bleManager?.let { manager ->
+            try {
+                val callbackClass = Class.forName("uniffi.offline_protocol.BleTransportCallback")
+                val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    callbackClass.classLoader,
+                    arrayOf(callbackClass)
+                ) { _, method, _ ->
+                    if (method.name == "onFragmentsAvailable") {
+                        manager.onFragmentsAvailable()
+                    }
+                    null
+                }
+                val setter = proto.javaClass.getMethod("setBleTransportCallback", callbackClass)
+                setter.invoke(proto, proxy)
+                android.util.Log.i(NAME, "BLE transport callback wired (event-driven sending active)")
+                emitDiagnostic("info", "BLE transport callback wired")
+            } catch (e: Throwable) {
+                android.util.Log.w(NAME, "BLE transport callback not available; using fallback polling", e)
+                emitDiagnostic("warning", "BLE callback wiring skipped (regenerate UniFFI bindings)")
+            }
+        }
+
+        // WiFi Direct callback
+        wifiDirectManager?.let { manager ->
+            try {
+                val callbackClass = Class.forName("uniffi.offline_protocol.WifiDirectTransportCallback")
+                val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    callbackClass.classLoader,
+                    arrayOf(callbackClass)
+                ) { _, method, _ ->
+                    if (method.name == "onMessagesAvailable") {
+                        manager.onMessagesAvailable()
+                    }
+                    null
+                }
+                val setter = proto.javaClass.getMethod("setWifiDirectTransportCallback", callbackClass)
+                setter.invoke(proto, proxy)
+                android.util.Log.i(NAME, "WiFi Direct transport callback wired (event-driven sending active)")
+                emitDiagnostic("info", "WiFi Direct transport callback wired")
+            } catch (e: Throwable) {
+                android.util.Log.w(NAME, "WiFi Direct transport callback not available; using fallback polling", e)
+                emitDiagnostic("warning", "WiFi Direct callback wiring skipped (regenerate UniFFI bindings)")
+            }
+        }
+    }
+
+    /**
+     * Start the foreground service to prevent process death while mesh is active.
+     */
+    private fun startForegroundService() {
+        try {
+            MeshForegroundService.start(reactApplicationContext)
+            emitDiagnostic("info", "Mesh foreground service started")
+        } catch (e: Exception) {
+            android.util.Log.w(NAME, "Failed to start foreground service: ${e.message}", e)
+            emitDiagnostic("warning", "Foreground service start failed", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+        }
+    }
+
+    /**
+     * Stop the foreground service.
+     */
+    private fun stopForegroundService() {
+        try {
+            MeshForegroundService.stop(reactApplicationContext)
+            emitDiagnostic("info", "Mesh foreground service stopped")
+        } catch (e: Exception) {
+            android.util.Log.w(NAME, "Failed to stop foreground service: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Start background process scheduler.
+     * Uses a 500ms interval as a fallback tick; latency-sensitive work is driven
+     * by transport callbacks (event-driven), not by this timer.
      */
     private fun startProcessScheduler() {
         stopProcessScheduler()
