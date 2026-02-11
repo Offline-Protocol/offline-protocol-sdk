@@ -308,6 +308,17 @@ callback interface EventCallback {
     void on_event(string event_json);
 };
 
+// BLE transport callback - notifies platform when outgoing fragments are available.
+// Replaces timer-based polling with event-driven sending.
+callback interface BleTransportCallback {
+    void on_fragments_available();
+};
+
+// WiFi Direct transport callback - notifies platform when outgoing messages are available.
+callback interface WifiDirectTransportCallback {
+    void on_messages_available();
+};
+
 // Main protocol interface
 interface OfflineProtocol {
     // Create a new protocol instance
@@ -355,6 +366,12 @@ interface OfflineProtocol {
     
     [Throws=ProtocolError]
     string reject_connection_request(string recipient);
+    
+    // BLE transport callback (event-driven sending, replaces timer-based polling)
+    void set_ble_transport_callback(BleTransportCallback callback);
+    
+    // WiFi Direct transport callback (event-driven sending, replaces timer-based polling)
+    void set_wifi_direct_transport_callback(WifiDirectTransportCallback callback);
     
     // BLE transport operations
     [Throws=ProtocolError]

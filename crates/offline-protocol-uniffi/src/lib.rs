@@ -654,6 +654,17 @@ pub trait EventCallback: Send + Sync {
     fn on_event(&self, event_json: String);
 }
 
+/// BLE transport callback trait — notifies platform when outgoing fragments are available.
+/// Replaces timer-based polling with event-driven sending.
+pub trait BleTransportCallback: Send + Sync {
+    fn on_fragments_available(&self);
+}
+
+/// WiFi Direct transport callback trait — notifies platform when outgoing messages are available.
+pub trait WifiDirectTransportCallback: Send + Sync {
+    fn on_messages_available(&self);
+}
+
 /// BLE fragment for outgoing data
 #[derive(Debug, Clone)]
 pub struct BleFragment {
@@ -928,6 +939,54 @@ impl OfflineProtocol {
             avg_latency_ms: 0,
         };
         self.emit_event(event);
+    }
+
+    // ========================================================================
+    // TRANSPORT CALLBACKS (EVENT-DRIVEN SENDING)
+    // ========================================================================
+
+    /// Registers a BLE transport callback that fires when outgoing fragments
+    /// become available. This replaces timer-based polling — the platform
+    /// should call `ble_get_next_fragment()` inside the callback.
+    pub fn set_ble_transport_callback(&self, callback: Box<dyn BleTransportCallback>) {
+        let callback: Arc<dyn BleTransportCallback> = Arc::from(callback);
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                let cb = callback.clone();
+                ble_transport.set_on_fragments_available(Arc::new(move || {
+                    cb.on_fragments_available();
+                }));
+            }
+        }
+    }
+
+    /// Registers a WiFi Direct transport callback that fires when outgoing
+    /// messages become available. This replaces timer-based polling.
+    pub fn set_wifi_direct_transport_callback(
+        &self,
+        callback: Box<dyn WifiDirectTransportCallback>,
+    ) {
+        let callback: Arc<dyn WifiDirectTransportCallback> = Arc::from(callback);
+        let protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::WiFiDirect)
+        {
+            let transport = transport_arc.lock().unwrap();
+            if let Some(wifi_transport) =
+                transport.as_any().downcast_ref::<WifiDirectTransport>()
+            {
+                let cb = callback.clone();
+                wifi_transport.set_on_messages_available(Arc::new(move || {
+                    cb.on_messages_available();
+                }));
+            }
+        }
     }
 
     // ========================================================================

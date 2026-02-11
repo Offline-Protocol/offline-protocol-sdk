@@ -32,6 +32,10 @@ class InternetManager(
     companion object {
         private const val TAG = "InternetManager"
         
+        // Polling is kept for Internet because there is no InternetTransportCallback in
+        // the UDL. WebSocket sends are cheap (OkHttp buffers internally), and the initial
+        // outbox flush is already event-driven (triggered immediately after authentication).
+        // This timer serves as a fallback to pick up messages queued while connected.
         private const val MESSAGE_POLL_INTERVAL_MS = 100L
         private const val RECONNECT_INITIAL_DELAY_MS = 1000L
         private const val RECONNECT_MAX_DELAY_MS = 30000L

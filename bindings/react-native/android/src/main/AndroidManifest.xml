@@ -19,6 +19,18 @@
     
     <!-- BLE feature requirement (not required to allow installation on devices without BLE) -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
+    <!-- Foreground Service permissions for background mesh operation -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <application>
+        <service
+            android:name=".MeshForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
     
 </manifest>
 

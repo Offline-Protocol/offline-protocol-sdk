@@ -24,7 +24,6 @@ public class WifiDirectManager: NSObject, TransportManager {
     // MARK: - Constants
     
     private let SERVICE_TYPE = "offline-proto"
-    private let MESSAGE_POLL_INTERVAL: TimeInterval = 0.1 // 100ms
     private let DISCOVERY_TIMEOUT: TimeInterval = 30.0
     private let CONNECTION_TIMEOUT: TimeInterval = 30.0
     
@@ -39,8 +38,7 @@ public class WifiDirectManager: NSObject, TransportManager {
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
     
-    // Message polling
-    private var messageTimer: Timer?
+    // Message sending (event-driven, no polling)
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.wifidirect.messages")
     
     // State tracking
@@ -116,9 +114,6 @@ public class WifiDirectManager: NSObject, TransportManager {
         // Notify protocol
         try? protocolInstance.wifiDirectStatusChanged(isConnected: true)
         
-        // Start message polling
-        startMessagePolling()
-        
         emitDiagnostic("info", "WiFi Direct transport started")
     }
     
@@ -128,9 +123,6 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
         
         updateState(.stopping)
-        
-        // Stop message polling
-        stopMessagePolling()
         
         // Stop browsing
         browser?.stopBrowsingForPeers()
@@ -155,7 +147,6 @@ public class WifiDirectManager: NSObject, TransportManager {
     }
     
     public func pause() {
-        stopMessagePolling()
         browser?.stopBrowsingForPeers()
         isBrowsing = false
     }
@@ -164,7 +155,8 @@ public class WifiDirectManager: NSObject, TransportManager {
         if state == .running {
             browser?.startBrowsingForPeers()
             isBrowsing = true
-            startMessagePolling()
+            // Drain any messages that accumulated while paused
+            drainAndSendMessages()
         }
     }
     
@@ -180,34 +172,24 @@ public class WifiDirectManager: NSObject, TransportManager {
         ]
     }
     
-    // MARK: - Message Handling
+    // MARK: - Message Handling (Event-Driven)
     
-    private func startMessagePolling() {
-        stopMessagePolling()
-        
-        messageTimer = Timer.scheduledTimer(
-            withTimeInterval: MESSAGE_POLL_INTERVAL,
-            repeats: true
-        ) { [weak self] _ in
-            self?.pollAndSendMessages()
+    /// Called by the Rust transport callback when new outgoing messages are available.
+    /// Replaces timer-based `startMessagePolling`.
+    public func onMessagesAvailable() {
+        DispatchQueue.main.async { [weak self] in
+            self?.drainAndSendMessages()
         }
-        
-        RunLoop.current.add(messageTimer!, forMode: .common)
     }
     
-    private func stopMessagePolling() {
-        messageTimer?.invalidate()
-        messageTimer = nil
-    }
-    
-    private func pollAndSendMessages() {
+    /// Drains the Rust message queue and sends each message over MultipeerConnectivity.
+    private func drainAndSendMessages() {
         guard state == .running, !connectedPeers.isEmpty else { return }
         
         messageQueue.async { [weak self] in
             guard let self = self else { return }
             
-            // Poll for next message from protocol
-            if let message = self.protocolInstance.wifiDirectGetNextMessage() {
+            while let message = self.protocolInstance.wifiDirectGetNextMessage() {
                 self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
             }
         }

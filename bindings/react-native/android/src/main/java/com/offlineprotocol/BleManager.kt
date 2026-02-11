@@ -69,7 +69,9 @@ class BleManager(
         private val DEVICE_ID_CHAR_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
         private val IDENTITY_CHAR_UUID = UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
         
-        private const val FRAGMENT_POLL_INTERVAL_MS = 100L // 100ms
+        // Fallback interval for fragment polling. Primary send path is event-driven
+        // via onFragmentsAvailable(); this timer only catches edge cases.
+        private const val FRAGMENT_POLL_INTERVAL_MS = 2000L
         private const val MAX_FRAGMENT_SIZE = 185
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
@@ -1588,6 +1590,48 @@ class BleManager(
         maybeHandleRebalance("evict")
     }
     
+    /**
+     * Called by the Rust transport callback when new outgoing fragments are available.
+     * This is the primary send path, replacing the 100ms polling loop.
+     * Posts to mainHandler to ensure all BLE operations run on the main thread.
+     */
+    fun onFragmentsAvailable() {
+        mainHandler.post { drainAndSendFragments() }
+    }
+
+    /**
+     * Drains the Rust fragment queue and sends each fragment over BLE.
+     * Stops when the queue is empty or all target peers are flow-controlled.
+     * Called from onFragmentsAvailable() and from the fallback polling timer.
+     */
+    private fun drainAndSendFragments() {
+        if (state != TransportState.RUNNING) return
+
+        try {
+            flushPendingOutboundFragments()
+
+            while (true) {
+                val fragment = try {
+                    protocol.bleGetNextFragment()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error calling bleGetNextFragment(): ${e.message}", e)
+                    return
+                } ?: break
+
+                val recipientId = fragment.recipientId
+                val data = fragment.data.map { it.toByte() }.toByteArray()
+
+                if (!sendFragmentData(recipientId, data)) {
+                    enqueuePendingOutboundFragment(recipientId, data)
+                    // Peer is flow-controlled; stop draining to avoid queuing everything
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in drainAndSendFragments", e)
+        }
+    }
+
     private fun pollAndSendFragments() {
         try {
             // The old logic would return early if there were unsent fragments, preventing new fragments

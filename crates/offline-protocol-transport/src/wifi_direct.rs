@@ -67,6 +67,8 @@ pub struct WifiDirectTransport {
     metrics: Arc<Mutex<TransportMetrics>>,
     /// Platform-specific handle (opaque pointer to Android WifiP2pManager)
     platform_handle: Arc<Mutex<Option<usize>>>,
+    /// Platform callback invoked when new messages are available to send.
+    on_messages_available: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl WifiDirectTransport {
@@ -86,6 +88,20 @@ impl WifiDirectTransport {
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             platform_handle: Arc::new(Mutex::new(None)),
+            on_messages_available: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Registers a callback that fires when new outgoing messages become available.
+    pub fn set_on_messages_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_messages_available.lock().unwrap() = Some(callback);
+    }
+
+    /// Notifies the platform that messages are ready to send.
+    fn notify_messages_available(&self) {
+        let callback = self.on_messages_available.lock().unwrap().clone();
+        if let Some(cb) = callback {
+            cb();
         }
     }
 
@@ -229,13 +245,18 @@ impl Transport for WifiDirectTransport {
 
         // Determine recipient and add to send queue
         let recipient = message.recipient.as_str().to_string();
-        let mut queue = self.send_queue.lock().unwrap();
-        queue.push_back((recipient, message.clone()));
+        {
+            let mut queue = self.send_queue.lock().unwrap();
+            queue.push_back((recipient, message.clone()));
 
-        // Update metrics
-        let mut metrics = self.metrics.lock().unwrap();
-        metrics.queue_depth = queue.len();
-        metrics.congestion = ((metrics.queue_depth as f32) / 20.0).clamp(0.0, 1.0);
+            // Update metrics
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.queue_depth = queue.len();
+            metrics.congestion = ((metrics.queue_depth as f32) / 20.0).clamp(0.0, 1.0);
+        }
+
+        // Notify platform that messages are available to send.
+        self.notify_messages_available();
 
         Ok(())
     }
