@@ -171,7 +171,7 @@ impl Default for HopCount {
 /// Use for human-readable display ("2:34 PM") only. Do NOT use for message
 /// ordering or cross-device duration calculations — wall clocks are unreliable
 /// across devices in offline/mesh networks.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct WallClockTimestamp(i64);
 
 impl WallClockTimestamp {
@@ -248,6 +248,10 @@ impl Default for Timestamp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct LamportClock(u64);
 
+/// Upper bound for accepted Lamport clock values.
+/// Rejects absurdly large values from malicious or buggy peers.
+pub const LAMPORT_CLOCK_MAX: u64 = u64::MAX / 2;
+
 impl LamportClock {
     /// Creates a clock at the initial value (0).
     pub fn new() -> Self {
@@ -256,7 +260,7 @@ impl LamportClock {
 
     /// Creates a clock from a raw value (for deserialization / migration).
     pub fn from_value(value: u64) -> Self {
-        Self(value)
+        Self(value.min(LAMPORT_CLOCK_MAX))
     }
 
     /// Returns the raw counter value.
@@ -266,14 +270,16 @@ impl LamportClock {
 
     /// Advances the clock for a local send event and returns the new value.
     pub fn tick(&mut self) -> Self {
-        self.0 += 1;
+        self.0 = self.0.saturating_add(1);
         *self
     }
 
     /// Advances the clock after receiving a message with the given clock value.
-    /// Sets local clock to `max(local, received) + 1`.
+    /// Sets local clock to `max(local, received) + 1`, clamping the received
+    /// value to [`LAMPORT_CLOCK_MAX`] to prevent adversarial inflation.
     pub fn merge(&mut self, received: LamportClock) -> Self {
-        self.0 = self.0.max(received.0) + 1;
+        let clamped = received.0.min(LAMPORT_CLOCK_MAX);
+        self.0 = self.0.max(clamped).saturating_add(1);
         *self
     }
 }
@@ -417,6 +423,29 @@ mod tests {
         let a = LamportClock::from_value(3);
         let b = LamportClock::from_value(7);
         assert!(a < b);
+    }
+
+    #[test]
+    fn test_lamport_clock_saturating_tick() {
+        let mut clock = LamportClock::from_value(LAMPORT_CLOCK_MAX);
+        let ticked = clock.tick();
+        assert_eq!(ticked.value(), LAMPORT_CLOCK_MAX.saturating_add(1));
+        // Doesn't panic or wrap
+    }
+
+    #[test]
+    fn test_lamport_clock_merge_clamps_adversarial_value() {
+        let mut local = LamportClock::from_value(5);
+        let adversarial = LamportClock(u64::MAX); // bypass from_value to simulate wire data
+        let merged = local.merge(adversarial);
+        // Should clamp to LAMPORT_CLOCK_MAX + 1, not overflow
+        assert_eq!(merged.value(), LAMPORT_CLOCK_MAX.saturating_add(1));
+    }
+
+    #[test]
+    fn test_lamport_clock_from_value_clamps() {
+        let clock = LamportClock::from_value(u64::MAX);
+        assert_eq!(clock.value(), LAMPORT_CLOCK_MAX);
     }
 
     #[test]

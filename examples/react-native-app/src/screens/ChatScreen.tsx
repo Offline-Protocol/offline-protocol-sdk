@@ -100,12 +100,15 @@ export function ChatScreen({
       }
     });
 
-    // Sort by Lamport clock for causal ordering; fall back to wall-clock
-    // for legacy messages (lamportClock === 0).
+    // Sort by Lamport clock for causal ordering.
+    // Legacy messages (lamportClock === 0) fall back to wall-clock timestamp.
+    // When one message is legacy and the other is not, legacy sorts first
+    // (it predates Lamport support) then tiebreak by message ID for stability.
     return Array.from(messageMap.values()).sort((a, b) => {
-      if (a.lamportClock === 0 && b.lamportClock === 0) {
-        return a.timestamp - b.timestamp;
-      }
+      const aLegacy = a.lamportClock === 0;
+      const bLegacy = b.lamportClock === 0;
+      if (aLegacy && bLegacy) return a.timestamp - b.timestamp;
+      if (aLegacy !== bLegacy) return aLegacy ? -1 : 1;
       const clockDiff = a.lamportClock - b.lamportClock;
       if (clockDiff !== 0) return clockDiff;
       return a.id.localeCompare(b.id);

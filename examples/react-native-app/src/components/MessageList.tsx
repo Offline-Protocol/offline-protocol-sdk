@@ -66,7 +66,7 @@ export function MessageList({
           recipient: e.recipient,
           status: 'delivered',
           timestamp: e.timestamp,
-          lamportClock: (e as any).lamport_clock ?? 0,
+          lamportClock: e.lamport_clock ?? 0,
           priority: e.priority,
           requiresAck: e.requires_ack,
         });
@@ -80,7 +80,7 @@ export function MessageList({
           recipient: e.recipient,
           status: 'delivered',
           timestamp: e.timestamp,
-          lamportClock: (e as any).lamport_clock ?? 0,
+          lamportClock: e.lamport_clock ?? 0,
           transport: e.transport,
           hopCount: e.hop_count,
         });
@@ -121,15 +121,18 @@ export function MessageList({
       }
     });
 
-    // Sort by Lamport clock for causal ordering; fall back to wall-clock
-    // for legacy messages (lamportClock === 0), tiebreak by sender ID.
+    // Sort by Lamport clock for causal ordering.
+    // Legacy messages (lamportClock === 0) fall back to wall-clock timestamp.
+    // When one message is legacy and the other is not, legacy sorts first
+    // (it predates Lamport support) then tiebreak by message ID for stability.
     return Array.from(messageMap.values()).sort((a, b) => {
-      if (a.lamportClock === 0 && b.lamportClock === 0) {
-        return a.timestamp - b.timestamp;
-      }
+      const aLegacy = a.lamportClock === 0;
+      const bLegacy = b.lamportClock === 0;
+      if (aLegacy && bLegacy) return a.timestamp - b.timestamp;
+      if (aLegacy !== bLegacy) return aLegacy ? -1 : 1;
       const clockDiff = a.lamportClock - b.lamportClock;
       if (clockDiff !== 0) return clockDiff;
-      return (a.sender ?? '').localeCompare(b.sender ?? '');
+      return a.id.localeCompare(b.id);
     });
   }, [events]);
 

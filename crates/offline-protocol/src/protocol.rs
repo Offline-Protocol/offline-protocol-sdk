@@ -74,6 +74,16 @@ struct ConnectionAcceptedPayload {
     key_package: Option<Vec<u8>>,
 }
 
+/// A received key package awaiting use for session creation.
+#[derive(Debug, Clone)]
+struct ReceivedKeyPackage {
+    /// Raw MLS key package bytes.
+    key_package_data: Vec<u8>,
+    /// Local wall-clock deadline (ms since epoch) computed from the sender's
+    /// `remaining_lifetime_ms`, anchored to *our* clock at receive time.
+    local_expires_at_ms: u64,
+}
+
 /// Result of processing an internal protocol message.
 enum InternalMessageResult {
     /// Message was consumed internally (don't surface to app).
@@ -101,6 +111,10 @@ struct PendingMessage {
 mod storage_keys {
     /// Key type for pending encrypted messages.
     pub const PENDING_MESSAGES: &str = "pending_messages";
+    /// Key type for the Lamport clock value.
+    pub const LAMPORT_CLOCK: &str = "lamport_clock";
+    /// Key ID for the single Lamport clock entry.
+    pub const LAMPORT_CLOCK_ID: &str = "current";
 }
 
 /// Protocol state.
@@ -197,8 +211,8 @@ pub struct OfflineProtocol {
     /// Pending messages waiting for session establishment (recipient -> messages).
     pending_encrypted_messages: HashMap<String, Vec<PendingMessage>>,
 
-    /// Key packages received but not yet used (sender_id -> key_package_data).
-    pending_key_packages: HashMap<String, Vec<u8>>,
+    /// Key packages received but not yet used (sender_id -> package).
+    pending_key_packages: HashMap<String, ReceivedKeyPackage>,
 
     /// Set of peers we've already sent our key package to.
     key_package_sent_to: std::collections::HashSet<String>,
@@ -278,8 +292,9 @@ impl OfflineProtocol {
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
 
-        // Restore any pending messages from previous session
+        // Restore state from previous session
         self.restore_pending_messages()?;
+        self.restore_lamport_clock();
 
         info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
         Ok(())
@@ -296,6 +311,7 @@ impl OfflineProtocol {
     pub fn enable_message_persistence(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
         self.message_storage = Some(storage);
         self.restore_pending_messages()?;
+        self.restore_lamport_clock();
         info!("Message persistence enabled");
         Ok(())
     }
@@ -490,6 +506,7 @@ impl OfflineProtocol {
         let app_id = AppId::new(&self.config.app_id)?;
 
         let clock_value = self.lamport_clock.tick();
+        self.persist_lamport_clock();
 
         let mut builder = Message::builder(sender, recipient, app_id)
             .content(content)
@@ -799,12 +816,18 @@ impl OfflineProtocol {
         if !has_session {
             // Try to create session from stored key package
             // Clone first, only remove after all operations succeed to avoid losing the key package on failure
-            if let Some(key_pkg) = self.pending_key_packages.get(recipient).cloned() {
+            if let Some(received_pkg) = self.pending_key_packages.get(recipient).cloned() {
+                // Check if key package has expired (using local clock)
+                let now_ms = Utc::now().timestamp_millis() as u64;
+                if now_ms >= received_pkg.local_expires_at_ms {
+                    warn!(recipient = %recipient, "Received key package has expired, discarding");
+                    self.pending_key_packages.remove(recipient);
+                } else {
                 {
                     let manager = mls
                         .read()
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.import_key_package(recipient, &key_pkg)?;
+                    manager.import_key_package(recipient, &received_pkg.key_package_data)?;
                 }
 
                 // Create session and send welcome message
@@ -843,6 +866,7 @@ impl OfflineProtocol {
                 if self.config.encryption.store_pending {
                     return Err(Error::SessionPending);
                 }
+                } // end else (not expired)
             } else {
                 // No key package available
                 if self.config.encryption.store_pending {
@@ -978,6 +1002,10 @@ impl OfflineProtocol {
                             .metadata
                             .insert("delayed_decrypt".to_string(), "true".to_string());
 
+                        // Advance local Lamport clock for delayed-decrypted messages
+                        self.lamport_clock.merge(decrypted_msg.lamport_clock);
+                        self.persist_lamport_clock();
+
                         if let Ok(mut state) = lock_shared_state(&self.shared_state) {
                             state.received_messages.push(decrypted_msg.clone());
 
@@ -1082,6 +1110,50 @@ impl OfflineProtocol {
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // LAMPORT CLOCK PERSISTENCE
+    // ========================================================================
+
+    /// Persists the current Lamport clock value to storage.
+    fn persist_lamport_clock(&self) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        let value = self.lamport_clock.value().to_le_bytes();
+        if let Err(e) = storage.store(
+            storage_keys::LAMPORT_CLOCK,
+            storage_keys::LAMPORT_CLOCK_ID,
+            &value,
+        ) {
+            warn!(error = %e, "Failed to persist Lamport clock");
+        }
+    }
+
+    /// Restores the Lamport clock from storage.
+    ///
+    /// Uses `max(current, restored)` so the clock never goes backward even
+    /// if the in-memory value has advanced before storage was attached.
+    fn restore_lamport_clock(&mut self) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Ok(Some(data)) = storage.load(
+            storage_keys::LAMPORT_CLOCK,
+            storage_keys::LAMPORT_CLOCK_ID,
+        ) {
+            if data.len() == 8 {
+                let restored = u64::from_le_bytes(
+                    data.try_into().expect("verified length is 8"),
+                );
+                let restored_clock = LamportClock::from_value(restored);
+                if restored_clock > self.lamport_clock {
+                    self.lamport_clock = restored_clock;
+                }
+                debug!(clock = %self.lamport_clock, "Restored Lamport clock from storage");
+            }
+        }
     }
 
     // ========================================================================
@@ -1204,44 +1276,51 @@ impl OfflineProtocol {
 
         // Check for pending key package
         // Clone first, only remove after all operations succeed to avoid losing the key package on failure
-        if let Some(key_pkg) = self.pending_key_packages.get(peer_id).cloned() {
-            {
-                let manager = mls
-                    .read()
-                    .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                manager.import_key_package(peer_id, &key_pkg)?;
+        if let Some(received_pkg) = self.pending_key_packages.get(peer_id).cloned() {
+            // Check if key package has expired (using local clock)
+            let now_ms = Utc::now().timestamp_millis() as u64;
+            if now_ms >= received_pkg.local_expires_at_ms {
+                warn!(peer_id = %peer_id, "Received key package has expired, discarding");
+                self.pending_key_packages.remove(peer_id);
+            } else {
+                {
+                    let manager = mls
+                        .read()
+                        .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                    manager.import_key_package(peer_id, &received_pkg.key_package_data)?;
+                }
+
+                // Create session and get welcome message
+                let welcome = {
+                    let manager = mls
+                        .read()
+                        .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                    manager.create_session(peer_id)?
+                };
+
+                // Send welcome message to peer
+                self.send_welcome_message(peer_id, &welcome)?;
+
+                // All operations succeeded, now safe to remove the key package
+                self.pending_key_packages.remove(peer_id);
+
+                let group_id = welcome.group_id.as_str().to_string();
+                let is_session = group_id.starts_with("session:");
+
+                info!(peer_id = %peer_id, group_id = %group_id, "Established secure session");
+
+                // Emit secure session established event
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::secure_session_established(
+                        peer_id.to_string(),
+                        group_id,
+                        is_session,
+                        true, // initiated_by_local is true - we sent the Welcome
+                    ));
+                }
+
+                return Ok(Some(welcome));
             }
-
-            // Create session and get welcome message
-            let welcome = {
-                let manager = mls
-                    .read()
-                    .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                manager.create_session(peer_id)?
-            };
-
-            // Send welcome message to peer
-            self.send_welcome_message(peer_id, &welcome)?;
-
-            // All operations succeeded, now safe to remove the key package
-            self.pending_key_packages.remove(peer_id);
-
-            let group_id = welcome.group_id.as_str().to_string();
-            let is_session = group_id.starts_with("session:");
-
-            info!(peer_id = %peer_id, group_id = %group_id, "Established secure session");
-
-            // Emit secure session established event
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::secure_session_established(
-                    peer_id.to_string(),
-                    group_id,
-                    is_session,
-                    true, // initiated_by_local is true - we sent the Welcome
-                ));
-            }
-
-            return Ok(Some(welcome));
         }
 
         // No key package available - peer hasn't sent one yet
@@ -1494,6 +1573,7 @@ impl OfflineProtocol {
 
                     // Advance local Lamport clock based on received message
                     self.lamport_clock.merge(message.lamport_clock);
+                    self.persist_lamport_clock();
 
                     if message.requires_ack {
                         if let Err(err) = self.send_delivery_ack(&message, transport_used) {
@@ -1554,8 +1634,21 @@ impl OfflineProtocol {
             let data = &content[internal_prefixes::KEY_PACKAGE.len()..];
             if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
                 debug!(sender = %sender, "Received key package");
-                self.pending_key_packages
-                    .insert(sender.to_string(), payload.key_package_data);
+                let now_ms = Utc::now().timestamp_millis() as u64;
+                let local_expires_at_ms = if payload.remaining_lifetime_ms > 0 {
+                    now_ms.saturating_add(payload.remaining_lifetime_ms)
+                } else {
+                    // Legacy sender didn't include remaining_lifetime_ms;
+                    // assume 30-day default lifetime.
+                    now_ms.saturating_add(30 * 24 * 60 * 60 * 1000)
+                };
+                self.pending_key_packages.insert(
+                    sender.to_string(),
+                    ReceivedKeyPackage {
+                        key_package_data: payload.key_package_data,
+                        local_expires_at_ms,
+                    },
+                );
 
                 // Send our key package back if auto_key_exchange is enabled
                 if self.config.encryption.auto_key_exchange && self.config.encryption.enabled {
@@ -2635,10 +2728,9 @@ mod tests {
 
         // Key package should be stored
         assert!(protocol.pending_key_packages.contains_key("sender123"));
-        assert_eq!(
-            protocol.pending_key_packages.get("sender123").unwrap(),
-            &vec![1u8, 2, 3, 4]
-        );
+        let received = protocol.pending_key_packages.get("sender123").unwrap();
+        assert_eq!(received.key_package_data, vec![1u8, 2, 3, 4]);
+        assert!(received.local_expires_at_ms > 0);
     }
 
     #[test]
