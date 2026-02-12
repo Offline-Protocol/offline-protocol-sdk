@@ -442,7 +442,7 @@ export function SettingsScreen({
         <SettingSection title="ADVANCED">
           <SettingItem
             title="Online Transport"
-            subtitle="Connect via WebSocket relay server"
+            subtitle="Relay server connection (SDK only)"
             icon="cloud"
             onPress={onOpenOnline}
             showChevron

@@ -13,7 +13,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
 import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 
@@ -55,14 +54,15 @@ export function GroupDetailScreen({
 }: GroupDetailScreenProps) {
   const { theme } = useTheme();
   const {
-    send,
-    authenticatedUser,
-    status,
     groupDetails,
     getGroupInfo,
     groupMessages,
-  } = useWebSocketRelayContext();
-  const { protocol, isInitialized } = useProtocol();
+    sendGroupMessage: sendGroupMessageApi,
+    addGroupMember: addGroupMemberApi,
+    relayReady,
+    currentUserId,
+    isInitialized,
+  } = useProtocol();
   const [activeTab, setActiveTab] = useState<Tab>('info');
   const [loading, setLoading] = useState(true);
   const [messageInput, setMessageInput] = useState('');
@@ -109,19 +109,13 @@ export function GroupDetailScreen({
   }, [contextGroupDetails]);
 
   const loadGroupInfo = useCallback(() => {
-    if (status !== 'authenticated') {
-      console.warn('[GroupDetailScreen] Not authenticated, status:', status);
+    if (!relayReady) {
       setLoading(false);
       return;
     }
-
-    console.log('[GroupDetailScreen] Requesting group info for:', groupId);
     setLoading(true);
-    const sent = getGroupInfo(groupId);
-    if (!sent) {
-      console.error('[GroupDetailScreen] Failed to send group info request');
-    }
-  }, [groupId, status, getGroupInfo]);
+    void getGroupInfo(groupId);
+  }, [groupId, relayReady, getGroupInfo]);
 
   const handleAddMember = useCallback(async () => {
     const username = usernameInput.trim();
@@ -130,33 +124,19 @@ export function GroupDetailScreen({
       return;
     }
 
-    if (!isInitialized || !protocol) {
+    if (!isInitialized || !relayReady) {
       Alert.alert(
-        'Protocol Not Ready',
-        'The protocol is not initialized yet. Please wait a moment and try again.',
-      );
-      return;
-    }
-
-    if (status !== 'authenticated') {
-      Alert.alert(
-        'WebSocket Not Connected',
-        `WebSocket status: ${status}. Please wait for the connection to be established.`,
+        'Not Ready',
+        'Please wait for the protocol and relay to be ready.',
       );
       return;
     }
 
     setAddingMember(true);
     try {
-      const addMemberJson = await protocol.groupAddMember(groupId, username);
-      const addMemberPayload = JSON.parse(addMemberJson);
-      const sent = send(addMemberPayload);
-      if (!sent) {
-        throw new Error('Failed to send add member request');
-      }
+      await addGroupMemberApi(groupId, username);
       setUsernameInput('');
-      // Reload group info after adding member
-      setTimeout(() => getGroupInfo(groupId), 500);
+      setTimeout(() => void getGroupInfo(groupId), 500);
     } catch (error: any) {
       console.error('Failed to add member:', error);
       Alert.alert('Error', error.message || 'Failed to add member');
@@ -166,52 +146,29 @@ export function GroupDetailScreen({
   }, [
     groupId,
     usernameInput,
-    protocol,
-    send,
-    status,
+    addGroupMemberApi,
+    relayReady,
     isInitialized,
     getGroupInfo,
   ]);
 
   const handleSendMessage = useCallback(async () => {
     if (!messageInput.trim()) return;
-    if (!isInitialized || !protocol) {
+    if (!isInitialized || !relayReady) {
       Alert.alert(
-        'Protocol Not Ready',
-        'The protocol is not initialized yet. Please wait a moment and try again.',
-      );
-      return;
-    }
-    if (status !== 'authenticated' && status !== 'connected') {
-      Alert.alert(
-        'WebSocket Not Connected',
-        `WebSocket status: ${status}. Please wait for the connection to be established.`,
+        'Not Ready',
+        'Please wait for the protocol and relay to be ready.',
       );
       return;
     }
 
     const content = messageInput.trim();
     const replyToMsgId = replyingTo?.id;
-    setMessageInput(''); // Clear input immediately for better UX
-    setReplyingTo(null); // Clear reply state
+    setMessageInput('');
+    setReplyingTo(null);
 
     try {
-      // Use the updated groupSendMessage with reply_to_msg parameter
-      const sendMessageJson = await protocol.groupSendMessage(
-        groupId,
-        content,
-        replyToMsgId || undefined,
-      );
-      console.warn('[GroupDetailScreen] sendMessageJson:', sendMessageJson);
-      const sendMessagePayload = JSON.parse(sendMessageJson);
-      const sent = send(sendMessagePayload);
-      if (!sent) {
-        throw new Error('Failed to send group message');
-      }
-
-      // Don't add message here - wait for GroupMessageSent response which provides
-      // the actual server message_id. The message will be added to groupMessages
-      // in WebSocketRelayProvider when GroupMessageSent is received with the server's message_id.
+      await sendGroupMessageApi(groupId, content, replyToMsgId);
     } catch (error: any) {
       console.error('Failed to send message:', error);
       Alert.alert('Error', error.message || 'Failed to send message');
@@ -223,20 +180,19 @@ export function GroupDetailScreen({
   }, [
     groupId,
     messageInput,
-    protocol,
-    send,
-    status,
+    sendGroupMessageApi,
+    relayReady,
     isInitialized,
     replyingTo,
   ]);
 
-  // Load group info once on mount
+  // Load group info once on mount when relay is ready
   useEffect(() => {
-    if (!hasRequestedInfo.current && status === 'authenticated') {
+    if (!hasRequestedInfo.current && relayReady) {
       hasRequestedInfo.current = true;
       loadGroupInfo();
     }
-  }, [status, loadGroupInfo]);
+  }, [relayReady, loadGroupInfo]);
 
   // Update loading state when group info is received
   useEffect(() => {
@@ -245,10 +201,7 @@ export function GroupDetailScreen({
     }
   }, [groupInfo]);
 
-  // Listen for group messages via WebSocket
-  // Note: GroupMessageReceived events will need to be handled by a callback
-  // For now, messages sent by this user are added immediately
-  // Received messages are handled by WebSocketRelayProvider
+  // Group messages are received via protocol events (group_message_received) in ProtocolProvider
 
   // Auto-scroll chat to bottom
   useEffect(() => {
@@ -358,7 +311,7 @@ export function GroupDetailScreen({
     }
 
     const isAdmin = groupInfo.members.some(
-      m => m.username === authenticatedUser?.username && m.role === 'admin',
+      m => m.username === currentUserId && m.role === 'admin',
     );
 
     return (

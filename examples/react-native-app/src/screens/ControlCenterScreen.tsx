@@ -102,6 +102,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
   const handleEnableTransport = useCallback(
     (transport: TransportType) => {
       if (transport === 'internet') {
+        // Relay URL is used by the SDK only; app never opens a WebSocket
         return onEnableTransport(transport, {
           enabled: true,
           serverAddress: DEFAULT_RELAY_SERVER_URL,

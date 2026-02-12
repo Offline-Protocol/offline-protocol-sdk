@@ -15,15 +15,21 @@ import {
 import LinearGradient from 'react-native-linear-gradient';
 import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
-import { type OnlineMessage } from '../providers/WebSocketRelayProvider';
 import { useProtocol } from '../hooks/useProtocol';
+import type { OnlineMessage } from '../providers/ProtocolProvider';
 
 type Tab = 'chat' | 'users' | 'groups';
 
 export function OnlineScreen() {
   const { theme } = useTheme();
-  const { currentUserName } = useProtocol();
+  const {
+    currentUserName,
+    currentUserId,
+    sendMessage: protocolSendMessage,
+    relayReady,
+    error,
+    protocol,
+  } = useProtocol();
   const flatListRef = useRef<FlatList>(null);
 
   const [activeTab, setActiveTab] = useState<Tab>('chat');
@@ -31,58 +37,50 @@ export function OnlineScreen() {
   const [recipientId, setRecipientId] = useState('');
   const [messageInput, setMessageInput] = useState('');
   const [checkUserId, setCheckUserId] = useState('');
+  const [messages, setMessages] = useState<OnlineMessage[]>([]);
+  const [onlineUsers] = useState<Map<string, { userId: string; username: string; isOnline: boolean; lastSeen?: Date }>>(new Map());
+  const [groups, setGroups] = useState<Array<{ groupId: string; name: string; createdAt: Date }>>([]);
 
-  const {
-    status,
-    authenticatedUser,
-    messages,
-    onlineUsers,
-    groups,
-    error,
-    connect,
-    disconnect,
-    authenticate,
-    sendMessage,
-    checkPresence,
-    clearMessages,
-  } = useWebSocketRelayContext();
+  // Subscribe to protocol message_received for direct messages in this tab
+  useEffect(() => {
+    if (!protocol) return;
+    const onMessage = (event: { type: string; sender?: string; content?: string; message_id?: string; timestamp?: number }) => {
+      if (event.type !== 'message_received' || !event.sender || !event.content) return;
+      const msg: OnlineMessage = {
+        id: event.message_id ?? `msg_${Date.now()}`,
+        sender: event.sender,
+        content: event.content,
+        timestamp: event.timestamp ? new Date(event.timestamp) : new Date(),
+        isFromMe: event.sender === currentUserId,
+      };
+      setMessages(prev => [...prev, msg]);
+    };
+    protocol.on('all', onMessage as (e: unknown) => void);
+    return () => { protocol.off?.('all', onMessage as (e: unknown) => void); };
+  }, [protocol, currentUserId]);
 
-  const handleConnect = useCallback(() => {
-    connect();
-  }, [connect]);
-
-  const handleDisconnect = useCallback(() => {
-    disconnect();
-  }, [disconnect]);
-
-  const handleAuthenticate = useCallback(() => {
-    const username = usernameInput.trim();
-    if (!username) {
-      Alert.alert('Error', 'Please enter a username');
-      return;
-    }
-  }, [usernameInput]);
-
-  const handleSendMessage = useCallback(() => {
+  const handleSendMessage = useCallback(async () => {
     if (!recipientId.trim() || !messageInput.trim()) {
       Alert.alert('Error', 'Please enter recipient ID and message');
       return;
     }
-
-    const success = sendMessage(recipientId.trim(), messageInput.trim());
-    if (success) {
+    try {
+      await protocolSendMessage(recipientId.trim(), messageInput.trim());
       setMessageInput('');
+    } catch (e) {
+      Alert.alert('Error', (e as Error)?.message ?? 'Failed to send');
     }
-  }, [recipientId, messageInput, sendMessage]);
+  }, [recipientId, messageInput, protocolSendMessage]);
+
+  const clearMessages = useCallback(() => setMessages([]), []);
 
   const handleCheckPresence = useCallback(() => {
     if (!checkUserId.trim()) {
       Alert.alert('Error', 'Please enter a user ID to check');
       return;
     }
-
-    checkPresence(checkUserId.trim());
-  }, [checkUserId, checkPresence]);
+    Alert.alert('Presence', 'Presence check is not available when using native relay.');
+  }, [checkUserId]);
 
   // Sync username input with profile username
   useEffect(() => {
@@ -90,9 +88,6 @@ export function OnlineScreen() {
       setUsernameInput(currentUserName);
     }
   }, [currentUserName]);
-
-  // Auto-authenticate is handled by WebSocketRelayProvider
-  // This effect is no longer needed but kept for backwards compatibility
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -102,35 +97,10 @@ export function OnlineScreen() {
     }
   }, [messages.length]);
 
-  const getStatusColor = () => {
-    switch (status) {
-      case 'authenticated':
-        return theme.colors.online;
-      case 'connected':
-        return theme.colors.warning;
-      case 'connecting':
-        return theme.colors.warning;
-      case 'error':
-        return theme.colors.error;
-      default:
-        return theme.colors.offline;
-    }
-  };
-
-  const getStatusLabel = () => {
-    switch (status) {
-      case 'authenticated':
-        return 'Authenticated';
-      case 'connected':
-        return 'Connected (Not Authenticated)';
-      case 'connecting':
-        return 'Connecting...';
-      case 'error':
-        return 'Error';
-      default:
-        return 'Disconnected';
-    }
-  };
+  const getStatusColor = () =>
+    relayReady ? theme.colors.online : theme.colors.offline;
+  const getStatusLabel = () =>
+    relayReady ? 'Relay ready' : 'Waiting for relay...';
 
   const renderConnectionCard = () => (
     <View style={[styles.card, { backgroundColor: theme.colors.surface }]}>
@@ -145,21 +115,19 @@ export function OnlineScreen() {
         </View>
       </View>
 
-      {authenticatedUser && (
-        <View style={styles.userInfo}>
-          <Text
-            style={[styles.userLabel, { color: theme.colors.textSecondary }]}
-          >
-            Logged in as:
-          </Text>
-          <Text style={[styles.userName, { color: theme.colors.text }]}>
-            {authenticatedUser.username}
-          </Text>
-          <Text style={[styles.userId, { color: theme.colors.textSecondary }]}>
-            ID: {authenticatedUser.userId}
-          </Text>
-        </View>
-      )}
+      <View style={styles.userInfo}>
+        <Text
+          style={[styles.userLabel, { color: theme.colors.textSecondary }]}
+        >
+          Logged in as:
+        </Text>
+        <Text style={[styles.userName, { color: theme.colors.text }]}>
+          {currentUserName || 'Me'}
+        </Text>
+        <Text style={[styles.userId, { color: theme.colors.textSecondary }]}>
+          ID: {currentUserId}
+        </Text>
+      </View>
 
       {error && (
         <View
@@ -175,124 +143,10 @@ export function OnlineScreen() {
         </View>
       )}
 
-      {status === 'connected' && (
-        <View style={styles.usernameSection}>
-          <Text
-            style={[
-              styles.usernameLabel,
-              { color: theme.colors.textSecondary },
-            ]}
-          >
-            Choose your username (this becomes your User ID):
-          </Text>
-          <TextInput
-            style={[
-              styles.usernameInput,
-              {
-                color: theme.colors.text,
-                backgroundColor: theme.colors.background,
-                borderColor: theme.colors.border,
-              },
-            ]}
-            value={usernameInput}
-            onChangeText={setUsernameInput}
-            placeholder="e.g., alice, bob, charlie..."
-            placeholderTextColor={theme.colors.textSecondary}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <Text
-            style={[styles.usernameHint, { color: theme.colors.textSecondary }]}
-          >
-            Other users can message you using this ID
-          </Text>
-        </View>
-      )}
-
       <View style={styles.buttonRow}>
-        {status === 'disconnected' || status === 'error' ? (
-          <TouchableOpacity
-            style={[styles.button, { backgroundColor: theme.colors.primary }]}
-            onPress={handleConnect}
-          >
-            <Icon name="wifi" size={18} color={theme.colors.textInverse} />
-            <Text
-              style={[styles.buttonText, { color: theme.colors.textInverse }]}
-            >
-              Connect
-            </Text>
-          </TouchableOpacity>
-        ) : status === 'connecting' ? (
-          <View
-            style={[styles.button, { backgroundColor: theme.colors.border }]}
-          >
-            <ActivityIndicator color={theme.colors.text} size="small" />
-            <Text style={[styles.buttonText, { color: theme.colors.text }]}>
-              Connecting...
-            </Text>
-          </View>
-        ) : status === 'connected' ? (
-          <>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                {
-                  backgroundColor: usernameInput.trim()
-                    ? theme.colors.primary
-                    : theme.colors.border,
-                },
-              ]}
-              onPress={handleAuthenticate}
-              disabled={!usernameInput.trim()}
-            >
-              <Icon
-                name="log-in"
-                size={18}
-                color={
-                  usernameInput.trim()
-                    ? theme.colors.textInverse
-                    : theme.colors.textSecondary
-                }
-              />
-              <Text
-                style={[
-                  styles.buttonText,
-                  {
-                    color: usernameInput.trim()
-                      ? theme.colors.textInverse
-                      : theme.colors.textSecondary,
-                  },
-                ]}
-              >
-                Join as {usernameInput.trim() || '...'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.button,
-                styles.buttonSecondary,
-                { borderColor: theme.colors.error },
-              ]}
-              onPress={handleDisconnect}
-            >
-              <Icon name="close" size={18} color={theme.colors.error} />
-            </TouchableOpacity>
-          </>
-        ) : (
-          <TouchableOpacity
-            style={[
-              styles.button,
-              styles.buttonSecondary,
-              { borderColor: theme.colors.error },
-            ]}
-            onPress={handleDisconnect}
-          >
-            <Icon name="close" size={18} color={theme.colors.error} />
-            <Text style={[styles.buttonText, { color: theme.colors.error }]}>
-              Disconnect
-            </Text>
-          </TouchableOpacity>
-        )}
+        <Text style={[styles.buttonText, { color: theme.colors.textSecondary }]}>
+          {relayReady ? 'Relay connected via native SDK' : 'Waiting for relay...'}
+        </Text>
       </View>
     </View>
   );
@@ -343,7 +197,7 @@ export function OnlineScreen() {
 
   const renderChatTab = () => (
     <View style={styles.tabContent}>
-      {status !== 'authenticated' ? (
+      {!relayReady ? (
         <View style={styles.centeredMessage}>
           <Icon
             name="lock-closed"
@@ -353,7 +207,7 @@ export function OnlineScreen() {
           <Text
             style={[styles.centeredText, { color: theme.colors.textSecondary }]}
           >
-            Connect and authenticate to start chatting
+            Waiting for relay to start chatting
           </Text>
         </View>
       ) : (
@@ -493,7 +347,7 @@ export function OnlineScreen() {
 
   const renderUsersTab = () => (
     <View style={styles.tabContent}>
-      {status !== 'authenticated' ? (
+      {!relayReady ? (
         <View style={styles.centeredMessage}>
           <Icon name="people" size={48} color={theme.colors.textSecondary} />
           <Text
@@ -618,7 +472,7 @@ export function OnlineScreen() {
 
   const renderGroupsTab = () => (
     <View style={styles.tabContent}>
-      {status !== 'authenticated' ? (
+      {!relayReady ? (
         <View style={styles.centeredMessage}>
           <Icon
             name="people-circle"
@@ -691,8 +545,8 @@ export function OnlineScreen() {
               color={theme.colors.primary}
             />
             <Text style={[styles.infoText, { color: theme.colors.text }]}>
-              Group management features are available through the WebSocket API.
-              Create groups, add members, and send group messages.
+              Group management uses the SDK relay connection. Create groups,
+              add members, and send group messages.
             </Text>
           </View>
         </ScrollView>
@@ -715,7 +569,7 @@ export function OnlineScreen() {
 
   // Chat tab has FlatList, so we don't wrap it in ScrollView
   const shouldUseScrollView =
-    activeTab !== 'chat' || status !== 'authenticated' || messages.length === 0;
+    activeTab !== 'chat' || !relayReady || messages.length === 0;
 
   return (
     <KeyboardAvoidingView
@@ -735,7 +589,7 @@ export function OnlineScreen() {
           <Text
             style={[styles.headerSubtitle, { color: theme.colors.textInverse }]}
           >
-            WebSocket Relay Server
+            Relay (SDK connection only)
           </Text>
         </View>
       </LinearGradient>

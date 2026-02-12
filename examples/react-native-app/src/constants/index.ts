@@ -8,15 +8,17 @@ import {
 } from '@env';
 
 /**
- * Default WebSocket relay server URL for internet transport.
+ * Relay server URL for internet transport.
+ * Passed to the SDK only; the app does not open any WebSocket.
+ * The native SDK (InternetManager) is the sole client connecting to the relay.
  * Can be overridden via RELAY_SERVER_URL environment variable.
  */
 export const DEFAULT_RELAY_SERVER_URL =
   ENV_RELAY_SERVER_URL || 'ws://localhost:3000/ws';
 
 /**
- * Authentication token for WebSocket relay server.
- * Must be set via RELAY_AUTH_TOKEN environment variable in .env file.
+ * Authentication token for the relay server.
+ * Passed to the SDK only. Set via RELAY_AUTH_TOKEN in .env.
  */
 export const HARDCODED_TOKEN = ENV_RELAY_AUTH_TOKEN || '';
 

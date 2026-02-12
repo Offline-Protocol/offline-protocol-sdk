@@ -595,6 +595,67 @@ public class InternetManager: NSObject, TransportManager {
                 "reason": reason
             ])
             
+        case "GroupMessageReceived":
+            var eventContext: [String: Any] = [
+                "type": "group_message_received",
+                "group_id": json["group_id"] as? String ?? "",
+                "sender": json["sender"] as? String ?? "",
+                "content": json["content"] as? String ?? "",
+                "timestamp": json["timestamp"] as? String ?? "",
+                "message_id": json["message_id"] as? String ?? ""
+            ]
+            if let replyToMsg = json["reply_to_msg"] as? String {
+                eventContext["reply_to_msg_id"] = replyToMsg
+            }
+            emitDiagnostic("debug", "Received relay message", context: eventContext)
+            
+        case "GroupCreated":
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": "group_created",
+                "group_id": json["group_id"] as? String ?? "",
+                "name": json["name"] as? String ?? ""
+            ])
+            
+        case "UserGroups":
+            let groups = json["groups"] as? [Any] ?? []
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": "user_groups",
+                "groups": groups
+            ])
+            
+        case "GroupInfo":
+            let members = json["members"] as? [Any] ?? []
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": "group_info",
+                "group_id": json["group_id"] as? String ?? "",
+                "name": json["name"] as? String ?? "",
+                "created_by": json["created_by"] as? String ?? "",
+                "created_at": json["created_at"] as? String ?? "",
+                "members": members
+            ])
+            
+        case "GroupMemberAdded":
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": "group_member_added",
+                "group_id": json["group_id"] as? String ?? "",
+                "user_id": json["user_id"] as? String ?? "",
+                "added_by": json["added_by"] as? String ?? ""
+            ])
+            
+        case "GroupMemberRemoved":
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": "group_member_removed",
+                "group_id": json["group_id"] as? String ?? "",
+                "user_id": json["user_id"] as? String ?? "",
+                "removed_by": json["removed_by"] as? String ?? ""
+            ])
+            
+        case "GroupError":
+            emitDiagnostic("debug", "Received relay message", context: [
+                "type": "group_error",
+                "reason": json["reason"] as? String ?? ""
+            ])
+            
         default:
             emitDiagnostic("debug", "Received relay message", context: [
                 "type": messageType

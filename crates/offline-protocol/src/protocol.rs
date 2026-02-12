@@ -1,6 +1,7 @@
 //! Main protocol engine.
 
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
+use crate::events::{GroupMemberInfo, UserGroupInfo};
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL};
@@ -1511,6 +1512,102 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
+    // ========================================================================
+    // GROUP EVENTS (from relay or after decrypting group messages)
+    // ========================================================================
+
+    /// Processes a group message received event (e.g. from relay or after decrypting a group message).
+    /// Emits `GroupMessageReceived` to registered listeners.
+    pub fn process_group_message_received(
+        &self,
+        group_id: String,
+        sender: String,
+        content: String,
+        timestamp: i64,
+        message_id: String,
+        reply_to_msg_id: Option<String>,
+    ) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_message_received(
+                group_id,
+                sender,
+                content,
+                timestamp,
+                message_id,
+                reply_to_msg_id,
+            ));
+        }
+    }
+
+    /// Processes a group created event (from relay). Emits `GroupCreated` to registered listeners.
+    pub fn process_group_created(&self, group_id: String, name: String) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_created(group_id, name));
+        }
+    }
+
+    /// Processes a user groups list event (from relay). Emits `UserGroups` to registered listeners.
+    pub fn process_user_groups(&self, groups: Vec<UserGroupInfo>) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::user_groups(groups));
+        }
+    }
+
+    /// Processes a group info event (from relay). Emits `GroupInfo` to registered listeners.
+    pub fn process_group_info(
+        &self,
+        group_id: String,
+        name: String,
+        created_by: String,
+        created_at: String,
+        members: Vec<GroupMemberInfo>,
+    ) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_info(
+                group_id,
+                name,
+                created_by,
+                created_at,
+                members,
+            ));
+        }
+    }
+
+    /// Processes a group member added event (from relay). Emits `GroupMemberAdded` to registered listeners.
+    pub fn process_group_member_added(
+        &self,
+        group_id: String,
+        user_id: String,
+        added_by: String,
+    ) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_member_added(group_id, user_id, added_by));
+        }
+    }
+
+    /// Processes a group member removed event (from relay). Emits `GroupMemberRemoved` to registered listeners.
+    pub fn process_group_member_removed(
+        &self,
+        group_id: String,
+        user_id: String,
+        removed_by: String,
+    ) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_member_removed(
+                group_id,
+                user_id,
+                removed_by,
+            ));
+        }
+    }
+
+    /// Processes a group error event (from relay). Emits `GroupError` to registered listeners.
+    pub fn process_group_error(&self, reason: String) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_error(reason));
+        }
+    }
+
     /// Receives the next available message.
     ///
     /// # Returns
@@ -1788,12 +1885,29 @@ impl OfflineProtocol {
                         text,
                         sender: sender_owned,
                     } => {
-                        if !self.confirmed_sessions.contains(&sender_owned) {
-                            info!(sender = %sender_owned, "Session confirmed via successful decryption");
-                            self.confirmed_sessions.insert(sender_owned.clone());
-                            let _ = self.flush_pending_messages(&sender_owned);
+                        let group_id_str = encrypted.group_id.as_str().to_string();
+                        let is_session = group_id_str.starts_with("session:");
+                        if is_session {
+                            if !self.confirmed_sessions.contains(&sender_owned) {
+                                info!(sender = %sender_owned, "Session confirmed via successful decryption");
+                                self.confirmed_sessions.insert(sender_owned.clone());
+                                let _ = self.flush_pending_messages(&sender_owned);
+                            }
+                            return Some(InternalMessageResult::Decrypted(text));
                         }
-                        return Some(InternalMessageResult::Decrypted(text));
+                        // Multi-party group message: process via dedicated group event handler
+                        self.process_group_message_received(
+                            group_id_str,
+                            sender_owned,
+                            text,
+                            message.timestamp.as_millis(),
+                            message.id.as_str().to_string(),
+                            message
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                        );
+                        return Some(InternalMessageResult::Consumed);
                     }
                     DecryptResult::Empty => {
                         return Some(InternalMessageResult::Decrypted(

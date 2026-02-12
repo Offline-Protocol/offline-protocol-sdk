@@ -17,18 +17,35 @@ import LinearGradient from 'react-native-linear-gradient';
 // import Animated, { FadeInDown, FadeInRight } from 'react-native-reanimated';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
-import { Contact } from '../providers/ProtocolProvider';
+import {
+  Contact,
+  type ConnectionStatus,
+  type IncomingConnectionRequest,
+} from '../providers/ProtocolProvider';
 import { MessagePriority } from '@offline-protocol/mesh-sdk';
 import { getUserInitials, generateAvatarColor } from '../utils/user';
 
 interface ContactItemProps {
   contact: Contact;
+  connectionStatus: ConnectionStatus;
   onPress: () => void;
   onMessage: () => void;
+  onSendConnectionRequest: () => void;
+  onAcceptConnectionRequest: () => void;
+  onRejectConnectionRequest: () => void;
   index: number;
 }
 
-function ContactItem({ contact, onPress, onMessage, index }: ContactItemProps) {
+function ContactItem({
+  contact,
+  connectionStatus,
+  onPress,
+  onMessage,
+  onSendConnectionRequest,
+  onAcceptConnectionRequest,
+  onRejectConnectionRequest,
+  index,
+}: ContactItemProps) {
   const { theme } = useTheme();
   const avatarColor = generateAvatarColor(contact.id);
   const initials = getUserInitials(contact.name);
@@ -130,19 +147,58 @@ function ContactItem({ contact, onPress, onMessage, index }: ContactItemProps) {
           </View>
         </TouchableOpacity>
 
-        {/* Message Button - Separate touchable */}
+        {/* Actions: Connect / Request sent / Accept+Decline / Message */}
         <View style={styles.actions}>
-          <TouchableOpacity
-            style={[styles.messageButton, { backgroundColor: theme.colors.primary }]}
-            onPress={() => {
-              console.log(`[ContactItem] Message button tapped for ${contact.name}`);
-              onMessage();
-            }}
-            activeOpacity={0.7}
-            hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
-          >
-            <Icon name="chatbubble" size={18} color={theme.colors.textInverse} />
-          </TouchableOpacity>
+          {connectionStatus === 'pending_received' && (
+            <>
+              <TouchableOpacity
+                style={[styles.messageButton, styles.declineButton, { backgroundColor: theme.colors.surfaceVariant }]}
+                onPress={onRejectConnectionRequest}
+                activeOpacity={0.7}
+                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+              >
+                <Icon name="close" size={18} color={theme.colors.text} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.messageButton, { backgroundColor: theme.colors.primary }]}
+                onPress={onAcceptConnectionRequest}
+                activeOpacity={0.7}
+                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+              >
+                <Icon name="checkmark" size={18} color={theme.colors.textInverse} />
+              </TouchableOpacity>
+            </>
+          )}
+          {connectionStatus === 'pending_sent' && (
+            <View style={[styles.pendingBadge, { backgroundColor: theme.colors.surfaceVariant }]}>
+              <Text style={[styles.pendingText, { color: theme.colors.textSecondary }]}>
+                Request sent
+              </Text>
+            </View>
+          )}
+          {(connectionStatus === 'none' || connectionStatus === 'rejected') && (
+            <TouchableOpacity
+              style={[styles.messageButton, { backgroundColor: theme.colors.primary }]}
+              onPress={onSendConnectionRequest}
+              activeOpacity={0.7}
+              hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+            >
+              <Icon name="person-add" size={18} color={theme.colors.textInverse} />
+            </TouchableOpacity>
+          )}
+          {connectionStatus === 'connected' && (
+            <TouchableOpacity
+              style={[styles.messageButton, { backgroundColor: theme.colors.primary }]}
+              onPress={() => {
+                console.log(`[ContactItem] Message button tapped for ${contact.name}`);
+                onMessage();
+              }}
+              activeOpacity={0.7}
+              hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+            >
+              <Icon name="chatbubble" size={18} color={theme.colors.textInverse} />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
     </View>
@@ -156,7 +212,18 @@ interface ContactsScreenProps {
 
 export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: ContactsScreenProps) {
   const { theme } = useTheme();
-  const { contacts, isOnline, connectedPeersCount, sendMessage, chats } = useProtocol();
+  const {
+    contacts,
+    isOnline,
+    connectedPeersCount,
+    sendMessage,
+    chats,
+    incomingConnectionRequests,
+    getConnectionStatus,
+    sendConnectionRequest,
+    acceptConnectionRequest,
+    rejectConnectionRequest,
+  } = useProtocol();
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<'all' | 'online' | 'offline'>('all');
@@ -197,18 +264,12 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
 
   const handleMessage = (contact: Contact) => {
     console.log(`[ContactsScreen] Message button pressed for contact: ${contact.id} (${contact.name})`);
-    
-    // Check if chat already exists
     const existingChat = chats.find(chat => chat.peerId === contact.id);
-    
     if (existingChat) {
-      console.log(`[ContactsScreen] Existing chat found, navigating to chat detail`);
       onNavigateToChatDetail(contact.id, contact.name);
       return;
     }
-
     if (Platform.OS === 'ios') {
-      console.log(`[ContactsScreen] No existing chat, showing message prompt`);
       Alert.prompt(
         `Message ${contact.name}`,
         'Enter your message:',
@@ -217,16 +278,12 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
           {
             text: 'Send',
             onPress: async (text?: string) => {
-              console.log(`[ContactsScreen] Prompt response: "${text}"`);
               if (text?.trim()) {
                 try {
-                  console.log(`[ContactsScreen] Calling sendMessage for ${contact.id}`);
                   await sendMessage(contact.id, text.trim(), MessagePriority.Medium);
-                  console.log(`[ContactsScreen] Message sent, navigating to chat`);
                   onNavigateToChatDetail(contact.id, contact.name);
                 } catch (error) {
-                  console.error(`[ContactsScreen] Failed to send message:`, error);
-                  Alert.alert('Send Failed', 'Failed to send message. Please try again.');
+                  Alert.alert('Send Failed', (error as Error)?.message ?? 'Failed to send message. Please try again.');
                 }
               }
             },
@@ -236,9 +293,31 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
       );
       return;
     }
-
-    console.log(`[ContactsScreen] Android detected, navigating directly to chat detail`);
     onNavigateToChatDetail(contact.id, contact.name);
+  };
+
+  const handleSendConnectionRequest = async (contact: Contact) => {
+    try {
+      await sendConnectionRequest(contact.id);
+    } catch (e) {
+      Alert.alert('Request Failed', (e as Error)?.message ?? 'Failed to send connection request.');
+    }
+  };
+
+  const handleAcceptConnectionRequest = async (senderId: string) => {
+    try {
+      await acceptConnectionRequest(senderId);
+    } catch (e) {
+      Alert.alert('Accept Failed', (e as Error)?.message ?? 'Failed to accept connection request.');
+    }
+  };
+
+  const handleRejectConnectionRequest = async (senderId: string) => {
+    try {
+      await rejectConnectionRequest(senderId);
+    } catch (e) {
+      Alert.alert('Decline Failed', (e as Error)?.message ?? 'Failed to decline connection request.');
+    }
   };
 
   const handleRefresh = async () => {
@@ -372,11 +451,53 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
       <FlatList
         data={filteredContacts}
         keyExtractor={(item) => item.id}
+        ListHeaderComponent={
+          incomingConnectionRequests.length > 0 ? (
+            <View style={[styles.incomingSection, { backgroundColor: theme.colors.surfaceVariant }]}>
+              <Text style={[styles.incomingSectionTitle, { color: theme.colors.textSecondary }]}>
+                Connection requests
+              </Text>
+              {incomingConnectionRequests.map((req: IncomingConnectionRequest) => (
+                <View
+                  key={req.sender}
+                  style={[styles.incomingRow, { backgroundColor: theme.colors.surface }]}
+                >
+                  <View style={styles.incomingRowInfo}>
+                    <Text style={[styles.incomingRowName, { color: theme.colors.text }]} numberOfLines={1}>
+                      {req.senderName || `User ${req.sender.slice(-4)}`}
+                    </Text>
+                    <Text style={[styles.incomingRowId, { color: theme.colors.textSecondary }]} numberOfLines={1}>
+                      ID: {req.sender.slice(-8)}
+                    </Text>
+                  </View>
+                  <View style={styles.incomingRowActions}>
+                    <TouchableOpacity
+                      style={[styles.incomingButton, styles.declineButton, { backgroundColor: theme.colors.surfaceVariant }]}
+                      onPress={() => handleRejectConnectionRequest(req.sender)}
+                    >
+                      <Text style={[styles.incomingButtonText, { color: theme.colors.text }]}>Decline</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.incomingButton, { backgroundColor: theme.colors.primary }]}
+                      onPress={() => handleAcceptConnectionRequest(req.sender)}
+                    >
+                      <Text style={[styles.incomingButtonText, { color: theme.colors.textInverse }]}>Accept</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null
+        }
         renderItem={({ item, index }) => (
           <ContactItem
             contact={item}
+            connectionStatus={getConnectionStatus(item.id)}
             onPress={() => handleContactPress(item)}
             onMessage={() => handleMessage(item)}
+            onSendConnectionRequest={() => handleSendConnectionRequest(item)}
+            onAcceptConnectionRequest={() => handleAcceptConnectionRequest(item.id)}
+            onRejectConnectionRequest={() => handleRejectConnectionRequest(item.id)}
             index={index}
           />
         )}
@@ -583,6 +704,9 @@ const styles = StyleSheet.create({
   actions: {
     marginLeft: 10,
     justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
   },
   messageButton: {
     width: 40,
@@ -601,6 +725,61 @@ const styles = StyleSheet.create({
         elevation: 1,
       },
     }),
+  },
+  declineButton: {},
+  pendingBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
+    justifyContent: 'center',
+  },
+  pendingText: {
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  incomingSection: {
+    padding: 12,
+    borderRadius: 14,
+    marginBottom: 12,
+  },
+  incomingSectionTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+  },
+  incomingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  incomingRowInfo: {
+    flex: 1,
+    marginRight: 12,
+  },
+  incomingRowName: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  incomingRowId: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  incomingRowActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  incomingButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  incomingButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
   emptyState: {
     flex: 1,

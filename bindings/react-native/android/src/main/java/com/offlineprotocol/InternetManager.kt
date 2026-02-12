@@ -717,6 +717,74 @@ class InternetManager(
                 ))
             }
             
+            "GroupMessageReceived" -> {
+                val eventContext = mutableMapOf<String, Any?>(
+                    "type" to "group_message_received",
+                    "group_id" to json.optString("group_id", ""),
+                    "sender" to json.optString("sender", ""),
+                    "content" to json.optString("content", ""),
+                    "timestamp" to json.optString("timestamp", ""),
+                    "message_id" to json.optString("message_id", "")
+                )
+                if (json.has("reply_to_msg")) eventContext["reply_to_msg_id"] = json.optString("reply_to_msg", "")
+                emitDiagnostic("debug", "Received relay message", eventContext)
+            }
+            
+            "GroupCreated" -> {
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to "group_created",
+                    "group_id" to json.optString("group_id", ""),
+                    "name" to json.optString("name", "")
+                ))
+            }
+            
+            "UserGroups" -> {
+                val groupsArray = json.optJSONArray("groups") ?: org.json.JSONArray()
+                val groupsList = (0 until groupsArray.length()).map { groupsArray.get(it) }
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to "user_groups",
+                    "groups" to groupsList
+                ))
+            }
+            
+            "GroupInfo" -> {
+                val membersArray = json.optJSONArray("members") ?: org.json.JSONArray()
+                val membersList = (0 until membersArray.length()).map { membersArray.get(it) }
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to "group_info",
+                    "group_id" to json.optString("group_id", ""),
+                    "name" to json.optString("name", ""),
+                    "created_by" to json.optString("created_by", ""),
+                    "created_at" to json.optString("created_at", ""),
+                    "members" to membersList
+                ))
+            }
+            
+            "GroupMemberAdded" -> {
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to "group_member_added",
+                    "group_id" to json.optString("group_id", ""),
+                    "user_id" to json.optString("user_id", ""),
+                    "added_by" to json.optString("added_by", "")
+                ))
+            }
+            
+            "GroupMemberRemoved" -> {
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to "group_member_removed",
+                    "group_id" to json.optString("group_id", ""),
+                    "user_id" to json.optString("user_id", ""),
+                    "removed_by" to json.optString("removed_by", "")
+                ))
+            }
+            
+            "GroupError" -> {
+                emitDiagnostic("debug", "Received relay message", mapOf(
+                    "type" to "group_error",
+                    "reason" to json.optString("reason", "")
+                ))
+            }
+            
             else -> {
                 emitDiagnostic("debug", "Received relay message", mapOf(
                     "type" to messageType
@@ -858,6 +926,29 @@ class InternetManager(
     private fun updateState(newState: TransportState) {
         state = newState
         listener?.onTransportStateChanged(this, newState)
+    }
+    
+    
+    /**
+     * Send a raw relay command (e.g. group create, group send message) over the WebSocket.
+     * Caller must pass the full JSON string expected by the relay server.
+     */
+    fun sendRelayMessage(json: String): Boolean {
+        val ws = webSocket
+        if (!isConnected.get() || !isAuthenticated.get() || ws == null) {
+            emitDiagnostic("warning", "Cannot send relay message - not connected or not authenticated", mapOf(
+                "isConnected" to isConnected.get(),
+                "isAuthenticated" to isAuthenticated.get(),
+                "hasSocket" to (ws != null)
+            ))
+            return false
+        }
+        val sent = ws.send(json)
+        if (sent) {
+            bytesSent += json.length
+            messagesSent++
+        }
+        return sent
     }
     
     // MARK: - Diagnostics

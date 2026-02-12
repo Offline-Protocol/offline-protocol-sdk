@@ -611,6 +611,9 @@ internal open class UniffiForeignFutureResultVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
+internal interface UniffiCallbackInterfaceBleTransportCallbackMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceEventCallbackMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`eventJson`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -625,6 +628,28 @@ internal interface UniffiCallbackInterfaceMlsStorageProviderMethod2 : com.sun.jn
 }
 internal interface UniffiCallbackInterfaceMlsStorageProviderMethod3 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`keyType`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceWifiDirectTransportCallbackMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onFragmentsAvailable")
+internal open class UniffiVTableCallbackInterfaceBleTransportCallback(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onFragmentsAvailable`: UniffiCallbackInterfaceBleTransportCallbackMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onFragmentsAvailable`: UniffiCallbackInterfaceBleTransportCallbackMethod0? = null,
+    ): UniffiVTableCallbackInterfaceBleTransportCallback(`uniffiFree`,`uniffiClone`,`onFragmentsAvailable`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceBleTransportCallback) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onFragmentsAvailable` = other.`onFragmentsAvailable`
+    }
+
 }
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onEvent")
 internal open class UniffiVTableCallbackInterfaceEventCallback(
@@ -673,6 +698,25 @@ internal open class UniffiVTableCallbackInterfaceMlsStorageProvider(
     }
 
 }
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onMessagesAvailable")
+internal open class UniffiVTableCallbackInterfaceWifiDirectTransportCallback(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onMessagesAvailable`: UniffiCallbackInterfaceWifiDirectTransportCallbackMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onMessagesAvailable`: UniffiCallbackInterfaceWifiDirectTransportCallbackMethod0? = null,
+    ): UniffiVTableCallbackInterfaceWifiDirectTransportCallback(`uniffiFree`,`uniffiClone`,`onMessagesAvailable`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceWifiDirectTransportCallback) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onMessagesAvailable` = other.`onMessagesAvailable`
+    }
+
+}
 
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
@@ -696,7 +740,9 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_internet_transport(
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_internet_transport(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_wifi_direct_transport(
 ): Short
@@ -796,9 +842,13 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed(
 ): Short
@@ -868,6 +918,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_proc
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes(
@@ -878,17 +930,23 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_requ
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi(
 ): Short
@@ -926,6 +984,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store(
@@ -935,6 +995,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_l
 external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available(
 ): Short
 external fun ffi_offline_protocol_uniffi_uniffi_contract_version(
 ): Int
@@ -952,8 +1014,10 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "offline_protocol"))
+        uniffiCallbackInterfaceBleTransportCallback.register(this)
         uniffiCallbackInterfaceEventCallback.register(this)
         uniffiCallbackInterfaceMlsStorageProvider.register(this)
+        uniffiCallbackInterfaceWifiDirectTransportCallback.register(this)
         
     }
     external fun uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -962,6 +1026,8 @@ external fun uniffi_offline_protocol_uniffi_fn_free_offlineprotocol(`handle`: Lo
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`accepterName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_internet_transport(`ptr`: Long,`serverUrl`: RustBuffer.ByValue,`port`: Short,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_wifi_direct_transport(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1138,6 +1204,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_fi
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes(`ptr`: Long,`neighborId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1148,11 +1216,15 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_pr
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1160,6 +1232,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1194,9 +1268,13 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direc
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback(`vtable`: UniffiVTableCallbackInterfaceBleTransportCallback,
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback(`vtable`: UniffiVTableCallbackInterfaceEventCallback,
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(`vtable`: UniffiVTableCallbackInterfaceMlsStorageProvider,
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(`vtable`: UniffiVTableCallbackInterfaceWifiDirectTransportCallback,
 ): Unit
 external fun ffi_offline_protocol_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1317,6 +1395,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_internet_transport() != 42106.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1467,10 +1548,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 29008.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 10435.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243.toShort()) {
@@ -1575,6 +1662,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1590,6 +1680,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 33006.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1599,6 +1692,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 28420.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 14659.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1606,6 +1702,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing() != 10907.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 39894.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161.toShort()) {
@@ -1662,6 +1761,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available() != 11079.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event() != 4769.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1675,6 +1777,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 24837.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -2182,6 +2287,8 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 //
 public interface OfflineProtocolInterface {
     
+    fun `acceptConnectionRequest`(`recipient`: kotlin.String, `accepterName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
+    
     fun `addInternetTransport`(`serverUrl`: kotlin.String, `port`: kotlin.UShort)
     
     fun `addWifiDirectTransport`()
@@ -2358,6 +2465,8 @@ public interface OfflineProtocolInterface {
     
     fun `receiveMessage`(): kotlin.String?
     
+    fun `rejectConnectionRequest`(`recipient`: kotlin.String): kotlin.String
+    
     fun `releaseTransportLock`()
     
     fun `removeNeighborRoutes`(`neighborId`: kotlin.String)
@@ -2368,17 +2477,23 @@ public interface OfflineProtocolInterface {
     
     fun `resume`()
     
+    fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
+    
     fun `sendFile`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String
     
     fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String
     
     fun `setBatteryLevel`(`level`: kotlin.UByte)
     
+    fun `setBleTransportCallback`(`callback`: BleTransportCallback)
+    
     fun `setEventCallback`(`callback`: EventCallback)
     
     fun `setRelayPriority`(`priority`: RelayPriority)
     
     fun `setTyping`(`conversationId`: kotlin.String): kotlin.String
+    
+    fun `setWifiDirectTransportCallback`(`callback`: WifiDirectTransportCallback)
     
     fun `shouldEscalateToWifi`(): kotlin.Boolean
     
@@ -2520,6 +2635,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
             UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol(handle, status)
         }
     }
+
+    
+    @Throws(ProtocolException::class)override fun `acceptConnectionRequest`(`recipient`: kotlin.String, `accepterName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(
+        it,
+        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`accepterName`),FfiConverterOptionalSequenceUByte.lower(`keyPackage`),_status)
+}
+    }
+    )
+    }
+    
 
     
     @Throws(ProtocolException::class)override fun `addInternetTransport`(`serverUrl`: kotlin.String, `port`: kotlin.UShort)
@@ -3688,6 +3817,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    
+    @Throws(ProtocolException::class)override fun `rejectConnectionRequest`(`recipient`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(
+        it,
+        FfiConverterString.lower(`recipient`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `releaseTransportLock`()
         = 
     callWithHandle {
@@ -3753,6 +3896,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(
+        it,
+        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`senderName`),FfiConverterOptionalSequenceUByte.lower(`keyPackage`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `sendFile`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -3787,6 +3944,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(
         it,
         FfiConverterUByte.lower(`level`),_status)
+}
+    }
+    
+    
+
+    override fun `setBleTransportCallback`(`callback`: BleTransportCallback)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(
+        it,
+        FfiConverterTypeBleTransportCallback.lower(`callback`),_status)
 }
     }
     
@@ -3829,6 +3998,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     )
     }
+    
+
+    override fun `setWifiDirectTransportCallback`(`callback`: WifiDirectTransportCallback)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(
+        it,
+        FfiConverterTypeWifiDirectTransportCallback.lower(`callback`),_status)
+}
+    }
+    
     
 
     override fun `shouldEscalateToWifi`(): kotlin.Boolean {
@@ -5780,6 +5961,65 @@ public object FfiConverterTypeTransportType: FfiConverterRustBuffer<TransportTyp
 
 
 
+public interface BleTransportCallback {
+    
+    fun `onFragmentsAvailable`()
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceBleTransportCallback {
+    internal object `onFragmentsAvailable`: UniffiCallbackInterfaceBleTransportCallbackMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeBleTransportCallback.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onFragmentsAvailable`(
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeBleTransportCallback.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeBleTransportCallback.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceBleTransportCallback.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onFragmentsAvailable`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeBleTransportCallback: FfiConverterCallbackInterface<BleTransportCallback>()
+
+
+
+
+
 public interface EventCallback {
     
     fun `onEvent`(`eventJson`: kotlin.String)
@@ -5964,6 +6204,65 @@ internal object uniffiCallbackInterfaceMlsStorageProvider {
  * @suppress
  */
 public object FfiConverterTypeMlsStorageProvider: FfiConverterCallbackInterface<MlsStorageProvider>()
+
+
+
+
+
+public interface WifiDirectTransportCallback {
+    
+    fun `onMessagesAvailable`()
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceWifiDirectTransportCallback {
+    internal object `onMessagesAvailable`: UniffiCallbackInterfaceWifiDirectTransportCallbackMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeWifiDirectTransportCallback.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onMessagesAvailable`(
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeWifiDirectTransportCallback.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeWifiDirectTransportCallback.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceWifiDirectTransportCallback.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onMessagesAvailable`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeWifiDirectTransportCallback: FfiConverterCallbackInterface<WifiDirectTransportCallback>()
 
 
 

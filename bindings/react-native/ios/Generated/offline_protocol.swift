@@ -588,6 +588,8 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
+    func acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: [UInt8]?) throws  -> String
+    
     func addInternetTransport(serverUrl: String, port: UInt16) throws 
     
     func addWifiDirectTransport() throws 
@@ -688,11 +690,13 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func initializeMls(storage: MlsStorageProvider) throws 
     
+    func internetConfirmSent(messageId: String) 
+    
     func internetGetNextMessage()  -> InternetMessage?
     
     func internetMessageReceived(senderId: String, data: [UInt8]) throws 
     
-    func internetReturnMessage() 
+    func internetSendFailed(messageId: String) 
     
     func internetStatusChanged(isConnected: Bool) throws 
     
@@ -762,6 +766,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func receiveMessage()  -> String?
     
+    func rejectConnectionRequest(recipient: String) throws  -> String
+    
     func releaseTransportLock() 
     
     func removeNeighborRoutes(neighborId: String) 
@@ -772,17 +778,23 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func resume() throws 
     
+    func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?) throws  -> String
+    
     func sendFile(recipient: String, filePath: String, fileName: String) throws  -> String
     
     func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
     
     func setBatteryLevel(level: UInt8) 
     
+    func setBleTransportCallback(callback: BleTransportCallback) 
+    
     func setEventCallback(callback: EventCallback) 
     
     func setRelayPriority(priority: RelayPriority) throws 
     
     func setTyping(conversationId: String) throws  -> String
+    
+    func setWifiDirectTransportCallback(callback: WifiDirectTransportCallback) 
     
     func shouldEscalateToWifi()  -> Bool
     
@@ -874,6 +886,17 @@ public convenience init(config: ProtocolConfig)throws  {
 
     
 
+    
+open func acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: [UInt8]?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterString.lower(accepterName),
+        FfiConverterOptionSequenceUInt8.lower(keyPackage),$0
+    )
+})
+}
     
 open func addInternetTransport(serverUrl: String, port: UInt16)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_internet_transport(
@@ -1299,6 +1322,14 @@ open func initializeMls(storage: MlsStorageProvider)throws   {try rustCallWithEr
 }
 }
     
+open func internetConfirmSent(messageId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
 open func internetGetNextMessage() -> InternetMessage?  {
     return try!  FfiConverterOptionTypeInternetMessage.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(
@@ -1316,9 +1347,10 @@ open func internetMessageReceived(senderId: String, data: [UInt8])throws   {try 
 }
 }
     
-open func internetReturnMessage()  {try! rustCall() {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_return_message(
-            self.uniffiCloneHandle(),$0
+open func internetSendFailed(messageId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),$0
     )
 }
 }
@@ -1618,6 +1650,15 @@ open func receiveMessage() -> String?  {
 })
 }
     
+open func rejectConnectionRequest(recipient: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),$0
+    )
+})
+}
+    
 open func releaseTransportLock()  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(
             self.uniffiCloneHandle(),$0
@@ -1657,6 +1698,17 @@ open func resume()throws   {try rustCallWithError(FfiConverterTypeProtocolError_
 }
 }
     
+open func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterString.lower(senderName),
+        FfiConverterOptionSequenceUInt8.lower(keyPackage),$0
+    )
+})
+}
+    
 open func sendFile(recipient: String, filePath: String, fileName: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
@@ -1688,6 +1740,14 @@ open func setBatteryLevel(level: UInt8)  {try! rustCall() {
 }
 }
     
+open func setBleTransportCallback(callback: BleTransportCallback)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceBleTransportCallback_lower(callback),$0
+    )
+}
+}
+    
 open func setEventCallback(callback: EventCallback)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(
             self.uniffiCloneHandle(),
@@ -1711,6 +1771,14 @@ open func setTyping(conversationId: String)throws  -> String  {
         FfiConverterString.lower(conversationId),$0
     )
 })
+}
+    
+open func setWifiDirectTransportCallback(callback: WifiDirectTransportCallback)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceWifiDirectTransportCallback_lower(callback),$0
+    )
+}
 }
     
 open func shouldEscalateToWifi() -> Bool  {
@@ -2389,13 +2457,15 @@ public func FfiConverterTypeGradientRoutingConfig_lower(_ value: GradientRouting
 
 
 public struct InternetMessage: Equatable, Hashable {
+    public var messageId: String
     public var recipientId: String
     public var data: [UInt8]
     public var replyToMsg: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(recipientId: String, data: [UInt8], replyToMsg: String?) {
+    public init(messageId: String, recipientId: String, data: [UInt8], replyToMsg: String?) {
+        self.messageId = messageId
         self.recipientId = recipientId
         self.data = data
         self.replyToMsg = replyToMsg
@@ -2415,6 +2485,7 @@ public struct FfiConverterTypeInternetMessage: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InternetMessage {
         return
             try InternetMessage(
+                messageId: FfiConverterString.read(from: &buf), 
                 recipientId: FfiConverterString.read(from: &buf), 
                 data: FfiConverterSequenceUInt8.read(from: &buf), 
                 replyToMsg: FfiConverterOptionString.read(from: &buf)
@@ -2422,6 +2493,7 @@ public struct FfiConverterTypeInternetMessage: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: InternetMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
         FfiConverterString.write(value.recipientId, into: &buf)
         FfiConverterSequenceUInt8.write(value.data, into: &buf)
         FfiConverterOptionString.write(value.replyToMsg, into: &buf)
@@ -4235,6 +4307,128 @@ public func FfiConverterTypeTransportType_lower(_ value: TransportType) -> RustB
 
 
 
+public protocol BleTransportCallback: AnyObject, Sendable {
+    
+    func onFragmentsAvailable() 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceBleTransportCallback {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceBleTransportCallback] = [UniffiVTableCallbackInterfaceBleTransportCallback(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceBleTransportCallback.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface BleTransportCallback: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceBleTransportCallback.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface BleTransportCallback: handle missing in uniffiClone")
+            }
+        },
+        onFragmentsAvailable: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceBleTransportCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onFragmentsAvailable(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitBleTransportCallback() {
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback(UniffiCallbackInterfaceBleTransportCallback.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceBleTransportCallback {
+    fileprivate static let handleMap = UniffiHandleMap<BleTransportCallback>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceBleTransportCallback : FfiConverter {
+    typealias SwiftType = BleTransportCallback
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceBleTransportCallback_lift(_ handle: UInt64) throws -> BleTransportCallback {
+    return try FfiConverterCallbackInterfaceBleTransportCallback.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceBleTransportCallback_lower(_ v: BleTransportCallback) -> UInt64 {
+    return FfiConverterCallbackInterfaceBleTransportCallback.lower(v)
+}
+
+
+
+
 public protocol EventCallback: AnyObject, Sendable {
     
     func onEvent(eventJson: String) 
@@ -4568,6 +4762,128 @@ public func FfiConverterCallbackInterfaceMlsStorageProvider_lift(_ handle: UInt6
 #endif
 public func FfiConverterCallbackInterfaceMlsStorageProvider_lower(_ v: MlsStorageProvider) -> UInt64 {
     return FfiConverterCallbackInterfaceMlsStorageProvider.lower(v)
+}
+
+
+
+
+public protocol WifiDirectTransportCallback: AnyObject, Sendable {
+    
+    func onMessagesAvailable() 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceWifiDirectTransportCallback {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceWifiDirectTransportCallback] = [UniffiVTableCallbackInterfaceWifiDirectTransportCallback(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceWifiDirectTransportCallback.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface WifiDirectTransportCallback: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceWifiDirectTransportCallback.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface WifiDirectTransportCallback: handle missing in uniffiClone")
+            }
+        },
+        onMessagesAvailable: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceWifiDirectTransportCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onMessagesAvailable(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitWifiDirectTransportCallback() {
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(UniffiCallbackInterfaceWifiDirectTransportCallback.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceWifiDirectTransportCallback {
+    fileprivate static let handleMap = UniffiHandleMap<WifiDirectTransportCallback>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceWifiDirectTransportCallback : FfiConverter {
+    typealias SwiftType = WifiDirectTransportCallback
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceWifiDirectTransportCallback_lift(_ handle: UInt64) throws -> WifiDirectTransportCallback {
+    return try FfiConverterCallbackInterfaceWifiDirectTransportCallback.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceWifiDirectTransportCallback_lower(_ v: WifiDirectTransportCallback) -> UInt64 {
+    return FfiConverterCallbackInterfaceWifiDirectTransportCallback.lower(v)
 }
 
 #if swift(>=5.8)
@@ -5072,6 +5388,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_internet_transport() != 42106) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5222,13 +5541,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 29008) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 10435) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_return_message() != 33628) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243) {
@@ -5333,6 +5655,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5348,6 +5673,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 33006) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5357,6 +5685,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 28420) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 14659) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5364,6 +5695,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing() != 10907) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 39894) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161) {
@@ -5420,6 +5754,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available() != 11079) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event() != 4769) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5435,9 +5772,14 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 24837) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635) {
+        return InitializationResult.apiChecksumMismatch
+    }
 
+    uniffiCallbackInitBleTransportCallback()
     uniffiCallbackInitEventCallback()
     uniffiCallbackInitMlsStorageProvider()
+    uniffiCallbackInitWifiDirectTransportCallback()
     return InitializationResult.ok
 }()
 

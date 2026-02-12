@@ -16,6 +16,11 @@ import {
   type InternetTransportConfig,
   type WifiDirectTransportConfig,
 } from '@offline-protocol/mesh-sdk';
+import type {
+  ConnectionRequestReceivedEvent,
+  ConnectionAcceptedEvent,
+  ConnectionRejectedEvent,
+} from '@offline-protocol/mesh-sdk';
 
 // MLS types (defined locally until SDK is rebuilt)
 interface MlsEncryptedMessage {
@@ -80,6 +85,20 @@ import type {
   TransportMetricsSnapshot,
 } from '../types/runtime';
 
+export type ConnectionStatus =
+  | 'none'
+  | 'pending_sent'
+  | 'pending_received'
+  | 'connected'
+  | 'rejected';
+
+export interface IncomingConnectionRequest {
+  sender: string;
+  senderName: string;
+  timestamp: number;
+  keyPackage?: number[];
+}
+
 export interface Contact {
   id: string;
   name: string;
@@ -119,6 +138,36 @@ interface PeerProfile {
   updatedAt: number;
 }
 
+// Relay/group types (relay connection is SDK-only; app only consumes events)
+export interface OnlineMessage {
+  id: string;
+  sender: string;
+  content: string;
+  timestamp: Date;
+  isFromMe: boolean;
+  replyToMsg?: string;
+}
+
+export interface OnlineGroup {
+  groupId: string;
+  name: string;
+  createdAt: Date;
+}
+
+export interface GroupMemberInfo {
+  userId: string;
+  role: 'admin' | 'member';
+  joinedAt: Date;
+}
+
+export interface GroupDetails {
+  groupId: string;
+  name: string;
+  createdBy: string;
+  createdAt: Date;
+  members: GroupMemberInfo[];
+}
+
 interface ProtocolContextType {
   // Core state
   isInitialized: boolean;
@@ -130,6 +179,13 @@ interface ProtocolContextType {
   contacts: Contact[];
   chats: Chat[];
   connectedPeersCount: number;
+
+  // Connection request flow (request → accept/decline)
+  incomingConnectionRequests: IncomingConnectionRequest[];
+  getConnectionStatus: (peerId: string) => ConnectionStatus;
+  sendConnectionRequest: (recipientId: string) => Promise<void>;
+  acceptConnectionRequest: (senderId: string) => Promise<void>;
+  rejectConnectionRequest: (senderId: string) => Promise<void>;
 
   // Protocol state
   events: ProtocolEvent[];
@@ -145,6 +201,25 @@ interface ProtocolContextType {
   // MLS encryption state
   isMlsInitialized: boolean;
   encryptedPeers: Set<string>;
+
+  // Relay/group state (only the SDK connects to the relay; app receives events)
+  relayReady: boolean;
+  groups: OnlineGroup[];
+  groupDetails: Map<string, GroupDetails>;
+  groupMessages: Map<string, OnlineMessage[]>;
+
+  // Group actions (SDK sends over its single relay connection)
+  createGroup: (name: string) => Promise<string>;
+  sendGroupMessage: (
+    groupId: string,
+    content: string,
+    replyToMsg?: string,
+  ) => Promise<string>;
+  addGroupMember: (groupId: string, username: string) => Promise<void>;
+  removeGroupMember: (groupId: string, username: string) => Promise<void>;
+  leaveGroup: (groupId: string) => Promise<void>;
+  getGroupInfo: (groupId: string) => Promise<void>;
+  getUserGroups: () => Promise<void>;
 
   // Actions
   initialize: () => Promise<boolean>;
@@ -213,6 +288,23 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const [encryptedPeers, setEncryptedPeers] = useState<Set<string>>(new Set());
   const peerKeyPackagesRef = useRef<Map<string, number[]>>(new Map());
   const keyPackageSentPeersRef = useRef<Set<string>>(new Set());
+
+  // Connection request flow: request → accept/decline
+  const [incomingConnectionRequests, setIncomingConnectionRequests] = useState<
+    IncomingConnectionRequest[]
+  >([]);
+  const [connectionStatus, setConnectionStatus] = useState<
+    Record<string, ConnectionStatus>
+  >({});
+
+  // Relay/group state (updated from protocol events; only SDK talks to relay)
+  const [groups, setGroups] = useState<OnlineGroup[]>([]);
+  const [groupDetails, setGroupDetails] = useState<Map<string, GroupDetails>>(
+    new Map(),
+  );
+  const [groupMessages, setGroupMessages] = useState<
+    Map<string, OnlineMessage[]>
+  >(new Map());
 
   // Helper to convert string to byte array (React Native compatible)
   const stringToBytes = useCallback((str: string): number[] => {
@@ -418,8 +510,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             };
           });
 
-          // Also send key package for MLS encryption
-          void sendKeyPackageToPeer(peerId);
+          // Connection is now request/accept/decline; no auto key package on presence
         }
       } catch (err) {
         console.warn(
@@ -429,8 +520,189 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         );
       }
     },
-    [protocolSendMessage, currentUserId, currentUserName, sendKeyPackageToPeer],
+    [protocolSendMessage, currentUserId, currentUserName],
   );
+
+  const getConnectionStatus = useCallback(
+    (peerId: string): ConnectionStatus => {
+      return connectionStatus[peerId] ?? 'none';
+    },
+    [connectionStatus],
+  );
+
+  const sendConnectionRequest = useCallback(
+    async (recipientId: string) => {
+      if (!protocol || recipientId === currentUserId) return;
+      let keyPackage: number[] | undefined;
+      if (isMlsInitialized) {
+        try {
+          const mlsProtocol = protocol as OfflineProtocolWithMls;
+          const kp = await mlsProtocol.mlsGetOrCreateKeyPackage();
+          keyPackage = kp.keyPackageData;
+        } catch (e) {
+          console.warn(
+            '[ProtocolProvider] MLS key package for connection request:',
+            e,
+          );
+        }
+      }
+      console.log(
+        '[ProtocolProvider] sending connection request to',
+        recipientId,
+      );
+      await protocol.sendConnectionRequest({
+        recipient: recipientId,
+        senderName: currentUserName,
+        keyPackage,
+      });
+      setConnectionStatus(prev => ({ ...prev, [recipientId]: 'pending_sent' }));
+    },
+    [protocol, currentUserId, currentUserName, isMlsInitialized],
+  );
+
+  const acceptConnectionRequest = useCallback(
+    async (senderId: string) => {
+      if (!protocol || senderId === currentUserId) return;
+      let keyPackage: number[] | undefined;
+      if (isMlsInitialized) {
+        try {
+          const mlsProtocol = protocol as OfflineProtocolWithMls;
+          const kp = await mlsProtocol.mlsGetOrCreateKeyPackage();
+          keyPackage = kp.keyPackageData;
+        } catch (e) {
+          console.warn('[ProtocolProvider] MLS key package for accept:', e);
+        }
+      }
+      await protocol.acceptConnectionRequest({
+        recipient: senderId,
+        accepterName: currentUserName,
+        keyPackage,
+      });
+      setIncomingConnectionRequests(prev =>
+        prev.filter(r => r.sender !== senderId),
+      );
+      setConnectionStatus(prev => ({ ...prev, [senderId]: 'connected' }));
+    },
+    [protocol, currentUserId, currentUserName, isMlsInitialized],
+  );
+
+  const rejectConnectionRequest = useCallback(
+    async (senderId: string) => {
+      if (!protocol || senderId === currentUserId) return;
+      await protocol.rejectConnectionRequest({ recipient: senderId });
+      setIncomingConnectionRequests(prev =>
+        prev.filter(r => r.sender !== senderId),
+      );
+      setConnectionStatus(prev => ({ ...prev, [senderId]: 'rejected' }));
+    },
+    [protocol, currentUserId],
+  );
+
+  // Subscribe to relay/group events (SDK is the only relay client)
+  useEffect(() => {
+    if (!protocol) return;
+    const onEvent = (event: ProtocolEvent) => {
+      switch (event.type) {
+        case 'group_message_received': {
+          const e =
+            event as import('@offline-protocol/mesh-sdk').GroupMessageReceivedEvent;
+          const msg: OnlineMessage = {
+            id: e.message_id,
+            sender: e.sender,
+            content: e.content,
+            timestamp: new Date(e.timestamp),
+            isFromMe: e.sender === currentUserId,
+            replyToMsg: e.reply_to_msg_id,
+          };
+          setGroupMessages(prev => {
+            const next = new Map(prev);
+            const list = next.get(e.group_id) ?? [];
+            const idx = list.findIndex(m => m.id === e.message_id);
+            if (idx >= 0) {
+              const copy = [...list];
+              copy[idx] = msg;
+              next.set(e.group_id, copy);
+            } else {
+              next.set(e.group_id, [...list, msg]);
+            }
+            return next;
+          });
+          break;
+        }
+        case 'group_created': {
+          const e =
+            event as import('@offline-protocol/mesh-sdk').GroupCreatedEvent;
+          setGroups(prev => [
+            ...prev,
+            {
+              groupId: e.group_id,
+              name: e.name,
+              createdAt: new Date(),
+            },
+          ]);
+          break;
+        }
+        case 'user_groups': {
+          const e =
+            event as import('@offline-protocol/mesh-sdk').UserGroupsEvent;
+          setGroups(
+            e.groups.map(g => ({
+              groupId: g.group_id,
+              name: g.name,
+              createdAt: new Date(g.created_at),
+            })),
+          );
+          break;
+        }
+        case 'group_info': {
+          const e =
+            event as import('@offline-protocol/mesh-sdk').GroupInfoEvent;
+          setGroupDetails(prev => {
+            const next = new Map(prev);
+            next.set(e.group_id, {
+              groupId: e.group_id,
+              name: e.name,
+              createdBy: e.created_by,
+              createdAt: new Date(e.created_at),
+              members: e.members.map(m => ({
+                userId: m.user_id,
+                role: m.role,
+                joinedAt: new Date(m.joined_at),
+              })),
+            });
+            return next;
+          });
+          break;
+        }
+        case 'group_member_added':
+        case 'group_member_removed':
+          // Refresh group info when membership changes
+          if (event.type === 'group_member_added') {
+            const e =
+              event as import('@offline-protocol/mesh-sdk').GroupMemberAddedEvent;
+            if (protocol) void protocol.groupGetInfo(e.group_id);
+          } else {
+            const e =
+              event as import('@offline-protocol/mesh-sdk').GroupMemberRemovedEvent;
+            if (protocol) void protocol.groupGetInfo(e.group_id);
+          }
+          break;
+        case 'group_error':
+          console.warn(
+            '[ProtocolProvider] Group error:',
+            (event as import('@offline-protocol/mesh-sdk').GroupErrorEvent)
+              .reason,
+          );
+          break;
+        default:
+          break;
+      }
+    };
+    protocol.on('all', onEvent);
+    return () => {
+      protocol.off?.('all', onEvent);
+    };
+  }, [protocol, currentUserId]);
 
   // Initialize protocol
   const initialize = useCallback(async (): Promise<boolean> => {
@@ -499,7 +771,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     }
   }, [protocolStop]);
 
-  // Send message with optional encryption
+  // Send message with optional encryption (only to connected peers)
   const sendMessage = useCallback(
     async (
       recipientId: string,
@@ -507,6 +779,12 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       priority: MessagePriority = MessagePriority.Medium,
       replyToMsg?: string,
     ) => {
+      const status = connectionStatus[recipientId] ?? 'none';
+      if (status !== 'connected') {
+        throw new Error(
+          'Not connected to this peer. Send a connection request and wait for them to accept.',
+        );
+      }
       try {
         console.log(
           `[ProtocolProvider] Sending message to ${recipientId}: "${content}" (priority: ${priority})`,
@@ -686,11 +964,13 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       }
     },
     [
+      connectionStatus,
       protocolSendMessage,
       currentUserId,
       getPeerDisplayName,
       protocol,
       isMlsInitialized,
+      stringToBytes,
     ],
   );
 
@@ -742,6 +1022,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       const now = Date.now();
 
       for (const event of chronologicalEvents) {
+        console.log('[ProtocolProvider] processing event', event.type);
         switch (event.type) {
           case 'neighbor_discovered': {
             const peerId = (event as any).peer_id;
@@ -757,6 +1038,96 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             if (peerId) {
               discoveredPeers.delete(peerId);
             }
+            break;
+          }
+          case 'connection_request_received': {
+            const e = event as ConnectionRequestReceivedEvent;
+            const timestamp =
+              typeof e.timestamp === 'number'
+                ? e.timestamp
+                : typeof e.timestamp === 'string'
+                ? parseInt(e.timestamp, 10) || Date.now()
+                : Date.now();
+            console.log(
+              '[ProtocolProvider] connection_request_received',
+              e.sender,
+              e.sender_name,
+            );
+            setIncomingConnectionRequests(prev => [
+              ...prev.filter(r => r.sender !== e.sender),
+              {
+                sender: e.sender,
+                senderName: e.sender_name,
+                timestamp,
+                keyPackage: e.key_package,
+              },
+            ]);
+            setConnectionStatus(prev => ({
+              ...prev,
+              [e.sender]: 'pending_received',
+            }));
+            if (e.key_package && e.key_package.length > 0) {
+              peerKeyPackagesRef.current.set(e.sender, e.key_package);
+            }
+            // Ensure requester appears in contacts so we can show Accept/Decline
+            setContacts(prev => {
+              if (prev.some(c => c.id === e.sender)) return prev;
+              return [
+                ...prev,
+                {
+                  id: e.sender,
+                  name:
+                    e.sender_name ||
+                    (e.sender.length > 4
+                      ? `User ${e.sender.slice(-4)}`
+                      : e.sender),
+                  avatar: undefined,
+                  isOnline: true,
+                  lastSeen: now,
+                  signalStrength: undefined,
+                  distance: undefined,
+                },
+              ];
+            });
+            break;
+          }
+          case 'connection_accepted': {
+            const e = event as ConnectionAcceptedEvent;
+            setConnectionStatus(prev => ({
+              ...prev,
+              [e.accepted_by]: 'connected',
+            }));
+            if (e.key_package && e.key_package.length > 0) {
+              peerKeyPackagesRef.current.set(e.accepted_by, e.key_package);
+            }
+            // Add accepter as contact on the requester's device so both devices have each other
+            setContacts(prev => {
+              if (prev.some(c => c.id === e.accepted_by)) return prev;
+              return [
+                ...prev,
+                {
+                  id: e.accepted_by,
+                  name:
+                    e.accepted_by_name ||
+                    (e.accepted_by.length > 4
+                      ? `User ${e.accepted_by.slice(-4)}`
+                      : e.accepted_by),
+                  avatar: undefined,
+                  isOnline: true,
+                  lastSeen: now,
+                  signalStrength: undefined,
+                  distance: undefined,
+                },
+              ];
+            });
+            break;
+          }
+          case 'connection_rejected': {
+            const e = event as ConnectionRejectedEvent;
+            setConnectionStatus(prev => ({
+              ...prev,
+              [e.rejected_by]: 'rejected',
+            }));
             break;
           }
           case 'message_sent': {
@@ -1249,6 +1620,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     isMlsInitialized,
     bytesToString,
     sendPresenceToPeer,
+    presenceSentPeers,
   ]);
 
   // Reset presence broadcast cache when the local user name changes
@@ -1349,6 +1721,72 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
   const connectedPeersCount = contacts.filter(c => c.isOnline).length;
 
+  const relayReady =
+    isOnline && (activeTransports?.includes('internet') ?? false);
+
+  const createGroup = useCallback(
+    async (name: string): Promise<string> => {
+      if (!protocol) throw new Error('Protocol not initialized');
+      const json = await protocol.groupCreate(name);
+      return json;
+    },
+    [protocol],
+  );
+
+  const sendGroupMessage = useCallback(
+    async (
+      groupId: string,
+      content: string,
+      replyToMsg?: string,
+    ): Promise<string> => {
+      if (!protocol) throw new Error('Protocol not initialized');
+      const json = await protocol.groupSendMessage(
+        groupId,
+        content,
+        replyToMsg ?? null,
+      );
+      return json;
+    },
+    [protocol],
+  );
+
+  const addGroupMember = useCallback(
+    async (groupId: string, username: string): Promise<void> => {
+      if (!protocol) throw new Error('Protocol not initialized');
+      await protocol.groupAddMember(groupId, username);
+    },
+    [protocol],
+  );
+
+  const removeGroupMember = useCallback(
+    async (groupId: string, username: string): Promise<void> => {
+      if (!protocol) throw new Error('Protocol not initialized');
+      await protocol.groupRemoveMember(groupId, username);
+    },
+    [protocol],
+  );
+
+  const leaveGroup = useCallback(
+    async (groupId: string): Promise<void> => {
+      if (!protocol) throw new Error('Protocol not initialized');
+      await protocol.groupLeave(groupId);
+    },
+    [protocol],
+  );
+
+  const getGroupInfo = useCallback(
+    async (groupId: string): Promise<void> => {
+      if (!protocol) return;
+      await protocol.groupGetInfo(groupId);
+    },
+    [protocol],
+  );
+
+  const getUserGroups = useCallback(async (): Promise<void> => {
+    if (!protocol) return;
+    await protocol.groupGetUserGroups();
+  }, [protocol]);
+
   const contextValue: ProtocolContextType = {
     isInitialized,
     isOnline,
@@ -1357,6 +1795,11 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     contacts,
     chats,
     connectedPeersCount,
+    incomingConnectionRequests,
+    getConnectionStatus,
+    sendConnectionRequest,
+    acceptConnectionRequest,
+    rejectConnectionRequest,
     events,
     insights,
     batteryLevel,
@@ -1368,6 +1811,17 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     fileTransfers,
     isMlsInitialized,
     encryptedPeers,
+    relayReady,
+    groups,
+    groupDetails,
+    groupMessages,
+    createGroup,
+    sendGroupMessage,
+    addGroupMember,
+    removeGroupMember,
+    leaveGroup,
+    getGroupInfo,
+    getUserGroups,
     initialize,
     start,
     stop,
