@@ -706,17 +706,11 @@ impl OfflineProtocol {
             match self.encrypt_content_for_recipient(&recipient_str, &content_str, priority) {
                 Ok(encrypted) => encrypted,
                 Err(Error::SessionPending) => {
-                    // Create message first to get an ID before queuing
-                    // This ensures we always return a message ID, even when queued
-                    let temp_message = self.create_message(
-                        &recipient_str,
-                        content_str.clone(),
-                        Some(priority),
-                        reply_to_msg_id.clone(),
-                    )?;
-                    let message_id = temp_message.id.clone();
+                    // Generate an ID without ticking the Lamport clock.
+                    // The real tick happens when flush_pending_messages re-sends
+                    // via send_message after the session is established.
+                    let message_id = MessageId::new();
 
-                    // Queue the pending message with the message ID
                     debug!(recipient = %recipient_str, message_id = %message_id, "Message queued pending session establishment");
                     self.queue_pending_message(
                         &recipient_str,
@@ -726,7 +720,6 @@ impl OfflineProtocol {
                         reply_to_msg_id.clone(),
                     );
 
-                    // Return the message ID even though it's queued
                     return Ok(message_id);
                 }
                 Err(Error::NoKeyPackage(ref r)) => {
@@ -823,50 +816,51 @@ impl OfflineProtocol {
                     warn!(recipient = %recipient, "Received key package has expired, discarding");
                     self.pending_key_packages.remove(recipient);
                 } else {
-                {
-                    let manager = mls
-                        .read()
-                        .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.import_key_package(recipient, &received_pkg.key_package_data)?;
+                    {
+                        let manager = mls
+                            .read()
+                            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                        manager
+                            .import_key_package(recipient, &received_pkg.key_package_data)?;
+                    }
+
+                    // Create session and send welcome message
+                    let welcome = {
+                        let manager = mls
+                            .read()
+                            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                        manager.create_session(recipient)?
+                    };
+
+                    // Send welcome as internal message
+                    self.send_welcome_message(recipient, &welcome)?;
+
+                    // All operations succeeded, now safe to remove the key package
+                    self.pending_key_packages.remove(recipient);
+
+                    let group_id = welcome.group_id.as_str().to_string();
+                    let is_session = group_id.starts_with("session:");
+
+                    debug!(recipient = %recipient, group_id = %group_id, "Created MLS session and sent welcome");
+
+                    // Emit secure session established event
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::secure_session_established(
+                            recipient.to_string(),
+                            group_id,
+                            is_session,
+                            true, // initiated_by_local is true - we sent the Welcome
+                        ));
+                    }
+
+                    // Don't encrypt immediately after creating session.
+                    // Queue message until session is confirmed (peer processes our Welcome
+                    // and we successfully decrypt their first message, or we receive their Welcome).
+                    // This avoids race conditions where both peers create sessions.
+                    if self.config.encryption.store_pending {
+                        return Err(Error::SessionPending);
+                    }
                 }
-
-                // Create session and send welcome message
-                let welcome = {
-                    let manager = mls
-                        .read()
-                        .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.create_session(recipient)?
-                };
-
-                // Send welcome as internal message
-                self.send_welcome_message(recipient, &welcome)?;
-
-                // All operations succeeded, now safe to remove the key package
-                self.pending_key_packages.remove(recipient);
-
-                let group_id = welcome.group_id.as_str().to_string();
-                let is_session = group_id.starts_with("session:");
-
-                debug!(recipient = %recipient, group_id = %group_id, "Created MLS session and sent welcome");
-
-                // Emit secure session established event
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::secure_session_established(
-                        recipient.to_string(),
-                        group_id,
-                        is_session,
-                        true, // initiated_by_local is true - we sent the Welcome
-                    ));
-                }
-
-                // Don't encrypt immediately after creating session.
-                // Queue message until session is confirmed (peer processes our Welcome
-                // and we successfully decrypt their first message, or we receive their Welcome).
-                // This avoids race conditions where both peers create sessions.
-                if self.config.encryption.store_pending {
-                    return Err(Error::SessionPending);
-                }
-                } // end else (not expired)
             } else {
                 // No key package available
                 if self.config.encryption.store_pending {
@@ -1152,6 +1146,11 @@ impl OfflineProtocol {
                     self.lamport_clock = restored_clock;
                 }
                 debug!(clock = %self.lamport_clock, "Restored Lamport clock from storage");
+            } else {
+                warn!(
+                    len = data.len(),
+                    "Corrupted Lamport clock in storage (expected 8 bytes), starting fresh"
+                );
             }
         }
     }
@@ -1543,6 +1542,14 @@ impl OfflineProtocol {
         loop {
             match self.transport_manager.receive() {
                 Ok(Some((transport_used, mut message))) => {
+                    // Merge Lamport clock for every received message — including
+                    // duplicates, ACKs, and internal protocol messages — so the
+                    // local clock always advances past any observed peer value.
+                    if message.lamport_clock.value() > 0 {
+                        self.lamport_clock.merge(message.lamport_clock);
+                        self.persist_lamport_clock();
+                    }
+
                     if message.metadata.contains_key(ACK_FOR_KEY) {
                         self.handle_ack_message(&message);
                         continue;
@@ -1570,10 +1577,6 @@ impl OfflineProtocol {
                             }
                         }
                     }
-
-                    // Advance local Lamport clock based on received message
-                    self.lamport_clock.merge(message.lamport_clock);
-                    self.persist_lamport_clock();
 
                     if message.requires_ack {
                         if let Err(err) = self.send_delivery_ack(&message, transport_used) {
@@ -3248,5 +3251,428 @@ mod tests {
 
         // Without MLS initialized, should return placeholder text
         assert!(matches!(result, Some(InternalMessageResult::Decrypted(_))));
+    }
+
+    // ========================================================================
+    // LAMPORT CLOCK TESTS
+    // ========================================================================
+
+    use crate::mls::InMemoryStorage;
+
+    #[test]
+    fn test_lamport_clock_advances_on_send() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
+
+        protocol.start().unwrap();
+
+        assert_eq!(protocol.lamport_clock.value(), 0);
+
+        protocol
+            .send_message("bob", "msg1", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(protocol.lamport_clock.value(), 1);
+
+        protocol
+            .send_message("bob", "msg2", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(protocol.lamport_clock.value(), 2);
+    }
+
+    #[test]
+    fn test_lamport_clock_merges_on_receive() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        // Create a message with a high Lamport clock from a peer
+        let mut message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "Hello",
+        );
+        message.lamport_clock = LamportClock::from_value(50);
+        mock_transport.queue_message(message);
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        assert_eq!(protocol.lamport_clock.value(), 0);
+
+        let received = protocol.receive_message();
+        assert!(received.is_some());
+
+        // Clock should be max(0, 50) + 1 = 51
+        assert_eq!(protocol.lamport_clock.value(), 51);
+    }
+
+    #[test]
+    fn test_lamport_clock_monotonic_across_send_receive() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        // Send a message first (clock -> 1)
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
+        protocol.start().unwrap();
+
+        protocol
+            .send_message("bob", "hi", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(protocol.lamport_clock.value(), 1);
+
+        // Receive a message with lower clock (clock should still advance)
+        let mut message = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "reply",
+        );
+        message.lamport_clock = LamportClock::from_value(0);
+        mock_transport.queue_message(message);
+
+        // Legacy message (clock=0) — merge is skipped so clock stays at 1
+        let received = protocol.receive_message();
+        assert!(received.is_some());
+        assert_eq!(protocol.lamport_clock.value(), 1);
+
+        // Now receive a message with higher clock
+        let mut message2 = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "another",
+        );
+        message2.lamport_clock = LamportClock::from_value(10);
+        mock_transport.queue_message(message2);
+
+        let received2 = protocol.receive_message();
+        assert!(received2.is_some());
+        // max(1, 10) + 1 = 11
+        assert_eq!(protocol.lamport_clock.value(), 11);
+    }
+
+    #[test]
+    fn test_lamport_clock_persists_and_restores() {
+        let storage = Arc::new(InMemoryStorage::new());
+
+        // First session: send messages to advance the clock
+        {
+            let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+            let mut mock_transport = MockTransport::new(TransportType::BLE);
+            mock_transport.start().unwrap();
+            protocol.transport_manager_mut().add_transport(
+                TransportType::BLE,
+                Box::new(mock_transport),
+            );
+
+            protocol
+                .enable_message_persistence(storage.clone())
+                .unwrap();
+            protocol.start().unwrap();
+
+            // Send 5 messages to advance clock to 5
+            for i in 0..5 {
+                protocol
+                    .send_message(
+                        "bob",
+                        format!("msg{}", i),
+                        None::<MessagePriority>,
+                        None::<String>,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(protocol.lamport_clock.value(), 5);
+        }
+
+        // Second session: clock should restore from storage
+        {
+            let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+            let mut mock_transport = MockTransport::new(TransportType::BLE);
+            mock_transport.start().unwrap();
+            protocol.transport_manager_mut().add_transport(
+                TransportType::BLE,
+                Box::new(mock_transport),
+            );
+
+            assert_eq!(protocol.lamport_clock.value(), 0);
+
+            protocol
+                .enable_message_persistence(storage.clone())
+                .unwrap();
+
+            // After attaching storage, clock should be restored
+            assert_eq!(protocol.lamport_clock.value(), 5);
+
+            // Next send should be 6, not 1
+            protocol.start().unwrap();
+            protocol
+                .send_message("bob", "after restart", None::<MessagePriority>, None::<String>)
+                .unwrap();
+            assert_eq!(protocol.lamport_clock.value(), 6);
+        }
+    }
+
+    #[test]
+    fn test_lamport_clock_restore_with_corrupted_data() {
+        let storage = Arc::new(InMemoryStorage::new());
+
+        // Write corrupted data (wrong length)
+        storage
+            .store(
+                storage_keys::LAMPORT_CLOCK,
+                storage_keys::LAMPORT_CLOCK_ID,
+                &[1, 2, 3], // only 3 bytes, not 8
+            )
+            .unwrap();
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol
+            .enable_message_persistence(storage.clone())
+            .unwrap();
+
+        // Clock should remain at 0 (corrupted data ignored)
+        assert_eq!(protocol.lamport_clock.value(), 0);
+    }
+
+    #[test]
+    fn test_lamport_clock_restore_never_goes_backward() {
+        let storage = Arc::new(InMemoryStorage::new());
+
+        // Store a value of 10 in storage
+        storage
+            .store(
+                storage_keys::LAMPORT_CLOCK,
+                storage_keys::LAMPORT_CLOCK_ID,
+                &10u64.to_le_bytes(),
+            )
+            .unwrap();
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Advance in-memory clock to 20 before attaching storage
+        for _ in 0..20 {
+            protocol.lamport_clock.tick();
+        }
+        assert_eq!(protocol.lamport_clock.value(), 20);
+
+        // Attaching storage should NOT regress to 10
+        protocol
+            .enable_message_persistence(storage.clone())
+            .unwrap();
+        assert_eq!(protocol.lamport_clock.value(), 20);
+    }
+
+    #[test]
+    fn test_lamport_clock_merge_on_internal_message() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        // Create a key package message with a high Lamport clock
+        let key_pkg_payload = KeyPackagePayload {
+            user_id: "sender456".to_string(),
+            key_package_data: vec![5, 6, 7, 8],
+            remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+            timestamp_ms: 12345,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::KEY_PACKAGE,
+            serde_json::to_string(&key_pkg_payload).unwrap()
+        );
+        let mut message = Message::new(
+            UserId::new("sender456").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+        message.lamport_clock = LamportClock::from_value(100);
+        mock_transport.queue_message(message);
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        assert_eq!(protocol.lamport_clock.value(), 0);
+
+        // Receiving the internal message should merge the clock even
+        // though process_internal_message returns Consumed
+        let received = protocol.receive_message();
+        // Internal messages are consumed, not surfaced
+        assert!(received.is_none());
+
+        // Clock should have merged: max(0, 100) + 1 = 101
+        assert_eq!(protocol.lamport_clock.value(), 101);
+    }
+
+    #[test]
+    fn test_lamport_clock_merge_on_duplicate_message() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        // Create two copies of the same message (simulate duplicate delivery)
+        let mut message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "Hello",
+        );
+        message.lamport_clock = LamportClock::from_value(42);
+        let message_dup = message.clone();
+
+        mock_transport.queue_message(message);
+        mock_transport.queue_message(message_dup);
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        // First receive: message delivered
+        let received = protocol.receive_message();
+        assert!(received.is_some());
+        // max(0, 42) + 1 = 43
+        assert_eq!(protocol.lamport_clock.value(), 43);
+
+        // Second receive: duplicate detected, but clock should have
+        // already merged (merge happens before dedup).
+        // The duplicate carries the same clock=42, so merge would yield
+        // max(43, 42) + 1 = 44
+        let received2 = protocol.receive_message();
+        assert!(received2.is_none());
+        assert_eq!(protocol.lamport_clock.value(), 44);
+    }
+
+    #[test]
+    fn test_lamport_clock_no_tick_on_pending_message() {
+        let mut config = create_test_config();
+        config.encryption.enabled = false;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        // Send two messages, verify each tick advances by exactly 1
+        let clock_before = protocol.lamport_clock.value();
+        protocol
+            .send_message("bob", "first", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(protocol.lamport_clock.value(), clock_before + 1);
+
+        protocol
+            .send_message("bob", "second", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(protocol.lamport_clock.value(), clock_before + 2);
+    }
+
+    #[test]
+    fn test_lamport_clock_sent_message_carries_clock_value() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
+        protocol.start().unwrap();
+
+        protocol
+            .send_message("bob", "test", None::<MessagePriority>, None::<String>)
+            .unwrap();
+
+        // Verify the sent message carries the Lamport clock
+        let sent = mock_transport.sent_messages();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].lamport_clock.value(), 1);
+    }
+
+    #[test]
+    fn test_key_package_remaining_lifetime_ms() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.auto_key_exchange = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        // Create a key package with remaining_lifetime_ms = 0 (legacy sender)
+        let key_pkg_payload = KeyPackagePayload {
+            user_id: "legacy_peer".to_string(),
+            key_package_data: vec![1, 2, 3],
+            remaining_lifetime_ms: 0,
+            timestamp_ms: 12345,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::KEY_PACKAGE,
+            serde_json::to_string(&key_pkg_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("legacy_peer").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // Should have stored with a 30-day default lifetime
+        let received = protocol.pending_key_packages.get("legacy_peer").unwrap();
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        let thirty_days_ms: u64 = 30 * 24 * 60 * 60 * 1000;
+        // Should expire roughly 30 days from now (within 1 second tolerance)
+        let diff = received.local_expires_at_ms.abs_diff(now_ms + thirty_days_ms);
+        assert!(diff < 1000, "Expiry should be ~30 days from now, diff was {}", diff);
+    }
+
+    #[test]
+    fn test_key_package_expired_discarded() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        // MLS must be initialized so establish_secure_session reaches the
+        // expiry check instead of short-circuiting with MlsNotInitialized.
+        let storage = Arc::new(InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        // Manually insert an already-expired key package
+        protocol.pending_key_packages.insert(
+            "expired_peer".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: vec![1, 2, 3],
+                local_expires_at_ms: 0, // expired at epoch
+            },
+        );
+
+        assert!(protocol.pending_key_packages.contains_key("expired_peer"));
+
+        // Attempting to establish session should detect expiry and discard
+        let result = protocol.establish_secure_session("expired_peer");
+        assert!(result.is_err());
+        assert!(!protocol.pending_key_packages.contains_key("expired_peer"));
     }
 }

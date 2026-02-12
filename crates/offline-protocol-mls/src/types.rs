@@ -118,30 +118,10 @@ impl KeyPackageBundle {
             user_id,
             key_package_data,
             created_at_ms: now_ms,
-            expires_at_ms: now_ms + remaining_lifetime_ms,
+            expires_at_ms: now_ms.saturating_add(remaining_lifetime_ms),
             synced: false,
         }
     }
-}
-
-/// Wire format for key package exchange between devices.
-///
-/// Uses relative `remaining_lifetime_ms` instead of absolute timestamps
-/// to eliminate cross-device clock skew from expiry calculations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyPackageTransfer {
-    /// Unique identifier for this key package.
-    pub package_id: String,
-
-    /// User ID this key package belongs to.
-    pub user_id: String,
-
-    /// Serialized MLS KeyPackage bytes.
-    pub key_package_data: Vec<u8>,
-
-    /// Remaining valid lifetime in milliseconds (computed by sender).
-    /// Receiver adds this to their local clock to determine expiry.
-    pub remaining_lifetime_ms: u64,
 }
 
 /// Information about an MLS group.

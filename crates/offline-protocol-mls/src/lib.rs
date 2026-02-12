@@ -44,6 +44,6 @@ pub use error::{MlsError, Result};
 pub use manager::MlsManager;
 pub use storage::{MlsStorage, StorageError};
 pub use types::{
-    EncryptedMessage, GroupId, GroupInfo, GroupMetadata, KeyPackageBundle, KeyPackageTransfer,
-    MlsMessageType, WelcomeMessage,
+    EncryptedMessage, GroupId, GroupInfo, GroupMetadata, KeyPackageBundle, MlsMessageType,
+    WelcomeMessage,
 };

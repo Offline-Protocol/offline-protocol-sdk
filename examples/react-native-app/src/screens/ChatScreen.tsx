@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MessagePriority, type ProtocolEvent } from '@offline-protocol/mesh-sdk';
+import { compareByCausalOrder } from '../utils/messageSort';
 
 interface Message {
   id: string;
@@ -100,19 +101,7 @@ export function ChatScreen({
       }
     });
 
-    // Sort by Lamport clock for causal ordering.
-    // Legacy messages (lamportClock === 0) fall back to wall-clock timestamp.
-    // When one message is legacy and the other is not, legacy sorts first
-    // (it predates Lamport support) then tiebreak by message ID for stability.
-    return Array.from(messageMap.values()).sort((a, b) => {
-      const aLegacy = a.lamportClock === 0;
-      const bLegacy = b.lamportClock === 0;
-      if (aLegacy && bLegacy) return a.timestamp - b.timestamp;
-      if (aLegacy !== bLegacy) return aLegacy ? -1 : 1;
-      const clockDiff = a.lamportClock - b.lamportClock;
-      if (clockDiff !== 0) return clockDiff;
-      return a.id.localeCompare(b.id);
-    });
+    return Array.from(messageMap.values()).sort(compareByCausalOrder);
   }, [events, peerId]);
 
   // Auto-scroll to bottom when new messages arrive

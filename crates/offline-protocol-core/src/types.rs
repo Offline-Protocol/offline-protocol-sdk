@@ -463,4 +463,59 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert!(instant.elapsed_millis() >= 10);
     }
+
+    #[test]
+    fn test_lamport_clock_serde_roundtrip() {
+        let clock = LamportClock::from_value(42);
+        let json = serde_json::to_string(&clock).unwrap();
+        let deserialized: LamportClock = serde_json::from_str(&json).unwrap();
+        assert_eq!(clock, deserialized);
+    }
+
+    #[test]
+    fn test_lamport_clock_deserialize_default() {
+        // Simulates receiving a legacy message without a lamport_clock field
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct LegacyMsg {
+            content: String,
+            #[serde(default)]
+            lamport_clock: LamportClock,
+        }
+        let json = r#"{"content":"hello"}"#;
+        let msg: LegacyMsg = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.lamport_clock.value(), 0);
+    }
+
+    #[test]
+    fn test_lamport_clock_merge_with_zero() {
+        // Merging with a legacy (zero) clock should still advance by 1
+        let mut local = LamportClock::from_value(10);
+        let legacy = LamportClock::new(); // value 0
+        let merged = local.merge(legacy);
+        // max(10, 0) + 1 = 11
+        assert_eq!(merged.value(), 11);
+    }
+
+    #[test]
+    fn test_lamport_clock_consecutive_merges_advance() {
+        let mut clock = LamportClock::new();
+        // Simulates receiving multiple messages with the same clock value
+        let peer_clock = LamportClock::from_value(5);
+
+        let m1 = clock.merge(peer_clock);
+        assert_eq!(m1.value(), 6); // max(0, 5) + 1
+
+        let m2 = clock.merge(peer_clock);
+        assert_eq!(m2.value(), 7); // max(6, 5) + 1
+
+        let m3 = clock.merge(peer_clock);
+        assert_eq!(m3.value(), 8); // max(7, 5) + 1
+    }
+
+    #[test]
+    fn test_lamport_clock_display() {
+        let clock = LamportClock::from_value(42);
+        assert_eq!(format!("{}", clock), "L42");
+    }
 }
