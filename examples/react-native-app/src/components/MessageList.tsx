@@ -17,6 +17,7 @@ interface Message {
   recipient?: string;
   status: 'pending' | 'delivered' | 'failed';
   timestamp: number;
+  lamportClock: number;
   transport?: string;
   hopCount?: number;
   priority?: string;
@@ -65,6 +66,7 @@ export function MessageList({
           recipient: e.recipient,
           status: 'delivered',
           timestamp: e.timestamp,
+          lamportClock: (e as any).lamport_clock ?? 0,
           priority: e.priority,
           requiresAck: e.requires_ack,
         });
@@ -78,6 +80,7 @@ export function MessageList({
           recipient: e.recipient,
           status: 'delivered',
           timestamp: e.timestamp,
+          lamportClock: (e as any).lamport_clock ?? 0,
           transport: e.transport,
           hopCount: e.hop_count,
         });
@@ -95,6 +98,7 @@ export function MessageList({
             content: '',
             status: 'delivered',
             timestamp: Date.now(),
+            lamportClock: 0,
             transport: e.transport,
             hopCount: e.hop_count,
           });
@@ -111,12 +115,22 @@ export function MessageList({
             content: '',
             status: 'failed',
             timestamp: Date.now(),
+            lamportClock: 0,
           });
         }
       }
     });
 
-    return Array.from(messageMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+    // Sort by Lamport clock for causal ordering; fall back to wall-clock
+    // for legacy messages (lamportClock === 0), tiebreak by sender ID.
+    return Array.from(messageMap.values()).sort((a, b) => {
+      if (a.lamportClock === 0 && b.lamportClock === 0) {
+        return a.timestamp - b.timestamp;
+      }
+      const clockDiff = a.lamportClock - b.lamportClock;
+      if (clockDiff !== 0) return clockDiff;
+      return (a.sender ?? '').localeCompare(b.sender ?? '');
+    });
   }, [events]);
 
   React.useEffect(() => {

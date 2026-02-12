@@ -85,11 +85,63 @@ impl KeyPackageBundle {
         }
     }
 
-    /// Checks if the key package has expired.
+    /// Checks if the key package has expired (local device's own packages only).
+    ///
+    /// This compares against the local clock and is valid because `created_at_ms`
+    /// and `expires_at_ms` were set on this same device.
     pub fn is_expired(&self) -> bool {
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         now_ms >= self.expires_at_ms
     }
+
+    /// Returns the remaining valid lifetime in milliseconds.
+    ///
+    /// Used when transmitting key packages to peers: the receiver applies
+    /// this duration relative to their own clock, eliminating cross-device
+    /// clock skew from expiry calculations.
+    pub fn remaining_lifetime_ms(&self) -> u64 {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        self.expires_at_ms.saturating_sub(now_ms)
+    }
+
+    /// Creates a bundle from received transfer data, computing local expiry
+    /// from the sender-provided remaining lifetime.
+    pub fn from_transfer(
+        package_id: String,
+        user_id: String,
+        key_package_data: Vec<u8>,
+        remaining_lifetime_ms: u64,
+    ) -> Self {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        Self {
+            package_id,
+            user_id,
+            key_package_data,
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms + remaining_lifetime_ms,
+            synced: false,
+        }
+    }
+}
+
+/// Wire format for key package exchange between devices.
+///
+/// Uses relative `remaining_lifetime_ms` instead of absolute timestamps
+/// to eliminate cross-device clock skew from expiry calculations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyPackageTransfer {
+    /// Unique identifier for this key package.
+    pub package_id: String,
+
+    /// User ID this key package belongs to.
+    pub user_id: String,
+
+    /// Serialized MLS KeyPackage bytes.
+    pub key_package_data: Vec<u8>,
+
+    /// Remaining valid lifetime in milliseconds (computed by sender).
+    /// Receiver adds this to their local clock to determine expiry.
+    pub remaining_lifetime_ms: u64,
 }
 
 /// Information about an MLS group.

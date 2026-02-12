@@ -3,7 +3,7 @@
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use offline_protocol_core::{AppId, Message, MessageId, MessagePriority, UserId, TTL};
+use offline_protocol_core::{AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{
     AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
@@ -39,7 +39,13 @@ struct KeyPackagePayload {
     user_id: String,
     /// Raw key package data.
     key_package_data: Vec<u8>,
-    /// Timestamp of creation.
+    /// Remaining valid lifetime in milliseconds (relative, not absolute).
+    /// Receiver applies this to their local clock, avoiding clock skew issues.
+    #[serde(default)]
+    remaining_lifetime_ms: u64,
+    /// Legacy absolute timestamp field — ignored on receive, kept for
+    /// backward compatibility with old nodes that may still send it.
+    #[serde(default)]
     timestamp_ms: u64,
 }
 
@@ -208,6 +214,10 @@ pub struct OfflineProtocol {
     /// Storage for persisting pending messages (reuses MLS storage).
     /// When set, pending messages survive app crashes/restarts.
     message_storage: Option<Arc<dyn MlsStorage>>,
+
+    /// Lamport logical clock for causal message ordering.
+    /// Ticked on send, merged on receive.
+    lamport_clock: LamportClock,
 }
 
 impl OfflineProtocol {
@@ -248,6 +258,7 @@ impl OfflineProtocol {
             confirmed_sessions: std::collections::HashSet::new(),
             pending_decryption: HashMap::new(),
             message_storage: None,
+            lamport_clock: LamportClock::new(),
             config,
         })
     }
@@ -468,7 +479,7 @@ impl OfflineProtocol {
 
     /// Creates a new message from the given parameters.
     fn create_message(
-        &self,
+        &mut self,
         recipient: impl Into<String>,
         content: impl Into<String>,
         priority: Option<MessagePriority>,
@@ -478,10 +489,13 @@ impl OfflineProtocol {
         let recipient = UserId::new(recipient)?;
         let app_id = AppId::new(&self.config.app_id)?;
 
+        let clock_value = self.lamport_clock.tick();
+
         let mut builder = Message::builder(sender, recipient, app_id)
             .content(content)
             .priority(priority.unwrap_or(MessagePriority::Medium))
-            .ttl(TTL::new(self.config.initial_ttl)?);
+            .ttl(TTL::new(self.config.initial_ttl)?)
+            .lamport_clock(clock_value);
 
         if let Some(reply_to) = reply_to_msg {
             builder = builder.reply_to_msg(reply_to);
@@ -976,6 +990,7 @@ impl OfflineProtocol {
                                 hop_count: decrypted_msg.hop_count.value(),
                                 transport: "delayed".to_string(),
                                 timestamp: Utc::now().timestamp_millis(),
+                                lamport_clock: decrypted_msg.lamport_clock.value(),
                                 reply_to_msg: decrypted_msg
                                     .reply_to_msg
                                     .as_ref()
@@ -1086,7 +1101,8 @@ impl OfflineProtocol {
 
         let payload = KeyPackagePayload {
             user_id: self.config.user_id.clone(),
-            key_package_data: key_pkg.key_package_data,
+            key_package_data: key_pkg.key_package_data.clone(),
+            remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
             timestamp_ms: Utc::now().timestamp_millis() as u64,
         };
 
@@ -1476,6 +1492,9 @@ impl OfflineProtocol {
                         }
                     }
 
+                    // Advance local Lamport clock based on received message
+                    self.lamport_clock.merge(message.lamport_clock);
+
                     if message.requires_ack {
                         if let Err(err) = self.send_delivery_ack(&message, transport_used) {
                             error!(
@@ -1494,6 +1513,7 @@ impl OfflineProtocol {
                         hop_count: message.hop_count.value(),
                         transport: transport_used.to_string(),
                         timestamp: message.timestamp.as_millis(),
+                        lamport_clock: message.lamport_clock.value(),
                         reply_to_msg: message
                             .reply_to_msg
                             .as_ref()
@@ -2591,6 +2611,7 @@ mod tests {
         let key_pkg_payload = KeyPackagePayload {
             user_id: "sender123".to_string(),
             key_package_data: vec![1, 2, 3, 4],
+            remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
             timestamp_ms: 12345,
         };
         let content = format!(

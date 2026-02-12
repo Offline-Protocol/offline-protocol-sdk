@@ -1041,6 +1041,7 @@ impl OfflineProtocol {
                 "recipient": msg.recipient.as_str(),
                 "content": msg.content,
                 "timestamp": msg.timestamp.as_millis(),
+                "lamport_clock": msg.lamport_clock.value(),
                 "hop_count": msg.hop_count.value(),
                 "priority": format!("{:?}", msg.priority),
             }))
