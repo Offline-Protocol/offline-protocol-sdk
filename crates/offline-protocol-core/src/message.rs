@@ -1,6 +1,6 @@
 //! Message types and structures.
 
-use crate::types::{AppId, HopCount, Timestamp, UserId, TTL};
+use crate::types::{AppId, HopCount, LamportClock, Timestamp, UserId, TTL};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -103,8 +103,12 @@ pub struct Message {
     /// Number of hops this message has traversed.
     pub hop_count: HopCount,
 
-    /// Timestamp when the message was created.
+    /// Timestamp when the message was created (wall-clock, for display only).
     pub timestamp: Timestamp,
+
+    /// Lamport logical clock for causal ordering across devices.
+    #[serde(default)]
+    pub lamport_clock: LamportClock,
 
     /// Message content (text, JSON, etc.).
     pub content: String,
@@ -150,6 +154,7 @@ impl Message {
             ttl: TTL::default(),
             hop_count: HopCount::new(),
             timestamp: Timestamp::now(),
+            lamport_clock: LamportClock::default(),
             content: content.into(),
             metadata: HashMap::new(),
             requires_ack: true,
@@ -219,6 +224,7 @@ pub struct MessageBuilder {
     content: String,
     priority: MessagePriority,
     ttl: TTL,
+    lamport_clock: LamportClock,
     metadata: HashMap<String, String>,
     requires_ack: bool,
     reply_to_msg: Option<MessageId>,
@@ -234,6 +240,7 @@ impl MessageBuilder {
             content: String::new(),
             priority: MessagePriority::default(),
             ttl: TTL::default(),
+            lamport_clock: LamportClock::default(),
             metadata: HashMap::new(),
             requires_ack: true,
             reply_to_msg: None,
@@ -276,6 +283,12 @@ impl MessageBuilder {
         self
     }
 
+    /// Sets the Lamport clock value for this message.
+    pub fn lamport_clock(mut self, clock: LamportClock) -> Self {
+        self.lamport_clock = clock;
+        self
+    }
+
     /// Builds the message.
     pub fn build(self) -> Message {
         Message {
@@ -287,6 +300,7 @@ impl MessageBuilder {
             ttl: self.ttl,
             hop_count: HopCount::new(),
             timestamp: Timestamp::now(),
+            lamport_clock: self.lamport_clock,
             content: self.content,
             metadata: self.metadata,
             requires_ack: self.requires_ack,

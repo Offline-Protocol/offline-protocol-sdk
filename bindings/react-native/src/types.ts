@@ -340,6 +340,8 @@ export interface MessageSentEvent extends BaseEvent {
   priority: 'low' | 'medium' | 'high' | 'critical';
   requires_ack: boolean;
   timestamp: number;
+  /** Lamport logical clock value for causal ordering (0 for legacy messages). */
+  lamport_clock: number;
 }
 
 /**
@@ -354,6 +356,8 @@ export interface MessageReceivedEvent extends BaseEvent {
   hop_count: number;
   transport: string;
   timestamp: number;
+  /** Lamport logical clock value for causal ordering (0 for legacy messages). */
+  lamport_clock: number;
   /** Whether the message was encrypted (auto-decrypted) */
   encrypted?: boolean;
 }

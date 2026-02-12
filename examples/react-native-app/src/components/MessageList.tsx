@@ -8,6 +8,7 @@ import type {
   MessageDeliveredEvent,
   MessageFailedEvent,
 } from '@offline-protocol/mesh-sdk';
+import { compareByCausalOrder } from '../utils/messageSort';
 
 interface Message {
   id: string;
@@ -17,6 +18,7 @@ interface Message {
   recipient?: string;
   status: 'pending' | 'delivered' | 'failed';
   timestamp: number;
+  lamportClock: number;
   transport?: string;
   hopCount?: number;
   priority?: string;
@@ -65,6 +67,7 @@ export function MessageList({
           recipient: e.recipient,
           status: 'delivered',
           timestamp: e.timestamp,
+          lamportClock: e.lamport_clock ?? 0,
           priority: e.priority,
           requiresAck: e.requires_ack,
         });
@@ -78,6 +81,7 @@ export function MessageList({
           recipient: e.recipient,
           status: 'delivered',
           timestamp: e.timestamp,
+          lamportClock: e.lamport_clock ?? 0,
           transport: e.transport,
           hopCount: e.hop_count,
         });
@@ -95,6 +99,7 @@ export function MessageList({
             content: '',
             status: 'delivered',
             timestamp: Date.now(),
+            lamportClock: 0,
             transport: e.transport,
             hopCount: e.hop_count,
           });
@@ -111,12 +116,13 @@ export function MessageList({
             content: '',
             status: 'failed',
             timestamp: Date.now(),
+            lamportClock: 0,
           });
         }
       }
     });
 
-    return Array.from(messageMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+    return Array.from(messageMap.values()).sort(compareByCausalOrder);
   }, [events]);
 
   React.useEffect(() => {

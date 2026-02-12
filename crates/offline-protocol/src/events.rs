@@ -30,8 +30,11 @@ pub enum Event {
         priority: String,
         /// Whether the message requires an acknowledgement.
         requires_ack: bool,
-        /// When the message was queued for delivery.
+        /// When the message was queued for delivery (wall-clock, for display).
         timestamp: i64,
+        /// Lamport logical clock value for causal ordering.
+        #[serde(default)]
+        lamport_clock: u64,
     },
 
     /// A message was received.
@@ -48,8 +51,11 @@ pub enum Event {
         hop_count: u8,
         /// Transport used for final delivery.
         transport: String,
-        /// When the message was received.
+        /// When the message was received (wall-clock, for display).
         timestamp: i64,
+        /// Lamport logical clock value for causal ordering.
+        #[serde(default)]
+        lamport_clock: u64,
         /// ID of the message this is replying to (optional).
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to_msg: Option<String>,
@@ -267,6 +273,7 @@ impl Event {
             priority: priority.to_string(),
             requires_ack: message.requires_ack,
             timestamp: message.timestamp.as_millis(),
+            lamport_clock: message.lamport_clock.value(),
         }
     }
 
@@ -508,6 +515,7 @@ impl fmt::Debug for Event {
                 priority,
                 requires_ack,
                 timestamp,
+                lamport_clock,
             } => f
                 .debug_struct("MessageSent")
                 .field("message_id", message_id)
@@ -517,6 +525,7 @@ impl fmt::Debug for Event {
                 .field("priority", priority)
                 .field("requires_ack", requires_ack)
                 .field("timestamp", timestamp)
+                .field("lamport_clock", lamport_clock)
                 .finish(),
             Self::MessageReceived {
                 message_id,
@@ -526,6 +535,7 @@ impl fmt::Debug for Event {
                 hop_count,
                 transport,
                 timestamp,
+                lamport_clock,
                 reply_to_msg: _,
             } => f
                 .debug_struct("MessageReceived")
@@ -536,6 +546,7 @@ impl fmt::Debug for Event {
                 .field("hop_count", hop_count)
                 .field("transport", transport)
                 .field("timestamp", timestamp)
+                .field("lamport_clock", lamport_clock)
                 .field("reply_to_msg", &"[REDACTED]")
                 .finish(),
             Self::MessageDelivered {
@@ -744,6 +755,7 @@ mod tests {
                 priority,
                 requires_ack,
                 timestamp,
+                lamport_clock,
             } => {
                 assert_eq!(message_id, message.id.as_str());
                 assert_eq!(sender, message.sender.as_str());
@@ -752,6 +764,7 @@ mod tests {
                 assert_eq!(priority, "high");
                 assert!(requires_ack);
                 assert_eq!(timestamp, message.timestamp.as_millis());
+                assert_eq!(lamport_clock, message.lamport_clock.value());
             }
             _ => panic!("Wrong event type"),
         }

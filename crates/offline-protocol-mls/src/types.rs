@@ -85,10 +85,42 @@ impl KeyPackageBundle {
         }
     }
 
-    /// Checks if the key package has expired.
+    /// Checks if the key package has expired (local device's own packages only).
+    ///
+    /// This compares against the local clock and is valid because `created_at_ms`
+    /// and `expires_at_ms` were set on this same device.
     pub fn is_expired(&self) -> bool {
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         now_ms >= self.expires_at_ms
+    }
+
+    /// Returns the remaining valid lifetime in milliseconds.
+    ///
+    /// Used when transmitting key packages to peers: the receiver applies
+    /// this duration relative to their own clock, eliminating cross-device
+    /// clock skew from expiry calculations.
+    pub fn remaining_lifetime_ms(&self) -> u64 {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        self.expires_at_ms.saturating_sub(now_ms)
+    }
+
+    /// Creates a bundle from received transfer data, computing local expiry
+    /// from the sender-provided remaining lifetime.
+    pub fn from_transfer(
+        package_id: String,
+        user_id: String,
+        key_package_data: Vec<u8>,
+        remaining_lifetime_ms: u64,
+    ) -> Self {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        Self {
+            package_id,
+            user_id,
+            key_package_data,
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms.saturating_add(remaining_lifetime_ms),
+            synced: false,
+        }
     }
 }
 
