@@ -90,6 +90,14 @@ export interface Contact {
   distance?: 'near' | 'medium' | 'far';
 }
 
+/** Incoming (they requested me) or sent (I requested them) connection request */
+export interface ConnectionRequest {
+  id: string;
+  name: string;
+  direction: 'incoming' | 'sent';
+  timestamp: number;
+}
+
 export interface Message {
   id: string;
   senderId: string;
@@ -128,6 +136,9 @@ interface ProtocolContextType {
 
   // Contacts and chats
   contacts: Contact[];
+  connectionRequests: ConnectionRequest[];
+  /** Currently discovered nearby peers (from neighbor_discovered / neighbor_lost) */
+  neighbors: Contact[];
   chats: Chat[];
   connectedPeersCount: number;
 
@@ -176,6 +187,9 @@ interface ProtocolContextType {
   ) => Promise<TransportMetricsSnapshot | null>;
   sendFile: (params: SendFileParams) => Promise<string | null>;
   cancelFileTransfer: (fileId: string) => Promise<boolean>;
+  rejectConnectionRequest: (peerId: string) => Promise<void>;
+  acceptConnectionRequest: (peerId: string) => Promise<void>;
+  sendConnectionRequest: (peerId: string) => Promise<void>;
 
   // Analytics
   getAnalytics: () => {
@@ -198,6 +212,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const [currentUserId] = useState(() => generateUserId());
   const [currentUserName, setCurrentUserName] = useState('Me');
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [connectionRequests, setConnectionRequests] = useState<ConnectionRequest[]>([]);
+  const [neighbors, setNeighbors] = useState<Contact[]>([]);
   const [chats, setChats] = useState<Chat[]>([]);
   const [isInitialized, setIsInitialized] = useState(false);
   const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>(
@@ -344,6 +360,78 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     [peerProfiles],
   );
 
+  const acceptConnectionRequest = useCallback(
+    async (peerId: string) => {
+      if (!protocol) {
+        return;
+      }
+      const name = getPeerDisplayName(peerId);
+      await protocol.acceptConnectionRequest({
+        recipient: peerId,
+        accepterName: currentUserName,
+        keyPackage: undefined,
+      });
+      setContacts(prev => {
+        if (prev.some(c => c.id === peerId)) return prev;
+        return [
+          ...prev,
+          {
+            id: peerId,
+            name,
+            avatar: undefined,
+            isOnline: true,
+            lastSeen: Date.now(),
+          },
+        ];
+      });
+      setConnectionRequests(prev =>
+        prev.filter(r => r.id !== peerId),
+      );
+    },
+    [protocol, currentUserName, getPeerDisplayName],
+  );
+
+  const rejectConnectionRequest = useCallback(
+    async (peerId: string) => {
+      if (!protocol) {
+        return;
+      }
+      await protocol.rejectConnectionRequest({
+        recipient: peerId,
+      });
+      setConnectionRequests(prev =>
+        prev.filter(r => r.id !== peerId),
+      );
+    },
+    [protocol],
+  );
+
+  const sendConnectionRequest = useCallback(
+    async (peerId: string) => {
+      if (!protocol) {
+        return;
+      }
+      const name = getPeerDisplayName(peerId);
+      await protocol.sendConnectionRequest({
+        recipient: peerId,
+        senderName: currentUserName,
+        keyPackage: undefined,
+      });
+      setConnectionRequests(prev => {
+        if (prev.some(r => r.id === peerId && r.direction === 'sent')) return prev;
+        return [
+          ...prev.filter(r => !(r.id === peerId && r.direction === 'sent')),
+          {
+            id: peerId,
+            name,
+            direction: 'sent',
+            timestamp: Date.now(),
+          },
+        ];
+      });
+    },
+    [protocol, currentUserName, getPeerDisplayName],
+  );
   // Send key package to a peer for MLS session establishment
   const sendKeyPackageToPeer = useCallback(
     async (peerId: string) => {
@@ -665,21 +753,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           return [...prevChats, newChat];
         });
 
-        setContacts(prevContacts => {
-          if (prevContacts.some(contact => contact.id === recipientId)) {
-            return prevContacts;
-          }
-          return [
-            ...prevContacts,
-            {
-              id: recipientId,
-              name: getPeerDisplayName(recipientId),
-              avatar: undefined,
-              isOnline: false,
-              lastSeen: now,
-            },
-          ];
-        });
+        // Do not add recipient to contacts when sending a message.
+        // Contacts are only added via connection_accepted or acceptConnectionRequest.
       } catch (err) {
         console.error('Failed to send message:', err);
         Alert.alert('Send Error', 'Failed to send message. Please try again.');
@@ -756,6 +831,64 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             const peerId = (event as any).peer_id;
             if (peerId) {
               discoveredPeers.delete(peerId);
+            }
+            break;
+          }
+          case 'connection_request_received': {
+            const e = event as { sender?: string; sender_name?: string; timestamp?: number };
+            const peerId = e.sender ?? (event as any).peer_id;
+            const name =
+              e.sender_name ??
+              (peerId && peerId.length > 4 ? `User ${peerId.slice(-4)}` : peerId ?? '');
+            if (peerId && peerId !== currentUserId) {
+              setConnectionRequests(prev => {
+                if (prev.some(r => r.id === peerId && r.direction === 'incoming')) return prev;
+                return [
+                  ...prev.filter(r => !(r.id === peerId && r.direction === 'incoming')),
+                  {
+                    id: peerId,
+                    name: name || getPeerDisplayName(peerId),
+                    direction: 'incoming',
+                    timestamp: typeof e.timestamp === 'number' ? e.timestamp : Date.now(),
+                  },
+                ];
+              });
+            }
+            break;
+          }
+          case 'connection_accepted': {
+            const e = event as { accepted_by?: string; accepted_by_name?: string };
+            const peerId = e.accepted_by;
+            const name =
+              e.accepted_by_name ??
+              (peerId && peerId.length > 4 ? `User ${peerId.slice(-4)}` : peerId ?? '');
+            if (peerId && peerId !== currentUserId) {
+              setContacts(prev => {
+                if (prev.some(c => c.id === peerId)) return prev;
+                return [
+                  ...prev,
+                  {
+                    id: peerId,
+                    name: name || getPeerDisplayName(peerId),
+                    avatar: undefined,
+                    isOnline: true,
+                    lastSeen: now,
+                  },
+                ];
+              });
+              setConnectionRequests(prev =>
+                prev.filter(r => r.id !== peerId),
+              );
+            }
+            break;
+          }
+          case 'connection_rejected': {
+            const e = event as { rejected_by?: string };
+            const peerId = e.rejected_by;
+            if (peerId) {
+              setConnectionRequests(prev =>
+                prev.filter(r => r.id !== peerId),
+              );
             }
             break;
           }
@@ -1011,51 +1144,13 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           : `User ${peerId}`;
       };
 
+      // Contacts are only added via connection_accepted or acceptConnectionRequest.
+      // Only update existing contacts (isOnline, name, lastSeen) from discovery/presence.
       setContacts(prevContacts => {
         const contactMap = new Map<string, Contact>(
           prevContacts.map(contact => [contact.id, contact]),
         );
         let changed = false;
-
-        discoveredPeers.forEach(peerId => {
-          if (!contactMap.has(peerId)) {
-            contactMap.set(peerId, {
-              id: peerId,
-              name: resolvePeerName(peerId),
-              avatar: undefined,
-              isOnline: true,
-              lastSeen: now,
-              signalStrength: Math.random(),
-              distance:
-                Math.random() > 0.6
-                  ? 'near'
-                  : Math.random() > 0.3
-                  ? 'medium'
-                  : 'far',
-            });
-            changed = true;
-          }
-        });
-
-        messageSenders.forEach(peerId => {
-          if (!contactMap.has(peerId)) {
-            contactMap.set(peerId, {
-              id: peerId,
-              name: resolvePeerName(peerId),
-              avatar: undefined,
-              isOnline: discoveredPeers.has(peerId),
-              lastSeen: now,
-              signalStrength: Math.random(),
-              distance:
-                Math.random() > 0.6
-                  ? 'near'
-                  : Math.random() > 0.3
-                  ? 'medium'
-                  : 'far',
-            });
-            changed = true;
-          }
-        });
 
         const nextContacts = Array.from(contactMap.values()).map(contact => {
           const isOnline = discoveredPeers.has(contact.id);
@@ -1209,6 +1304,19 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
       pruneProcessedMessages();
 
+      // Update neighbors list (currently discovered nearby peers)
+      setNeighbors(
+        Array.from(discoveredPeers)
+          .filter(pid => pid !== currentUserId)
+          .map(peerId => ({
+            id: peerId,
+            name: resolvePeerName(peerId),
+            avatar: undefined,
+            isOnline: true,
+            lastSeen: now,
+          })),
+      );
+
       //  Send presence to newly discovered peers after event processing
       // This ensures usernames are synced immediately when peers are discovered
       // BUT: Only send if we haven't sent recently to prevent infinite loops
@@ -1249,6 +1357,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     isMlsInitialized,
     bytesToString,
     sendPresenceToPeer,
+    getPeerDisplayName,
   ]);
 
   // Reset presence broadcast cache when the local user name changes
@@ -1355,6 +1464,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     currentUserId,
     currentUserName,
     contacts,
+    connectionRequests,
+    neighbors,
     chats,
     connectedPeersCount,
     events,
@@ -1386,6 +1497,9 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     sendFile: protocolSendFile,
     cancelFileTransfer: protocolCancelFile,
     getAnalytics,
+    rejectConnectionRequest,
+    acceptConnectionRequest,
+    sendConnectionRequest,
   };
 
   return (
