@@ -546,44 +546,102 @@ public class InternetManager: NSObject, TransportManager {
             ])
             
         case "ConnectionRequestReceived":
-            // Forward connection request to JavaScript with full data
-            let sender = json["sender"] as? String ?? ""
-            let senderName = json["sender_name"] as? String ?? sender
-            let timestamp = json["timestamp"] as? String ?? ""
-            var requestContext: [String: Any] = [
-                "type": messageType,
-                "sender": sender,
-                "sender_name": senderName,
-                "timestamp": timestamp
-            ]
-            // Include key package if present
-            if let keyPackage = json["key_package"] as? [Int] {
-                requestContext["key_package"] = keyPackage
+            // Process like MessageReceived: build internal message and feed to protocol so it emits connection_request_received
+            let senderId = json["sender"] as? String ?? ""
+            let senderName = json["sender_name"] as? String ?? senderId
+            let timestampStr = json["timestamp"] as? String ?? ""
+            let keyPackage = json["key_package"] as? [Int]
+            guard !senderId.isEmpty else {
+                emitDiagnostic("warning", "Invalid ConnectionRequestReceived format: missing sender", context: [:])
+                return
             }
-            emitDiagnostic("debug", "Received relay message", context: requestContext)
+            let timestampMs = parseTimestampToMs(timestampStr)
+            var payloadDict: [String: Any] = [
+                "sender_name": senderName,
+                "timestamp_ms": timestampMs
+            ]
+            if let kp = keyPackage {
+                payloadDict["key_package"] = kp.map { $0 & 0xFF }
+            }
+            guard let payloadData = try? JSONSerialization.data(withJSONObject: payloadDict),
+                  let payloadStr = String(data: payloadData, encoding: .utf8) else { return }
+            let content = "__CONN_REQ__" + payloadStr
+            messageQueue.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    let messageData = self.buildInternalMessageData(senderId: senderId, content: content)
+                    let bytes = [UInt8](messageData)
+                    try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
+                    self.emitDiagnostic("debug", "Connection request received from relay", context: [
+                        "sender": senderId,
+                        "sender_name": senderName
+                    ])
+                } catch {
+                    self.emitDiagnostic("error", "Error processing ConnectionRequestReceived", context: [
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
             
         case "ConnectionAccepted":
-            // Forward connection accepted to JavaScript with full data
             let acceptedBy = json["accepted_by"] as? String ?? json["sender"] as? String ?? ""
             let acceptedByName = json["accepted_by_name"] as? String ?? json["sender_name"] as? String ?? acceptedBy
-            var acceptContext: [String: Any] = [
-                "type": messageType,
-                "accepted_by": acceptedBy,
-                "accepted_by_name": acceptedByName
-            ]
-            // Include key package if present
-            if let keyPackage = json["key_package"] as? [Int] {
-                acceptContext["key_package"] = keyPackage
+            let timestampStr = json["timestamp"] as? String ?? ""
+            let keyPackage = json["key_package"] as? [Int]
+            guard !acceptedBy.isEmpty else {
+                emitDiagnostic("warning", "Invalid ConnectionAccepted format: missing accepted_by", context: [:])
+                return
             }
-            emitDiagnostic("debug", "Received relay message", context: acceptContext)
+            let timestampMs = parseTimestampToMs(timestampStr)
+            var payloadDict: [String: Any] = [
+                "accepted_by_name": acceptedByName,
+                "timestamp_ms": timestampMs
+            ]
+            if let kp = keyPackage {
+                payloadDict["key_package"] = kp.map { $0 & 0xFF }
+            }
+            guard let payloadData = try? JSONSerialization.data(withJSONObject: payloadDict),
+                  let payloadStr = String(data: payloadData, encoding: .utf8) else { return }
+            let content = "__CONN_ACC__" + payloadStr
+            messageQueue.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    let messageData = self.buildInternalMessageData(senderId: acceptedBy, content: content)
+                    let bytes = [UInt8](messageData)
+                    try self.protocolInstance.internetMessageReceived(senderId: acceptedBy, data: bytes)
+                    self.emitDiagnostic("debug", "Connection accepted from relay", context: [
+                        "accepted_by": acceptedBy,
+                        "accepted_by_name": acceptedByName
+                    ])
+                } catch {
+                    self.emitDiagnostic("error", "Error processing ConnectionAccepted", context: [
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
             
         case "ConnectionRejected":
-            // Forward connection rejected to JavaScript with full data
             let rejectedBy = json["rejected_by"] as? String ?? json["sender"] as? String ?? ""
-            emitDiagnostic("debug", "Received relay message", context: [
-                "type": messageType,
-                "rejected_by": rejectedBy
-            ])
+            guard !rejectedBy.isEmpty else {
+                emitDiagnostic("warning", "Invalid ConnectionRejected format: missing rejected_by", context: [:])
+                return
+            }
+            let content = "__CONN_REJ__"
+            messageQueue.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    let messageData = self.buildInternalMessageData(senderId: rejectedBy, content: content)
+                    let bytes = [UInt8](messageData)
+                    try self.protocolInstance.internetMessageReceived(senderId: rejectedBy, data: bytes)
+                    self.emitDiagnostic("debug", "Connection rejected from relay", context: [
+                        "rejected_by": rejectedBy
+                    ])
+                } catch {
+                    self.emitDiagnostic("error", "Error processing ConnectionRejected", context: [
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
             
         case "ConnectionRequestError":
             // Forward connection request error to JavaScript with full data
@@ -600,6 +658,40 @@ public class InternetManager: NSObject, TransportManager {
                 "type": messageType
             ])
         }
+    }
+    
+    /// Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid.
+    private func parseTimestampToMs(_ timestampStr: String) -> Int64 {
+        guard !timestampStr.isEmpty else {
+            return Int64(Date().timeIntervalSince1970 * 1000)
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: timestampStr) {
+            return Int64(date.timeIntervalSince1970 * 1000)
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        if let date = formatter.date(from: timestampStr) {
+            return Int64(date.timeIntervalSince1970 * 1000)
+        }
+        return Int64(Date().timeIntervalSince1970 * 1000)
+    }
+    
+    /// Build serialized Message JSON data for an internal (relay) message, same shape as MessageReceived.
+    private func buildInternalMessageData(senderId: String, content: String) -> Data {
+        let messageDict: [String: Any] = [
+            "id": UUID().uuidString,
+            "sender": senderId,
+            "recipient": deviceId,
+            "content": content,
+            "app_id": "offline-messenger",
+            "priority": "Medium",
+            "ttl": 8,
+            "hop_count": 0,
+            "requires_ack": true,
+            "timestamp": Int64(Date().timeIntervalSince1970 * 1000)
+        ]
+        return try! JSONSerialization.data(withJSONObject: messageDict)
     }
     
     private func startMessagePolling() {

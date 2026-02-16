@@ -317,7 +317,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         enabled: true,
         serverAddress: DEFAULT_RELAY_SERVER_URL,
         autoReconnect: true,
-        authToken: HARDCODED_TOKEN || undefined,
+        authToken: undefined,
       },
       wifiDirect: {
         enabled: true,
@@ -412,11 +412,18 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         return;
       }
       const name = getPeerDisplayName(peerId);
-      await protocol.sendConnectionRequest({
+			console.log(
+        '[ProtocolProvider] sendConnectionRequest to',
+        peerId,
+        'name=',
+        name,
+      );
+      const s = await protocol.sendConnectionRequest({
         recipient: peerId,
         senderName: currentUserName,
         keyPackage: undefined,
       });
+			console.log('[ProtocolProvider] sendConnectionRequest result=', s);
       setConnectionRequests(prev => {
         if (prev.some(r => r.id === peerId && r.direction === 'sent')) return prev;
         return [
@@ -835,6 +842,10 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             break;
           }
           case 'connection_request_received': {
+            console.log(
+              '[ProtocolProvider] connection_request_received',
+              event,
+            );
             const e = event as { sender?: string; sender_name?: string; timestamp?: number };
             const peerId = e.sender ?? (event as any).peer_id;
             const name =

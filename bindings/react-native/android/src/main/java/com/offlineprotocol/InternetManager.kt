@@ -652,58 +652,98 @@ class InternetManager(
             }
             
             "ConnectionRequestReceived" -> {
-                // Forward connection request to JavaScript with full data
-                val sender = json.optString("sender", "")
-                val senderName = json.optString("sender_name", sender)
-                val timestamp = json.optString("timestamp", "")
+                // Forward connection request to JavaScript with full data so it emits connection_request_received
+                val senderId = json.optString("sender", "")
+                val senderName = json.optString("sender_name", senderId)
+                val timestampStr = json.optString("timestamp", "")
                 val keyPackage = if (json.has("key_package")) {
                     try {
                         val keyPackageArray = json.getJSONArray("key_package")
-                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it) }
+                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it).toByte() }
                     } catch (e: Exception) { null }
                 } else null
-                
-                val requestContext = mutableMapOf<String, Any?>(
-                    "type" to messageType,
-                    "sender" to sender,
-                    "sender_name" to senderName,
-                    "timestamp" to timestamp
-                )
-                if (keyPackage != null) {
-                    requestContext["key_package"] = keyPackage
+                if (senderId.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid ConnectionRequestReceived format: missing sender")
+                    return
                 }
-                emitDiagnostic("debug", "Received relay message", requestContext)
+                val timestampMs = parseTimestampToMs(timestampStr)
+                val payloadJson = org.json.JSONObject().apply {
+                    put("sender_name", senderName)
+                    put("timestamp_ms", timestampMs)
+                    if (keyPackage != null) {
+                        put("key_package", org.json.JSONArray(keyPackage.map { it.toInt().and(0xFF) }))
+                    }
+                }
+                val content = "__CONN_REQ__" + payloadJson.toString()
+                try {
+                    val messageBytes = buildInternalMessageBytes(senderId, content)
+                    protocol.internetMessageReceived(senderId, messageBytes.map { it.toUByte() })
+                    emitDiagnostic("debug", "Connection request received from relay", mapOf(
+                        "sender" to senderId,
+                        "sender_name" to senderName
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing ConnectionRequestReceived", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
             }
             
             "ConnectionAccepted" -> {
-                // Forward connection accepted to JavaScript with full data
                 val acceptedBy = json.optString("accepted_by", json.optString("sender", ""))
                 val acceptedByName = json.optString("accepted_by_name", json.optString("sender_name", acceptedBy))
+                val timestampStr = json.optString("timestamp", "")
                 val keyPackage = if (json.has("key_package")) {
                     try {
                         val keyPackageArray = json.getJSONArray("key_package")
-                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it) }
+                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it).toByte() }
                     } catch (e: Exception) { null }
                 } else null
-                
-                val acceptContext = mutableMapOf<String, Any?>(
-                    "type" to messageType,
-                    "accepted_by" to acceptedBy,
-                    "accepted_by_name" to acceptedByName
-                )
-                if (keyPackage != null) {
-                    acceptContext["key_package"] = keyPackage
+                if (acceptedBy.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid ConnectionAccepted format: missing accepted_by")
+                    return
                 }
-                emitDiagnostic("debug", "Received relay message", acceptContext)
+                val timestampMs = parseTimestampToMs(timestampStr)
+                val payloadJson = org.json.JSONObject().apply {
+                    put("accepted_by_name", acceptedByName)
+                    put("timestamp_ms", timestampMs)
+                    if (keyPackage != null) {
+                        put("key_package", org.json.JSONArray(keyPackage.map { it.toInt().and(0xFF) }))
+                    }
+                }
+                val content = "__CONN_ACC__" + payloadJson.toString()
+                try {
+                    val messageBytes = buildInternalMessageBytes(acceptedBy, content)
+                    protocol.internetMessageReceived(acceptedBy, messageBytes.map { it.toUByte() })
+                    emitDiagnostic("debug", "Connection accepted from relay", mapOf(
+                        "accepted_by" to acceptedBy,
+                        "accepted_by_name" to acceptedByName
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing ConnectionAccepted", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
             }
             
             "ConnectionRejected" -> {
-                // Forward connection rejected to JavaScript with full data
                 val rejectedBy = json.optString("rejected_by", json.optString("sender", ""))
-                emitDiagnostic("debug", "Received relay message", mapOf(
-                    "type" to messageType,
-                    "rejected_by" to rejectedBy
-                ))
+                if (rejectedBy.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid ConnectionRejected format: missing rejected_by")
+                    return
+                }
+                val content = "__CONN_REJ__"
+                try {
+                    val messageBytes = buildInternalMessageBytes(rejectedBy, content)
+                    protocol.internetMessageReceived(rejectedBy, messageBytes.map { it.toUByte() })
+                    emitDiagnostic("debug", "Connection rejected from relay", mapOf(
+                        "rejected_by" to rejectedBy
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing ConnectionRejected", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
             }
             
             "ConnectionRequestError" -> {
@@ -723,6 +763,33 @@ class InternetManager(
                 ))
             }
         }
+    }
+    
+    /** Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid. */
+    private fun parseTimestampToMs(timestampStr: String): Long {
+        if (timestampStr.isEmpty()) return System.currentTimeMillis()
+        return try {
+            java.time.Instant.parse(timestampStr).toEpochMilli()
+        } catch (e: Exception) {
+            System.currentTimeMillis()
+        }
+    }
+    
+    /** Build serialized Message JSON bytes for an internal (relay) message, same shape as MessageReceived. */
+    private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray {
+        val messageJson = org.json.JSONObject().apply {
+            put("id", java.util.UUID.randomUUID().toString())
+            put("sender", senderId)
+            put("recipient", deviceId)
+            put("content", content)
+            put("app_id", "offline-messenger")
+            put("priority", "Medium")
+            put("ttl", 8)
+            put("hop_count", 0)
+            put("requires_ack", true)
+            put("timestamp", System.currentTimeMillis())
+        }
+        return messageJson.toString().toByteArray(Charsets.UTF_8)
     }
     
     private fun startMessagePolling() {
