@@ -13,7 +13,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
 import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 
@@ -57,12 +56,14 @@ export function GroupDetailScreen({
   const {
     send,
     authenticatedUser,
-    status,
+    relayStatus: status,
     groupDetails,
     getGroupInfo,
     groupMessages,
-  } = useWebSocketRelayContext();
-  const { protocol, isInitialized } = useProtocol();
+    sendGroupMessage,
+    addGroupMember,
+    isInitialized,
+  } = useProtocol();
   const [activeTab, setActiveTab] = useState<Tab>('info');
   const [loading, setLoading] = useState(true);
   const [messageInput, setMessageInput] = useState('');
@@ -108,7 +109,7 @@ export function GroupDetailScreen({
     };
   }, [contextGroupDetails]);
 
-  const loadGroupInfo = useCallback(() => {
+  const loadGroupInfo = useCallback(async () => {
     if (status !== 'authenticated') {
       console.warn('[GroupDetailScreen] Not authenticated, status:', status);
       setLoading(false);
@@ -117,7 +118,7 @@ export function GroupDetailScreen({
 
     console.log('[GroupDetailScreen] Requesting group info for:', groupId);
     setLoading(true);
-    const sent = getGroupInfo(groupId);
+    const sent = await getGroupInfo(groupId);
     if (!sent) {
       console.error('[GroupDetailScreen] Failed to send group info request');
     }
@@ -130,7 +131,7 @@ export function GroupDetailScreen({
       return;
     }
 
-    if (!isInitialized || !protocol) {
+    if (!isInitialized) {
       Alert.alert(
         'Protocol Not Ready',
         'The protocol is not initialized yet. Please wait a moment and try again.',
@@ -148,14 +149,11 @@ export function GroupDetailScreen({
 
     setAddingMember(true);
     try {
-      const addMemberJson = await protocol.groupAddMember(groupId, username);
-      const addMemberPayload = JSON.parse(addMemberJson);
-      const sent = send(addMemberPayload);
+      const sent = await addGroupMember(groupId, username);
       if (!sent) {
         throw new Error('Failed to send add member request');
       }
       setUsernameInput('');
-      // Reload group info after adding member
       setTimeout(() => getGroupInfo(groupId), 500);
     } catch (error: any) {
       console.error('Failed to add member:', error);
@@ -166,8 +164,7 @@ export function GroupDetailScreen({
   }, [
     groupId,
     usernameInput,
-    protocol,
-    send,
+    addGroupMember,
     status,
     isInitialized,
     getGroupInfo,
@@ -175,7 +172,7 @@ export function GroupDetailScreen({
 
   const handleSendMessage = useCallback(async () => {
     if (!messageInput.trim()) return;
-    if (!isInitialized || !protocol) {
+    if (!isInitialized) {
       Alert.alert(
         'Protocol Not Ready',
         'The protocol is not initialized yet. Please wait a moment and try again.',
@@ -196,22 +193,14 @@ export function GroupDetailScreen({
     setReplyingTo(null); // Clear reply state
 
     try {
-      // Use the updated groupSendMessage with reply_to_msg parameter
-      const sendMessageJson = await protocol.groupSendMessage(
+      const sent = await sendGroupMessage(
         groupId,
         content,
         replyToMsgId || undefined,
       );
-      console.warn('[GroupDetailScreen] sendMessageJson:', sendMessageJson);
-      const sendMessagePayload = JSON.parse(sendMessageJson);
-      const sent = send(sendMessagePayload);
       if (!sent) {
         throw new Error('Failed to send group message');
       }
-
-      // Don't add message here - wait for GroupMessageSent response which provides
-      // the actual server message_id. The message will be added to groupMessages
-      // in WebSocketRelayProvider when GroupMessageSent is received with the server's message_id.
     } catch (error: any) {
       console.error('Failed to send message:', error);
       Alert.alert('Error', error.message || 'Failed to send message');
@@ -223,8 +212,7 @@ export function GroupDetailScreen({
   }, [
     groupId,
     messageInput,
-    protocol,
-    send,
+    sendGroupMessage,
     status,
     isInitialized,
     replyingTo,
@@ -248,7 +236,7 @@ export function GroupDetailScreen({
   // Listen for group messages via WebSocket
   // Note: GroupMessageReceived events will need to be handled by a callback
   // For now, messages sent by this user are added immediately
-  // Received messages are handled by WebSocketRelayProvider
+  // Received messages are handled by ProtocolProvider relay state
 
   // Auto-scroll chat to bottom
   useEffect(() => {
