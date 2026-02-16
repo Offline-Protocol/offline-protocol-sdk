@@ -1,6 +1,6 @@
 # Offline Protocol SDK Integration Guide (React Native)
 
-This guide covers integrating the Offline Protocol SDK into React Native applications: installation, configuration, transports (BLE, Wi‑Fi Direct, Internet), Dynamic Offline Relay Switch (DORS), **group management via WebSocket relay**, and a **complete API reference** for every function.
+This guide covers integrating the Offline Protocol SDK into React Native applications: installation, configuration, transports (BLE, Wi‑Fi Direct, Internet), Dynamic Offline Relay Switch (DORS), **group management (relay-based) via SDK group methods**, and a **complete API reference** for every function.
 
 ---
 
@@ -43,7 +43,7 @@ const protocol = new OfflineProtocol({
   transports: {
     ble: { enabled: true },
     wifiDirect: { enabled: Platform.OS === 'android' },
-    internet: { enabled: true, serverAddress: 'wss://mesh.example.com/socket' },
+    internet: { enabled: true, serverAddress: 'wss://mesh.example.com/socket', authToken: 'string' },
   },
   dors: {
     preferOnline: false,
@@ -144,65 +144,36 @@ See `docs/dors-configuration.md` and `docs/configuration.md` for full parameters
 
 ---
 
-## 7. Group SDK (WebSocket Relay)
+## 7. Group SDK (Relay-Based Groups)
 
-Group features (create groups, send messages, manage members) use a **WebSocket relay server**. The SDK **returns JSON strings** that your app **sends over the WebSocket**; the SDK does not open or manage the socket.
+Group features (create groups, send messages, manage members) are provided by **SDK group methods**. Each method returns a JSON string that must be sent to your relay server; the SDK does not open or manage the connection. Your app is responsible for relay connection, authentication, and sending the SDK payloads—or for using a provider that does this (e.g. the example app’s **ProtocolProvider**).
 
 ### 7.1 Prerequisites
 
-- Relay server implementing the group WebSocket API.
-- User identity (e.g. JWT) for `Authenticate`.
+- A relay server that implements the group WebSocket API.
+- User identity (e.g. token) for authenticating with the relay.
 
-### 7.2 Connection and Authentication
+### 7.2 Using Group Methods (SDK Only)
 
-```ts
-const ws = new WebSocket('wss://your-relay.example.com/ws');
-
-ws.onopen = () => {
-  ws.send(JSON.stringify({ type: 'Authenticate', token: AUTH_TOKEN }));
-};
-
-ws.onmessage = (event) => {
-  const msg = JSON.parse(event.data);
-  switch (msg.type) {
-    case 'Authenticated':
-      setCurrentUser({ userId: msg.user_id, username: msg.username });
-      break;
-    case 'UserGroups':
-      setGroups(msg.groups ?? []);
-      break;
-    case 'GroupCreated':
-    case 'GroupMessage':
-    case 'GroupInfo':
-    case 'Error':
-      // Handle per your relay contract
-      break;
-  }
-};
-```
-
-Only after `Authenticated` should you call group methods and send their return values over the WebSocket.
-
-### 7.3 Using Group Methods
-
-Each group method returns a **JSON string**. Send it with `ws.send(payload)`.
+Call the group methods on your `OfflineProtocol` instance. Each returns a **Promise&lt;string&gt;** (a JSON string). Your app (or your provider) must send that string to the relay; the SDK does not perform the send.
 
 ```ts
-function sendToRelay(jsonString: string) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(jsonString);
-}
+// After your app has established an authenticated relay connection,
+// call SDK group methods and send the returned JSON to the relay.
 
 const createPayload = await protocol.groupCreate('My Group');
-sendToRelay(createPayload);
+// Send createPayload to relay (e.g. via your provider’s send() or equivalent).
 
 const listPayload = await protocol.groupGetUserGroups();
-sendToRelay(listPayload);
+// Send listPayload to relay.
 
 const msgPayload = await protocol.groupSendMessage(groupId, content, replyToMsgId ?? null);
-sendToRelay(msgPayload);
+// Send msgPayload to relay.
 ```
 
-### 7.4 Group Methods Summary
+In the **example React Native app**, **ProtocolProvider** owns the relay connection and exposes group actions (`createGroup`, `sendGroupMessage`, `addGroupMember`, etc.) that call these SDK methods and send the resulting JSON over the relay. Screens use `useProtocol()` and call those context methods only—no direct WebSocket creation. See `examples/react-native-app` and `ProtocolProvider.tsx` for the full pattern.
+
+### 7.3 Group Methods Summary
 
 | Method | Description |
 |--------|-------------|
@@ -217,15 +188,15 @@ sendToRelay(msgPayload);
 | `groupGetInfo(groupId)` | Get group metadata. |
 | `groupGetUserGroups()` | Get all groups for current user. |
 
-Relay responses (e.g. `UserGroups`, `GroupCreated`, `GroupMessage`, `GroupInfo`, `Error`) are received asynchronously in `ws.onmessage`; see your relay API docs for exact shapes.
+Relay responses (e.g. `UserGroups`, `GroupCreated`, `GroupMessage`, `GroupInfo`, `Error`) are received asynchronously from your relay; see your relay API docs for exact shapes. In the example app, ProtocolProvider tracks these and updates `groups`, `groupDetails`, and `groupMessages` in context.
 
-### 7.5 Reply-to (Threaded Messages)
+### 7.4 Reply-to (Threaded Messages)
 
 Store the message ID when the user taps “reply”, then pass it as the third argument:
 
 ```ts
 const payload = await protocol.groupSendMessage(groupId, content, replyToMessageId);
-sendToRelay(payload);
+// Send payload to relay (or use your provider's sendGroupMessage(groupId, content, replyToMessageId)).
 ```
 
 Render replies in the UI by resolving `reply_to` / `replyToMsg` to the original message.
@@ -248,7 +219,7 @@ Subscribe to `transport_switched`, `relay_promoted`, `network_metrics` for DORS 
 1. BLE/Wi‑Fi Direct permissions granted before start.
 2. `cargo test -p offline-protocol-router` and `cargo test -p offline-protocol` for core logic.
 3. Example app (`examples/react-native-app`) for device scenarios and Control Center.
-4. For groups: WebSocket connects, `Authenticated` received, `groupGetUserGroups` / create / send / reply-to work; add/remove member, leave, delete (admin).
+4. For groups: relay connection and auth (e.g. via ProtocolProvider), then `groupGetUserGroups` / create / send / reply-to work; add/remove member, leave, delete (admin).
 
 ---
 
@@ -452,7 +423,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 ### 11.14 Group Management (Relay Server API)
 
-Each method returns a **JSON string** to send over your WebSocket to the relay.
+Each method returns a **JSON string** that your app (or provider) sends to the relay. The SDK does not open or manage the connection. In the example app, ProtocolProvider owns the relay and exposes group actions that call these methods and send the JSON for you.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|

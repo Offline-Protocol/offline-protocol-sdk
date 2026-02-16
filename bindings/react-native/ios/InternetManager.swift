@@ -644,7 +644,6 @@ public class InternetManager: NSObject, TransportManager {
             }
             
         case "ConnectionRequestError":
-            // Forward connection request error to JavaScript with full data
             let recipient = json["recipient"] as? String ?? ""
             let reason = json["reason"] as? String ?? "Unknown error"
             emitDiagnostic("debug", "Received relay message", context: [
@@ -652,6 +651,56 @@ public class InternetManager: NSObject, TransportManager {
                 "recipient": recipient,
                 "reason": reason
             ])
+            
+        case "GroupCreated":
+            guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
+            let name = json["name"] as? String ?? ""
+            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_CREATED__", payload: ["group_id": groupId, "name": name])
+            
+        case "GroupMessageReceived":
+            guard let groupId = json["group_id"] as? String,
+                  let messageId = json["message_id"] as? String, !groupId.isEmpty, !messageId.isEmpty else { return }
+            let sender = json["sender"] as? String ?? ""
+            let content = json["content"] as? String ?? ""
+            let timestamp = json["timestamp"] as? String ?? ""
+            let replyToMsg = json["reply_to_msg"] as? String
+            var payload: [String: Any] = ["group_id": groupId, "sender": sender, "content": content, "timestamp": timestamp, "message_id": messageId]
+            if let r = replyToMsg, !r.isEmpty { payload["reply_to_msg"] = r }
+            injectGroupInternalMessage(senderId: sender.isEmpty ? "relay" : sender, prefix: "__GROUP_MSG__", payload: payload)
+            
+        case "GroupMemberAdded":
+            guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
+            let userId = json["user_id"] as? String ?? ""
+            let addedBy = json["added_by"] as? String ?? ""
+            injectGroupInternalMessage(senderId: addedBy.isEmpty ? "relay" : addedBy, prefix: "__GROUP_MEMBER_ADDED__", payload: ["group_id": groupId, "user_id": userId, "added_by": addedBy])
+            
+        case "GroupMemberRemoved":
+            guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
+            let userId = json["user_id"] as? String ?? ""
+            let removedBy = json["removed_by"] as? String ?? ""
+            injectGroupInternalMessage(senderId: removedBy.isEmpty ? "relay" : removedBy, prefix: "__GROUP_MEMBER_REMOVED__", payload: ["group_id": groupId, "user_id": userId, "removed_by": removedBy])
+            
+        case "GroupInfo":
+            guard let groupId = json["group_id"] as? String, !groupId.isEmpty else { return }
+            let name = json["name"] as? String ?? ""
+            let createdBy = json["created_by"] as? String ?? ""
+            let createdAt = json["created_at"] as? String ?? ""
+            let membersRaw = json["members"] as? [[String: Any]] ?? []
+            let members = membersRaw.map { m in
+                ["user_id": m["user_id"] as? String ?? "", "role": m["role"] as? String ?? "member", "joined_at": m["joined_at"] as? String ?? ""]
+            }
+            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_INFO__", payload: ["group_id": groupId, "name": name, "created_by": createdBy, "created_at": createdAt, "members": members])
+            
+        case "UserGroups":
+            guard let groupsRaw = json["groups"] as? [[String: Any]] else { return }
+            let groups = groupsRaw.map { g in
+                ["group_id": g["group_id"] as? String ?? "", "name": g["name"] as? String ?? "", "created_at": g["created_at"] as? String ?? ""]
+            }
+            injectGroupInternalMessage(senderId: "relay", prefix: "__USER_GROUPS__", payload: ["groups": groups])
+            
+        case "GroupError":
+            let reason = json["reason"] as? String ?? "Unknown error"
+            injectGroupInternalMessage(senderId: "relay", prefix: "__GROUP_ERROR__", payload: ["reason": reason])
             
         default:
             emitDiagnostic("debug", "Received relay message", context: [
@@ -692,6 +741,26 @@ public class InternetManager: NSObject, TransportManager {
             "timestamp": Int64(Date().timeIntervalSince1970 * 1000)
         ]
         return try! JSONSerialization.data(withJSONObject: messageDict)
+    }
+    
+    /// Inject a group (relay) internal message into the protocol so it emits the corresponding event.
+    private func injectGroupInternalMessage(senderId: String, prefix: String, payload: [String: Any]) {
+        messageQueue.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let payloadData = try JSONSerialization.data(withJSONObject: payload)
+                guard let payloadStr = String(data: payloadData, encoding: .utf8) else { return }
+                let content = prefix + payloadStr
+                let messageData = self.buildInternalMessageData(senderId: senderId, content: content)
+                let bytes = [UInt8](messageData)
+                try self.protocolInstance.internetMessageReceived(senderId: senderId, data: bytes)
+            } catch {
+                self.emitDiagnostic("error", "Error injecting group message", context: [
+                    "prefix": prefix,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
     }
     
     private func startMessagePolling() {

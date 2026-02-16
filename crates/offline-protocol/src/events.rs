@@ -251,6 +251,74 @@ pub enum Event {
         /// User ID of the rejecting party.
         rejected_by: String,
     },
+
+    // --- Group (relay) events ---
+
+    /// A group was created (from relay).
+    GroupCreated {
+        group_id: String,
+        name: String,
+    },
+
+    /// A message was received in a group (from relay).
+    GroupMessageReceived {
+        group_id: String,
+        sender: String,
+        content: String,
+        timestamp: String,
+        message_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reply_to_msg: Option<String>,
+    },
+
+    /// A member was added to a group (from relay).
+    GroupMemberAdded {
+        group_id: String,
+        user_id: String,
+        added_by: String,
+    },
+
+    /// A member was removed from a group (from relay).
+    GroupMemberRemoved {
+        group_id: String,
+        user_id: String,
+        removed_by: String,
+    },
+
+    /// Group info was received (from relay).
+    GroupInfo {
+        group_id: String,
+        name: String,
+        created_by: String,
+        created_at: String,
+        members: Vec<GroupInfoMember>,
+    },
+
+    /// User's groups list was received (from relay).
+    UserGroups {
+        groups: Vec<UserGroupSummary>,
+    },
+
+    /// A group operation failed (from relay).
+    GroupError {
+        reason: String,
+    },
+}
+
+/// Member entry in GroupInfo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInfoMember {
+    pub user_id: String,
+    pub role: String,
+    pub joined_at: String,
+}
+
+/// Group summary in UserGroups.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserGroupSummary {
+    pub group_id: String,
+    pub name: String,
+    pub created_at: String,
 }
 
 impl Event {
@@ -491,6 +559,79 @@ impl Event {
         Self::ConnectionRejected { rejected_by }
     }
 
+    /// Creates a GroupCreated event.
+    pub fn group_created(group_id: String, name: String) -> Self {
+        Self::GroupCreated { group_id, name }
+    }
+
+    /// Creates a GroupMessageReceived event.
+    pub fn group_message_received(
+        group_id: String,
+        sender: String,
+        content: String,
+        timestamp: String,
+        message_id: String,
+        reply_to_msg: Option<String>,
+    ) -> Self {
+        Self::GroupMessageReceived {
+            group_id,
+            sender,
+            content,
+            timestamp,
+            message_id,
+            reply_to_msg,
+        }
+    }
+
+    /// Creates a GroupMemberAdded event.
+    pub fn group_member_added(group_id: String, user_id: String, added_by: String) -> Self {
+        Self::GroupMemberAdded {
+            group_id,
+            user_id,
+            added_by,
+        }
+    }
+
+    /// Creates a GroupMemberRemoved event.
+    pub fn group_member_removed(
+        group_id: String,
+        user_id: String,
+        removed_by: String,
+    ) -> Self {
+        Self::GroupMemberRemoved {
+            group_id,
+            user_id,
+            removed_by,
+        }
+    }
+
+    /// Creates a GroupInfo event.
+    pub fn group_info(
+        group_id: String,
+        name: String,
+        created_by: String,
+        created_at: String,
+        members: Vec<GroupInfoMember>,
+    ) -> Self {
+        Self::GroupInfo {
+            group_id,
+            name,
+            created_by,
+            created_at,
+            members,
+        }
+    }
+
+    /// Creates a UserGroups event.
+    pub fn user_groups(groups: Vec<UserGroupSummary>) -> Self {
+        Self::UserGroups { groups }
+    }
+
+    /// Creates a GroupError event.
+    pub fn group_error(reason: String) -> Self {
+        Self::GroupError { reason }
+    }
+
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -723,6 +864,64 @@ impl fmt::Debug for Event {
             Self::ConnectionRejected { rejected_by: _ } => f
                 .debug_struct("ConnectionRejected")
                 .field("rejected_by", &"[REDACTED]")
+                .finish(),
+            Self::GroupCreated { group_id, name } => f
+                .debug_struct("GroupCreated")
+                .field("group_id", group_id)
+                .field("name", name)
+                .finish(),
+            Self::GroupMessageReceived {
+                group_id,
+                sender: _,
+                content,
+                ..
+            } => f
+                .debug_struct("GroupMessageReceived")
+                .field("group_id", group_id)
+                .field("sender", &"[REDACTED]")
+                .field("content", &format!("[REDACTED {} bytes]", content.len()))
+                .finish(),
+            Self::GroupMemberAdded {
+                group_id,
+                user_id: _,
+                added_by: _,
+            } => f
+                .debug_struct("GroupMemberAdded")
+                .field("group_id", group_id)
+                .field("user_id", &"[REDACTED]")
+                .field("added_by", &"[REDACTED]")
+                .finish(),
+            Self::GroupMemberRemoved {
+                group_id,
+                user_id: _,
+                removed_by: _,
+            } => f
+                .debug_struct("GroupMemberRemoved")
+                .field("group_id", group_id)
+                .field("user_id", &"[REDACTED]")
+                .field("removed_by", &"[REDACTED]")
+                .finish(),
+            Self::GroupInfo {
+                group_id,
+                name,
+                created_by: _,
+                created_at,
+                members,
+            } => f
+                .debug_struct("GroupInfo")
+                .field("group_id", group_id)
+                .field("name", name)
+                .field("created_by", &"[REDACTED]")
+                .field("created_at", created_at)
+                .field("members_count", &members.len())
+                .finish(),
+            Self::UserGroups { groups } => f
+                .debug_struct("UserGroups")
+                .field("groups_count", &groups.len())
+                .finish(),
+            Self::GroupError { reason } => f
+                .debug_struct("GroupError")
+                .field("reason", reason)
                 .finish(),
         }
     }

@@ -30,6 +30,20 @@ mod internal_prefixes {
     pub const CONN_ACCEPT: &str = "__CONN_ACC__";
     /// Prefix for connection rejected messages.
     pub const CONN_REJECT: &str = "__CONN_REJ__";
+    /// Prefix for group created (relay).
+    pub const GROUP_CREATED: &str = "__GROUP_CREATED__";
+    /// Prefix for group message received (relay).
+    pub const GROUP_MSG: &str = "__GROUP_MSG__";
+    /// Prefix for group member added (relay).
+    pub const GROUP_MEMBER_ADDED: &str = "__GROUP_MEMBER_ADDED__";
+    /// Prefix for group member removed (relay).
+    pub const GROUP_MEMBER_REMOVED: &str = "__GROUP_MEMBER_REMOVED__";
+    /// Prefix for group info (relay).
+    pub const GROUP_INFO: &str = "__GROUP_INFO__";
+    /// Prefix for user groups list (relay).
+    pub const USER_GROUPS: &str = "__USER_GROUPS__";
+    /// Prefix for group error (relay).
+    pub const GROUP_ERROR: &str = "__GROUP_ERROR__";
 }
 
 /// Payload for key package exchange.
@@ -72,6 +86,72 @@ struct ConnectionAcceptedPayload {
     /// Optional MLS key package data for encrypted session setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     key_package: Option<Vec<u8>>,
+}
+
+// --- Group (relay) payloads ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupCreatedPayload {
+    group_id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupMessageReceivedPayload {
+    group_id: String,
+    sender: String,
+    content: String,
+    timestamp: String,
+    message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_to_msg: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupMemberAddedPayload {
+    group_id: String,
+    user_id: String,
+    added_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupMemberRemovedPayload {
+    group_id: String,
+    user_id: String,
+    removed_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupInfoMemberPayload {
+    user_id: String,
+    role: String,
+    joined_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupInfoPayload {
+    group_id: String,
+    name: String,
+    created_by: String,
+    created_at: String,
+    members: Vec<GroupInfoMemberPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserGroupSummaryPayload {
+    group_id: String,
+    name: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserGroupsPayload {
+    groups: Vec<UserGroupSummaryPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupErrorPayload {
+    reason: String,
 }
 
 /// A received key package awaiting use for session creation.
@@ -1866,6 +1946,141 @@ impl OfflineProtocol {
             info!(sender = %sender, "Connection request rejected");
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::connection_rejected(sender.to_string()));
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        // --- Group (relay) messages ---
+
+        if content.starts_with(internal_prefixes::GROUP_CREATED) {
+            let data = &content[internal_prefixes::GROUP_CREATED.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupCreatedPayload>(data) {
+                info!(group_id = %payload.group_id, "Group created");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::group_created(
+                        payload.group_id,
+                        payload.name,
+                    ));
+                }
+            } else {
+                warn!("Failed to parse GroupCreated payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_MSG) {
+            let data = &content[internal_prefixes::GROUP_MSG.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupMessageReceivedPayload>(data) {
+                info!(group_id = %payload.group_id, message_id = %payload.message_id, "Group message received");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::group_message_received(
+                        payload.group_id,
+                        payload.sender,
+                        payload.content,
+                        payload.timestamp,
+                        payload.message_id,
+                        payload.reply_to_msg,
+                    ));
+                }
+            } else {
+                warn!("Failed to parse GroupMessageReceived payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_MEMBER_ADDED) {
+            let data = &content[internal_prefixes::GROUP_MEMBER_ADDED.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupMemberAddedPayload>(data) {
+                info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member added");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::group_member_added(
+                        payload.group_id,
+                        payload.user_id,
+                        payload.added_by,
+                    ));
+                }
+            } else {
+                warn!("Failed to parse GroupMemberAdded payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_MEMBER_REMOVED) {
+            let data = &content[internal_prefixes::GROUP_MEMBER_REMOVED.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupMemberRemovedPayload>(data) {
+                info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member removed");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::group_member_removed(
+                        payload.group_id,
+                        payload.user_id,
+                        payload.removed_by,
+                    ));
+                }
+            } else {
+                warn!("Failed to parse GroupMemberRemoved payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_INFO) {
+            let data = &content[internal_prefixes::GROUP_INFO.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupInfoPayload>(data) {
+                info!(group_id = %payload.group_id, "Group info received");
+                let members: Vec<crate::events::GroupInfoMember> = payload
+                    .members
+                    .into_iter()
+                    .map(|m| crate::events::GroupInfoMember {
+                        user_id: m.user_id,
+                        role: m.role,
+                        joined_at: m.joined_at,
+                    })
+                    .collect();
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::group_info(
+                        payload.group_id,
+                        payload.name,
+                        payload.created_by,
+                        payload.created_at,
+                        members,
+                    ));
+                }
+            } else {
+                warn!("Failed to parse GroupInfo payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::USER_GROUPS) {
+            let data = &content[internal_prefixes::USER_GROUPS.len()..];
+            if let Ok(payload) = serde_json::from_str::<UserGroupsPayload>(data) {
+                info!(count = payload.groups.len(), "User groups received");
+                let groups: Vec<crate::events::UserGroupSummary> = payload
+                    .groups
+                    .into_iter()
+                    .map(|g| crate::events::UserGroupSummary {
+                        group_id: g.group_id,
+                        name: g.name,
+                        created_at: g.created_at,
+                    })
+                    .collect();
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::user_groups(groups));
+                }
+            } else {
+                warn!("Failed to parse UserGroups payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_ERROR) {
+            let data = &content[internal_prefixes::GROUP_ERROR.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupErrorPayload>(data) {
+                warn!(reason = %payload.reason, "Group error");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::group_error(payload.reason));
+                }
+            } else {
+                warn!("Failed to parse GroupError payload");
             }
             return Some(InternalMessageResult::Consumed);
         }

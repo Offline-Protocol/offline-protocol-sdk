@@ -20,7 +20,7 @@ pub mod visualization;
 
 pub use config::{EncryptionConfig, ProtocolConfig};
 pub use error::{Error, Result};
-pub use events::{Event, EventCallback};
+pub use events::{Event, EventCallback, GroupInfoMember, UserGroupSummary};
 pub use protocol::OfflineProtocol;
 pub use transport_manager::TransportManager;
 pub use visualization::{
