@@ -652,62 +652,101 @@ class InternetManager(
             }
             
             "ConnectionRequestReceived" -> {
-                // Forward connection request to JavaScript with full data
-                val sender = json.optString("sender", "")
-                val senderName = json.optString("sender_name", sender)
-                val timestamp = json.optString("timestamp", "")
+                // Forward connection request to JavaScript with full data so it emits connection_request_received
+                val senderId = json.optString("sender", "")
+                val senderName = json.optString("sender_name", senderId)
+                val timestampStr = json.optString("timestamp", "")
                 val keyPackage = if (json.has("key_package")) {
                     try {
                         val keyPackageArray = json.getJSONArray("key_package")
-                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it) }
+                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it).toByte() }
                     } catch (e: Exception) { null }
                 } else null
-                
-                val requestContext = mutableMapOf<String, Any?>(
-                    "type" to messageType,
-                    "sender" to sender,
-                    "sender_name" to senderName,
-                    "timestamp" to timestamp
-                )
-                if (keyPackage != null) {
-                    requestContext["key_package"] = keyPackage
+                if (senderId.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid ConnectionRequestReceived format: missing sender")
+                    return
                 }
-                emitDiagnostic("debug", "Received relay message", requestContext)
+                val timestampMs = parseTimestampToMs(timestampStr)
+                val payloadJson = org.json.JSONObject().apply {
+                    put("sender_name", senderName)
+                    put("timestamp_ms", timestampMs)
+                    if (keyPackage != null) {
+                        put("key_package", org.json.JSONArray(keyPackage.map { it.toInt().and(0xFF) }))
+                    }
+                }
+                val content = "__CONN_REQ__" + payloadJson.toString()
+                try {
+                    val messageBytes = buildInternalMessageBytes(senderId, content)
+                    protocol.internetMessageReceived(senderId, messageBytes.map { it.toUByte() })
+                    emitDiagnostic("debug", "Connection request received from relay", mapOf(
+                        "sender" to senderId,
+                        "sender_name" to senderName
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing ConnectionRequestReceived", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
             }
             
             "ConnectionAccepted" -> {
-                // Forward connection accepted to JavaScript with full data
                 val acceptedBy = json.optString("accepted_by", json.optString("sender", ""))
                 val acceptedByName = json.optString("accepted_by_name", json.optString("sender_name", acceptedBy))
+                val timestampStr = json.optString("timestamp", "")
                 val keyPackage = if (json.has("key_package")) {
                     try {
                         val keyPackageArray = json.getJSONArray("key_package")
-                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it) }
+                        (0 until keyPackageArray.length()).map { keyPackageArray.getInt(it).toByte() }
                     } catch (e: Exception) { null }
                 } else null
-                
-                val acceptContext = mutableMapOf<String, Any?>(
-                    "type" to messageType,
-                    "accepted_by" to acceptedBy,
-                    "accepted_by_name" to acceptedByName
-                )
-                if (keyPackage != null) {
-                    acceptContext["key_package"] = keyPackage
+                if (acceptedBy.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid ConnectionAccepted format: missing accepted_by")
+                    return
                 }
-                emitDiagnostic("debug", "Received relay message", acceptContext)
+                val timestampMs = parseTimestampToMs(timestampStr)
+                val payloadJson = org.json.JSONObject().apply {
+                    put("accepted_by_name", acceptedByName)
+                    put("timestamp_ms", timestampMs)
+                    if (keyPackage != null) {
+                        put("key_package", org.json.JSONArray(keyPackage.map { it.toInt().and(0xFF) }))
+                    }
+                }
+                val content = "__CONN_ACC__" + payloadJson.toString()
+                try {
+                    val messageBytes = buildInternalMessageBytes(acceptedBy, content)
+                    protocol.internetMessageReceived(acceptedBy, messageBytes.map { it.toUByte() })
+                    emitDiagnostic("debug", "Connection accepted from relay", mapOf(
+                        "accepted_by" to acceptedBy,
+                        "accepted_by_name" to acceptedByName
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing ConnectionAccepted", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
             }
             
             "ConnectionRejected" -> {
-                // Forward connection rejected to JavaScript with full data
                 val rejectedBy = json.optString("rejected_by", json.optString("sender", ""))
-                emitDiagnostic("debug", "Received relay message", mapOf(
-                    "type" to messageType,
-                    "rejected_by" to rejectedBy
-                ))
+                if (rejectedBy.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid ConnectionRejected format: missing rejected_by")
+                    return
+                }
+                val content = "__CONN_REJ__"
+                try {
+                    val messageBytes = buildInternalMessageBytes(rejectedBy, content)
+                    protocol.internetMessageReceived(rejectedBy, messageBytes.map { it.toUByte() })
+                    emitDiagnostic("debug", "Connection rejected from relay", mapOf(
+                        "rejected_by" to rejectedBy
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing ConnectionRejected", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
             }
             
             "ConnectionRequestError" -> {
-                // Forward connection request error to JavaScript with full data
                 val recipient = json.optString("recipient", "")
                 val reason = json.optString("reason", "Unknown error")
                 emitDiagnostic("debug", "Received relay message", mapOf(
@@ -717,11 +756,158 @@ class InternetManager(
                 ))
             }
             
+            "GroupCreated" -> {
+                val groupId = json.optString("group_id", "")
+                val name = json.optString("name", "")
+                if (groupId.isEmpty()) return
+                val payloadJson = org.json.JSONObject().apply {
+                    put("group_id", groupId)
+                    put("name", name)
+                }
+                injectGroupInternalMessage("relay", "__GROUP_CREATED__", payloadJson)
+            }
+            
+            "GroupMessageReceived" -> {
+                val groupId = json.optString("group_id", "")
+                val sender = json.optString("sender", "")
+                val content = json.optString("content", "")
+                val timestamp = json.optString("timestamp", "")
+                val messageId = json.optString("message_id", "")
+                val replyToMsg = json.optString("reply_to_msg", null)
+                if (groupId.isEmpty() || messageId.isEmpty()) return
+                val payloadJson = org.json.JSONObject().apply {
+                    put("group_id", groupId)
+                    put("sender", sender)
+                    put("content", content)
+                    put("timestamp", timestamp)
+                    put("message_id", messageId)
+                    if (replyToMsg != null && replyToMsg.isNotEmpty()) put("reply_to_msg", replyToMsg)
+                }
+                injectGroupInternalMessage(if (sender.isNotEmpty()) sender else "relay", "__GROUP_MSG__", payloadJson)
+            }
+            
+            "GroupMemberAdded" -> {
+                val groupId = json.optString("group_id", "")
+                val userId = json.optString("user_id", "")
+                val addedBy = json.optString("added_by", "")
+                if (groupId.isEmpty()) return
+                val payloadJson = org.json.JSONObject().apply {
+                    put("group_id", groupId)
+                    put("user_id", userId)
+                    put("added_by", addedBy)
+                }
+                injectGroupInternalMessage(if (addedBy.isNotEmpty()) addedBy else "relay", "__GROUP_MEMBER_ADDED__", payloadJson)
+            }
+            
+            "GroupMemberRemoved" -> {
+                val groupId = json.optString("group_id", "")
+                val userId = json.optString("user_id", "")
+                val removedBy = json.optString("removed_by", "")
+                if (groupId.isEmpty()) return
+                val payloadJson = org.json.JSONObject().apply {
+                    put("group_id", groupId)
+                    put("user_id", userId)
+                    put("removed_by", removedBy)
+                }
+                injectGroupInternalMessage(if (removedBy.isNotEmpty()) removedBy else "relay", "__GROUP_MEMBER_REMOVED__", payloadJson)
+            }
+            
+            "GroupInfo" -> {
+                val groupId = json.optString("group_id", "")
+                val name = json.optString("name", "")
+                val createdBy = json.optString("created_by", "")
+                val createdAt = json.optString("created_at", "")
+                val membersArray = json.optJSONArray("members")
+                if (groupId.isEmpty()) return
+                val membersJson = org.json.JSONArray()
+                if (membersArray != null) {
+                    for (i in 0 until membersArray.length()) {
+                        val m = membersArray.getJSONObject(i)
+                        membersJson.put(org.json.JSONObject().apply {
+                            put("user_id", m.optString("user_id", ""))
+                            put("role", m.optString("role", "member"))
+                            put("joined_at", m.optString("joined_at", ""))
+                        })
+                    }
+                }
+                val payloadJson = org.json.JSONObject().apply {
+                    put("group_id", groupId)
+                    put("name", name)
+                    put("created_by", createdBy)
+                    put("created_at", createdAt)
+                    put("members", membersJson)
+                }
+                injectGroupInternalMessage("relay", "__GROUP_INFO__", payloadJson)
+            }
+            
+            "UserGroups" -> {
+                val groupsArray = json.optJSONArray("groups")
+                if (groupsArray == null) return
+                val groupsJson = org.json.JSONArray()
+                for (i in 0 until groupsArray.length()) {
+                    val g = groupsArray.getJSONObject(i)
+                    groupsJson.put(org.json.JSONObject().apply {
+                        put("group_id", g.optString("group_id", ""))
+                        put("name", g.optString("name", ""))
+                        put("created_at", g.optString("created_at", ""))
+                    })
+                }
+                val payloadJson = org.json.JSONObject().apply { put("groups", groupsJson) }
+                injectGroupInternalMessage("relay", "__USER_GROUPS__", payloadJson)
+            }
+            
+            "GroupError" -> {
+                val reason = json.optString("reason", "Unknown error")
+                val payloadJson = org.json.JSONObject().apply { put("reason", reason) }
+                injectGroupInternalMessage("relay", "__GROUP_ERROR__", payloadJson)
+            }
+            
             else -> {
                 emitDiagnostic("debug", "Received relay message", mapOf(
                     "type" to messageType
                 ))
             }
+        }
+    }
+    
+    /** Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid. */
+    private fun parseTimestampToMs(timestampStr: String): Long {
+        if (timestampStr.isEmpty()) return System.currentTimeMillis()
+        return try {
+            java.time.Instant.parse(timestampStr).toEpochMilli()
+        } catch (e: Exception) {
+            System.currentTimeMillis()
+        }
+    }
+    
+    /** Build serialized Message JSON bytes for an internal (relay) message, same shape as MessageReceived. */
+    private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray {
+        val messageJson = org.json.JSONObject().apply {
+            put("id", java.util.UUID.randomUUID().toString())
+            put("sender", senderId)
+            put("recipient", deviceId)
+            put("content", content)
+            put("app_id", "offline-messenger")
+            put("priority", "Medium")
+            put("ttl", 8)
+            put("hop_count", 0)
+            put("requires_ack", true)
+            put("timestamp", System.currentTimeMillis())
+        }
+        return messageJson.toString().toByteArray(Charsets.UTF_8)
+    }
+    
+    /** Inject a group (relay) internal message into the protocol so it emits the corresponding event. */
+    private fun injectGroupInternalMessage(senderId: String, prefix: String, payloadJson: org.json.JSONObject) {
+        try {
+            val content = prefix + payloadJson.toString()
+            val messageBytes = buildInternalMessageBytes(senderId, content)
+            protocol.internetMessageReceived(senderId, messageBytes.map { it.toUByte() })
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Error injecting group message", mapOf(
+                "prefix" to prefix,
+                "error" to (e.message ?: "unknown")
+            ))
         }
     }
     

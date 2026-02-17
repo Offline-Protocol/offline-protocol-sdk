@@ -530,6 +530,94 @@ export interface ConnectionRejectedEvent extends BaseEvent {
 }
 
 /**
+ * Group created event (from relay)
+ */
+export interface GroupCreatedEvent extends BaseEvent {
+  type: 'group_created';
+  group_id: string;
+  name: string;
+}
+
+/**
+ * Group message received event (from relay)
+ */
+export interface GroupMessageReceivedEvent extends BaseEvent {
+  type: 'group_message_received';
+  group_id: string;
+  sender: string;
+  content: string;
+  timestamp: string;
+  message_id: string;
+  reply_to_msg?: string;
+}
+
+/**
+ * Group member added event (from relay)
+ */
+export interface GroupMemberAddedEvent extends BaseEvent {
+  type: 'group_member_added';
+  group_id: string;
+  user_id: string;
+  added_by: string;
+}
+
+/**
+ * Group member removed event (from relay)
+ */
+export interface GroupMemberRemovedEvent extends BaseEvent {
+  type: 'group_member_removed';
+  group_id: string;
+  user_id: string;
+  removed_by: string;
+}
+
+/**
+ * Group info member (in GroupInfoEvent)
+ */
+export interface GroupInfoMemberEvent {
+  user_id: string;
+  role: string;
+  joined_at: string;
+}
+
+/**
+ * Group info event (from relay)
+ */
+export interface GroupInfoEvent extends BaseEvent {
+  type: 'group_info';
+  group_id: string;
+  name: string;
+  created_by: string;
+  created_at: string;
+  members: GroupInfoMemberEvent[];
+}
+
+/**
+ * User group summary (in UserGroupsEvent)
+ */
+export interface UserGroupSummaryEvent {
+  group_id: string;
+  name: string;
+  created_at: string;
+}
+
+/**
+ * User groups event (from relay)
+ */
+export interface UserGroupsEvent extends BaseEvent {
+  type: 'user_groups';
+  groups: UserGroupSummaryEvent[];
+}
+
+/**
+ * Group error event (from relay)
+ */
+export interface GroupErrorEvent extends BaseEvent {
+  type: 'group_error';
+  reason: string;
+}
+
+/**
  * Union type of all events
  */
 export type ProtocolEvent =
@@ -550,7 +638,14 @@ export type ProtocolEvent =
   | SecureSessionFailedEvent
   | ConnectionRequestReceivedEvent
   | ConnectionAcceptedEvent
-  | ConnectionRejectedEvent;
+  | ConnectionRejectedEvent
+  | GroupCreatedEvent
+  | GroupMessageReceivedEvent
+  | GroupMemberAddedEvent
+  | GroupMemberRemovedEvent
+  | GroupInfoEvent
+  | UserGroupsEvent
+  | GroupErrorEvent;
 
 /**
  * Event listener type

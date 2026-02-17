@@ -9,7 +9,6 @@ import { MainAppScreen } from './screens/MainAppScreen';
 // Providers
 import { ThemeProvider } from './providers/ThemeProvider';
 import { ProtocolProvider } from './providers/ProtocolProvider';
-import { WebSocketRelayProvider } from './providers/WebSocketRelayProvider';
 
 // Hooks
 import { useTheme } from './hooks/useTheme';
@@ -76,14 +75,12 @@ export default function App() {
     <SafeAreaProvider>
       <ThemeProvider>
         <ProtocolProvider>
-          <WebSocketRelayProvider>
-            <StatusBar
-              barStyle="light-content"
-              backgroundColor="#1a1a1a"
-              translucent
-            />
-            <AppContent />
-          </WebSocketRelayProvider>
+          <StatusBar
+            barStyle="light-content"
+            backgroundColor="#1a1a1a"
+            translucent
+          />
+          <AppContent />
         </ProtocolProvider>
       </ThemeProvider>
     </SafeAreaProvider>

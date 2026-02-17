@@ -72,6 +72,53 @@ import {
   MLS_WELCOME_MESSAGE_PREFIX,
   ENCRYPTED_MESSAGE_PREFIX,
 } from '../constants';
+
+// Relay (WebSocket) types – used for groups and online messaging
+export interface OnlineMessage {
+  id: string;
+  sender: string;
+  content: string;
+  timestamp: Date;
+  isFromMe: boolean;
+  replyToMsg?: string;
+}
+export interface OnlineUser {
+  userId: string;
+  username: string;
+  isOnline: boolean;
+  lastSeen?: Date;
+}
+export interface OnlineGroup {
+  groupId: string;
+  name: string;
+  createdAt: Date;
+}
+export interface GroupMember {
+  userId: string;
+  role: 'admin' | 'member';
+  joinedAt: Date;
+}
+export interface GroupDetails {
+  groupId: string;
+  name: string;
+  createdBy: string;
+  createdAt: Date;
+  members: GroupMember[];
+}
+export type ConnectionStatus =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'authenticated'
+  | 'error';
+
+// Internal: relay server message shapes (for handleMessage)
+interface PendingSentMessage {
+  content: string;
+  replyToMsg?: string;
+  timestamp: Date;
+  groupId: string;
+}
 import type {
   DorsRuntimeConfig,
   FileTransferState,
@@ -88,6 +135,14 @@ export interface Contact {
   lastSeen?: number;
   signalStrength?: number;
   distance?: 'near' | 'medium' | 'far';
+}
+
+/** Incoming (they requested me) or sent (I requested them) connection request */
+export interface ConnectionRequest {
+  id: string;
+  name: string;
+  direction: 'incoming' | 'sent';
+  timestamp: number;
 }
 
 export interface Message {
@@ -128,6 +183,9 @@ interface ProtocolContextType {
 
   // Contacts and chats
   contacts: Contact[];
+  connectionRequests: ConnectionRequest[];
+  /** Currently discovered nearby peers (from neighbor_discovered / neighbor_lost) */
+  neighbors: Contact[];
   chats: Chat[];
   connectedPeersCount: number;
 
@@ -176,6 +234,44 @@ interface ProtocolContextType {
   ) => Promise<TransportMetricsSnapshot | null>;
   sendFile: (params: SendFileParams) => Promise<string | null>;
   cancelFileTransfer: (fileId: string) => Promise<boolean>;
+  rejectConnectionRequest: (peerId: string) => Promise<void>;
+  acceptConnectionRequest: (peerId: string) => Promise<void>;
+  sendConnectionRequest: (peerId: string) => Promise<void>;
+
+  // Relay and groups (user groups list and group state in context)
+  relayStatus: ConnectionStatus;
+  authenticatedUser: OnlineUser | null;
+  relayMessages: OnlineMessage[];
+  onlineUsers: Map<string, OnlineUser>;
+  /** User groups list – set from relay (UserGroups) and protocol events (user_groups, group_created) */
+  groups: OnlineGroup[];
+  groupDetails: Map<string, GroupDetails>;
+  groupMessages: Map<string, OnlineMessage[]>;
+  relayError: string | null;
+  connect: () => void;
+  disconnect: () => void;
+  authenticate: (token: string) => boolean;
+  send: (message: Record<string, unknown>) => boolean;
+  relaySendMessage: (recipientId: string, content: string) => boolean;
+  checkPresence: (username: string) => boolean;
+  setTyping: (conversationId: string) => boolean;
+  clearTyping: (conversationId: string) => boolean;
+  createGroup: (name: string) => Promise<boolean>;
+  sendGroupMessage: (
+    groupId: string,
+    content: string,
+    replyToMsg?: string,
+  ) => Promise<boolean>;
+  addGroupMember: (groupId: string, username: string) => Promise<boolean>;
+  removeGroupMember: (groupId: string, username: string) => Promise<boolean>;
+  leaveGroup: (groupId: string) => Promise<boolean>;
+  getGroupInfo: (groupId: string) => Promise<boolean>;
+  getUserGroups: () => Promise<boolean>;
+  groupSetAdmin: (groupId: string, username: string) => Promise<boolean>;
+  groupRemoveAdmin: (groupId: string, username: string) => Promise<boolean>;
+  groupDelete: (groupId: string) => Promise<boolean>;
+  clearRelayMessages: () => void;
+  clearGroupMessages: (groupId: string) => void;
 
   // Analytics
   getAnalytics: () => {
@@ -198,6 +294,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const [currentUserId] = useState(() => generateUserId());
   const [currentUserName, setCurrentUserName] = useState('Me');
   const [contacts, setContacts] = useState<Contact[]>([]);
+  const [connectionRequests, setConnectionRequests] = useState<ConnectionRequest[]>([]);
+  const [neighbors, setNeighbors] = useState<Contact[]>([]);
   const [chats, setChats] = useState<Chat[]>([]);
   const [isInitialized, setIsInitialized] = useState(false);
   const [peerProfiles, setPeerProfiles] = useState<Record<string, PeerProfile>>(
@@ -213,6 +311,483 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const [encryptedPeers, setEncryptedPeers] = useState<Set<string>>(new Set());
   const peerKeyPackagesRef = useRef<Map<string, number[]>>(new Map());
   const keyPackageSentPeersRef = useRef<Set<string>>(new Set());
+
+  // Relay (WebSocket) state – inlined from former WebSocketRelayProvider
+  const [relayStatus, setRelayStatus] = useState<ConnectionStatus>('disconnected');
+  const [authenticatedUser, setAuthenticatedUser] = useState<OnlineUser | null>(null);
+  const [relayMessages, setRelayMessages] = useState<OnlineMessage[]>([]);
+  const [onlineUsers, setOnlineUsers] = useState<Map<string, OnlineUser>>(new Map());
+  const [groups, setGroups] = useState<OnlineGroup[]>([]);
+  const [groupDetails, setGroupDetails] = useState<Map<string, GroupDetails>>(new Map());
+  const [groupMessages, setGroupMessages] = useState<Map<string, OnlineMessage[]>>(new Map());
+  const [relayError, setRelayError] = useState<string | null>(null);
+  const [typingUsers, setTypingUsers] = useState<Map<string, Set<string>>>(new Map());
+  const pendingSentMessagesRef = useRef<Map<string, PendingSentMessage>>(new Map());
+  const wsRef = useRef<WebSocket | null>(null);
+  const relayMessageIdCounter = useRef(0);
+
+  const generateRelayMessageId = useCallback(() => {
+    relayMessageIdCounter.current += 1;
+    return `msg_${Date.now()}_${relayMessageIdCounter.current}`;
+  }, []);
+
+  const applyGroupCreated = useCallback((payload: { group_id: string; name: string }) => {
+    setGroups(prev => [
+      ...prev,
+      { groupId: payload.group_id, name: payload.name, createdAt: new Date() },
+    ]);
+  }, []);
+
+  const applyGroupMessageReceived = useCallback(
+    (
+      payload: {
+        group_id: string;
+        sender: string;
+        content: string;
+        timestamp: string;
+        message_id: string;
+        reply_to_msg?: string;
+      },
+    ) => {
+      const isFromMe =
+        payload.sender === authenticatedUser?.userId ||
+        payload.sender === authenticatedUser?.username;
+      const newMessage: OnlineMessage = {
+        id: payload.message_id,
+        sender: payload.sender,
+        content: payload.content,
+        timestamp: new Date(payload.timestamp),
+        isFromMe: !!isFromMe,
+        replyToMsg: payload.reply_to_msg,
+      };
+      setGroupMessages(prev => {
+        const updated = new Map(prev);
+        const existing = updated.get(payload.group_id) || [];
+        const idx = existing.findIndex(m => m.id === payload.message_id);
+        if (idx >= 0) {
+          const next = [...existing];
+          next[idx] = newMessage;
+          updated.set(payload.group_id, next);
+        } else {
+          updated.set(payload.group_id, [...existing, newMessage]);
+        }
+        return updated;
+      });
+    },
+    [authenticatedUser?.userId, authenticatedUser?.username],
+  );
+
+  const applyGroupInfo = useCallback(
+    (payload: {
+      group_id: string;
+      name: string;
+      created_by: string;
+      created_at: string;
+      members: Array<{ user_id: string; role: string; joined_at: string }>;
+    }) => {
+      const details: GroupDetails = {
+        groupId: payload.group_id,
+        name: payload.name,
+        createdBy: payload.created_by,
+        createdAt: new Date(payload.created_at),
+        members: (payload.members || []).map(m => ({
+          userId: m.user_id || 'unknown',
+          role: (m.role as 'admin' | 'member') || 'member',
+          joinedAt: m.joined_at ? new Date(m.joined_at) : new Date(),
+        })),
+      };
+      setGroupDetails(prev => {
+        const updated = new Map(prev);
+        updated.set(payload.group_id, details);
+        return updated;
+      });
+    },
+    [],
+  );
+
+  const applyUserGroups = useCallback(
+    (payload: {
+      groups: Array<{ group_id: string; name: string; created_at: string }>;
+    }) => {
+      setGroups(
+        payload.groups.map(g => ({
+          groupId: g.group_id,
+          name: g.name,
+          createdAt: new Date(g.created_at),
+        })),
+      );
+    },
+    [],
+  );
+
+  const applyGroupMemberAdded = useCallback(
+    (payload: { group_id: string; user_id: string; added_by: string }) => {
+      setGroupDetails(prev => {
+        const updated = new Map(prev);
+        const existing = updated.get(payload.group_id);
+        if (!existing) return updated;
+        if (existing.members.some(m => m.userId === payload.user_id)) return updated;
+        updated.set(payload.group_id, {
+          ...existing,
+          members: [
+            ...existing.members,
+            { userId: payload.user_id, role: 'member', joinedAt: new Date() },
+          ],
+        });
+        return updated;
+      });
+    },
+    [],
+  );
+
+  const applyGroupMemberRemoved = useCallback(
+    (payload: { group_id: string; user_id: string; removed_by: string }) => {
+      setGroupDetails(prev => {
+        const updated = new Map(prev);
+        const existing = updated.get(payload.group_id);
+        if (!existing) return updated;
+        updated.set(payload.group_id, {
+          ...existing,
+          members: existing.members.filter(m => m.userId !== payload.user_id),
+        });
+        return updated;
+      });
+    },
+    [],
+  );
+
+  const setGroupError = useCallback((reason: string) => {
+    setRelayError(reason);
+  }, []);
+
+  const handleRelayMessage = useCallback(
+    (event: { data?: string }) => {
+      try {
+        const raw = event.data ?? '{}';
+        const data = JSON.parse(raw) as { type: string; [key: string]: unknown };
+
+        switch (data.type) {
+          case 'Authenticated': {
+            setRelayStatus('authenticated');
+            setAuthenticatedUser({
+              userId: (data as any).user_id,
+              username: (data as any).username,
+              isOnline: true,
+            });
+            setRelayError(null);
+            break;
+          }
+          case 'AuthError': {
+            setRelayStatus('error');
+            setRelayError((data as any).reason);
+            break;
+          }
+          case 'MessageReceived': {
+            const msg = data as any;
+            setRelayMessages(prev => [
+              ...prev,
+              {
+                id: generateRelayMessageId(),
+                sender: msg.sender,
+                content: msg.content,
+                timestamp: new Date(msg.timestamp),
+                isFromMe: false,
+              },
+            ]);
+            break;
+          }
+          case 'DeliveryError': {
+            const err = data as any;
+            setRelayError(`Failed to deliver to ${err.recipient}: ${err.reason}`);
+            break;
+          }
+          case 'PresenceStatus': {
+            const p = data as any;
+            setOnlineUsers(prev => {
+              const next = new Map(prev);
+              const existing = next.get(p.user_id);
+              next.set(p.user_id, {
+                userId: p.user_id,
+                username: existing?.username ?? p.user_id,
+                isOnline: p.online,
+                lastSeen: existing?.lastSeen,
+              });
+              return next;
+            });
+            break;
+          }
+          case 'PresenceStatusWithLastSeen': {
+            const p = data as any;
+            const lastSeen = new Date(p.last_seen);
+            setOnlineUsers(prev => {
+              const next = new Map(prev);
+              const existing = next.get(p.user_id);
+              next.set(p.user_id, {
+                userId: p.user_id,
+                username: existing?.username ?? p.user_id,
+                isOnline: p.online,
+                lastSeen,
+              });
+              return next;
+            });
+            break;
+          }
+          case 'GroupMessageReceived': {
+            const g = data as any;
+            const newMsg: OnlineMessage = {
+              id: g.message_id,
+              sender: g.sender,
+              content: g.content,
+              timestamp: new Date(g.timestamp),
+              isFromMe:
+                g.sender === authenticatedUser?.userId ||
+                g.sender === authenticatedUser?.username,
+              replyToMsg: g.reply_to_msg,
+            };
+            setGroupMessages(prev => {
+              const next = new Map(prev);
+              const list = next.get(g.group_id) || [];
+              const idx = list.findIndex((m: OnlineMessage) => m.id === g.message_id);
+              if (idx >= 0) {
+                const arr = [...list];
+                arr[idx] = newMsg;
+                next.set(g.group_id, arr);
+              } else {
+                next.set(g.group_id, [...list, newMsg]);
+              }
+              return next;
+            });
+            break;
+          }
+          case 'GroupMessageSent': {
+            const g = data as any;
+            const now = Date.now();
+            let pending: PendingSentMessage | undefined;
+            let pendingKey: string | undefined;
+            for (const [k, p] of pendingSentMessagesRef.current.entries()) {
+              if (p.groupId === g.group_id && now - p.timestamp.getTime() < 10000) {
+                if (!pending || p.timestamp > pending.timestamp) {
+                  pending = p;
+                  pendingKey = k;
+                }
+              }
+            }
+            const newMsg: OnlineMessage = {
+              id: g.message_id,
+              sender: authenticatedUser?.username || authenticatedUser?.userId || 'me',
+              content: pending?.content ?? '',
+              timestamp: new Date(g.timestamp),
+              isFromMe: true,
+              replyToMsg: pending?.replyToMsg,
+            };
+            if (pendingKey) pendingSentMessagesRef.current.delete(pendingKey);
+            setGroupMessages(prev => {
+              const next = new Map(prev);
+              const list = next.get(g.group_id) || [];
+              if (!list.some((m: OnlineMessage) => m.id === g.message_id)) {
+                next.set(g.group_id, [...list, newMsg]);
+              }
+              return next;
+            });
+            break;
+          }
+          case 'GroupCreated': {
+            const g = data as any;
+            applyGroupCreated({ group_id: g.group_id, name: g.name });
+            break;
+          }
+          case 'GroupInfo': {
+            const g = data as any;
+            applyGroupInfo({
+              group_id: g.group_id,
+              name: g.name,
+              created_by: g.created_by,
+              created_at: g.created_at,
+              members: (g.members || []).map((m: any) => ({
+                user_id: m.user_id || m.username || 'unknown',
+                role: m.role || 'member',
+                joined_at: typeof m.joined_at === 'string' ? m.joined_at : new Date().toISOString(),
+              })),
+            });
+            break;
+          }
+          case 'UserGroups': {
+            const g = data as any;
+            applyUserGroups({
+              groups: (g.groups || []).map((x: any) => ({
+                group_id: x.group_id,
+                name: x.name,
+                created_at: x.created_at,
+              })),
+            });
+            break;
+          }
+          case 'GroupMemberAdded': {
+            const g = data as any;
+            applyGroupMemberAdded(g);
+            break;
+          }
+          case 'GroupMemberRemoved': {
+            const g = data as any;
+            applyGroupMemberRemoved(g);
+            break;
+          }
+          case 'GroupError': {
+            setGroupError((data as any).reason ?? 'Unknown');
+            break;
+          }
+          case 'TypingUpdate': {
+            const t = data as any;
+            setTypingUsers(prev => {
+              const next = new Map(prev);
+              const set = next.get(t.conversation_id) ?? new Set<string>();
+              if (t.typing) set.add(t.user_id);
+              else set.delete(t.user_id);
+              next.set(t.conversation_id, set);
+              return next;
+            });
+            break;
+          }
+          default:
+            break;
+        }
+      } catch (err) {
+        console.error('[ProtocolProvider] Relay message parse error', err);
+      }
+    },
+    [
+      authenticatedUser?.userId,
+      authenticatedUser?.username,
+      generateRelayMessageId,
+      applyGroupCreated,
+      applyGroupInfo,
+      applyUserGroups,
+      applyGroupMemberAdded,
+      applyGroupMemberRemoved,
+      setGroupError,
+    ],
+  );
+
+  const connect = useCallback(() => {
+    if (typeof WebSocket === 'undefined') return;
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    setRelayStatus('connecting');
+    setRelayError(null);
+    try {
+      const ws = new WebSocket(DEFAULT_RELAY_SERVER_URL);
+      ws.onopen = () => setRelayStatus('connected');
+      ws.onmessage = handleRelayMessage;
+      ws.onerror = () => {
+        setRelayStatus('error');
+        setRelayError(`WebSocket error. Check server at ${DEFAULT_RELAY_SERVER_URL}`);
+      };
+      ws.onclose = () => {
+        setRelayStatus('disconnected');
+        setAuthenticatedUser(null);
+        wsRef.current = null;
+      };
+      wsRef.current = ws;
+    } catch (err) {
+      console.error('[ProtocolProvider] Relay connect error', err);
+      setRelayStatus('error');
+      setRelayError('Failed to connect to relay');
+    }
+  }, [handleRelayMessage]);
+
+  const disconnect = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setRelayStatus('disconnected');
+    setAuthenticatedUser(null);
+    setRelayError(null);
+  }, []);
+
+  const send = useCallback((message: Record<string, unknown>) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+    try {
+      wsRef.current.send(JSON.stringify(message));
+      return true;
+    } catch (err) {
+      console.error('[ProtocolProvider] Relay send error', err);
+      return false;
+    }
+  }, []);
+
+  const authenticate = useCallback(
+    (token: string) => {
+      if (relayStatus !== 'connected') return false;
+      return send({ type: 'Authenticate', token });
+    },
+    [send, relayStatus],
+  );
+
+  const relaySendMessage = useCallback(
+    (recipientId: string, content: string) => {
+      if (relayStatus !== 'authenticated') return false;
+      const ok = send({ type: 'SendMessage', recipient: recipientId, content });
+      if (ok) {
+        setRelayMessages(prev => [
+          ...prev,
+          {
+            id: generateRelayMessageId(),
+            sender: authenticatedUser?.userId ?? 'me',
+            content,
+            timestamp: new Date(),
+            isFromMe: true,
+          },
+        ]);
+      }
+      return ok;
+    },
+    [authenticatedUser?.userId, generateRelayMessageId, send, relayStatus],
+  );
+
+  const checkPresence = useCallback(
+    (username: string) => {
+      if (relayStatus !== 'authenticated') return false;
+      return send({ type: 'CheckPresence', username });
+    },
+    [send, relayStatus],
+  );
+
+  const setTyping = useCallback(
+    (conversationId: string) => {
+      if (relayStatus !== 'authenticated') return false;
+      return send({ type: 'SetTyping', conversation_id: conversationId });
+    },
+    [send, relayStatus],
+  );
+
+  const clearTyping = useCallback(
+    (conversationId: string) => {
+      if (relayStatus !== 'authenticated') return false;
+      return send({ type: 'ClearTyping', conversation_id: conversationId });
+    },
+    [send, relayStatus],
+  );
+
+  const clearRelayMessages = useCallback(() => {
+    setRelayMessages([]);
+  }, []);
+
+  const clearGroupMessages = useCallback((groupId: string) => {
+    setGroupMessages(prev => {
+      const next = new Map(prev);
+      next.delete(groupId);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, []);
 
   // Helper to convert string to byte array (React Native compatible)
   const stringToBytes = useCallback((str: string): number[] => {
@@ -301,7 +876,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         enabled: true,
         serverAddress: DEFAULT_RELAY_SERVER_URL,
         autoReconnect: true,
-        authToken: HARDCODED_TOKEN || undefined,
+        authToken: undefined,
       },
       wifiDirect: {
         enabled: true,
@@ -344,6 +919,85 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     [peerProfiles],
   );
 
+  const acceptConnectionRequest = useCallback(
+    async (peerId: string) => {
+      if (!protocol) {
+        return;
+      }
+      const name = getPeerDisplayName(peerId);
+      await protocol.acceptConnectionRequest({
+        recipient: peerId,
+        accepterName: currentUserName,
+        keyPackage: undefined,
+      });
+      setContacts(prev => {
+        if (prev.some(c => c.id === peerId)) return prev;
+        return [
+          ...prev,
+          {
+            id: peerId,
+            name,
+            avatar: undefined,
+            isOnline: true,
+            lastSeen: Date.now(),
+          },
+        ];
+      });
+      setConnectionRequests(prev =>
+        prev.filter(r => r.id !== peerId),
+      );
+    },
+    [protocol, currentUserName, getPeerDisplayName],
+  );
+
+  const rejectConnectionRequest = useCallback(
+    async (peerId: string) => {
+      if (!protocol) {
+        return;
+      }
+      await protocol.rejectConnectionRequest({
+        recipient: peerId,
+      });
+      setConnectionRequests(prev =>
+        prev.filter(r => r.id !== peerId),
+      );
+    },
+    [protocol],
+  );
+
+  const sendConnectionRequest = useCallback(
+    async (peerId: string) => {
+      if (!protocol) {
+        return;
+      }
+      const name = getPeerDisplayName(peerId);
+			console.log(
+        '[ProtocolProvider] sendConnectionRequest to',
+        peerId,
+        'name=',
+        name,
+      );
+      const s = await protocol.sendConnectionRequest({
+        recipient: peerId,
+        senderName: currentUserName,
+        keyPackage: undefined,
+      });
+			console.log('[ProtocolProvider] sendConnectionRequest result=', s);
+      setConnectionRequests(prev => {
+        if (prev.some(r => r.id === peerId && r.direction === 'sent')) return prev;
+        return [
+          ...prev.filter(r => !(r.id === peerId && r.direction === 'sent')),
+          {
+            id: peerId,
+            name,
+            direction: 'sent',
+            timestamp: Date.now(),
+          },
+        ];
+      });
+    },
+    [protocol, currentUserName, getPeerDisplayName],
+  );
   // Send key package to a peer for MLS session establishment
   const sendKeyPackageToPeer = useCallback(
     async (peerId: string) => {
@@ -665,21 +1319,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           return [...prevChats, newChat];
         });
 
-        setContacts(prevContacts => {
-          if (prevContacts.some(contact => contact.id === recipientId)) {
-            return prevContacts;
-          }
-          return [
-            ...prevContacts,
-            {
-              id: recipientId,
-              name: getPeerDisplayName(recipientId),
-              avatar: undefined,
-              isOnline: false,
-              lastSeen: now,
-            },
-          ];
-        });
+        // Do not add recipient to contacts when sending a message.
+        // Contacts are only added via connection_accepted or acceptConnectionRequest.
       } catch (err) {
         console.error('Failed to send message:', err);
         Alert.alert('Send Error', 'Failed to send message. Please try again.');
@@ -742,7 +1383,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       const now = Date.now();
 
       for (const event of chronologicalEvents) {
-        switch (event.type) {
+        const eventType = (event as { type: string }).type;
+        switch (eventType) {
           case 'neighbor_discovered': {
             const peerId = (event as any).peer_id;
             if (peerId && peerId !== currentUserId) {
@@ -756,6 +1398,68 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             const peerId = (event as any).peer_id;
             if (peerId) {
               discoveredPeers.delete(peerId);
+            }
+            break;
+          }
+          case 'connection_request_received': {
+            console.log(
+              '[ProtocolProvider] connection_request_received',
+              event,
+            );
+            const e = event as { sender?: string; sender_name?: string; timestamp?: number };
+            const peerId = e.sender ?? (event as any).peer_id;
+            const name =
+              e.sender_name ??
+              (peerId && peerId.length > 4 ? `User ${peerId.slice(-4)}` : peerId ?? '');
+            if (peerId && peerId !== currentUserId) {
+              setConnectionRequests(prev => {
+                if (prev.some(r => r.id === peerId && r.direction === 'incoming')) return prev;
+                return [
+                  ...prev.filter(r => !(r.id === peerId && r.direction === 'incoming')),
+                  {
+                    id: peerId,
+                    name: name || getPeerDisplayName(peerId),
+                    direction: 'incoming',
+                    timestamp: typeof e.timestamp === 'number' ? e.timestamp : Date.now(),
+                  },
+                ];
+              });
+            }
+            break;
+          }
+          case 'connection_accepted': {
+            const e = event as { accepted_by?: string; accepted_by_name?: string };
+            const peerId = e.accepted_by;
+            const name =
+              e.accepted_by_name ??
+              (peerId && peerId.length > 4 ? `User ${peerId.slice(-4)}` : peerId ?? '');
+            if (peerId && peerId !== currentUserId) {
+              setContacts(prev => {
+                if (prev.some(c => c.id === peerId)) return prev;
+                return [
+                  ...prev,
+                  {
+                    id: peerId,
+                    name: name || getPeerDisplayName(peerId),
+                    avatar: undefined,
+                    isOnline: true,
+                    lastSeen: now,
+                  },
+                ];
+              });
+              setConnectionRequests(prev =>
+                prev.filter(r => r.id !== peerId),
+              );
+            }
+            break;
+          }
+          case 'connection_rejected': {
+            const e = event as { rejected_by?: string };
+            const peerId = e.rejected_by;
+            if (peerId) {
+              setConnectionRequests(prev =>
+                prev.filter(r => r.id !== peerId),
+              );
             }
             break;
           }
@@ -975,6 +1679,118 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             receivedMessages.push(receivedMessage);
             break;
           }
+          case 'group_created': {
+            const e = event as unknown as { group_id: string; name: string };
+            if (e.group_id && e.name) {
+              applyGroupCreated({ group_id: e.group_id, name: e.name });
+            }
+            break;
+          }
+          case 'group_message_received': {
+            const e = event as unknown as {
+              group_id: string;
+              sender: string;
+              content: string;
+              timestamp: string;
+              message_id: string;
+              reply_to_msg?: string;
+            };
+            if (e.group_id && e.message_id) {
+              applyGroupMessageReceived(
+                {
+                  group_id: e.group_id,
+                  sender: e.sender,
+                  content: e.content ?? '',
+                  timestamp: e.timestamp ?? new Date().toISOString(),
+                  message_id: e.message_id,
+                  reply_to_msg: e.reply_to_msg,
+                },
+              );
+            }
+            break;
+          }
+          case 'group_info': {
+            const e = event as unknown as {
+              group_id: string;
+              name: string;
+              created_by: string;
+              created_at: string;
+              members: Array<{
+                user_id: string;
+                role: string;
+                joined_at: string;
+              }>;
+            };
+            if (e.group_id) {
+              applyGroupInfo({
+                group_id: e.group_id,
+                name: e.name ?? '',
+                created_by: e.created_by ?? '',
+                created_at:
+                  typeof e.created_at === 'string'
+                    ? e.created_at
+                    : new Date().toISOString(),
+                members: (e.members ?? []).map(m => ({
+                  user_id: m.user_id ?? (m as any).username ?? 'unknown',
+                  role: m.role ?? 'member',
+                  joined_at:
+                    typeof m.joined_at === 'string'
+                      ? m.joined_at
+                      : new Date().toISOString(),
+                })),
+              });
+            }
+            break;
+          }
+          case 'user_groups': {
+            const e = event as unknown as {
+              groups: Array<{
+                group_id: string;
+                name: string;
+                created_at: string;
+              }>;
+            };
+            if (e.groups && Array.isArray(e.groups)) {
+              applyUserGroups({
+                groups: e.groups.map(g => ({
+                  group_id: g.group_id,
+                  name: g.name,
+                  created_at:
+                    typeof g.created_at === 'string'
+                      ? g.created_at
+                      : new Date(g.created_at).toISOString(),
+                })),
+              });
+            }
+            break;
+          }
+          case 'group_member_added': {
+            const e = event as unknown as {
+              group_id: string;
+              user_id: string;
+              added_by: string;
+            };
+            if (e.group_id && e.user_id) {
+              applyGroupMemberAdded(e);
+            }
+            break;
+          }
+          case 'group_member_removed': {
+            const e = event as unknown as {
+              group_id: string;
+              user_id: string;
+              removed_by: string;
+            };
+            if (e.group_id && e.user_id) {
+              applyGroupMemberRemoved(e);
+            }
+            break;
+          }
+          case 'group_error': {
+            const e = event as unknown as { reason: string };
+            setGroupError(e.reason ?? 'Unknown group error');
+            break;
+          }
           default:
             break;
         }
@@ -1011,51 +1827,13 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           : `User ${peerId}`;
       };
 
+      // Contacts are only added via connection_accepted or acceptConnectionRequest.
+      // Only update existing contacts (isOnline, name, lastSeen) from discovery/presence.
       setContacts(prevContacts => {
         const contactMap = new Map<string, Contact>(
           prevContacts.map(contact => [contact.id, contact]),
         );
         let changed = false;
-
-        discoveredPeers.forEach(peerId => {
-          if (!contactMap.has(peerId)) {
-            contactMap.set(peerId, {
-              id: peerId,
-              name: resolvePeerName(peerId),
-              avatar: undefined,
-              isOnline: true,
-              lastSeen: now,
-              signalStrength: Math.random(),
-              distance:
-                Math.random() > 0.6
-                  ? 'near'
-                  : Math.random() > 0.3
-                  ? 'medium'
-                  : 'far',
-            });
-            changed = true;
-          }
-        });
-
-        messageSenders.forEach(peerId => {
-          if (!contactMap.has(peerId)) {
-            contactMap.set(peerId, {
-              id: peerId,
-              name: resolvePeerName(peerId),
-              avatar: undefined,
-              isOnline: discoveredPeers.has(peerId),
-              lastSeen: now,
-              signalStrength: Math.random(),
-              distance:
-                Math.random() > 0.6
-                  ? 'near'
-                  : Math.random() > 0.3
-                  ? 'medium'
-                  : 'far',
-            });
-            changed = true;
-          }
-        });
 
         const nextContacts = Array.from(contactMap.values()).map(contact => {
           const isOnline = discoveredPeers.has(contact.id);
@@ -1209,6 +1987,19 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
       pruneProcessedMessages();
 
+      // Update neighbors list (currently discovered nearby peers)
+      setNeighbors(
+        Array.from(discoveredPeers)
+          .filter(pid => pid !== currentUserId)
+          .map(peerId => ({
+            id: peerId,
+            name: resolvePeerName(peerId),
+            avatar: undefined,
+            isOnline: true,
+            lastSeen: now,
+          })),
+      );
+
       //  Send presence to newly discovered peers after event processing
       // This ensures usernames are synced immediately when peers are discovered
       // BUT: Only send if we haven't sent recently to prevent infinite loops
@@ -1249,6 +2040,14 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     isMlsInitialized,
     bytesToString,
     sendPresenceToPeer,
+    getPeerDisplayName,
+    applyGroupCreated,
+    applyGroupMessageReceived,
+    applyGroupInfo,
+    applyUserGroups,
+    applyGroupMemberAdded,
+    applyGroupMemberRemoved,
+    setGroupError,
   ]);
 
   // Reset presence broadcast cache when the local user name changes
@@ -1349,12 +2148,160 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
   const connectedPeersCount = contacts.filter(c => c.isOnline).length;
 
+  // Group functions via mesh-sdk: call protocol then send JSON over relay
+  const createGroup = useCallback(
+    async (name: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupCreate(name);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] createGroup failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const sendGroupMessage = useCallback(
+    async (
+      groupId: string,
+      content: string,
+      replyToMsg?: string,
+    ) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupSendMessage(
+          groupId,
+          content,
+          replyToMsg ?? null,
+        );
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] sendGroupMessage failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const addGroupMember = useCallback(
+    async (groupId: string, username: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupAddMember(groupId, username);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] addGroupMember failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const removeGroupMember = useCallback(
+    async (groupId: string, username: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupRemoveMember(groupId, username);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] removeGroupMember failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const leaveGroup = useCallback(
+    async (groupId: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupLeave(groupId);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] leaveGroup failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const getGroupInfo = useCallback(
+    async (groupId: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupGetInfo(groupId);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] getGroupInfo failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const getUserGroups = useCallback(async () => {
+    if (!protocol || relayStatus !== 'authenticated') return false;
+    try {
+      const json = await protocol.groupGetUserGroups();
+      return send(JSON.parse(json));
+    } catch (e) {
+      console.error('[ProtocolProvider] getUserGroups failed', e);
+      return false;
+    }
+  }, [protocol, relayStatus, send]);
+
+  const groupSetAdmin = useCallback(
+    async (groupId: string, username: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupSetAdmin(groupId, username);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] groupSetAdmin failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const groupRemoveAdmin = useCallback(
+    async (groupId: string, username: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupRemoveAdmin(groupId, username);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] groupRemoveAdmin failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
+  const groupDelete = useCallback(
+    async (groupId: string) => {
+      if (!protocol || relayStatus !== 'authenticated') return false;
+      try {
+        const json = await protocol.groupDelete(groupId);
+        return send(JSON.parse(json));
+      } catch (e) {
+        console.error('[ProtocolProvider] groupDelete failed', e);
+        return false;
+      }
+    },
+    [protocol, relayStatus, send],
+  );
+
   const contextValue: ProtocolContextType = {
     isInitialized,
     isOnline,
     currentUserId,
     currentUserName,
     contacts,
+    connectionRequests,
+    neighbors,
     chats,
     connectedPeersCount,
     events,
@@ -1386,6 +2333,37 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     sendFile: protocolSendFile,
     cancelFileTransfer: protocolCancelFile,
     getAnalytics,
+    rejectConnectionRequest,
+    acceptConnectionRequest,
+    sendConnectionRequest,
+    relayStatus,
+    authenticatedUser,
+    relayMessages,
+    onlineUsers,
+    groups,
+    groupDetails,
+    groupMessages,
+    relayError,
+    connect,
+    disconnect,
+    authenticate,
+    send,
+    relaySendMessage,
+    checkPresence,
+    setTyping,
+    clearTyping,
+    createGroup,
+    sendGroupMessage,
+    addGroupMember,
+    removeGroupMember,
+    leaveGroup,
+    getGroupInfo,
+    getUserGroups,
+    groupSetAdmin,
+    groupRemoveAdmin,
+    groupDelete,
+    clearRelayMessages,
+    clearGroupMessages,
   };
 
   return (

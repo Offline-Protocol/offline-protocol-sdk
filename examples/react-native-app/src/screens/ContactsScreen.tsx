@@ -17,9 +17,206 @@ import LinearGradient from 'react-native-linear-gradient';
 // import Animated, { FadeInDown, FadeInRight } from 'react-native-reanimated';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
-import { Contact } from '../providers/ProtocolProvider';
+import {
+  Contact,
+  type ConnectionRequest,
+} from '../providers/ProtocolProvider';
 import { MessagePriority } from '@offline-protocol/mesh-sdk';
 import { getUserInitials, generateAvatarColor } from '../utils/user';
+
+interface RequestItemProps {
+  request: ConnectionRequest;
+  onAccept: () => void;
+  onDecline: () => void;
+  onPress: () => void;
+}
+
+function RequestItem({
+  request,
+  onAccept,
+  onDecline,
+  onPress,
+}: RequestItemProps) {
+  const { theme } = useTheme();
+  const avatarColor = generateAvatarColor(request.id);
+  const initials = getUserInitials(request.name);
+  const isIncoming = request.direction === 'incoming';
+
+  return (
+    <View
+      style={[styles.contactItem, { backgroundColor: theme.colors.surface }]}
+    >
+      <View style={styles.contactContent}>
+        <TouchableOpacity onPress={onPress} activeOpacity={0.7}>
+          <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
+            <Text style={[styles.avatarText, { color: theme.colors.textInverse }]}>
+              {initials}
+            </Text>
+          </View>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.contactInfo}
+          onPress={onPress}
+          activeOpacity={0.7}
+        >
+          <View style={styles.contactHeader}>
+            <Text
+              style={[styles.contactName, { color: theme.colors.text }]}
+              numberOfLines={1}
+            >
+              {request.name}
+            </Text>
+            <Text
+              style={[styles.status, { color: theme.colors.textSecondary }]}
+            >
+              {isIncoming ? 'Wants to connect' : 'Request sent'}
+            </Text>
+          </View>
+          <Text
+            style={[styles.contactId, { color: theme.colors.textSecondary }]}
+            numberOfLines={1}
+          >
+            ID: {request.id.slice(-8)}
+          </Text>
+        </TouchableOpacity>
+        <View style={styles.actions}>
+          {isIncoming ? (
+            <>
+              <TouchableOpacity
+                style={[
+                  styles.messageButton,
+                  styles.declineButton,
+                  { backgroundColor: theme.colors.surfaceVariant },
+                ]}
+                onPress={onDecline}
+                activeOpacity={0.7}
+                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+              >
+                <Icon name="close" size={18} color={theme.colors.text} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.messageButton,
+                  { backgroundColor: theme.colors.primary },
+                ]}
+                onPress={onAccept}
+                activeOpacity={0.7}
+                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
+              >
+                <Icon name="checkmark" size={18} color={theme.colors.textInverse} />
+              </TouchableOpacity>
+            </>
+          ) : (
+            <View
+              style={[
+                styles.pendingBadge,
+                { backgroundColor: theme.colors.surfaceVariant },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.pendingText,
+                  { color: theme.colors.textSecondary },
+                ]}
+              >
+                Pending
+              </Text>
+            </View>
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+interface NeighborItemProps {
+  neighbor: Contact;
+  hasPendingSentRequest: boolean;
+  onPress: () => void;
+  onSendRequest: () => void;
+}
+
+function NeighborItem({
+  neighbor,
+  hasPendingSentRequest,
+  onPress,
+  onSendRequest,
+}: NeighborItemProps) {
+  const { theme } = useTheme();
+  const avatarColor = generateAvatarColor(neighbor.id);
+  const initials = getUserInitials(neighbor.name);
+
+  return (
+    <View
+      style={[styles.contactItem, { backgroundColor: theme.colors.surface }]}
+    >
+      <View style={styles.contactContent}>
+        <TouchableOpacity onPress={onPress} activeOpacity={0.7}>
+          <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
+            <Text style={[styles.avatarText, { color: theme.colors.textInverse }]}>
+              {initials}
+            </Text>
+            <View
+              style={[
+                styles.onlineIndicator,
+                { backgroundColor: theme.colors.online },
+              ]}
+            />
+          </View>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.contactInfo}
+          onPress={onPress}
+          activeOpacity={0.7}
+        >
+          <View style={styles.contactHeader}>
+            <Text
+              style={[styles.contactName, { color: theme.colors.text }]}
+              numberOfLines={1}
+            >
+              {neighbor.name}
+            </Text>
+            <Text
+              style={[styles.status, { color: theme.colors.online }]}
+            >
+              Nearby
+            </Text>
+          </View>
+          <Text
+            style={[styles.contactId, { color: theme.colors.textSecondary }]}
+            numberOfLines={1}
+          >
+            ID: {neighbor.id.slice(-8)}
+          </Text>
+        </TouchableOpacity>
+        <View style={styles.actions}>
+          {hasPendingSentRequest ? (
+            <View
+              style={[
+                styles.pendingBadge,
+                { backgroundColor: theme.colors.surfaceVariant },
+              ]}
+            >
+              <Text
+                style={[styles.pendingText, { color: theme.colors.textSecondary }]}
+              >
+                Pending
+              </Text>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[styles.messageButton, { backgroundColor: theme.colors.primary }]}
+              onPress={onSendRequest}
+              activeOpacity={0.7}
+            >
+              <Icon name="person-add" size={18} color={theme.colors.textInverse} />
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
 
 interface ContactItemProps {
   contact: Contact;
@@ -28,7 +225,7 @@ interface ContactItemProps {
   index: number;
 }
 
-function ContactItem({ contact, onPress, onMessage, index }: ContactItemProps) {
+function ContactItem({ contact, onPress, onMessage, index: _index }: ContactItemProps) {
   const { theme } = useTheme();
   const avatarColor = generateAvatarColor(contact.id);
   const initials = getUserInitials(contact.name);
@@ -156,40 +353,59 @@ interface ContactsScreenProps {
 
 export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: ContactsScreenProps) {
   const { theme } = useTheme();
-  const { contacts, isOnline, connectedPeersCount, sendMessage, chats } = useProtocol();
+  const {
+    contacts,
+    connectionRequests,
+    neighbors,
+    isOnline,
+    connectedPeersCount,
+    sendMessage,
+    sendConnectionRequest,
+    acceptConnectionRequest,
+    rejectConnectionRequest,
+    chats,
+  } = useProtocol();
   const [searchQuery, setSearchQuery] = useState('');
   const [refreshing, setRefreshing] = useState(false);
-  const [filter, setFilter] = useState<'all' | 'online' | 'offline'>('all');
+  const [filter, setFilter] = useState<'contacts' | 'requests' | 'neighbors'>(
+    'contacts',
+  );
 
   const filteredContacts = useMemo(() => {
     let filtered = contacts;
-
-    // Apply search filter
     if (searchQuery.trim()) {
-      filtered = filtered.filter(contact =>
-        contact.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        contact.id.toLowerCase().includes(searchQuery.toLowerCase())
+      filtered = filtered.filter(
+        contact =>
+          contact.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          contact.id.toLowerCase().includes(searchQuery.toLowerCase()),
       );
     }
+    return filtered.sort((a, b) => a.name.localeCompare(b.name));
+  }, [contacts, searchQuery]);
 
-    // Apply status filter
-    switch (filter) {
-      case 'online':
-        filtered = filtered.filter(contact => contact.isOnline);
-        break;
-      case 'offline':
-        filtered = filtered.filter(contact => !contact.isOnline);
-        break;
+  const filteredRequests = useMemo(() => {
+    let filtered = connectionRequests;
+    if (searchQuery.trim()) {
+      filtered = filtered.filter(
+        req =>
+          req.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          req.id.toLowerCase().includes(searchQuery.toLowerCase()),
+      );
     }
+    return filtered.sort((a, b) => b.timestamp - a.timestamp);
+  }, [connectionRequests, searchQuery]);
 
-    // Sort by online status first, then by name
-    return filtered.sort((a, b) => {
-      if (a.isOnline !== b.isOnline) {
-        return a.isOnline ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    });
-  }, [contacts, searchQuery, filter]);
+  const filteredNeighbors = useMemo(() => {
+    let filtered = neighbors;
+    if (searchQuery.trim()) {
+      filtered = filtered.filter(
+        n =>
+          n.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          n.id.toLowerCase().includes(searchQuery.toLowerCase()),
+      );
+    }
+    return filtered.sort((a, b) => a.name.localeCompare(b.name));
+  }, [neighbors, searchQuery]);
 
   const handleContactPress = (contact: Contact) => {
     onNavigateToProfile(contact.id);
@@ -266,14 +482,43 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
     </View>
   );
 
-  const getFilterCount = (filterType: 'all' | 'online' | 'offline') => {
+  const getFilterCount = (
+    filterType: 'contacts' | 'requests' | 'neighbors',
+  ) => {
     switch (filterType) {
-      case 'online':
-        return contacts.filter(c => c.isOnline).length;
-      case 'offline':
-        return contacts.filter(c => !c.isOnline).length;
-      default:
+      case 'contacts':
         return contacts.length;
+      case 'requests':
+        return connectionRequests.length;
+      case 'neighbors':
+        return neighbors.length;
+      default:
+        return 0;
+    }
+  };
+
+  const hasSentRequestToNeighbor = (id: string) =>
+    connectionRequests.some(r => r.id === id && r.direction === 'sent');
+
+  const handleAcceptRequest = async (request: ConnectionRequest) => {
+    try {
+      await acceptConnectionRequest(request.id);
+    } catch (e) {
+      Alert.alert(
+        'Accept Failed',
+        (e as Error)?.message ?? 'Failed to accept connection request.',
+      );
+    }
+  };
+
+  const handleDeclineRequest = async (request: ConnectionRequest) => {
+    try {
+      await rejectConnectionRequest(request.id);
+    } catch (e) {
+      Alert.alert(
+        'Decline Failed',
+        (e as Error)?.message ?? 'Failed to decline connection request.',
+      );
     }
   };
 
@@ -290,16 +535,19 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
               Contacts
             </Text>
             <Text style={[styles.headerSubtitle, { color: theme.colors.textInverse }]}>
-              {isOnline 
-                ? `${connectedPeersCount} nearby • ${contacts.length} total`
-                : 'Offline'
-              }
+              {isOnline
+                ? `${connectedPeersCount} nearby • ${contacts.length} contacts`
+                : 'Offline'}
             </Text>
           </View>
-          
+
           <View style={styles.headerActions}>
             <Text style={[styles.headerDebug, { color: theme.colors.textInverse }]}>
-              {filteredContacts.length} contacts
+              {filter === 'contacts'
+                ? `${filteredContacts.length} contacts`
+                : filter === 'requests'
+                  ? `${filteredRequests.length} requests`
+                  : `${filteredNeighbors.length} nearby`}
             </Text>
             <View style={[
               styles.statusIndicator,
@@ -328,15 +576,16 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
           )}
         </View>
 
-        {/* Filter Tabs */}
+        {/* Filter Tabs: Contacts | Requests | Neighbors */}
         <View style={styles.filterContainer}>
-          {(['all', 'online', 'offline'] as const).map((filterType) => (
+          {(['contacts', 'requests', 'neighbors'] as const).map(filterType => (
             <TouchableOpacity
               key={filterType}
               style={[
                 styles.filterTab,
                 {
-                  backgroundColor: filter === filterType ? theme.colors.primary : 'transparent',
+                  backgroundColor:
+                    filter === filterType ? theme.colors.primary : 'transparent',
                 },
               ]}
               onPress={() => setFilter(filterType)}
@@ -346,7 +595,10 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
                 style={[
                   styles.filterText,
                   {
-                    color: filter === filterType ? theme.colors.textInverse : theme.colors.textSecondary,
+                    color:
+                      filter === filterType
+                        ? theme.colors.textInverse
+                        : theme.colors.textSecondary,
                     fontWeight: filter === filterType ? '600' : '500',
                   },
                 ]}
@@ -357,7 +609,10 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
                 style={[
                   styles.filterCount,
                   {
-                    color: filter === filterType ? theme.colors.textInverse : theme.colors.textSecondary,
+                    color:
+                      filter === filterType
+                        ? theme.colors.textInverse
+                        : theme.colors.textSecondary,
                   },
                 ]}
               >
@@ -368,30 +623,141 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
         </View>
       </View>
 
-      {/* Contacts List */}
-      <FlatList
-        data={filteredContacts}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item, index }) => (
-          <ContactItem
-            contact={item}
-            onPress={() => handleContactPress(item)}
-            onMessage={() => handleMessage(item)}
-            index={index}
-          />
-        )}
-        contentContainerStyle={styles.listContainer}
-        showsVerticalScrollIndicator={false}
-        ListEmptyComponent={renderEmptyState}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            tintColor={theme.colors.primary}
-            colors={[theme.colors.primary]}
-          />
-        }
-      />
+      {/* Contacts, Requests, or Neighbors List */}
+      {filter === 'contacts' ? (
+        <FlatList
+          data={filteredContacts}
+          keyExtractor={item => item.id}
+          renderItem={({ item, index }) => (
+            <ContactItem
+              contact={item}
+              onPress={() => handleContactPress(item)}
+              onMessage={() => handleMessage(item)}
+              index={index}
+            />
+          )}
+          contentContainerStyle={styles.listContainer}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={renderEmptyState}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor={theme.colors.primary}
+              colors={[theme.colors.primary]}
+            />
+          }
+        />
+      ) : filter === 'requests' ? (
+        <FlatList
+          data={filteredRequests}
+          keyExtractor={item => `${item.id}-${item.direction}-${item.timestamp}`}
+          renderItem={({ item }) => (
+            <RequestItem
+              request={item}
+              onPress={() => onNavigateToProfile(item.id)}
+              onAccept={() => handleAcceptRequest(item)}
+              onDecline={() => handleDeclineRequest(item)}
+            />
+          )}
+          contentContainerStyle={styles.listContainer}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={() => (
+            <View style={styles.emptyState}>
+              <View
+                style={[
+                  styles.emptyIcon,
+                  { backgroundColor: theme.colors.surfaceVariant },
+                ]}
+              >
+                <Icon
+                  name="mail-outline"
+                  size={48}
+                  color={theme.colors.textSecondary}
+                />
+              </View>
+              <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>
+                {searchQuery.trim() ? 'No requests found' : 'No connection requests'}
+              </Text>
+              <Text
+                style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}
+              >
+                {searchQuery.trim()
+                  ? 'Try adjusting your search.'
+                  : 'Incoming and sent requests will appear here.'}
+              </Text>
+            </View>
+          )}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor={theme.colors.primary}
+              colors={[theme.colors.primary]}
+            />
+          }
+        />
+      ) : (
+        <FlatList
+          data={filteredNeighbors}
+          keyExtractor={item => item.id}
+          renderItem={({ item }) => (
+            <NeighborItem
+              neighbor={item}
+              hasPendingSentRequest={hasSentRequestToNeighbor(item.id)}
+              onPress={() => onNavigateToProfile(item.id)}
+              onSendRequest={async () => {
+                try {
+                  await sendConnectionRequest(item.id);
+                } catch (e) {
+                  Alert.alert(
+                    'Request Failed',
+                    (e as Error)?.message ?? 'Failed to send connection request.',
+                  );
+                }
+              }}
+            />
+          )}
+          contentContainerStyle={styles.listContainer}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={() => (
+            <View style={styles.emptyState}>
+              <View
+                style={[
+                  styles.emptyIcon,
+                  { backgroundColor: theme.colors.surfaceVariant },
+                ]}
+              >
+                <Icon
+                  name="radio-outline"
+                  size={48}
+                  color={theme.colors.textSecondary}
+                />
+              </View>
+              <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>
+                {searchQuery.trim() ? 'No neighbors found' : 'No nearby devices'}
+              </Text>
+              <Text
+                style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}
+              >
+                {searchQuery.trim()
+                  ? 'Try adjusting your search.'
+                  : isOnline
+                    ? 'Devices with the app open nearby will appear here.'
+                    : 'Turn on the messenger to discover nearby devices.'}
+              </Text>
+            </View>
+          )}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor={theme.colors.primary}
+              colors={[theme.colors.primary]}
+            />
+          }
+        />
+      )}
     </View>
   );
 }
@@ -601,6 +967,18 @@ const styles = StyleSheet.create({
         elevation: 1,
       },
     }),
+  },
+  declineButton: {},
+  pendingBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingText: {
+    fontSize: 13,
+    fontWeight: '500',
   },
   emptyState: {
     flex: 1,

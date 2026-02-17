@@ -11,7 +11,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
 import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 
@@ -22,8 +21,12 @@ interface CreateGroupModalProps {
 
 export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalProps) {
   const { theme } = useTheme();
-  const { send, authenticatedUser, status } = useWebSocketRelayContext();
-  const { protocol, isInitialized } = useProtocol();
+  const {
+    createGroup,
+    authenticatedUser,
+    relayStatus: status,
+    isInitialized,
+  } = useProtocol();
   const [groupName, setGroupName] = useState('');
   const [membersToAdd, setMembersToAdd] = useState<string[]>([]);
   const [usernameInput, setUsernameInput] = useState('');
@@ -53,7 +56,7 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
       return;
     }
 
-    if (!isInitialized || !protocol) {
+    if (!isInitialized) {
       Alert.alert(
         'Protocol Not Ready',
         'The protocol is not initialized yet. Please wait a moment and try again.',
@@ -71,25 +74,13 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
 
     setIsCreating(true);
     try {
-      // Create group using SDK
-      const createGroupJson = await protocol.groupCreate(groupName.trim());
-      const createGroupPayload = JSON.parse(createGroupJson);
-
-      // Send via WebSocket
-      const sent = send(createGroupPayload);
+      const sent = await createGroup(groupName.trim());
       if (!sent) {
         throw new Error('Failed to send group creation request');
       }
 
-      // Wait for GroupCreated response (handled by WebSocketRelayProvider)
-      // Then add members if any
       if (membersToAdd.length > 0) {
-        // We'll need to wait for the group_id from the response
-        // For now, we'll add members after a short delay
-        setTimeout(async () => {
-          // This will be handled by the GroupCreated event handler
-          // which should trigger a refresh
-        }, 1000);
+        setTimeout(() => {}, 1000);
       }
 
       // Close modal and refresh groups list
@@ -100,7 +91,7 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
     } finally {
       setIsCreating(false);
     }
-  }, [groupName, membersToAdd, protocol, send, status, onGroupCreated]);
+  }, [groupName, membersToAdd, createGroup, status, isInitialized, onGroupCreated]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.colors.background }]}>
@@ -200,7 +191,7 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
           style={[
             styles.createButton,
             {
-              backgroundColor: isCreating ? theme.colors.disabled : theme.colors.primary,
+              backgroundColor: isCreating ? theme.colors.textSecondary : theme.colors.primary,
             },
           ]}
           onPress={handleCreateGroup}

@@ -15,9 +15,8 @@ import {
 import LinearGradient from 'react-native-linear-gradient';
 import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
-import { useWebSocketRelayContext } from '../hooks/useWebSocketRelayContext';
-import { type OnlineMessage } from '../providers/WebSocketRelayProvider';
 import { useProtocol } from '../hooks/useProtocol';
+import type { OnlineMessage } from '../providers/ProtocolProvider';
 
 type Tab = 'chat' | 'users' | 'groups';
 
@@ -33,19 +32,19 @@ export function OnlineScreen() {
   const [checkUserId, setCheckUserId] = useState('');
 
   const {
-    status,
+    relayStatus: status,
     authenticatedUser,
-    messages,
+    relayMessages: messages,
     onlineUsers,
     groups,
-    error,
+    relayError: error,
     connect,
     disconnect,
     authenticate,
-    sendMessage,
+    relaySendMessage: sendMessage,
     checkPresence,
-    clearMessages,
-  } = useWebSocketRelayContext();
+    clearRelayMessages: clearMessages,
+  } = useProtocol();
 
   const handleConnect = useCallback(() => {
     connect();
@@ -90,9 +89,6 @@ export function OnlineScreen() {
       setUsernameInput(currentUserName);
     }
   }, [currentUserName]);
-
-  // Auto-authenticate is handled by WebSocketRelayProvider
-  // This effect is no longer needed but kept for backwards compatibility
 
   useEffect(() => {
     if (messages.length > 0) {
