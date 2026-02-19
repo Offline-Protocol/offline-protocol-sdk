@@ -175,6 +175,14 @@ public class BleManager: NSObject, TransportManager {
     private let MAX_CONSECUTIVE_SCAN_RESTARTS = 3
     private let CENTRAL_RESET_BACKOFF: TimeInterval = 45.0
     private let MINIMUM_RSSI_TO_CONNECT: Int16 = -90
+    /// Cooldown between provisional bootstrap attempts for unknown peripherals
+    private let UNKNOWN_BOOTSTRAP_RATE_LIMIT: TimeInterval = 12.0
+    /// Minimum RSSI for provisional bootstrap when advertisement keys are present
+    private let UNKNOWN_BOOTSTRAP_MIN_RSSI: Int16 = -75
+    /// Stricter RSSI threshold when expected advertisement keys are missing
+    private let UNKNOWN_BOOTSTRAP_MIN_RSSI_WITH_MISSING_KEYS: Int16 = -68
+    /// Max provisional unknown bootstrap attempts per minute
+    private let MAX_UNKNOWN_BOOTSTRAP_ATTEMPTS_PER_MINUTE = 4
     /// Proactive scan refresh interval even when discoveries are occurring
     private let PROACTIVE_SCAN_REFRESH_INTERVAL: TimeInterval = 60.0
     private var lastProactiveScanRefresh: Date?
@@ -186,6 +194,8 @@ public class BleManager: NSObject, TransportManager {
     private var aggressiveDiscoveryStarted: Date?
     /// Negative cache: devices verified via GATT as non-mesh (identifier -> timestamp)
     private var verifiedNonMeshDevices: [UUID: Date] = [:]
+    /// Rate limiter for provisional unknown bootstrap attempts
+    private var unknownBootstrapAttempts: [UUID: Date] = [:]
     private let NON_MESH_CACHE_TTL: TimeInterval = 300.0 // 5 minutes
 
     // MARK: - Thread helpers
@@ -419,6 +429,7 @@ public class BleManager: NSObject, TransportManager {
         pendingFragments.removeAll()
         pendingOutboundFragments.removeAll()
         lastSeenMeshAdvertisements.removeAll()
+        unknownBootstrapAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
         recentAdvertisementHashes.removeAll()
         pendingAdvertiseRestart?.cancel()
@@ -1521,6 +1532,7 @@ public class BleManager: NSObject, TransportManager {
 
     private func pruneMeshObservations(now: Date = Date()) {
         lastSeenMeshAdvertisements = lastSeenMeshAdvertisements.filter { now.timeIntervalSince($0.value.timestamp) <= MESH_OBSERVATION_TTL }
+        unknownBootstrapAttempts = unknownBootstrapAttempts.filter { now.timeIntervalSince($0.value) <= 60.0 }
         
     }
     
@@ -1659,14 +1671,23 @@ public class BleManager: NSObject, TransportManager {
     /// - Devices with our service data
     /// - Previously discovered mesh devices
     /// - Previously verified peer/device mappings
+    /// - Strictly rate-limited bootstrap attempts for unknown connectable peripherals
     private func shouldProcessDiscoveredPeripheral(
         peripheral: CBPeripheral,
         advertisementData: [String: Any],
+        rssi: Int16,
+        isConnectable: Bool,
         now: Date
     ) -> Bool {
         // 0. Skip devices previously verified as non-mesh via GATT
         if let nonMeshTimestamp = verifiedNonMeshDevices[peripheral.identifier] {
             if now.timeIntervalSince(nonMeshTimestamp) < NON_MESH_CACHE_TTL {
+                logDiscoveryRejection(
+                    peripheral: peripheral,
+                    reason: "non_mesh_cache",
+                    now: now,
+                    context: ["ageMs": Int(now.timeIntervalSince(nonMeshTimestamp) * 1000)]
+                )
                 return false
             }
             // Entry expired, remove it and allow re-evaluation
@@ -1718,9 +1739,97 @@ public class BleManager: NSObject, TransportManager {
            connections.centralDeviceId(for: peripheral.identifier) != nil {
             return true
         }
+
+        // Controlled bootstrap for unknown connectable peripherals.
+        // Missing advertisement keys are treated as unknown (not invalid), while
+        // strict rate/rssi limits prevent broad probing.
+        if shouldAllowUnknownBootstrap(
+            peripheral: peripheral,
+            advertisementData: advertisementData,
+            rssi: rssi,
+            isConnectable: isConnectable,
+            now: now
+        ) {
+            if logThrottler.shouldLog(key: "bootstrap_allow_\(peripheral.identifier.uuidString)", interval: 30) {
+                print("[BleManager] Allowing provisional bootstrap for \(peripheral.identifier) RSSI=\(rssi)")
+                emitDiagnostic("debug", "Allowing provisional bootstrap candidate", context: [
+                    "identifier": peripheral.identifier.uuidString,
+                    "rssi": rssi,
+                    "connectable": isConnectable
+                ])
+            }
+            return true
+        }
         
         // Filter out all other devices (not our mesh network)
+        logDiscoveryRejection(
+            peripheral: peripheral,
+            reason: "unknown_candidate_blocked",
+            now: now,
+            context: [
+                "rssi": rssi,
+                "connectable": isConnectable,
+                "hasServiceUUIDs": advertisementData[CBAdvertisementDataServiceUUIDsKey] != nil,
+                "hasServiceData": advertisementData[CBAdvertisementDataServiceDataKey] != nil
+            ]
+        )
         return false
+    }
+
+    private func shouldAllowUnknownBootstrap(
+        peripheral: CBPeripheral,
+        advertisementData: [String: Any],
+        rssi: Int16,
+        isConnectable: Bool,
+        now: Date
+    ) -> Bool {
+        let hasAnyServiceKey =
+            advertisementData[CBAdvertisementDataServiceUUIDsKey] != nil ||
+            advertisementData[CBAdvertisementDataServiceDataKey] != nil ||
+            advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] != nil ||
+            advertisementData[CBAdvertisementDataSolicitedServiceUUIDsKey] != nil
+
+        let lastAttempt = unknownBootstrapAttempts[peripheral.identifier]
+        let oneMinuteAgo = now.addingTimeInterval(-60.0)
+        let recentBootstrapAttempts = unknownBootstrapAttempts.values.filter { $0 > oneMinuteAgo }.count
+        let recentConnectionAttempts = globalConnectionAttempts.filter { $0 > oneMinuteAgo }.count
+        let shouldAllow = BleDiscoveryBootstrapPolicy.shouldAllowCandidate(
+            isConnectable: isConnectable,
+            currentConnectionCount: currentConnectionCount(),
+            maxConnectionsPerDevice: MAX_CONNECTIONS_PER_DEVICE,
+            estimatedVisiblePeerCount: estimatedVisiblePeerCount,
+            densePeerThreshold: ADAPTIVE_HIGH_DENSITY_THRESHOLD,
+            rssi: rssi,
+            hasAnyServiceKey: hasAnyServiceKey,
+            minRssiWithServiceKeys: UNKNOWN_BOOTSTRAP_MIN_RSSI,
+            minRssiWithoutServiceKeys: UNKNOWN_BOOTSTRAP_MIN_RSSI_WITH_MISSING_KEYS,
+            lastAttemptAt: lastAttempt,
+            now: now,
+            perDeviceCooldown: UNKNOWN_BOOTSTRAP_RATE_LIMIT,
+            recentBootstrapAttempts: recentBootstrapAttempts,
+            maxBootstrapAttemptsPerMinute: MAX_UNKNOWN_BOOTSTRAP_ATTEMPTS_PER_MINUTE,
+            recentConnectionAttempts: recentConnectionAttempts,
+            maxConnectionAttemptsPerMinute: ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE
+        )
+        guard shouldAllow else { return false }
+
+        unknownBootstrapAttempts[peripheral.identifier] = now
+        return true
+    }
+
+    private func logDiscoveryRejection(
+        peripheral: CBPeripheral,
+        reason: String,
+        now: Date,
+        context: [String: Any] = [:]
+    ) {
+        let key = "reject_\(reason)_\(peripheral.identifier.uuidString)"
+        guard logThrottler.shouldLog(key: key, interval: 30, now: now) else { return }
+        print("[BleManager] Skipping discovered peripheral \(peripheral.identifier) (\(reason))")
+        emitDiagnostic("debug", "Skipping discovered BLE peripheral", context: context.merging([
+            "identifier": peripheral.identifier.uuidString,
+            "reason": reason
+        ]) { current, _ in current })
     }
 
     private func identifierForNodeHash(_ nodeHash: UInt64) -> UUID? {
@@ -1983,9 +2092,18 @@ extension BleManager: CBCentralManagerDelegate {
         // Smart filtering for iOS ↔ Android interoperability
         // Since we scan without a service UUID filter (for Android compatibility),
         // we need to filter discovered peripherals here instead.
+        let isConnectable: Bool
+        if #available(iOS 13.0, *) {
+            isConnectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? true
+        } else {
+            isConnectable = true
+        }
+
         let shouldProcess = shouldProcessDiscoveredPeripheral(
             peripheral: peripheral,
             advertisementData: advertisementData,
+            rssi: rssiValue,
+            isConnectable: isConnectable,
             now: now
         )
         
@@ -2009,12 +2127,6 @@ extension BleManager: CBCentralManagerDelegate {
         discoveredPeripherals[peripheral.identifier] = peripheral
         peripheralRSSI[peripheral.identifier] = rssiValue
         
-        let isConnectable: Bool
-        if #available(iOS 13.0, *) {
-            isConnectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? true
-        } else {
-            isConnectable = true
-        }
         if discoveryLogTimestamps[peripheral.identifier] == nil || (now.timeIntervalSince(discoveryLogTimestamps[peripheral.identifier]!) > 30) {
             discoveryLogTimestamps[peripheral.identifier] = now
             print("[BleManager] Discovered peripheral: \(peripheral.identifier) RSSI=\(rssiValue) (density: \(estimatedVisiblePeerCount))")

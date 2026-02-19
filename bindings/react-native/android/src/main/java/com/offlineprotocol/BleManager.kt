@@ -99,6 +99,14 @@ class BleManager(
         private const val ADAPTIVE_COOLDOWN_PER_DEVICE_MS = 30_000L
         /** Interval for updating visible peer count estimate (ms) */
         private const val ADAPTIVE_PEER_COUNT_WINDOW_MS = 5_000L
+        /** Cooldown between provisional bootstrap attempts for unknown devices */
+        private const val UNKNOWN_BOOTSTRAP_RATE_LIMIT_MS = 12_000L
+        /** Minimum RSSI required for provisional bootstrap attempt */
+        private const val UNKNOWN_BOOTSTRAP_MIN_RSSI = -75
+        /** Stricter RSSI requirement when scan record is missing */
+        private const val UNKNOWN_BOOTSTRAP_MIN_RSSI_NO_SCAN_RECORD = -68
+        /** Max provisional bootstrap attempts per minute */
+        private const val MAX_UNKNOWN_BOOTSTRAP_ATTEMPTS_PER_MINUTE = 4
         /** Proactive scan refresh interval even when discoveries are occurring (ms) */
         private const val PROACTIVE_SCAN_REFRESH_MS = 60_000L
         /** Force a complete BLE stack refresh periodically even when things seem healthy (ms) */
@@ -181,6 +189,8 @@ class BleManager(
     @Volatile private var lastProactiveScanRefresh: Long = 0L
     /** Last time we performed a forced BLE refresh */
     @Volatile private var lastForcedBleRefresh: Long = 0L
+    /** Rate limiter for provisional unknown-device bootstrap attempts */
+    private val unknownBootstrapAttempts = ConcurrentHashMap<String, Long>()
     /** Tracks recently seen advertisements to avoid duplicate processing (hash, timestamp) */
     private data class AdvertisementCacheEntry(val hash: Int, val timestamp: Long)
     private val recentAdvertisementHashes = ConcurrentHashMap<String, AdvertisementCacheEntry>()
@@ -505,6 +515,7 @@ class BleManager(
         pendingOutboundFragments.clear()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
+        unknownBootstrapAttempts.clear()
         recentAdvertisementHashes.clear()
         connectionRetryCount.clear()
         connectedCentrals.clear()
@@ -1109,7 +1120,7 @@ class BleManager(
             true // Assume connectable on older Android
         }
         
-        if (!shouldProcessDiscoveredDevice(address, scanRecord, now)) {
+        if (!shouldProcessDiscoveredDevice(address, scanRecord, rssi, isConnectable, now)) {
             return
         }
         
@@ -1248,16 +1259,20 @@ class BleManager(
      * - Devices with our service data
      * - Previously discovered mesh devices
      * - Previously verified peer/device mappings
+     * - Strictly rate-limited bootstrap attempts for unknown connectable devices
      */
     private fun shouldProcessDiscoveredDevice(
         address: String,
         scanRecord: android.bluetooth.le.ScanRecord?,
+        rssi: Int,
+        isConnectable: Boolean,
         now: Long
     ): Boolean {
         // 0. Skip devices previously verified as non-mesh via GATT
         val nonMeshTimestamp = verifiedNonMeshDevices[address]
         if (nonMeshTimestamp != null) {
             if (now - nonMeshTimestamp < NON_MESH_CACHE_TTL_MS) {
+                logDiscoveryRejection(address, "non_mesh_cache", now, mapOf("ageMs" to (now - nonMeshTimestamp)))
                 return false
             }
             // Entry expired, remove it and allow re-evaluation
@@ -1330,9 +1345,84 @@ class BleManager(
         if (connections.getGatt(address) != null) {
             return true
         }
+
+        // 6. Controlled bootstrap for unknown connectable devices.
+        // Missing advertisement fields are treated as unknown (not invalid), but we keep
+        // strict safeguards to avoid probing arbitrary peripherals.
+        if (shouldAllowUnknownBootstrap(address, scanRecord != null, rssi, isConnectable, now)) {
+            if (logThrottler.shouldLog("bootstrap_allow_$address", intervalMs = 30_000L)) {
+                Log.d(TAG, "Allowing provisional bootstrap for $address (rssi=$rssi, scanRecord=${scanRecord != null})")
+                emitDiagnostic("debug", "Allowing provisional bootstrap candidate", mapOf(
+                    "address" to address,
+                    "rssi" to rssi,
+                    "scanRecordPresent" to (scanRecord != null),
+                    "connectable" to isConnectable
+                ))
+            }
+            return true
+        }
         
         // Filter out all other devices (not our mesh network)
+        logDiscoveryRejection(address, "unknown_candidate_blocked", now, mapOf(
+            "rssi" to rssi,
+            "connectable" to isConnectable,
+            "scanRecordPresent" to (scanRecord != null)
+        ))
         return false
+    }
+
+    private fun shouldAllowUnknownBootstrap(
+        address: String,
+        hasScanRecord: Boolean,
+        rssi: Int,
+        isConnectable: Boolean,
+        now: Long
+    ): Boolean {
+        val lastAttempt = unknownBootstrapAttempts[address]
+        val oneMinuteAgo = now - 60_000L
+        val recentBootstrapAttempts = unknownBootstrapAttempts.values.count { it >= oneMinuteAgo }
+
+        val recentConnectionAttempts = synchronized(globalConnectionAttempts) {
+            globalConnectionAttempts.count { it >= oneMinuteAgo }
+        }
+        val shouldAllow = BleDiscoveryBootstrapPolicy.shouldAllowCandidate(
+            isConnectable = isConnectable,
+            currentConnectionCount = currentConnectionCount(),
+            maxConnectionsPerDevice = MAX_CONNECTIONS_PER_DEVICE,
+            estimatedVisiblePeerCount = estimatedVisiblePeerCount,
+            densePeerThreshold = ADAPTIVE_HIGH_DENSITY_THRESHOLD,
+            rssi = rssi,
+            hasScanRecord = hasScanRecord,
+            minRssiWithScanRecord = UNKNOWN_BOOTSTRAP_MIN_RSSI,
+            minRssiWithoutScanRecord = UNKNOWN_BOOTSTRAP_MIN_RSSI_NO_SCAN_RECORD,
+            lastAttemptAt = lastAttempt,
+            now = now,
+            perDeviceCooldownMs = UNKNOWN_BOOTSTRAP_RATE_LIMIT_MS,
+            recentBootstrapAttempts = recentBootstrapAttempts,
+            maxBootstrapAttemptsPerMinute = MAX_UNKNOWN_BOOTSTRAP_ATTEMPTS_PER_MINUTE,
+            recentConnectionAttempts = recentConnectionAttempts,
+            maxConnectionAttemptsPerMinute = ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE
+        )
+        if (!shouldAllow) return false
+
+        unknownBootstrapAttempts[address] = now
+        return true
+    }
+
+    private fun logDiscoveryRejection(
+        address: String,
+        reason: String,
+        now: Long,
+        details: Map<String, Any?> = emptyMap()
+    ) {
+        if (!logThrottler.shouldLog("reject_${reason}_$address", intervalMs = 30_000L, nowMs = now)) {
+            return
+        }
+        Log.v(TAG, "Skipping discovered device $address ($reason)")
+        emitDiagnostic("debug", "Skipping discovered BLE device", details + mapOf(
+            "address" to address,
+            "reason" to reason
+        ))
     }
     
     /**
@@ -1963,6 +2053,13 @@ class BleManager(
             val entry = iterator.next()
             if (now - entry.value.timestamp > MESH_OBSERVATION_TTL_MS) {
                 iterator.remove()
+            }
+        }
+
+        val unknownIterator = unknownBootstrapAttempts.entries.iterator()
+        while (unknownIterator.hasNext()) {
+            if (now - unknownIterator.next().value > 60_000L) {
+                unknownIterator.remove()
             }
         }
     }
