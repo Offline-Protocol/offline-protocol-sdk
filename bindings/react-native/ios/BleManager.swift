@@ -175,11 +175,6 @@ public class BleManager: NSObject, TransportManager {
     private let MAX_CONSECUTIVE_SCAN_RESTARTS = 3
     private let CENTRAL_RESET_BACKOFF: TimeInterval = 45.0
     private let MINIMUM_RSSI_TO_CONNECT: Int16 = -90
-    /// Rate limiting for unknown connectable devices that need GATT verification
-    private var unknownDeviceAttempts: [UUID: Date] = [:]
-    private let UNKNOWN_DEVICE_RATE_LIMIT: TimeInterval = 5.0 // More aggressive for cross-platform discovery
-    private let UNKNOWN_DEVICE_MIN_RSSI: Int16 = -80 // More lenient for cross-platform discovery
-    private let MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE = 10
     /// Proactive scan refresh interval even when discoveries are occurring
     private let PROACTIVE_SCAN_REFRESH_INTERVAL: TimeInterval = 60.0
     private var lastProactiveScanRefresh: Date?
@@ -424,7 +419,6 @@ public class BleManager: NSObject, TransportManager {
         pendingFragments.removeAll()
         pendingOutboundFragments.removeAll()
         lastSeenMeshAdvertisements.removeAll()
-        unknownDeviceAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
         recentAdvertisementHashes.removeAll()
         pendingAdvertiseRestart?.cancel()
@@ -1528,8 +1522,6 @@ public class BleManager: NSObject, TransportManager {
     private func pruneMeshObservations(now: Date = Date()) {
         lastSeenMeshAdvertisements = lastSeenMeshAdvertisements.filter { now.timeIntervalSince($0.value.timestamp) <= MESH_OBSERVATION_TTL }
         
-        // Also clean up stale unknown device rate limiting entries
-        unknownDeviceAttempts = unknownDeviceAttempts.filter { now.timeIntervalSince($0.value) <= UNKNOWN_DEVICE_RATE_LIMIT * 3 }
     }
     
     // MARK: - Adaptive Scan Methods
@@ -1666,11 +1658,10 @@ public class BleManager: NSObject, TransportManager {
     /// - Devices advertising our service UUID (iOS devices)
     /// - Devices with our service data
     /// - Previously discovered mesh devices
-    /// - Unknown connectable devices (rate-limited, verified via GATT)
+    /// - Previously verified peer/device mappings
     private func shouldProcessDiscoveredPeripheral(
         peripheral: CBPeripheral,
         advertisementData: [String: Any],
-        rssi: Int16,
         now: Date
     ) -> Bool {
         // 0. Skip devices previously verified as non-mesh via GATT
@@ -1726,60 +1717,6 @@ public class BleManager: NSObject, TransportManager {
         if connections.peripheralDeviceId(for: peripheral.identifier) != nil ||
            connections.centralDeviceId(for: peripheral.identifier) != nil {
             return true
-        }
-        
-        // 6. For unknown connectable devices, allow with rate limiting
-        //    These will be verified via GATT service discovery after connection
-        //    each platform may not recognize the other's service UUID format in advertisements
-        let isConnectable: Bool
-        if #available(iOS 13.0, *) {
-            isConnectable = (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? false
-        } else {
-            isConnectable = true
-        }
-        
-        if isConnectable {
-            // Rate limit unknown device connection attempts
-            if let lastAttempt = unknownDeviceAttempts[peripheral.identifier],
-               now.timeIntervalSince(lastAttempt) < UNKNOWN_DEVICE_RATE_LIMIT {
-                return false
-            }
-            
-            // Check global rate limit for unknown device attempts
-            let oneMinuteAgo = now.addingTimeInterval(-60.0)
-            let recentUnknownAttempts = unknownDeviceAttempts.values.filter { $0 > oneMinuteAgo }.count
-            if recentUnknownAttempts >= MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE {
-                return false
-            }
-            
-            // Use a tiered approach: stronger signals get priority
-            // Matches Android tiering for cross-platform discovery parity
-            let shouldAttempt: Bool
-            if rssi >= -70 {
-                // Strong signal - always try
-                shouldAttempt = true
-            } else if rssi >= -85 {
-                // Medium signal - be lenient for cross-platform discovery
-                shouldAttempt = true
-            } else if rssi >= UNKNOWN_DEVICE_MIN_RSSI && recentUnknownAttempts < MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE / 2 {
-                // Weaker signal and we have budget
-                shouldAttempt = true
-            } else {
-                shouldAttempt = false
-            }
-            
-            if shouldAttempt {
-                unknownDeviceAttempts[peripheral.identifier] = now
-                if logThrottler.shouldLog(key: "unknown_connectable_\(peripheral.identifier.uuidString)", interval: 30) {
-                    print("[BleManager] Allowing unknown connectable device for GATT verification: \(peripheral.identifier) RSSI=\(rssi)")
-                    emitDiagnostic("debug", "Allowing unknown device for GATT verification", context: [
-                        "identifier": peripheral.identifier.uuidString,
-                        "rssi": rssi,
-                        "recentAttempts": recentUnknownAttempts
-                    ])
-                }
-                return true
-            }
         }
         
         // Filter out all other devices (not our mesh network)
@@ -2049,7 +1986,6 @@ extension BleManager: CBCentralManagerDelegate {
         let shouldProcess = shouldProcessDiscoveredPeripheral(
             peripheral: peripheral,
             advertisementData: advertisementData,
-            rssi: rssiValue,
             now: now
         )
         

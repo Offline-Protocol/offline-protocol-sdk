@@ -99,12 +99,6 @@ class BleManager(
         private const val ADAPTIVE_COOLDOWN_PER_DEVICE_MS = 30_000L
         /** Interval for updating visible peer count estimate (ms) */
         private const val ADAPTIVE_PEER_COUNT_WINDOW_MS = 5_000L
-        /** Rate limit for unknown device GATT verification attempts (ms) */
-        private const val UNKNOWN_DEVICE_RATE_LIMIT_MS = 5_000L // More aggressive for cross-platform discovery
-        /** Minimum RSSI for unknown device to be considered for GATT verification */
-        private const val UNKNOWN_DEVICE_MIN_RSSI = -80 // More lenient for cross-platform discovery
-        /** Maximum unknown device verification attempts per minute */
-        private const val MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE = 10
         /** Proactive scan refresh interval even when discoveries are occurring (ms) */
         private const val PROACTIVE_SCAN_REFRESH_MS = 60_000L
         /** Force a complete BLE stack refresh periodically even when things seem healthy (ms) */
@@ -183,8 +177,6 @@ class BleManager(
     /** Last time we updated the peer count estimate */
     @Volatile private var lastPeerCountUpdate: Long = 0L
     @Volatile private var lastMeshAdvertisement: MeshAdvertisementData? = null
-    /** Rate limiting for unknown connectable devices that need GATT verification */
-    private val unknownDeviceAttempts = ConcurrentHashMap<String, Long>()
     /** Last time we proactively refreshed the scan */
     @Volatile private var lastProactiveScanRefresh: Long = 0L
     /** Last time we performed a forced BLE refresh */
@@ -512,7 +504,6 @@ class BleManager(
         pendingFragments.clear()
         pendingOutboundFragments.clear()
         lastSeenMeshAdvertisements.clear()
-        unknownDeviceAttempts.clear()
         verifiedNonMeshDevices.clear()
         recentAdvertisementHashes.clear()
         connectionRetryCount.clear()
@@ -1118,7 +1109,7 @@ class BleManager(
             true // Assume connectable on older Android
         }
         
-        if (!shouldProcessDiscoveredDevice(address, scanRecord, rssi, isConnectable, now)) {
+        if (!shouldProcessDiscoveredDevice(address, scanRecord, now)) {
             return
         }
         
@@ -1256,13 +1247,11 @@ class BleManager(
      * - Devices advertising our service UUID
      * - Devices with our service data
      * - Previously discovered mesh devices
-     * - Unknown connectable devices (rate-limited, verified via GATT)
+     * - Previously verified peer/device mappings
      */
     private fun shouldProcessDiscoveredDevice(
         address: String,
         scanRecord: android.bluetooth.le.ScanRecord?,
-        rssi: Int,
-        isConnectable: Boolean,
         now: Long
     ): Boolean {
         // 0. Skip devices previously verified as non-mesh via GATT
@@ -1340,50 +1329,6 @@ class BleManager(
         // 5. Check if we have an active GATT connection to this device
         if (connections.getGatt(address) != null) {
             return true
-        }
-        
-        // 6. For unknown connectable devices, allow with rate limiting
-        //    These will be verified via GATT service discovery after connection
-        //    This is important for iOS ↔ Android cross-platform discovery since
-        //    each platform may not recognize the other's service UUID format in advertisements
-        if (isConnectable) {
-            // Rate limit unknown device connection attempts
-            val lastAttempt = unknownDeviceAttempts[address]
-            if (lastAttempt != null && now - lastAttempt < UNKNOWN_DEVICE_RATE_LIMIT_MS) {
-                return false
-            }
-            
-            // Check global rate limit for unknown device attempts
-            val recentUnknownAttempts = unknownDeviceAttempts.values.count { 
-                now - it < 60_000L 
-            }
-            if (recentUnknownAttempts >= MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE) {
-                return false
-            }
-            
-            // More lenient RSSI threshold for cross-platform discovery
-            // iOS devices may not advertise service UUID in a format Android recognizes,
-            // so we need to be more aggressive about connecting to verify via GATT
-            val shouldAttempt = when {
-                rssi >= -70 -> true  // Strong signal - always try
-                rssi >= -85 -> true  // Medium signal - be more lenient for iOS compatibility
-                rssi >= UNKNOWN_DEVICE_MIN_RSSI && recentUnknownAttempts < MAX_UNKNOWN_DEVICE_ATTEMPTS_PER_MINUTE / 2 -> true
-                else -> false
-            }
-            
-            if (shouldAttempt) {
-                unknownDeviceAttempts[address] = now
-                if (logThrottler.shouldLog("unknown_connectable_$address", intervalMs = 30_000)) {
-                    Log.d(TAG, "🔍 Allowing unknown connectable device for GATT verification: $address RSSI=$rssi (iOS compatibility mode)")
-                    emitDiagnostic("info", "Allowing unknown device for GATT verification", mapOf(
-                        "address" to address,
-                        "rssi" to rssi,
-                        "recentAttempts" to recentUnknownAttempts,
-                        "reason" to "ios_compatibility"
-                    ))
-                }
-                return true
-            }
         }
         
         // Filter out all other devices (not our mesh network)
