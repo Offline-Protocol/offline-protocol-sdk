@@ -68,6 +68,10 @@ class BleManager(
         private val MESSAGE_CHAR_UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
         private val DEVICE_ID_CHAR_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
         private val IDENTITY_CHAR_UUID = UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
+        private const val AD_TYPE_INCOMPLETE_128_BIT_SERVICE_UUIDS = 0x06
+        private const val AD_TYPE_COMPLETE_128_BIT_SERVICE_UUIDS = 0x07
+        private const val UUID_128_BIT_LENGTH_BYTES = 16
+        private val SERVICE_UUID_LE_BYTES = uuidToLittleEndianBytes(SERVICE_UUID)
         
         // Fallback interval for fragment polling. Primary send path is event-driven
         // via onFragmentsAvailable(); this timer only catches edge cases.
@@ -121,6 +125,12 @@ class BleManager(
         private const val AGGRESSIVE_DISCOVERY_PHASE_MS = 30_000L
         /** TTL for negative cache entries of verified non-mesh devices (ms) */
         private const val NON_MESH_CACHE_TTL_MS = 300_000L // 5 minutes
+
+        private fun uuidToLittleEndianBytes(uuid: UUID): ByteArray {
+            val hexUuid = uuid.toString().uppercase().replace("-", "")
+            val bigEndianBytes = hexUuid.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            return bigEndianBytes.reversedArray()
+        }
     }
     
     // MARK: - Properties
@@ -1293,36 +1303,15 @@ class BleManager(
             }
         }
         
-        // Also check service UUIDs in scan record bytes (for iOS compatibility)
-        // iOS sometimes advertises service UUIDs in a format Android's API doesn't parse correctly
+        // Also check service UUIDs in scan record AD structures (for iOS compatibility)
+        // iOS sometimes advertises service UUIDs in a format Android's API doesn't parse correctly.
+        // Restrict this fallback to 128-bit Service UUID AD fields only.
         val scanRecordBytes = scanRecord?.bytes
-        if (scanRecordBytes != null) {
-            // Convert UUID to byte array in little-endian format (BLE advertisement byte order).
-            // BLE stores 128-bit UUIDs with least-significant byte first.
-            val uuidString = SERVICE_UUID.toString().uppercase().replace("-", "")
-            val bigEndianBytes = uuidString.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            val uuidBytesLE = bigEndianBytes.reversedArray()
-            // Check if UUID bytes appear in scan record (simple substring search)
-            var found = false
-            for (i in 0..(scanRecordBytes.size - uuidBytesLE.size)) {
-                var match = true
-                for (j in uuidBytesLE.indices) {
-                    if (scanRecordBytes[i + j] != uuidBytesLE[j]) {
-                        match = false
-                        break
-                    }
-                }
-                if (match) {
-                    found = true
-                    break
-                }
+        if (scanRecordBytes != null && containsServiceUuidInAdStructures(scanRecordBytes)) {
+            if (logThrottler.shouldLog("service_uuid_bytes_match_$address", intervalMs = 30_000)) {
+                Log.d(TAG, "✅ Device $address matches service UUID in scan record AD structures")
             }
-            if (found) {
-                if (logThrottler.shouldLog("service_uuid_bytes_match_$address", intervalMs = 30_000)) {
-                    Log.d(TAG, "✅ Device $address matches service UUID in raw bytes")
-                }
-                return true
-            }
+            return true
         }
         
         // 2. Check for our service data
@@ -1368,6 +1357,45 @@ class BleManager(
             "connectable" to isConnectable,
             "scanRecordPresent" to (scanRecord != null)
         ))
+        return false
+    }
+
+    private fun containsServiceUuidInAdStructures(scanRecordBytes: ByteArray): Boolean {
+        var offset = 0
+        while (offset < scanRecordBytes.size) {
+            val length = scanRecordBytes[offset].toInt() and 0xFF
+            if (length == 0) break
+
+            val nextStructureOffset = offset + length + 1
+            if (nextStructureOffset > scanRecordBytes.size) {
+                return false
+            }
+            if (length < 2) {
+                offset = nextStructureOffset
+                continue
+            }
+
+            val adType = scanRecordBytes[offset + 1].toInt() and 0xFF
+            if (adType == AD_TYPE_INCOMPLETE_128_BIT_SERVICE_UUIDS || adType == AD_TYPE_COMPLETE_128_BIT_SERVICE_UUIDS) {
+                val dataStart = offset + 2
+                val dataLength = length - 1
+                val uuidCount = dataLength / UUID_128_BIT_LENGTH_BYTES
+
+                for (uuidIndex in 0 until uuidCount) {
+                    val uuidOffset = dataStart + (uuidIndex * UUID_128_BIT_LENGTH_BYTES)
+                    var matches = true
+                    for (byteIndex in 0 until UUID_128_BIT_LENGTH_BYTES) {
+                        if (scanRecordBytes[uuidOffset + byteIndex] != SERVICE_UUID_LE_BYTES[byteIndex]) {
+                            matches = false
+                            break
+                        }
+                    }
+                    if (matches) return true
+                }
+            }
+
+            offset = nextStructureOffset
+        }
         return false
     }
 
