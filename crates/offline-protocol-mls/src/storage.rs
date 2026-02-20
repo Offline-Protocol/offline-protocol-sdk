@@ -73,6 +73,11 @@ pub trait MlsStorage: Send + Sync {
     /// Stores data with the given key type and ID.
     ///
     /// If data already exists for this key, it should be overwritten.
+    /// Implementations should commit atomically for each `(key_type, key_id)` entry:
+    /// after `Ok(())`, a subsequent `load()` from any thread/process must return
+    /// either the old full value or the new full value, never a torn write.
+    /// Implementations should also provide best-effort crash durability so power
+    /// loss does not silently roll back acknowledged critical state writes.
     ///
     /// # Arguments
     ///
