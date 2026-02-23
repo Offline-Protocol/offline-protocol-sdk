@@ -296,14 +296,34 @@ impl TransportSelector {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Determine the best score, then apply deterministic tie-break among any
-        // transports that are within TIE_EPSILON of that best score.
-        let best_total = scored_transports.first()?.1.total;
-        let (best_transport, best_score) = scored_transports
+        // Determine the best finite score (ignoring NaNs), then apply deterministic
+        // tie-break among any transports that are within TIE_EPSILON of that best score.
+        // If all scores are non-finite, fall back to tie-break order alone.
+        let (best_transport, best_score) = if let Some((best_t, best_s)) = scored_transports
             .iter()
-            .filter(|(_, s)| best_total - s.total <= TIE_EPSILON)
-            .min_by_key(|(t, _)| transport_tie_break_priority(*t))
-            .map(|(t, s)| (*t, s.total))?;
+            .filter(|(_, s)| s.total.is_finite())
+            .max_by(|a, b| {
+                a.1.total
+                    .partial_cmp(&b.1.total)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            let best_total = best_s.total;
+            scored_transports
+                .iter()
+                .filter(|(_, s)| s.total.is_finite() && best_total - s.total <= TIE_EPSILON)
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, s)| (*t, s.total))
+                // In the unlikely event the filter yields nothing, fall back to the
+                // original best candidate.
+                .unwrap_or((*best_t, best_total))
+        } else {
+            // No finite scores; pick purely by tie-break priority.
+            scored_transports
+                .iter()
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, s)| (*t, s.total))?
+        };
 
         // Log all scored transports for observability.
         // Guard allocation behind level check to avoid Vec<String> on every call.
@@ -1184,19 +1204,27 @@ impl TransportSelector {
             return None;
         }
 
-        // Find best score (ignoring NaNs via partial_cmp fallback).
-        let best = scores
+        // Find best finite score (ignoring NaNs). If none, fall back to tie-break only.
+        if let Some(best) = scores
             .iter()
             .map(|(_, s)| *s)
-            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
-
-        // Apply same tie semantics as select_transport: consider any score within
-        // TIE_EPSILON of the best to be a tie, then apply tie-break priority.
-        scores
-            .iter()
-            .filter(|(_, s)| best - *s <= TIE_EPSILON)
-            .min_by_key(|(t, _)| transport_tie_break_priority(*t))
-            .map(|(t, _)| *t)
+            .filter(|s| s.is_finite())
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            // Apply same tie semantics as select_transport: consider any score within
+            // TIE_EPSILON of the best to be a tie, then apply tie-break priority.
+            scores
+                .iter()
+                .filter(|(_, s)| s.is_finite() && best - *s <= TIE_EPSILON)
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, _)| *t)
+        } else {
+            // No finite scores; choose purely by tie-break priority.
+            scores
+                .iter()
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, _)| *t)
+        }
     }
 }
 
