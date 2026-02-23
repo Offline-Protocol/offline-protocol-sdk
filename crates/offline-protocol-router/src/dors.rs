@@ -85,8 +85,8 @@ impl Default for DorsConfig {
     }
 }
 
-/// When two transport scores differ by less than this, they are considered a tie;
-/// the tie-break order (Internet > WiFiDirect > BLE) is then used.
+/// Scores within this delta of the *best* score are treated as a tie for selection,
+/// and the tie-break order (Internet > WiFiDirect > BLE) is then used.
 const TIE_EPSILON: f32 = 0.01;
 
 /// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
@@ -287,25 +287,23 @@ impl TransportSelector {
             scored_transports.push((*transport_type, score));
         }
 
-        // Sort by total score (descending), then by tie-break order when scores are equal
-        // or within TIE_EPSILON. Tie-break: Internet > WiFiDirect > BLE.
+        // Sort by total score (descending). Tie-break is applied *after* sorting using
+        // a transitive rule ("within TIE_EPSILON of best"), so we avoid epsilon-based
+        // comparators inside sort_by (which can violate transitivity).
         scored_transports.sort_by(|a, b| {
-            let diff = b.1.total - a.1.total;
-            if diff.abs() < TIE_EPSILON {
-                let pa = transport_tie_break_priority(a.0);
-                let pb = transport_tie_break_priority(b.0);
-                pa.cmp(&pb)
-            } else {
-                b.1.total
-                    .partial_cmp(&a.1.total)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
+            b.1.total
+                .partial_cmp(&a.1.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Get the best transport
-        let best = scored_transports.first()?;
-        let best_transport = best.0;
-        let best_score = best.1.total;
+        // Determine the best score, then apply deterministic tie-break among any
+        // transports that are within TIE_EPSILON of that best score.
+        let best_total = scored_transports.first()?.1.total;
+        let (best_transport, best_score) = scored_transports
+            .iter()
+            .filter(|(_, s)| best_total - s.total <= TIE_EPSILON)
+            .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+            .map(|(t, s)| (*t, s.total))?;
 
         // Log all scored transports for observability.
         // Guard allocation behind level check to avoid Vec<String> on every call.
@@ -396,17 +394,30 @@ impl TransportSelector {
             scored.push((*transport_type, score.total));
         }
 
-        // Same tie-break as select_transport: when scores are within TIE_EPSILON, prefer Internet > WiFiDirect > BLE
-        scored.sort_by(|a, b| {
-            let diff = b.1 - a.1;
-            if diff.abs() < TIE_EPSILON {
-                transport_tie_break_priority(a.0)
-                    .cmp(&transport_tie_break_priority(b.0))
-            } else {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        // Sort by score (descending) first.
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Then apply the same deterministic tie-break as `select_transport` within
+        // "near-tie" groups (within TIE_EPSILON of the group leader).
+        //
+        // This avoids epsilon-based comparators inside sort_by (non-transitive),
+        // while still producing stable ordering for presentation/debugging.
+        let mut ranked: Vec<(TransportType, f32)> = Vec::with_capacity(scored.len());
+        let mut i = 0;
+        while i < scored.len() {
+            let group_best = scored[i].1;
+            let mut j = i + 1;
+            while j < scored.len() && group_best - scored[j].1 <= TIE_EPSILON {
+                j += 1;
             }
-        });
-        scored
+
+            let mut group: Vec<(TransportType, f32)> = scored[i..j].to_vec();
+            group.sort_by_key(|(t, _)| transport_tie_break_priority(*t));
+            ranked.extend(group);
+            i = j;
+        }
+
+        ranked
     }
 
     /// Calculates the transport score based on multiple factors.
@@ -1181,16 +1192,20 @@ impl TransportSelector {
         if scores.is_empty() {
             return None;
         }
-        let mut sorted: Vec<_> = scores.to_vec();
-        sorted.sort_by(|a, b| {
-            let diff = b.1 - a.1;
-            if diff.abs() < TIE_EPSILON {
-                transport_tie_break_priority(a.0).cmp(&transport_tie_break_priority(b.0))
-            } else {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            }
-        });
-        sorted.first().map(|(t, _)| *t)
+
+        // Find best score (ignoring NaNs via partial_cmp fallback).
+        let best = scores
+            .iter()
+            .map(|(_, s)| *s)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+
+        // Apply same tie semantics as select_transport: consider any score within
+        // TIE_EPSILON of the best to be a tie, then apply tie-break priority.
+        scores
+            .iter()
+            .filter(|(_, s)| best - *s <= TIE_EPSILON)
+            .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+            .map(|(t, _)| *t)
     }
 }
 
@@ -2017,7 +2032,6 @@ mod tests {
             (TransportType::WiFiDirect, 50.0),
             (TransportType::BLE, 50.0),
         ];
-				print!("scores_two: {:?}", TransportSelector::select_from_scores_for_test(&scores_two));
         assert_eq!(
             TransportSelector::select_from_scores_for_test(&scores_two),
             Some(TransportType::WiFiDirect),
