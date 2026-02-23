@@ -394,30 +394,21 @@ impl TransportSelector {
             scored.push((*transport_type, score.total));
         }
 
-        // Sort by score (descending) first.
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Then apply the same deterministic tie-break as `select_transport` within
-        // "near-tie" groups (within TIE_EPSILON of the group leader).
+        // Contract: ranked by score (descending).
         //
-        // This avoids epsilon-based comparators inside sort_by (non-transitive),
-        // while still producing stable ordering for presentation/debugging.
-        let mut ranked: Vec<(TransportType, f32)> = Vec::with_capacity(scored.len());
-        let mut i = 0;
-        while i < scored.len() {
-            let group_best = scored[i].1;
-            let mut j = i + 1;
-            while j < scored.len() && group_best - scored[j].1 <= TIE_EPSILON {
-                j += 1;
+        // Determinism: when scores are exactly equal (rare with floats, but can
+        // happen in tests or after rounding), apply the same priority tie-break
+        // used by selection: Internet > WiFiDirect > BLE.
+        scored.sort_by(|a, b| {
+            let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+            if ord == std::cmp::Ordering::Equal {
+                transport_tie_break_priority(a.0).cmp(&transport_tie_break_priority(b.0))
+            } else {
+                ord
             }
+        });
 
-            let mut group: Vec<(TransportType, f32)> = scored[i..j].to_vec();
-            group.sort_by_key(|(t, _)| transport_tie_break_priority(*t));
-            ranked.extend(group);
-            i = j;
-        }
-
-        ranked
+        scored
     }
 
     /// Calculates the transport score based on multiple factors.
