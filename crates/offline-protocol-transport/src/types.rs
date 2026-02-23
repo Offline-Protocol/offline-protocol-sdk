@@ -193,6 +193,98 @@ impl LinkQuality {
 mod tests {
     use super::*;
 
+    // --- TransportType ---
+
+    #[test]
+    fn test_transport_type_label() {
+        assert_eq!(TransportType::Internet.label(), "internet");
+        assert_eq!(TransportType::BLE.label(), "ble");
+        assert_eq!(TransportType::WiFiDirect.label(), "wifiDirect");
+    }
+
+    #[test]
+    fn test_transport_type_from_label() {
+        assert_eq!(TransportType::from_label("internet"), TransportType::Internet);
+        assert_eq!(TransportType::from_label("INTERNET"), TransportType::Internet);
+        assert_eq!(TransportType::from_label("ble"), TransportType::BLE);
+        assert_eq!(TransportType::from_label("BLE"), TransportType::BLE);
+        assert_eq!(TransportType::from_label("wifiDirect"), TransportType::WiFiDirect);
+        assert_eq!(TransportType::from_label("wifi_direct"), TransportType::WiFiDirect);
+        assert_eq!(TransportType::from_label("wifi-direct"), TransportType::WiFiDirect);
+        assert_eq!(TransportType::from_label("wifidirect"), TransportType::WiFiDirect);
+        assert_eq!(TransportType::from_label("unknown"), TransportType::BLE);
+        assert_eq!(TransportType::from_label(""), TransportType::BLE);
+    }
+
+    #[test]
+    fn test_transport_type_display() {
+        assert_eq!(TransportType::Internet.to_string(), "internet");
+        assert_eq!(TransportType::BLE.to_string(), "ble");
+        assert_eq!(TransportType::WiFiDirect.to_string(), "wifiDirect");
+    }
+
+    // --- TransportMetrics ---
+
+    #[test]
+    fn test_transport_metrics_default() {
+        let m = TransportMetrics::default();
+        assert_eq!(m.rssi, None);
+        assert_eq!(m.congestion, 0.0);
+        assert_eq!(m.queue_depth, 0);
+        assert_eq!(m.success_count, 0);
+        assert_eq!(m.failure_count, 0);
+        assert_eq!(m.sample_count(), 0);
+    }
+
+    #[test]
+    fn test_transport_metrics_effective_delivery_ratio_explicit() {
+        let mut m = TransportMetrics::default();
+        m.delivery_ratio = Some(0.9);
+        assert_eq!(m.effective_delivery_ratio(), Some(0.9));
+    }
+
+    #[test]
+    fn test_transport_metrics_effective_delivery_ratio_from_counts() {
+        let mut m = TransportMetrics::default();
+        m.success_count = 8;
+        m.failure_count = 2;
+        assert_eq!(m.effective_delivery_ratio(), Some(0.8));
+        assert_eq!(m.sample_count(), 10);
+    }
+
+    #[test]
+    fn test_transport_metrics_effective_delivery_ratio_none_when_no_samples() {
+        let m = TransportMetrics::default();
+        assert_eq!(m.effective_delivery_ratio(), None);
+        assert_eq!(m.effective_drop_ratio(), None);
+    }
+
+    #[test]
+    fn test_transport_metrics_effective_drop_ratio() {
+        let mut m = TransportMetrics::default();
+        m.drop_rate = Some(0.2);
+        assert_eq!(m.effective_drop_ratio(), Some(0.2));
+    }
+
+    #[test]
+    fn test_transport_metrics_effective_drop_ratio_from_counts() {
+        let mut m = TransportMetrics::default();
+        m.success_count = 7;
+        m.failure_count = 3;
+        assert_eq!(m.effective_drop_ratio(), Some(0.3));
+    }
+
+    #[test]
+    fn test_transport_metrics_delivery_ratio_clamped() {
+        let mut m = TransportMetrics::default();
+        m.delivery_ratio = Some(1.5);
+        assert_eq!(m.effective_delivery_ratio(), Some(1.0));
+        m.delivery_ratio = Some(-0.1);
+        assert_eq!(m.effective_delivery_ratio(), Some(0.0));
+    }
+
+    // --- LinkQuality ---
+
     #[test]
     fn test_link_quality_from_rssi() {
         let excellent = LinkQuality::from_rssi(-40);
@@ -215,5 +307,36 @@ mod tests {
     fn test_link_quality_clamping() {
         let quality = LinkQuality::new(150);
         assert_eq!(quality.value(), 100);
+        assert_eq!(LinkQuality::new(0).value(), 0);
+        assert_eq!(LinkQuality::new(100).value(), 100);
+    }
+
+    #[test]
+    fn test_link_quality_new_and_value() {
+        let q = LinkQuality::new(50);
+        assert_eq!(q.value(), 50);
+    }
+
+    #[test]
+    fn test_link_quality_is_good_is_poor() {
+        assert!(LinkQuality::new(70).is_good());
+        assert!(!LinkQuality::new(69).is_good());
+        assert!(LinkQuality::new(40).is_poor());
+        assert!(LinkQuality::new(39).is_poor());
+        assert!(!LinkQuality::new(41).is_poor());
+    }
+
+    #[test]
+    fn test_link_quality_from_rssi_boundaries() {
+        assert_eq!(LinkQuality::from_rssi(-50).value(), 100);
+        assert!(LinkQuality::from_rssi(-70).value() >= 70);
+        assert!(LinkQuality::from_rssi(-85).value() >= 40 && LinkQuality::from_rssi(-85).value() <= 70);
+        assert!(LinkQuality::from_rssi(-100).value() <= 40);
+    }
+
+    #[test]
+    fn test_link_quality_constants() {
+        assert_eq!(LinkQuality::MAX, 100);
+        assert_eq!(LinkQuality::MIN, 0);
     }
 }
