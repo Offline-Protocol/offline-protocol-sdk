@@ -515,6 +515,7 @@ export type WelcomeReasonCode =
 export interface WelcomeSendAttemptedEvent extends BaseEvent {
   type: 'welcome_send_attempted';
   peer_id: string;
+  message_id: string;
   group_id: string;
   attempt: number;
 }
@@ -525,6 +526,7 @@ export interface WelcomeSendAttemptedEvent extends BaseEvent {
 export interface WelcomeSendSucceededEvent extends BaseEvent {
   type: 'welcome_send_succeeded';
   peer_id: string;
+  message_id: string;
   group_id: string;
   attempt: number;
 }
@@ -535,6 +537,7 @@ export interface WelcomeSendSucceededEvent extends BaseEvent {
 export interface WelcomeSendFailedEvent extends BaseEvent {
   type: 'welcome_send_failed';
   peer_id: string;
+  message_id: string;
   group_id: string;
   attempt: number;
   reason_code: WelcomeReasonCode;
@@ -549,6 +552,7 @@ export interface WelcomeSendFailedEvent extends BaseEvent {
 export interface WelcomeSendExpiredEvent extends BaseEvent {
   type: 'welcome_send_expired';
   peer_id: string;
+  message_id: string;
   attempt: number;
   reason_code: WelcomeReasonCode;
 }

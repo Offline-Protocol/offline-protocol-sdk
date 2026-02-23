@@ -253,6 +253,8 @@ pub enum Event {
     WelcomeSendAttempted {
         /// Peer identifier for this welcome lifecycle.
         peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
         /// MLS group identifier associated with the welcome.
         group_id: String,
         /// 1-based send attempt number.
@@ -263,6 +265,8 @@ pub enum Event {
     WelcomeSendSucceeded {
         /// Peer identifier for this welcome lifecycle.
         peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
         /// MLS group identifier associated with the welcome.
         group_id: String,
         /// 1-based send attempt number.
@@ -273,6 +277,8 @@ pub enum Event {
     WelcomeSendFailed {
         /// Peer identifier for this welcome lifecycle.
         peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
         /// MLS group identifier associated with the welcome.
         group_id: String,
         /// 1-based send attempt number.
@@ -293,6 +299,8 @@ pub enum Event {
     WelcomeSendExpired {
         /// Peer identifier for this welcome lifecycle.
         peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
         /// Final attempt number when lifecycle expired.
         attempt: u32,
         /// Terminal machine-readable reason code.
@@ -604,18 +612,30 @@ impl Event {
     }
 
     /// Creates a WelcomeSendAttempted event.
-    pub fn welcome_send_attempted(peer_id: String, group_id: String, attempt: u32) -> Self {
+    pub fn welcome_send_attempted(
+        peer_id: String,
+        message_id: String,
+        group_id: String,
+        attempt: u32,
+    ) -> Self {
         Self::WelcomeSendAttempted {
             peer_id,
+            message_id,
             group_id,
             attempt,
         }
     }
 
     /// Creates a WelcomeSendSucceeded event.
-    pub fn welcome_send_succeeded(peer_id: String, group_id: String, attempt: u32) -> Self {
+    pub fn welcome_send_succeeded(
+        peer_id: String,
+        message_id: String,
+        group_id: String,
+        attempt: u32,
+    ) -> Self {
         Self::WelcomeSendSucceeded {
             peer_id,
+            message_id,
             group_id,
             attempt,
         }
@@ -624,6 +644,7 @@ impl Event {
     /// Creates a WelcomeSendFailed event.
     pub fn welcome_send_failed(
         peer_id: String,
+        message_id: String,
         group_id: String,
         attempt: u32,
         reason_code: WelcomeReasonCode,
@@ -633,6 +654,7 @@ impl Event {
     ) -> Self {
         Self::WelcomeSendFailed {
             peer_id,
+            message_id,
             group_id,
             attempt,
             reason_code,
@@ -643,9 +665,15 @@ impl Event {
     }
 
     /// Creates a WelcomeSendExpired event.
-    pub fn welcome_send_expired(peer_id: String, attempt: u32, reason_code: WelcomeReasonCode) -> Self {
+    pub fn welcome_send_expired(
+        peer_id: String,
+        message_id: String,
+        attempt: u32,
+        reason_code: WelcomeReasonCode,
+    ) -> Self {
         Self::WelcomeSendExpired {
             peer_id,
+            message_id,
             attempt,
             reason_code,
         }
@@ -966,26 +994,31 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::WelcomeSendAttempted {
                 peer_id: _,
+                message_id,
                 group_id,
                 attempt,
             } => f
                 .debug_struct("WelcomeSendAttempted")
                 .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
                 .field("group_id", group_id)
                 .field("attempt", attempt)
                 .finish(),
             Self::WelcomeSendSucceeded {
                 peer_id: _,
+                message_id,
                 group_id,
                 attempt,
             } => f
                 .debug_struct("WelcomeSendSucceeded")
                 .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
                 .field("group_id", group_id)
                 .field("attempt", attempt)
                 .finish(),
             Self::WelcomeSendFailed {
                 peer_id: _,
+                message_id,
                 group_id,
                 attempt,
                 reason_code,
@@ -995,6 +1028,7 @@ impl fmt::Debug for Event {
             } => f
                 .debug_struct("WelcomeSendFailed")
                 .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
                 .field("group_id", group_id)
                 .field("attempt", attempt)
                 .field("reason_code", reason_code)
@@ -1004,11 +1038,13 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::WelcomeSendExpired {
                 peer_id: _,
+                message_id,
                 attempt,
                 reason_code,
             } => f
                 .debug_struct("WelcomeSendExpired")
                 .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
                 .field("attempt", attempt)
                 .field("reason_code", reason_code)
                 .finish(),

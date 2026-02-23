@@ -698,6 +698,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func internetSendFailed(messageId: String) 
     
+    func internetSendFailedWithReason(messageId: String, reason: String?) 
+    
     func internetStatusChanged(isConnected: Bool) throws 
     
     func isMlsInitialized()  -> Bool
@@ -1351,6 +1353,15 @@ open func internetSendFailed(messageId: String)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
+open func internetSendFailedWithReason(messageId: String, reason: String?)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterOptionString.lower(reason),$0
     )
 }
 }
@@ -5551,6 +5562,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 21563) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243) {
