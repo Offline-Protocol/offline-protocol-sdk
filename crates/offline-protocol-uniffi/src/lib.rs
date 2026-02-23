@@ -676,7 +676,8 @@ pub struct BleFragment {
 #[derive(Debug, Clone)]
 pub struct InternetMessage {
     /// Unique message identifier. Use this with `internet_confirm_sent()` or
-    /// `internet_send_failed()` to report the send outcome.
+    /// `internet_send_failed()`/`internet_send_failed_with_reason()` to report
+    /// the send outcome.
     pub message_id: String,
     pub recipient_id: String,
     pub data: Vec<u8>,
@@ -1391,7 +1392,8 @@ impl OfflineProtocol {
     ///
     /// Returns the next queued message with its `message_id`. After sending
     /// over the wire, the platform **must** call either `internet_confirm_sent(message_id)`
-    /// or `internet_send_failed(message_id)` to close the feedback loop.
+    /// or `internet_send_failed(message_id)`/`internet_send_failed_with_reason(message_id, reason)`
+    /// to close the feedback loop.
     pub fn internet_get_next_message(&self) -> Option<InternetMessage> {
         {
             let internet_state = self.internet_state.lock().unwrap();
@@ -1484,7 +1486,14 @@ impl OfflineProtocol {
     /// This feeds real delivery data into transport metrics so DORS can make
     /// accurate routing decisions.
     pub fn internet_confirm_sent(&self, message_id: String) {
-        let protocol = self.inner.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
+        if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
+            tracing::warn!(
+                message_id = %message_id,
+                error = %err,
+                "Failed to apply welcome lifecycle transport confirmation"
+            );
+        }
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
@@ -1504,7 +1513,25 @@ impl OfflineProtocol {
     ///
     /// The platform must call this when the WebSocket send fails.
     pub fn internet_send_failed(&self, message_id: String) {
-        let protocol = self.inner.lock().unwrap();
+        self.internet_send_failed_with_reason(
+            message_id,
+            Some("Internet transport send failed".to_string()),
+        );
+    }
+
+    /// Internet: Report that a message failed to send over the wire.
+    ///
+    /// `reason` should carry platform-specific error context so reliability
+    /// telemetry can classify root causes more accurately.
+    pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
+        let mut protocol = self.inner.lock().unwrap();
+        if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+            tracing::warn!(
+                message_id = %message_id,
+                error = %err,
+                "Failed to apply welcome lifecycle transport failure"
+            );
+        }
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)

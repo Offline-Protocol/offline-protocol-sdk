@@ -168,6 +168,32 @@ impl ProtocolConfig {
             ));
         }
 
+        if self.reliability.retry.initial_delay_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.initial_delay_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.retry.max_delay_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.max_delay_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.retry.initial_delay_ms > self.reliability.retry.max_delay_ms {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.initial_delay_ms must be <= retry.max_delay_ms".to_string(),
+            ));
+        }
+
+        if !self.reliability.retry.backoff_multiplier.is_finite()
+            || self.reliability.retry.backoff_multiplier < 1.0
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.backoff_multiplier must be finite and >= 1.0".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -323,6 +349,28 @@ mod tests {
         config.transport.ble_enabled = false;
         config.transport.wifi_direct_enabled = false;
         config.transport.internet_enabled = false;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_retry_initial_delay_must_be_positive() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.reliability.retry.initial_delay_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_retry_delay_bounds() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.reliability.retry.initial_delay_ms = 2000;
+        config.reliability.retry.max_delay_ms = 1000;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_retry_backoff_multiplier_bounds() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.reliability.retry.backoff_multiplier = 0.5;
         assert!(config.validate().is_err());
     }
 

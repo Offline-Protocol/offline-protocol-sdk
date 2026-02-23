@@ -9,6 +9,35 @@ use std::sync::Arc;
 /// Event callback type for handling protocol events.
 pub type EventCallback = Arc<dyn Fn(Event) + Send + Sync>;
 
+/// Machine-readable reason taxonomy for welcome delivery failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WelcomeReasonCode {
+    /// No transport was available or all transport sends failed.
+    TransportUnavailable,
+    /// Peer was disconnected or became unavailable during send.
+    PeerDisconnected,
+    /// Send operation timed out.
+    Timeout,
+    /// Local/internal error prevented send.
+    InternalError,
+    /// Retry budget or lifecycle TTL was exhausted.
+    RetryExhausted,
+}
+
+impl WelcomeReasonCode {
+    /// Returns the stable machine-readable reason code.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TransportUnavailable => "TRANSPORT_UNAVAILABLE",
+            Self::PeerDisconnected => "PEER_DISCONNECTED",
+            Self::Timeout => "TIMEOUT",
+            Self::InternalError => "INTERNAL_ERROR",
+            Self::RetryExhausted => "RETRY_EXHAUSTED",
+        }
+    }
+}
+
 /// Events that can occur in the protocol.
 ///
 /// Note: This type implements a custom Debug that redacts sensitive fields
@@ -218,6 +247,64 @@ pub enum Event {
         peer_id: String,
         /// Reason for the failure.
         reason: String,
+    },
+
+    /// Welcome send lifecycle entered attempted state.
+    WelcomeSendAttempted {
+        /// Peer identifier for this welcome lifecycle.
+        peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
+        /// MLS group identifier associated with the welcome.
+        group_id: String,
+        /// 1-based send attempt number.
+        attempt: u32,
+    },
+
+    /// Welcome send lifecycle reached successful sent state.
+    WelcomeSendSucceeded {
+        /// Peer identifier for this welcome lifecycle.
+        peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
+        /// MLS group identifier associated with the welcome.
+        group_id: String,
+        /// 1-based send attempt number.
+        attempt: u32,
+    },
+
+    /// Welcome send attempt failed and may be retried.
+    WelcomeSendFailed {
+        /// Peer identifier for this welcome lifecycle.
+        peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
+        /// MLS group identifier associated with the welcome.
+        group_id: String,
+        /// 1-based send attempt number.
+        attempt: u32,
+        /// Machine-readable reason code.
+        reason_code: WelcomeReasonCode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Optional transport/native error detail.
+        transport_error: Option<String>,
+        /// Whether this failure will be retried.
+        retryable: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Next scheduled retry timestamp in Unix ms.
+        next_retry_at: Option<i64>,
+    },
+
+    /// Welcome send lifecycle reached terminal expiry.
+    WelcomeSendExpired {
+        /// Peer identifier for this welcome lifecycle.
+        peer_id: String,
+        /// Welcome message identifier for lifecycle correlation.
+        message_id: String,
+        /// Final attempt number when lifecycle expired.
+        attempt: u32,
+        /// Terminal machine-readable reason code.
+        reason_code: WelcomeReasonCode,
     },
 
     /// A connection request was received from another user.
@@ -522,6 +609,74 @@ impl Event {
     /// Creates a SecureSessionFailed event.
     pub fn secure_session_failed(peer_id: String, reason: String) -> Self {
         Self::SecureSessionFailed { peer_id, reason }
+    }
+
+    /// Creates a WelcomeSendAttempted event.
+    pub fn welcome_send_attempted(
+        peer_id: String,
+        message_id: String,
+        group_id: String,
+        attempt: u32,
+    ) -> Self {
+        Self::WelcomeSendAttempted {
+            peer_id,
+            message_id,
+            group_id,
+            attempt,
+        }
+    }
+
+    /// Creates a WelcomeSendSucceeded event.
+    pub fn welcome_send_succeeded(
+        peer_id: String,
+        message_id: String,
+        group_id: String,
+        attempt: u32,
+    ) -> Self {
+        Self::WelcomeSendSucceeded {
+            peer_id,
+            message_id,
+            group_id,
+            attempt,
+        }
+    }
+
+    /// Creates a WelcomeSendFailed event.
+    pub fn welcome_send_failed(
+        peer_id: String,
+        message_id: String,
+        group_id: String,
+        attempt: u32,
+        reason_code: WelcomeReasonCode,
+        transport_error: Option<String>,
+        retryable: bool,
+        next_retry_at: Option<i64>,
+    ) -> Self {
+        Self::WelcomeSendFailed {
+            peer_id,
+            message_id,
+            group_id,
+            attempt,
+            reason_code,
+            transport_error,
+            retryable,
+            next_retry_at,
+        }
+    }
+
+    /// Creates a WelcomeSendExpired event.
+    pub fn welcome_send_expired(
+        peer_id: String,
+        message_id: String,
+        attempt: u32,
+        reason_code: WelcomeReasonCode,
+    ) -> Self {
+        Self::WelcomeSendExpired {
+            peer_id,
+            message_id,
+            attempt,
+            reason_code,
+        }
     }
 
     /// Creates a ConnectionRequestReceived event.
@@ -836,6 +991,62 @@ impl fmt::Debug for Event {
                 .debug_struct("SecureSessionFailed")
                 .field("peer_id", &"[REDACTED]")
                 .field("reason", reason)
+                .finish(),
+            Self::WelcomeSendAttempted {
+                peer_id: _,
+                message_id,
+                group_id,
+                attempt,
+            } => f
+                .debug_struct("WelcomeSendAttempted")
+                .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
+                .field("group_id", group_id)
+                .field("attempt", attempt)
+                .finish(),
+            Self::WelcomeSendSucceeded {
+                peer_id: _,
+                message_id,
+                group_id,
+                attempt,
+            } => f
+                .debug_struct("WelcomeSendSucceeded")
+                .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
+                .field("group_id", group_id)
+                .field("attempt", attempt)
+                .finish(),
+            Self::WelcomeSendFailed {
+                peer_id: _,
+                message_id,
+                group_id,
+                attempt,
+                reason_code,
+                transport_error,
+                retryable,
+                next_retry_at,
+            } => f
+                .debug_struct("WelcomeSendFailed")
+                .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
+                .field("group_id", group_id)
+                .field("attempt", attempt)
+                .field("reason_code", reason_code)
+                .field("transport_error", transport_error)
+                .field("retryable", retryable)
+                .field("next_retry_at", next_retry_at)
+                .finish(),
+            Self::WelcomeSendExpired {
+                peer_id: _,
+                message_id,
+                attempt,
+                reason_code,
+            } => f
+                .debug_struct("WelcomeSendExpired")
+                .field("peer_id", &"[REDACTED]")
+                .field("message_id", message_id)
+                .field("attempt", attempt)
+                .field("reason_code", reason_code)
                 .finish(),
             Self::ConnectionRequestReceived {
                 sender: _,

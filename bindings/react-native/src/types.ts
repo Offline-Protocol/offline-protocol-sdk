@@ -500,6 +500,64 @@ export interface SecureSessionFailedEvent extends BaseEvent {
 }
 
 /**
+ * Machine-readable reason codes for welcome delivery failures.
+ */
+export type WelcomeReasonCode =
+  | 'TRANSPORT_UNAVAILABLE'
+  | 'PEER_DISCONNECTED'
+  | 'TIMEOUT'
+  | 'INTERNAL_ERROR'
+  | 'RETRY_EXHAUSTED';
+
+/**
+ * Welcome send attempted event
+ */
+export interface WelcomeSendAttemptedEvent extends BaseEvent {
+  type: 'welcome_send_attempted';
+  peer_id: string;
+  message_id: string;
+  group_id: string;
+  attempt: number;
+}
+
+/**
+ * Welcome send succeeded event
+ */
+export interface WelcomeSendSucceededEvent extends BaseEvent {
+  type: 'welcome_send_succeeded';
+  peer_id: string;
+  message_id: string;
+  group_id: string;
+  attempt: number;
+}
+
+/**
+ * Welcome send failed event
+ */
+export interface WelcomeSendFailedEvent extends BaseEvent {
+  type: 'welcome_send_failed';
+  peer_id: string;
+  message_id: string;
+  group_id: string;
+  attempt: number;
+  reason_code: WelcomeReasonCode;
+  transport_error?: string;
+  retryable: boolean;
+  next_retry_at?: number;
+}
+
+/**
+ * Welcome send expired event
+ */
+export interface WelcomeSendExpiredEvent extends BaseEvent {
+  type: 'welcome_send_expired';
+  peer_id: string;
+  message_id: string;
+  attempt: number;
+  reason_code: WelcomeReasonCode;
+}
+
+/**
  * Connection request received event
  */
 export interface ConnectionRequestReceivedEvent extends BaseEvent {
@@ -636,6 +694,10 @@ export type ProtocolEvent =
   | DiagnosticEvent
   | SecureSessionEstablishedEvent
   | SecureSessionFailedEvent
+  | WelcomeSendAttemptedEvent
+  | WelcomeSendSucceededEvent
+  | WelcomeSendFailedEvent
+  | WelcomeSendExpiredEvent
   | ConnectionRequestReceivedEvent
   | ConnectionAcceptedEvent
   | ConnectionRejectedEvent

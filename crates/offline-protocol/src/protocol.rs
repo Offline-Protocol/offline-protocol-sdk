@@ -13,6 +13,7 @@ use offline_protocol_router::{DorsConfig, PathSelector, RelayManager, TransportS
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
@@ -54,6 +55,14 @@ mod internal_prefixes {
 const CONFIRMATION_RETRY_INTERVAL_SECS: i64 = 5;
 /// Probe interval for reconciling pending sessions after restart.
 const CONFIRMATION_PROBE_INTERVAL_SECS: i64 = 5;
+/// Number of welcome retry records processed per tick.
+const WELCOME_RETRY_BATCH_SIZE: usize = 20;
+/// Hard TTL for outbound welcome lifecycle records.
+const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
+/// Jitter ratio applied to welcome retry backoff delays.
+const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
+/// Timeout waiting for explicit internet send confirmation for welcome.
+const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,12 +221,51 @@ impl SessionState {
     }
 }
 
+/// Durable lifecycle states for outbound Welcome delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WelcomeDeliveryState {
+    Created,
+    SendAttempted,
+    Sent,
+    Failed,
+    Expired,
+}
+
+impl WelcomeDeliveryState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "Created",
+            Self::SendAttempted => "SendAttempted",
+            Self::Sent => "Sent",
+            Self::Failed => "Failed",
+            Self::Expired => "Expired",
+        }
+    }
+}
+
+/// Durable metadata for outbound Welcome reliability handling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WelcomeLifecycleRecord {
+    peer_id: String,
+    group_id: String,
+    state: WelcomeDeliveryState,
+    attempt: u32,
+    welcome_message: Message,
+    next_retry_at: Option<DateTime<Utc>>,
+    last_reason_code: Option<crate::events::WelcomeReasonCode>,
+    last_transport_error: Option<String>,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
 /// Storage key types for message persistence.
 mod storage_keys {
     /// Key type for pending encrypted messages.
     pub const PENDING_MESSAGES: &str = "pending_messages";
     /// Key type for persisted per-peer MLS session confirmation state.
     pub const SESSION_STATES: &str = "session_states";
+    /// Key type for persisted per-peer outbound welcome lifecycle state.
+    pub const WELCOME_LIFECYCLES: &str = "welcome_lifecycles";
     /// Key type for the Lamport clock value.
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
@@ -345,6 +393,9 @@ pub struct OfflineProtocol {
 
     /// Probe schedule for pending sessions to guarantee post-restart convergence.
     confirmation_probe_due_at: HashMap<String, DateTime<Utc>>,
+
+    /// Outbound welcome lifecycle records keyed by peer id.
+    welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 }
 
 impl OfflineProtocol {
@@ -388,6 +439,7 @@ impl OfflineProtocol {
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
+            welcome_lifecycles: HashMap::new(),
             config,
         })
     }
@@ -411,6 +463,7 @@ impl OfflineProtocol {
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
         self.restore_session_states()?;
+        self.restore_welcome_lifecycles()?;
 
         info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
         Ok(())
@@ -464,6 +517,7 @@ impl OfflineProtocol {
 
         self.flush_restored_confirmed_pending_messages();
         self.kick_pending_session_reconciliation("start");
+        self.process_welcome_retry_queue()?;
 
         Ok(())
     }
@@ -840,6 +894,16 @@ impl OfflineProtocol {
                         reply_to_msg_id.clone(),
                     );
                     self.kick_pending_session_reconciliation("send_message_session_pending");
+                    if self.has_terminal_welcome_failure(&recipient_str) {
+                        self.abort_pending_session_for_peer(
+                            &recipient_str,
+                            crate::events::WelcomeReasonCode::RetryExhausted,
+                        );
+                        return Err(Error::Other(format!(
+                            "Welcome delivery failed for {}",
+                            recipient_str
+                        )));
+                    }
 
                     return Ok(message_id);
                 }
@@ -950,9 +1014,6 @@ impl OfflineProtocol {
                         manager.create_session(recipient)?
                     };
 
-                    // Send welcome as internal message
-                    self.send_welcome_message(recipient, &welcome)?;
-
                     // All operations succeeded, now safe to remove the key package
                     self.pending_key_packages.remove(recipient);
 
@@ -969,16 +1030,17 @@ impl OfflineProtocol {
                         );
                     }
 
-                    debug!(recipient = %recipient, group_id = %group_id, "Created MLS session and sent welcome");
+                    let welcome_sent = self.send_welcome_message(recipient, &welcome)?;
 
-                    // Emit secure session established event
-                    if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::secure_session_established(
-                            recipient.to_string(),
-                            group_id,
-                            is_session,
-                            true, // initiated_by_local is true - we sent the Welcome
-                        ));
+                    debug!(
+                        recipient = %recipient,
+                        group_id = %group_id,
+                        welcome_sent = welcome_sent,
+                        "Created MLS session and scheduled welcome lifecycle"
+                    );
+
+                    if welcome_sent {
+                        debug!(recipient = %recipient, group_id = %group_id, is_session, "Welcome synchronously sent");
                     }
 
                     // Don't encrypt immediately after creating session.
@@ -1026,16 +1088,368 @@ impl OfflineProtocol {
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
-    /// Sends a welcome message to establish an MLS session.
-    fn send_welcome_message(&mut self, recipient: &str, welcome: &WelcomeMessage) -> Result<()> {
+    /// Sends or schedules sending of a welcome message to establish an MLS session.
+    ///
+    /// Returns `Ok(true)` when the welcome is delivered synchronously and `Ok(false)`
+    /// when it is deferred to retry lifecycle management.
+    fn send_welcome_message(&mut self, recipient: &str, welcome: &WelcomeMessage) -> Result<bool> {
         let serialized =
             serde_json::to_string(welcome).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::WELCOME, serialized);
-
-        // Create and send internal message with high priority
         let message = self.create_message(recipient, content, Some(MessagePriority::High), None)?;
-        let _ = self.transport_manager.send(&message);
+        let group_id = welcome.group_id.as_str().to_string();
 
+        self.upsert_welcome_lifecycle(recipient, &group_id, message, "welcome_created")?;
+        self.try_send_welcome(recipient, "welcome_initial_send")
+    }
+
+    fn map_welcome_reason_code(error: &Error) -> crate::events::WelcomeReasonCode {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("timeout") {
+            return crate::events::WelcomeReasonCode::Timeout;
+        }
+        if message.contains("disconnected") || message.contains("unavailable") {
+            return crate::events::WelcomeReasonCode::PeerDisconnected;
+        }
+        if message.contains("no available transport")
+            || message.contains("transport")
+            || message.contains("all transports failed")
+        {
+            return crate::events::WelcomeReasonCode::TransportUnavailable;
+        }
+        crate::events::WelcomeReasonCode::InternalError
+    }
+
+    fn can_confirm_from_source(&self, peer_id: &str, source_event: &str) -> bool {
+        if !matches!(
+            source_event,
+            "decrypt_success"
+                | "confirmation_ack_received"
+                | "confirmation_probe_received"
+                | "confirmation_retry"
+        ) {
+            return true;
+        }
+
+        match self.welcome_lifecycles.get(peer_id) {
+            Some(record) => matches!(record.state, WelcomeDeliveryState::Sent),
+            None => matches!(
+                source_event,
+                // Compatibility path for sessions created before welcome lifecycle
+                // persistence existed. Decrypt-based confirmation stays blocked
+                // until we have explicit local welcome delivery evidence.
+                "confirmation_ack_received"
+                    | "confirmation_probe_received"
+                    | "confirmation_retry"
+            ),
+        }
+    }
+
+    fn has_terminal_welcome_failure(&self, peer_id: &str) -> bool {
+        self.welcome_lifecycles
+            .get(peer_id)
+            .is_some_and(|record| matches!(record.state, WelcomeDeliveryState::Expired))
+    }
+
+    fn abort_pending_session_for_peer(
+        &mut self,
+        peer_id: &str,
+        reason: crate::events::WelcomeReasonCode,
+    ) {
+        self.pending_encrypted_messages.remove(peer_id);
+        self.clear_pending_messages_from_storage(peer_id);
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::secure_session_failed(
+                peer_id.to_string(),
+                format!("Welcome delivery failed: {}", reason.as_str()),
+            ));
+        }
+    }
+
+    fn try_send_welcome(&mut self, peer_id: &str, source_event: &str) -> Result<bool> {
+        let now = Utc::now();
+        let mut record = self
+            .welcome_lifecycles
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+
+        if matches!(record.state, WelcomeDeliveryState::Sent) {
+            return Ok(true);
+        }
+        if matches!(record.state, WelcomeDeliveryState::Expired) {
+            return Ok(false);
+        }
+
+        if record.expires_at <= now {
+            self.transition_welcome_state(peer_id, WelcomeDeliveryState::Expired, source_event)?;
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::welcome_send_expired(
+                    peer_id.to_string(),
+                    record.welcome_message.id.as_str().to_string(),
+                    record.attempt,
+                    crate::events::WelcomeReasonCode::RetryExhausted,
+                ));
+            }
+            self.abort_pending_session_for_peer(peer_id, crate::events::WelcomeReasonCode::RetryExhausted);
+            return Ok(false);
+        }
+
+        record.attempt = record.attempt.saturating_add(1);
+        self.welcome_lifecycles
+            .insert(peer_id.to_string(), record.clone());
+        self.persist_welcome_lifecycle_entry(&record)?;
+        self.transition_welcome_state(peer_id, WelcomeDeliveryState::SendAttempted, source_event)?;
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::welcome_send_attempted(
+                peer_id.to_string(),
+                record.welcome_message.id.as_str().to_string(),
+                record.group_id.clone(),
+                record.attempt,
+            ));
+        }
+
+        match self.transport_manager.send(&record.welcome_message) {
+            Ok(()) => {
+                let transport_used = self.transport_manager.current_transport();
+                let mut updated = self
+                    .welcome_lifecycles
+                    .get(peer_id)
+                    .cloned()
+                    .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+
+                if matches!(transport_used, Some(TransportType::Internet)) {
+                    // Internet send() only enqueues for platform polling. Keep lifecycle
+                    // non-terminal until explicit platform confirmation arrives.
+                    updated.next_retry_at = Some(
+                        Utc::now()
+                            + ChronoDuration::seconds(WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS),
+                    );
+                    updated.last_reason_code = None;
+                    updated.last_transport_error = None;
+                    self.welcome_lifecycles.insert(peer_id.to_string(), updated.clone());
+                    self.persist_welcome_lifecycle_entry(&updated)?;
+                    return Ok(false);
+                }
+
+                updated.next_retry_at = None;
+                updated.last_reason_code = None;
+                updated.last_transport_error = None;
+                self.welcome_lifecycles.insert(peer_id.to_string(), updated.clone());
+                self.persist_welcome_lifecycle_entry(&updated)?;
+                self.transition_welcome_state(peer_id, WelcomeDeliveryState::Sent, source_event)?;
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::welcome_send_succeeded(
+                        peer_id.to_string(),
+                        updated.welcome_message.id.as_str().to_string(),
+                        updated.group_id,
+                        updated.attempt,
+                    ));
+                }
+                Ok(true)
+            }
+            Err(err) => {
+                let reason = Self::map_welcome_reason_code(&err);
+                self.apply_welcome_send_failure(
+                    peer_id,
+                    reason,
+                    Some(err.to_string()),
+                    source_event,
+                )
+            }
+        }
+    }
+
+    fn apply_welcome_send_failure(
+        &mut self,
+        peer_id: &str,
+        reason: crate::events::WelcomeReasonCode,
+        transport_error: Option<String>,
+        source_event: &str,
+    ) -> Result<bool> {
+        let mut updated = self
+            .welcome_lifecycles
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+
+        if matches!(updated.state, WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired) {
+            return Ok(matches!(updated.state, WelcomeDeliveryState::Sent));
+        }
+
+        let max_attempts = self.config.reliability.retry.max_retries.max(1);
+        let should_expire = updated.attempt >= max_attempts || updated.expires_at <= Utc::now();
+        if should_expire {
+            let terminal_reason = crate::events::WelcomeReasonCode::RetryExhausted;
+            {
+                let record = self.welcome_lifecycles.get_mut(peer_id).ok_or_else(|| {
+                    Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
+                })?;
+                record.last_reason_code = Some(terminal_reason);
+                record.last_transport_error = transport_error.clone();
+                record.next_retry_at = None;
+            }
+
+            if !matches!(updated.state, WelcomeDeliveryState::Failed) {
+                self.transition_welcome_state(peer_id, WelcomeDeliveryState::Failed, source_event)?;
+            }
+            self.transition_welcome_state(
+                peer_id,
+                WelcomeDeliveryState::Expired,
+                "welcome_retry_exhausted",
+            )?;
+
+            let expired_snapshot = self
+                .welcome_lifecycles
+                .get(peer_id)
+                .cloned()
+                .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::welcome_send_failed(
+                    peer_id.to_string(),
+                    expired_snapshot.welcome_message.id.as_str().to_string(),
+                    expired_snapshot.group_id.clone(),
+                    expired_snapshot.attempt,
+                    terminal_reason,
+                    expired_snapshot.last_transport_error.clone(),
+                    false,
+                    None,
+                ));
+                state.emit_event(Event::welcome_send_expired(
+                    peer_id.to_string(),
+                    expired_snapshot.welcome_message.id.as_str().to_string(),
+                    expired_snapshot.attempt,
+                    terminal_reason,
+                ));
+            }
+            self.abort_pending_session_for_peer(peer_id, terminal_reason);
+            return Ok(false);
+        }
+
+        let delay_ms = self.compute_welcome_retry_delay_ms(peer_id, updated.attempt);
+        let retry_at = Utc::now() + ChronoDuration::milliseconds(delay_ms as i64);
+
+        {
+            let record = self
+                .welcome_lifecycles
+                .get_mut(peer_id)
+                .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+            record.last_reason_code = Some(reason);
+            record.last_transport_error = transport_error;
+            record.next_retry_at = Some(retry_at);
+        }
+
+        if !matches!(updated.state, WelcomeDeliveryState::Failed) {
+            self.transition_welcome_state(peer_id, WelcomeDeliveryState::Failed, source_event)?;
+        } else if let Some(record) = self.welcome_lifecycles.get(peer_id).cloned() {
+            self.persist_welcome_lifecycle_entry(&record)?;
+        }
+
+        updated = self
+            .welcome_lifecycles
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::welcome_send_failed(
+                peer_id.to_string(),
+                updated.welcome_message.id.as_str().to_string(),
+                updated.group_id,
+                updated.attempt,
+                reason,
+                updated.last_transport_error.clone(),
+                true,
+                Some(retry_at.timestamp_millis()),
+            ));
+        }
+        Ok(false)
+    }
+
+    fn maybe_emit_local_session_established(&self, peer_id: &str) {
+        let Some(record) = self.welcome_lifecycles.get(peer_id) else {
+            return;
+        };
+        if !matches!(record.state, WelcomeDeliveryState::Sent) {
+            return;
+        }
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::secure_session_established(
+                peer_id.to_string(),
+                record.group_id.clone(),
+                record.group_id.starts_with("session:"),
+                true,
+            ));
+        }
+    }
+
+    fn find_welcome_peer_by_message_id(&self, message_id: &str) -> Option<String> {
+        self.welcome_lifecycles.iter().find_map(|(peer_id, record)| {
+            if record.welcome_message.id.as_str() == message_id {
+                return Some(peer_id.clone());
+            }
+            None
+        })
+    }
+
+    /// Handles asynchronous transport confirmation for pending welcome sends.
+    pub fn on_transport_send_confirmed(&mut self, message_id: &str) -> Result<()> {
+        let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
+            return Ok(());
+        };
+
+        let updated = self
+            .welcome_lifecycles
+            .get(&peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+
+        if matches!(updated.state, WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired) {
+            return Ok(());
+        }
+
+        {
+            let record = self
+                .welcome_lifecycles
+                .get_mut(&peer_id)
+                .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+            record.next_retry_at = None;
+            record.last_reason_code = None;
+            record.last_transport_error = None;
+        }
+        self.transition_welcome_state(&peer_id, WelcomeDeliveryState::Sent, "transport_confirmed")?;
+
+        let sent_snapshot = self
+            .welcome_lifecycles
+            .get(&peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::welcome_send_succeeded(
+                peer_id,
+                sent_snapshot.welcome_message.id.as_str().to_string(),
+                sent_snapshot.group_id,
+                sent_snapshot.attempt,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Handles asynchronous transport send failures for pending welcome sends.
+    pub fn on_transport_send_failed(
+        &mut self,
+        message_id: &str,
+        transport_error: Option<String>,
+    ) -> Result<()> {
+        let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
+            return Ok(());
+        };
+        let reason = transport_error
+            .as_ref()
+            .map(|err| Self::map_welcome_reason_code(&Error::Other(err.clone())))
+            .unwrap_or(crate::events::WelcomeReasonCode::TransportUnavailable);
+        let _ =
+            self.apply_welcome_send_failure(&peer_id, reason, transport_error, "transport_failed")?;
         Ok(())
     }
 
@@ -1374,6 +1788,270 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    fn load_welcome_lifecycle_entry(&self, peer_id: &str) -> Result<Option<WelcomeLifecycleRecord>> {
+        let Some(storage) = &self.message_storage else {
+            return Ok(None);
+        };
+
+        let Some(data) = storage
+            .load(storage_keys::WELCOME_LIFECYCLES, peer_id)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to load welcome lifecycle for {}: {}",
+                    peer_id, e
+                ))
+            })?
+        else {
+            return Ok(None);
+        };
+
+        let record = serde_json::from_slice::<WelcomeLifecycleRecord>(&data).map_err(|e| {
+            Error::Other(format!(
+                "Failed to deserialize welcome lifecycle for {}: {}",
+                peer_id, e
+            ))
+        })?;
+        Ok(Some(record))
+    }
+
+    fn persist_welcome_lifecycle_entry(&self, record: &WelcomeLifecycleRecord) -> Result<()> {
+        let Some(storage) = &self.message_storage else {
+            return Err(Error::MlsNotInitialized);
+        };
+
+        let encoded = serde_json::to_vec(record)
+            .map_err(|e| Error::Serialization(format!("Failed to serialize welcome lifecycle: {}", e)))?;
+        storage
+            .store(storage_keys::WELCOME_LIFECYCLES, &record.peer_id, &encoded)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to persist welcome lifecycle for {}: {}",
+                    record.peer_id, e
+                ))
+            })
+    }
+
+    fn restore_welcome_lifecycles(&mut self) -> Result<()> {
+        self.welcome_lifecycles.clear();
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+
+        let peers = storage
+            .list_keys(storage_keys::WELCOME_LIFECYCLES)
+            .map_err(|e| Error::Other(format!("Failed to list welcome lifecycles: {}", e)))?;
+
+        for peer_id in peers {
+            if let Some(mut record) = self.load_welcome_lifecycle_entry(&peer_id)? {
+                if matches!(
+                    record.state,
+                    WelcomeDeliveryState::Created | WelcomeDeliveryState::SendAttempted
+                ) {
+                    record.state = WelcomeDeliveryState::Failed;
+                    record.next_retry_at = Some(Utc::now());
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                    warn!(
+                        event = "welcome_lifecycle_repaired",
+                        session_or_group_id = %peer_id,
+                        repair_action = "in_flight_to_failed_retry_now",
+                        state = record.state.as_str(),
+                        attempt = record.attempt,
+                        "welcome_lifecycle_repaired"
+                    );
+                }
+                if matches!(record.state, WelcomeDeliveryState::Failed)
+                    && record.next_retry_at.is_none()
+                {
+                    if matches!(
+                        record.last_reason_code,
+                        Some(crate::events::WelcomeReasonCode::RetryExhausted)
+                    ) || record.expires_at <= Utc::now()
+                    {
+                        record.state = WelcomeDeliveryState::Expired;
+                        warn!(
+                            event = "welcome_lifecycle_repaired",
+                            session_or_group_id = %peer_id,
+                            repair_action = "failed_no_retry_to_expired",
+                            state = record.state.as_str(),
+                            attempt = record.attempt,
+                            "welcome_lifecycle_repaired"
+                        );
+                    } else {
+                        // Recover from partial-crash write where Failed was persisted
+                        // without a retry schedule.
+                        record.next_retry_at = Some(Utc::now());
+                        warn!(
+                            event = "welcome_lifecycle_repaired",
+                            session_or_group_id = %peer_id,
+                            repair_action = "failed_no_retry_to_failed_retry_now",
+                            state = record.state.as_str(),
+                            attempt = record.attempt,
+                            "welcome_lifecycle_repaired"
+                        );
+                    }
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                }
+                if matches!(record.state, WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired)
+                    && record.next_retry_at.is_some()
+                {
+                    record.next_retry_at = None;
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                    warn!(
+                        event = "welcome_lifecycle_repaired",
+                        session_or_group_id = %peer_id,
+                        repair_action = "terminal_clear_retry_schedule",
+                        state = record.state.as_str(),
+                        attempt = record.attempt,
+                        "welcome_lifecycle_repaired"
+                    );
+                }
+                self.welcome_lifecycles.insert(peer_id.clone(), record);
+                info!(
+                    event = "welcome_lifecycle_restored",
+                    session_or_group_id = %peer_id,
+                    "welcome_lifecycle_restored"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn can_transition_welcome_state(
+        current: WelcomeDeliveryState,
+        next: WelcomeDeliveryState,
+    ) -> bool {
+        matches!(
+            (current, next),
+            (WelcomeDeliveryState::Created, WelcomeDeliveryState::SendAttempted)
+                | (WelcomeDeliveryState::Created, WelcomeDeliveryState::Expired)
+                | (WelcomeDeliveryState::SendAttempted, WelcomeDeliveryState::Sent)
+                | (WelcomeDeliveryState::SendAttempted, WelcomeDeliveryState::Failed)
+                | (WelcomeDeliveryState::Failed, WelcomeDeliveryState::SendAttempted)
+                | (WelcomeDeliveryState::Failed, WelcomeDeliveryState::Sent)
+                | (WelcomeDeliveryState::Failed, WelcomeDeliveryState::Expired)
+        )
+    }
+
+    fn transition_welcome_state(
+        &mut self,
+        peer_id: &str,
+        next_state: WelcomeDeliveryState,
+        source_event: &str,
+    ) -> Result<()> {
+        let (previous_state, record_snapshot) = {
+            let record = self.welcome_lifecycles.get_mut(peer_id).ok_or_else(|| {
+                Error::Other(format!(
+                    "Missing welcome lifecycle for transition: {}",
+                    peer_id
+                ))
+            })?;
+
+            if record.state == next_state {
+                return Ok(());
+            }
+
+            if !Self::can_transition_welcome_state(record.state, next_state) {
+                return Err(Error::Other(format!(
+                    "Illegal welcome lifecycle transition for {}: {} -> {}",
+                    peer_id,
+                    record.state.as_str(),
+                    next_state.as_str()
+                )));
+            }
+
+            let previous = record.state;
+            record.state = next_state;
+            if matches!(
+                next_state,
+                WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
+            ) {
+                record.next_retry_at = None;
+            }
+            (previous, record.clone())
+        };
+
+        self.persist_welcome_lifecycle_entry(&record_snapshot)?;
+        info!(
+            event = "welcome_lifecycle_transition",
+            session_or_group_id = %peer_id,
+            previous_state = previous_state.as_str(),
+            new_state = next_state.as_str(),
+            source_event = %source_event,
+            attempt = record_snapshot.attempt,
+            "welcome_lifecycle_transition"
+        );
+        Ok(())
+    }
+
+    fn upsert_welcome_lifecycle(
+        &mut self,
+        peer_id: &str,
+        group_id: &str,
+        welcome_message: Message,
+        source_event: &str,
+    ) -> Result<()> {
+        if let Some(existing) = self.welcome_lifecycles.get(peer_id) {
+            if !matches!(
+                existing.state,
+                WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
+            ) {
+                return Err(Error::Other(format!(
+                    "Refusing to overwrite active welcome lifecycle for {} in state {}",
+                    peer_id,
+                    existing.state.as_str()
+                )));
+            }
+        }
+
+        let now = Utc::now();
+        let record = WelcomeLifecycleRecord {
+            peer_id: peer_id.to_string(),
+            group_id: group_id.to_string(),
+            state: WelcomeDeliveryState::Created,
+            attempt: 0,
+            welcome_message,
+            next_retry_at: None,
+            last_reason_code: None,
+            last_transport_error: None,
+            created_at: now,
+            expires_at: now + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS),
+        };
+        self.welcome_lifecycles.insert(peer_id.to_string(), record.clone());
+        self.persist_welcome_lifecycle_entry(&record)?;
+        info!(
+            event = "welcome_lifecycle_transition",
+            session_or_group_id = %peer_id,
+            previous_state = "Absent",
+            new_state = WelcomeDeliveryState::Created.as_str(),
+            source_event = %source_event,
+            attempt = 0,
+            "welcome_lifecycle_transition"
+        );
+        Ok(())
+    }
+
+    fn compute_welcome_retry_delay_ms(&self, peer_id: &str, attempt: u32) -> u64 {
+        let config = &self.config.reliability.retry;
+        let capped_attempt = attempt.saturating_sub(1);
+        let base_ms = if capped_attempt == 0 {
+            config.initial_delay_ms
+        } else {
+            let multiplier = config.backoff_multiplier.powi(capped_attempt as i32);
+            (config.initial_delay_ms as f64 * multiplier as f64) as u64
+        }
+        .min(config.max_delay_ms);
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        peer_id.hash(&mut hasher);
+        attempt.hash(&mut hasher);
+        Utc::now().timestamp_millis().hash(&mut hasher);
+        let bucket = (hasher.finish() % 10_000) as f64 / 10_000.0;
+        let jitter_factor = 1.0 + ((bucket * 2.0 - 1.0) * WELCOME_RETRY_JITTER_RATIO);
+        let jittered = (base_ms as f64 * jitter_factor).round() as i64;
+        jittered.max(1) as u64
+    }
+
     /// Ensures a session has an explicit persisted state entry.
     fn ensure_session_state_entry(&self, peer_id: &str, source_event: &str) -> Result<SessionState> {
         let existing = self.load_session_state_entry(peer_id)?;
@@ -1436,6 +2114,16 @@ impl OfflineProtocol {
 
     /// Monotonic state transition helper: Pending -> Confirmed only.
     fn confirm_session_state(&mut self, peer_id: &str, source_event: &str) -> Result<bool> {
+        if !self.can_confirm_from_source(peer_id, source_event) {
+            warn!(
+                event = "session_confirmation_blocked",
+                session_or_group_id = %peer_id,
+                source_event = %source_event,
+                "session_confirmation_blocked"
+            );
+            return Ok(false);
+        }
+
         let previous = self.ensure_session_state_entry(peer_id, source_event)?;
 
         if matches!(previous, SessionState::Confirmed) {
@@ -1460,6 +2148,9 @@ impl OfflineProtocol {
 
         self.confirmed_sessions.insert(peer_id.to_string());
         self.clear_confirmation_recovery_tracking(peer_id);
+        if source_event != "welcome_received" {
+            self.maybe_emit_local_session_established(peer_id);
+        }
         info!(
             event = "session_state_transition",
             session_or_group_id = %peer_id,
@@ -1647,6 +2338,14 @@ impl OfflineProtocol {
                     );
                     continue;
                 }
+            }
+
+            if !self.can_confirm_from_source(&peer_id, "confirmation_retry") {
+                debug!(
+                    peer_id = %peer_id,
+                    "Skipping confirmation retry until welcome delivery is sent"
+                );
+                continue;
             }
 
             match self.confirm_session_state(&peer_id, "confirmation_retry") {
@@ -1862,24 +2561,25 @@ impl OfflineProtocol {
                 };
 
                 // Send welcome message to peer
-                self.send_welcome_message(peer_id, &welcome)?;
+                let welcome_sent = self.send_welcome_message(peer_id, &welcome)?;
 
                 // All operations succeeded, now safe to remove the key package
                 self.pending_key_packages.remove(peer_id);
 
                 let group_id = welcome.group_id.as_str().to_string();
                 let is_session = group_id.starts_with("session:");
+                if let Err(err) = self.ensure_session_state_entry(peer_id, "session_created_local") {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to persist pending session state"
+                    );
+                }
 
                 info!(peer_id = %peer_id, group_id = %group_id, "Established secure session");
 
-                // Emit secure session established event
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::secure_session_established(
-                        peer_id.to_string(),
-                        group_id,
-                        is_session,
-                        true, // initiated_by_local is true - we sent the Welcome
-                    ));
+                if welcome_sent {
+                    debug!(peer_id = %peer_id, group_id = %group_id, is_session, "Welcome synchronously sent");
                 }
 
                 return Ok(Some(welcome));
@@ -1968,6 +2668,16 @@ impl OfflineProtocol {
                     self.kick_pending_session_reconciliation(
                         "send_message_via_transport_session_pending",
                     );
+                    if self.has_terminal_welcome_failure(&recipient_str) {
+                        self.abort_pending_session_for_peer(
+                            &recipient_str,
+                            crate::events::WelcomeReasonCode::RetryExhausted,
+                        );
+                        return Err(Error::Other(format!(
+                            "Welcome delivery failed for {}",
+                            recipient_str
+                        )));
+                    }
                     return Ok(message_id);
                 }
                 Err(e) => {
@@ -2278,17 +2988,24 @@ impl OfflineProtocol {
             let sender_owned = sender.to_string();
             match self.has_mls_session(&sender_owned) {
                 Ok(true) => {
-                    match self.confirm_session_state(&sender_owned, "confirmation_probe_received") {
-                        Ok(_) => {
-                            let _ = self.flush_pending_messages(&sender_owned);
-                            self.process_pending_decryption(&sender_owned);
-                        }
-                        Err(err) => {
-                            warn!(
-                                sender = %sender_owned,
-                                error = %err,
-                                "Failed to persist session confirmation after probe"
-                            );
+                    if !self.can_confirm_from_source(&sender_owned, "confirmation_probe_received") {
+                        debug!(
+                            sender = %sender_owned,
+                            "Skipping probe confirmation until welcome delivery is sent"
+                        );
+                    } else {
+                        match self.confirm_session_state(&sender_owned, "confirmation_probe_received") {
+                            Ok(_) => {
+                                let _ = self.flush_pending_messages(&sender_owned);
+                                self.process_pending_decryption(&sender_owned);
+                            }
+                            Err(err) => {
+                                warn!(
+                                    sender = %sender_owned,
+                                    error = %err,
+                                    "Failed to persist session confirmation after probe"
+                                );
+                            }
                         }
                     }
 
@@ -2324,19 +3041,28 @@ impl OfflineProtocol {
         if content.starts_with(internal_prefixes::SESSION_CONFIRM_ACK) {
             let sender_owned = sender.to_string();
             match self.has_mls_session(&sender_owned) {
-                Ok(true) => match self.confirm_session_state(&sender_owned, "confirmation_ack_received") {
-                    Ok(_) => {
-                        let _ = self.flush_pending_messages(&sender_owned);
-                        self.process_pending_decryption(&sender_owned);
-                    }
-                    Err(err) => {
-                        warn!(
+                Ok(true) => {
+                    if !self.can_confirm_from_source(&sender_owned, "confirmation_ack_received") {
+                        debug!(
                             sender = %sender_owned,
-                            error = %err,
-                            "Failed to persist session confirmation after ack"
+                            "Skipping ack confirmation until welcome delivery is sent"
                         );
+                    } else {
+                        match self.confirm_session_state(&sender_owned, "confirmation_ack_received") {
+                            Ok(_) => {
+                                let _ = self.flush_pending_messages(&sender_owned);
+                                self.process_pending_decryption(&sender_owned);
+                            }
+                            Err(err) => {
+                                warn!(
+                                    sender = %sender_owned,
+                                    error = %err,
+                                    "Failed to persist session confirmation after ack"
+                                );
+                            }
+                        }
                     }
-                },
+                }
                 Ok(false) => {
                     debug!(
                         sender = %sender_owned,
@@ -2488,6 +3214,14 @@ impl OfflineProtocol {
                         text,
                         sender: sender_owned,
                     } => {
+                        if !self.can_confirm_from_source(&sender_owned, "decrypt_success") {
+                            debug!(
+                                sender = %sender_owned,
+                                "Skipping decrypt-based confirmation until welcome delivery is sent"
+                            );
+                            return Some(InternalMessageResult::Decrypted(text));
+                        }
+
                         match self.confirm_session_state(&sender_owned, "decrypt_success") {
                             Ok(true) => {
                                 info!(sender = %sender_owned, "Session confirmed via successful decryption");
@@ -2745,11 +3479,64 @@ impl OfflineProtocol {
         }
 
         self.process_retry_queue()?;
+        self.process_welcome_retry_queue()?;
         self.process_timed_out_acks()?;
         self.retry_pending_session_confirmations();
         self.kick_pending_session_reconciliation("process_tick");
         self.cleanup_expired_entries();
         self.check_dors_escalation()?;
+
+        Ok(())
+    }
+
+    fn process_welcome_retry_queue(&mut self) -> Result<()> {
+        let now = Utc::now();
+        let timed_out_attempts: Vec<String> = self
+            .welcome_lifecycles
+            .iter()
+            .filter_map(|(peer_id, record)| {
+                if matches!(record.state, WelcomeDeliveryState::SendAttempted)
+                    && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
+                {
+                    return Some(peer_id.clone());
+                }
+                None
+            })
+            .take(WELCOME_RETRY_BATCH_SIZE)
+            .collect();
+
+        for peer_id in timed_out_attempts {
+            let _ = self.apply_welcome_send_failure(
+                &peer_id,
+                crate::events::WelcomeReasonCode::Timeout,
+                Some("Welcome send confirmation timed out".to_string()),
+                "welcome_confirm_timeout",
+            )?;
+        }
+
+        let due_peers: Vec<String> = self
+            .welcome_lifecycles
+            .iter()
+            .filter_map(|(peer_id, record)| {
+                if matches!(record.state, WelcomeDeliveryState::Failed)
+                    && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
+                {
+                    return Some(peer_id.clone());
+                }
+                None
+            })
+            .take(WELCOME_RETRY_BATCH_SIZE)
+            .collect();
+
+        for peer_id in due_peers {
+            if let Err(err) = self.try_send_welcome(&peer_id, "welcome_retry") {
+                warn!(
+                    peer_id = %peer_id,
+                    error = %err,
+                    "Failed to process welcome retry"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -3181,7 +3968,9 @@ impl OfflineProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
+    use offline_protocol_transport::{
+        mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
+    };
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -3192,6 +3981,70 @@ mod tests {
 
     fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
         ProtocolConfig::new("test-app", user_id)
+    }
+
+    #[derive(Debug, Clone)]
+    struct FlakyTransport {
+        transport_type: TransportType,
+        status: Arc<Mutex<TransportStatus>>,
+        sent_messages: Arc<Mutex<Vec<Message>>>,
+        failures_remaining: Arc<Mutex<u32>>,
+    }
+
+    impl FlakyTransport {
+        fn fail_first(transport_type: TransportType, failures: u32) -> Self {
+            Self {
+                transport_type,
+                status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
+                sent_messages: Arc::new(Mutex::new(Vec::new())),
+                failures_remaining: Arc::new(Mutex::new(failures)),
+            }
+        }
+    }
+
+    impl Transport for FlakyTransport {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn transport_type(&self) -> TransportType {
+            self.transport_type
+        }
+
+        fn status(&self) -> TransportStatus {
+            *self.status.lock().unwrap()
+        }
+
+        fn metrics(&self) -> TransportMetrics {
+            TransportMetrics::default()
+        }
+
+        fn send(&self, message: &Message) -> offline_protocol_transport::Result<()> {
+            let mut remaining = self.failures_remaining.lock().unwrap();
+            if *remaining > 0 {
+                *remaining = remaining.saturating_sub(1);
+                return Err(offline_protocol_transport::Error::SendFailed(
+                    "forced failure".to_string(),
+                ));
+            }
+
+            self.sent_messages.lock().unwrap().push(message.clone());
+            Ok(())
+        }
+
+        fn receive(&self) -> offline_protocol_transport::Result<Option<Message>> {
+            Ok(None)
+        }
+
+        fn start(&mut self) -> offline_protocol_transport::Result<()> {
+            *self.status.lock().unwrap() = TransportStatus::Available;
+            Ok(())
+        }
+
+        fn stop(&mut self) -> offline_protocol_transport::Result<()> {
+            *self.status.lock().unwrap() = TransportStatus::Disconnected;
+            Ok(())
+        }
     }
 
     #[test]
@@ -4188,6 +5041,554 @@ mod tests {
         );
         let persisted = protocol.load_session_state_entry("bob").unwrap().unwrap();
         assert_eq!(persisted, SessionState::Pending);
+    }
+
+    #[test]
+    fn test_welcome_send_failure_keeps_session_pending_and_emits_reason_code() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 3;
+        config.reliability.retry.initial_delay_ms = 1;
+        config.reliability.retry.max_delay_ms = 5;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+
+        let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let observed_events_clone = observed_events.clone();
+        protocol.on_event(move |event| {
+            observed_events_clone.lock().unwrap().push(event);
+        });
+
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message("bob", "queued-after-welcome-fail", None::<MessagePriority>, None::<String>)
+            .unwrap();
+
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Pending
+        );
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+        assert!(protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .is_some_and(|messages| !messages.is_empty()));
+
+        let events = observed_events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::WelcomeSendFailed {
+                reason_code: crate::events::WelcomeReasonCode::TransportUnavailable,
+                retryable: true,
+                ..
+            }
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::SecureSessionEstablished { .. })));
+    }
+
+    #[test]
+    fn test_welcome_retry_exhaustion_expires_and_aborts_pending_queue() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 1;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 10);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+
+        let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let observed_events_clone = observed_events.clone();
+        protocol.on_event(move |event| {
+            observed_events_clone.lock().unwrap().push(event);
+        });
+
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let result = protocol.send_message(
+            "bob",
+            "should-fail-terminally",
+            None::<MessagePriority>,
+            None::<String>,
+        );
+        assert!(result.is_err());
+
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(lifecycle.state, WelcomeDeliveryState::Expired);
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Pending
+        );
+        assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+
+        let events = observed_events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::WelcomeSendExpired {
+                reason_code: crate::events::WelcomeReasonCode::RetryExhausted,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_welcome_partial_success_after_retry_reaches_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 3;
+        config.reliability.retry.initial_delay_ms = 1;
+        config.reliability.retry.max_delay_ms = 5;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message("bob", "queued-after-flaky-send", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Failed
+        );
+
+        thread::sleep(Duration::from_millis(10));
+        protocol.process().unwrap();
+
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+    }
+
+    #[test]
+    fn test_welcome_internet_requires_async_confirmation_before_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message("bob", "queued-over-internet", None::<MessagePriority>, None::<String>)
+            .unwrap();
+
+        let welcome_message_id = protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .welcome_message
+            .id
+            .as_str()
+            .to_string();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::SendAttempted
+        );
+        assert!(protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .next_retry_at
+            .is_some());
+
+        protocol
+            .on_transport_send_confirmed(&welcome_message_id)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+    }
+
+    #[test]
+    fn test_welcome_terminal_lifecycle_can_be_overwritten() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message.clone(), "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::Sent, "test_sent")
+            .unwrap();
+
+        let overwrite = protocol.upsert_welcome_lifecycle(
+            "bob",
+            "session:bob:2",
+            message,
+            "test_overwrite",
+        );
+        assert!(overwrite.is_ok());
+    }
+
+    #[test]
+    fn test_welcome_non_terminal_lifecycle_cannot_be_overwritten() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message.clone(), "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+
+        let overwrite = protocol.upsert_welcome_lifecycle(
+            "bob",
+            "session:bob:2",
+            message,
+            "test_overwrite",
+        );
+        assert!(overwrite.is_err());
+    }
+
+    #[test]
+    fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message("bob", "welcome-sent", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+
+        let illegal = protocol.transition_welcome_state(
+            "bob",
+            WelcomeDeliveryState::Failed,
+            "test_illegal_transition",
+        );
+        assert!(illegal.is_err());
+    }
+
+    #[test]
+    fn test_welcome_restart_recovery_restores_failed_lifecycle() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 3;
+        config.reliability.retry.initial_delay_ms = 50;
+        config.reliability.retry.max_delay_ms = 50;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message("bob", "restart-recovery", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Failed
+        );
+
+        let mut restarted = OfflineProtocol::new(config).unwrap();
+        restarted.initialize_mls(storage).unwrap();
+        let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(restored.state, WelcomeDeliveryState::Failed);
+        assert!(restored.next_retry_at.is_some());
+    }
+
+    #[test]
+    fn test_welcome_restore_repairs_failed_without_retry_schedule() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+            .unwrap();
+
+        {
+            let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+            record.last_reason_code = Some(crate::events::WelcomeReasonCode::TransportUnavailable);
+            record.next_retry_at = None;
+        }
+        let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+        protocol.persist_welcome_lifecycle_entry(&persisted).unwrap();
+
+        let mut restarted = OfflineProtocol::new(config).unwrap();
+        restarted.initialize_mls(storage).unwrap();
+        let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(restored.state, WelcomeDeliveryState::Failed);
+        assert!(restored.next_retry_at.is_some());
+    }
+
+    #[test]
+    fn test_welcome_restore_promotes_retry_exhausted_failed_to_expired() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+            .unwrap();
+
+        {
+            let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+            record.last_reason_code = Some(crate::events::WelcomeReasonCode::RetryExhausted);
+            record.next_retry_at = None;
+        }
+        let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+        protocol.persist_welcome_lifecycle_entry(&persisted).unwrap();
+
+        let mut restarted = OfflineProtocol::new(config).unwrap();
+        restarted.initialize_mls(storage).unwrap();
+        let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(restored.state, WelcomeDeliveryState::Expired);
+        assert!(restored.next_retry_at.is_none());
+    }
+
+    #[test]
+    fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message("bob", "queued-over-internet", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        let welcome_message_id = protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .welcome_message
+            .id
+            .as_str()
+            .to_string();
+
+        protocol
+            .on_transport_send_failed(
+                &welcome_message_id,
+                Some("Internet transport send failed".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Failed
+        );
+
+        protocol
+            .on_transport_send_confirmed(&welcome_message_id)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+
+        protocol
+            .on_transport_send_failed(
+                &welcome_message_id,
+                Some("Late failure callback".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
     }
 
     #[test]
