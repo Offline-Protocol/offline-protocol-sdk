@@ -85,6 +85,20 @@ impl Default for DorsConfig {
     }
 }
 
+/// Scores within this delta of the *best* score are treated as a tie for selection,
+/// and the tie-break order (Internet > WiFiDirect > BLE) is then used.
+const TIE_EPSILON: f32 = 0.01;
+
+/// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
+/// Lower value = preferred. Order: Internet, WiFiDirect, BLE.
+fn transport_tie_break_priority(transport_type: TransportType) -> u8 {
+    match transport_type {
+        TransportType::Internet => 0,
+        TransportType::WiFiDirect => 1,
+        TransportType::BLE => 2,
+    }
+}
+
 /// Score breakdown for transport selection.
 #[derive(Debug, Clone)]
 pub struct TransportScore {
@@ -273,17 +287,43 @@ impl TransportSelector {
             scored_transports.push((*transport_type, score));
         }
 
-        // Sort by total score (descending)
+        // Sort by total score (descending). Tie-break is applied *after* sorting using
+        // a transitive rule ("within TIE_EPSILON of best"), so we avoid epsilon-based
+        // comparators inside sort_by (which can violate transitivity).
         scored_transports.sort_by(|a, b| {
             b.1.total
                 .partial_cmp(&a.1.total)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Get the best transport
-        let best = scored_transports.first()?;
-        let best_transport = best.0;
-        let best_score = best.1.total;
+        // Determine the best finite score (ignoring NaNs), then apply deterministic
+        // tie-break among any transports that are within TIE_EPSILON of that best score.
+        // If all scores are non-finite, fall back to tie-break order alone.
+        let (best_transport, best_score) = if let Some((best_t, best_s)) = scored_transports
+            .iter()
+            .filter(|(_, s)| s.total.is_finite())
+            .max_by(|a, b| {
+                a.1.total
+                    .partial_cmp(&b.1.total)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            let best_total = best_s.total;
+            scored_transports
+                .iter()
+                .filter(|(_, s)| s.total.is_finite() && best_total - s.total <= TIE_EPSILON)
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, s)| (*t, s.total))
+                // In the unlikely event the filter yields nothing, fall back to the
+                // original best candidate.
+                .unwrap_or((*best_t, best_total))
+        } else {
+            // No finite scores; pick purely by tie-break priority.
+            scored_transports
+                .iter()
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, s)| (*t, s.total))?
+        };
 
         // Log all scored transports for observability.
         // Guard allocation behind level check to avoid Vec<String> on every call.
@@ -374,7 +414,20 @@ impl TransportSelector {
             scored.push((*transport_type, score.total));
         }
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Contract: ranked by score (descending).
+        //
+        // Determinism: when scores are exactly equal (rare with floats, but can
+        // happen in tests or after rounding), apply the same priority tie-break
+        // used by selection: Internet > WiFiDirect > BLE.
+        scored.sort_by(|a, b| {
+            let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+            if ord == std::cmp::Ordering::Equal {
+                transport_tie_break_priority(a.0).cmp(&transport_tie_break_priority(b.0))
+            } else {
+                ord
+            }
+        });
+
         scored
     }
 
@@ -1143,9 +1196,42 @@ impl Default for TransportSelector {
 }
 
 #[cfg(test)]
+impl TransportSelector {
+    /// Returns the transport that would win with these scores using the same tie-break as `select_transport`.
+    /// Use to verify tie-break order (Internet > WiFiDirect > BLE) when scores are forced equal.
+    pub fn select_from_scores_for_test(scores: &[(TransportType, f32)]) -> Option<TransportType> {
+        if scores.is_empty() {
+            return None;
+        }
+
+        // Find best finite score (ignoring NaNs). If none, fall back to tie-break only.
+        if let Some(best) = scores
+            .iter()
+            .map(|(_, s)| *s)
+            .filter(|s| s.is_finite())
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            // Apply same tie semantics as select_transport: consider any score within
+            // TIE_EPSILON of the best to be a tie, then apply tie-break priority.
+            scores
+                .iter()
+                .filter(|(_, s)| s.is_finite() && best - *s <= TIE_EPSILON)
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, _)| *t)
+        } else {
+            // No finite scores; choose purely by tie-break priority.
+            scores
+                .iter()
+                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .map(|(t, _)| *t)
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use offline_protocol_core::{AppId, TTL, UserId};
+    use offline_protocol_core::{AppId, UserId, TTL};
 
     fn create_test_message() -> Message {
         Message::new(
@@ -1458,14 +1544,13 @@ mod tests {
         );
 
         let ranked = selector.score_and_rank(&message, &transports);
-				println!("{:?}", ranked);
-        assert_eq!(ranked.len(), 3, "Each transport gets one score from the same scoring path");
+        assert_eq!(
+            ranked.len(),
+            3,
+            "Each transport gets one score from the same scoring path"
+        );
         for (tt, score) in &ranked {
-            assert!(
-                score.is_finite(),
-                "Score for {:?} must be finite",
-                tt
-            );
+            assert!(score.is_finite(), "Score for {:?} must be finite", tt);
             assert!(*score >= 0.0, "Score for {:?} must be non-negative", tt);
         }
         let scores: Vec<f32> = ranked.iter().map(|(_, s)| *s).collect();
@@ -1570,13 +1655,21 @@ mod tests {
         // 10 Mbps => score 100
         let mut m10 = TransportMetrics::default();
         m10.bandwidth_bps = Some(10_000_000);
-        assert!((selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 100.0).abs() < 0.01);
+        assert!(
+            (selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 100.0).abs()
+                < 0.01
+        );
         // 1 Mbps => score 10
         m10.bandwidth_bps = Some(1_000_000);
-        assert!((selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 10.0).abs() < 0.01);
+        assert!(
+            (selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 10.0).abs() < 0.01
+        );
         // Above 10 Mbps clamped to 100
         m10.bandwidth_bps = Some(100_000_000);
-        assert!((selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 100.0).abs() < 0.01);
+        assert!(
+            (selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 100.0).abs()
+                < 0.01
+        );
     }
 
     #[test]
@@ -1591,8 +1684,14 @@ mod tests {
             prefer_online: false,
             ..Default::default()
         });
-        assert_eq!(prefer.calculate_bandwidth_score(TransportType::Internet, &metrics), 70.0);
-        assert_eq!(no_prefer.calculate_bandwidth_score(TransportType::Internet, &metrics), 50.0);
+        assert_eq!(
+            prefer.calculate_bandwidth_score(TransportType::Internet, &metrics),
+            70.0
+        );
+        assert_eq!(
+            no_prefer.calculate_bandwidth_score(TransportType::Internet, &metrics),
+            50.0
+        );
     }
 
     #[test]
@@ -1658,7 +1757,10 @@ mod tests {
         let wifi = selector.calculate_energy_score(TransportType::WiFiDirect, &metrics);
         assert!(ble.is_finite() && ble >= 0.0 && ble <= 100.0);
         assert!(wifi.is_finite() && wifi >= 0.0 && wifi <= 100.0);
-        assert!(ble > wifi, "BLE should score higher on energy than WiFi at same battery");
+        assert!(
+            ble > wifi,
+            "BLE should score higher on energy than WiFi at same battery"
+        );
     }
 
     #[test]
@@ -1687,7 +1789,10 @@ mod tests {
         metrics.queue_depth = 5;
         let score = selector.calculate_load_score(TransportType::BLE, &metrics);
         assert!(score.is_finite() && score >= 0.0 && score <= 100.0);
-        assert!(score > 50.0, "low queue should yield relatively high load score");
+        assert!(
+            score > 50.0,
+            "low queue should yield relatively high load score"
+        );
     }
 
     #[test]
@@ -1742,7 +1847,9 @@ mod tests {
         assert!((selector.calculate_reliability_score(TransportType::BLE, &m0)).abs() < 0.01);
         let mut m1 = TransportMetrics::default();
         m1.delivery_ratio = Some(1.0);
-        assert!((selector.calculate_reliability_score(TransportType::BLE, &m1) - 100.0).abs() < 0.01);
+        assert!(
+            (selector.calculate_reliability_score(TransportType::BLE, &m1) - 100.0).abs() < 0.01
+        );
     }
 
     #[test]
@@ -1762,7 +1869,10 @@ mod tests {
         metrics.queue_depth = 200; // above default threshold 50
         let score = selector.calculate_load_score(TransportType::BLE, &metrics);
         assert!(score.is_finite() && score >= 0.0);
-        assert!(score < 50.0, "queue above threshold should reduce load score");
+        assert!(
+            score < 50.0,
+            "queue above threshold should reduce load score"
+        );
     }
 
     #[test]
@@ -1770,10 +1880,22 @@ mod tests {
         let selector = TransportSelector::new();
         let message = create_test_message();
         let metrics = TransportMetrics::default();
-        for transport_type in [TransportType::BLE, TransportType::WiFiDirect, TransportType::Internet] {
+        for transport_type in [
+            TransportType::BLE,
+            TransportType::WiFiDirect,
+            TransportType::Internet,
+        ] {
             let score = selector.calculate_transport_score(&message, transport_type, &metrics);
-            assert!(score.total.is_finite(), "total must be finite for {:?}", transport_type);
-            assert!(score.total >= 0.0, "total must be non-negative for {:?}", transport_type);
+            assert!(
+                score.total.is_finite(),
+                "total must be finite for {:?}",
+                transport_type
+            );
+            assert!(
+                score.total >= 0.0,
+                "total must be non-negative for {:?}",
+                transport_type
+            );
             assert!(score.bandwidth >= 0.0 && score.bandwidth <= 100.0);
             assert!(score.congestion >= 0.0 && score.congestion <= 100.0);
         }
@@ -1832,5 +1954,158 @@ mod tests {
             TransportType::BLE,
             "DORS must fall back to BLE when Internet is no longer available"
         );
+    }
+
+    #[test]
+    fn test_selection_chooses_highest_scored_transport_when_no_current() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-70), 0.3, 15));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.05, 2),
+        );
+        transports.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
+
+        let ranked = selector.score_and_rank(&message, &transports);
+        assert_eq!(ranked.len(), 3);
+        let (best_type, best_score) = ranked[0];
+        let (_second_type, second_score) = ranked[1];
+        assert!(
+            best_score >= second_score,
+            "score_and_rank returns descending order"
+        );
+
+        let selected = selector.select_transport(&message, &transports).unwrap();
+        assert_eq!(
+				selected, best_type,
+				"Selection must choose the transport with the highest policy-compliant score when there is no current transport"
+		);
+    }
+
+    #[test]
+    fn test_no_transport_viable_returns_none_typed_fallback() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+        let transports: HashMap<TransportType, TransportMetrics> = HashMap::new();
+
+        let result = selector.select_transport(&message, &transports);
+        assert!(
+				result.is_none(),
+				"When no transport is viable (empty available_transports), must return None as typed fallback"
+		);
+    }
+
+    #[test]
+    fn test_single_transport_returns_that_transport() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+        let mut transports = HashMap::new();
+        transports.insert(
+            TransportType::Internet,
+            create_test_metrics(Some(-60), 0.2, 10),
+        );
+
+        let selected = selector.select_transport(&message, &transports);
+        assert_eq!(selected, Some(TransportType::Internet));
+    }
+
+    /// When scores are equal or within a small gap (TIE_EPSILON), selection still returns
+    /// one of the available transports with finite, non-negative scores. Tie-break order
+    /// (Internet > WiFiDirect > BLE) is applied when scores are effectively equal.
+    #[test]
+    fn test_tie_case_returns_some_transport_with_finite_scores() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+        let mut transports = HashMap::new();
+        let mut ble = create_test_metrics(Some(-68), 0.15, 8);
+        ble.bandwidth_bps = Some(120_000);
+        let mut wifi = create_test_metrics(Some(-65), 0.15, 8);
+        wifi.bandwidth_bps = Some(1_900_000);
+        transports.insert(TransportType::BLE, ble);
+        transports.insert(TransportType::WiFiDirect, wifi);
+
+        let ranked = selector.score_and_rank(&message, &transports);
+        assert_eq!(ranked.len(), 2);
+        let selected = selector.select_transport(&message, &transports);
+        assert!(selected.is_some());
+        let sel = selected.unwrap();
+        assert!(
+            sel == TransportType::BLE || sel == TransportType::WiFiDirect,
+            "On tie or near-tie, selection must return one of the available transports"
+        );
+        assert!(
+            ranked.iter().all(|(_, s)| s.is_finite() && *s >= 0.0),
+            "All scores must be finite and non-negative"
+        );
+    }
+
+    /// With forced equal scores, the winner must follow the tie-break rule: Internet > WiFiDirect > BLE.
+    /// Uses a test-only helper to inject equal scores so we don't rely on runtime metrics to tie.
+    #[test]
+    fn test_tie_break_order_when_scores_forced_equal() {
+        // Two transports with identical score: WiFiDirect and BLE. Tie-break prefers WiFiDirect over BLE.
+        let scores_two = [
+            (TransportType::WiFiDirect, 50.0),
+            (TransportType::BLE, 50.0),
+        ];
+        assert_eq!(
+            TransportSelector::select_from_scores_for_test(&scores_two),
+            Some(TransportType::WiFiDirect),
+            "Tie-break: WiFiDirect > BLE"
+        );
+
+        // All three with identical score: Internet must win.
+        let scores_three = [
+            (TransportType::BLE, 50.0),
+            (TransportType::WiFiDirect, 50.0),
+            (TransportType::Internet, 50.0),
+        ];
+        assert_eq!(
+            TransportSelector::select_from_scores_for_test(&scores_three),
+            Some(TransportType::Internet),
+            "Tie-break: Internet > WiFiDirect > BLE"
+        );
+
+        // Order in input should not matter.
+        let scores_reversed = [
+            (TransportType::Internet, 50.0),
+            (TransportType::WiFiDirect, 50.0),
+            (TransportType::BLE, 50.0),
+        ];
+        assert_eq!(
+            TransportSelector::select_from_scores_for_test(&scores_reversed),
+            Some(TransportType::Internet)
+        );
+    }
+
+    #[test]
+    fn test_policy_compliant_when_hysteresis_blocks_returns_current() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 5),
+        );
+
+        let first = selector.select_transport(&message, &transports).unwrap();
+        let current = first;
+
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-62), 0.2, 10));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-56), 0.1, 5),
+        );
+
+        let second = selector.select_transport(&message, &transports).unwrap();
+        assert_eq!(
+				second, current,
+				"When hysteresis blocks a switch, selection must return current transport (policy-compliant)"
+		);
     }
 }
