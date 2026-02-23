@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import UIKit
 import CoreBluetooth
 import React
 
@@ -33,10 +34,12 @@ class OfflineProtocolModule: RCTEventEmitter {
     override init() {
         print("[OfflineProtocolModule] init() called")
         super.init()
+        addBackgroundObservers()
         print("[OfflineProtocolModule] init() completed successfully")
     }
     
     deinit {
+        removeBackgroundObservers()
         stopProcessTimer()
         bleManager?.stop()
         bleManager = nil
@@ -45,6 +48,40 @@ class OfflineProtocolModule: RCTEventEmitter {
         wifiDirectManager?.stop()
         wifiDirectManager = nil
         protocolInstance = nil
+    }
+    
+    // MARK: - iOS background / Wi‑Fi suspension
+    
+    /// When the app enters background, iOS kills MultipeerConnectivity. Notify Rust so DORS
+    /// stops routing over Wi‑Fi Direct and uses BLE (allowed in background).
+    private func addBackgroundObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidEnterBackground),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+    }
+    
+    private func removeBackgroundObservers() {
+        NotificationCenter.default.removeObserver(self, name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: UIApplication.willEnterForegroundNotification, object: nil)
+    }
+    
+    @objc private func applicationDidEnterBackground() {
+        guard let proto = protocolInstance else { return }
+        try? proto.wifiDirectStatusChanged(isConnected: false)
+    }
+    
+    @objc private func applicationWillEnterForeground() {
+        guard let proto = protocolInstance else { return }
+        try? proto.wifiDirectStatusChanged(isConnected: true)
     }
     
     override class func requiresMainQueueSetup() -> Bool {
