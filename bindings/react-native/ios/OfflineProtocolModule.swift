@@ -75,14 +75,19 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     @objc private func applicationDidEnterBackground() {
+        Self.testLastWifiStatusChangeForTesting = false
         guard let proto = protocolInstance else { return }
         try? proto.wifiDirectStatusChanged(isConnected: false)
     }
-    
+
     @objc private func applicationWillEnterForeground() {
+        Self.testLastWifiStatusChangeForTesting = true
         guard let proto = protocolInstance else { return }
         try? proto.wifiDirectStatusChanged(isConnected: true)
     }
+
+    /// Set by notification handlers for unit tests. Reset to nil before each test that uses it.
+    static var testLastWifiStatusChangeForTesting: Bool?
     
     override class func requiresMainQueueSetup() -> Bool {
         return true
