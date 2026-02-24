@@ -100,6 +100,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val storePending = encryptionJson?.let {
             it.optBooleanCompat("storePending", "store_pending") ?: true
         } ?: true
+        val requireEncryption = encryptionJson?.let {
+            it.optBooleanCompat("requireEncryption", "require_encryption") ?: false
+        } ?: false
 
         val config = ProtocolConfig(
             appId = json.optString("appId", json.optString("app_id", "")),
@@ -111,7 +114,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte(),
             encryptionEnabled = encryptionEnabled,
             autoKeyExchange = autoKeyExchange,
-            storePending = storePending
+            storePending = storePending,
+            requireEncryption = requireEncryption
         )
 
         return ParsedConfig(config, json)

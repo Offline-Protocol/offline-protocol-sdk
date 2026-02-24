@@ -594,6 +594,8 @@ pub struct EncryptionConfig {
     pub auto_key_exchange: bool,
     /// Store pending messages when no session exists (default: true)
     pub store_pending: bool,
+    /// Require encryption for outbound sends (default: false)
+    pub require_encryption: bool,
 }
 
 impl Default for EncryptionConfig {
@@ -602,6 +604,7 @@ impl Default for EncryptionConfig {
             enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
         }
     }
 }
@@ -619,6 +622,7 @@ pub struct ProtocolConfig {
     pub encryption_enabled: bool,
     pub auto_key_exchange: bool,
     pub store_pending: bool,
+    pub require_encryption: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -645,6 +649,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.encryption.enabled = config.encryption_enabled;
         core_config.encryption.auto_key_exchange = config.auto_key_exchange;
         core_config.encryption.store_pending = config.store_pending;
+        core_config.encryption.require_encryption = config.require_encryption;
         core_config
     }
 }
@@ -979,9 +984,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(wifi_transport) =
-                transport.as_any().downcast_ref::<WifiDirectTransport>()
-            {
+            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 let cb = callback.clone();
                 wifi_transport.set_on_messages_available(Arc::new(move || {
                     cb.on_messages_available();
@@ -2731,8 +2734,9 @@ impl OfflineProtocol {
             "type": "RequestPreKeyBundle",
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e))
+        })
     }
 
     /// Upload identity key and prekeys for Signal Protocol.
@@ -2745,12 +2749,16 @@ impl OfflineProtocol {
         one_time_prekeys_json: String,
     ) -> Result<String, ProtocolError> {
         // Parse the JSON strings into values
-        let signed_prekey: serde_json::Value = serde_json::from_str(&signed_prekey_json)
-            .map_err(|e| ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e)))?;
-        
+        let signed_prekey: serde_json::Value =
+            serde_json::from_str(&signed_prekey_json).map_err(|e| {
+                ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e))
+            })?;
+
         let one_time_prekeys: Vec<serde_json::Value> = serde_json::from_str(&one_time_prekeys_json)
-            .map_err(|e| ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e)))?;
-        
+            .map_err(|e| {
+                ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e))
+            })?;
+
         let payload = serde_json::json!({
             "type": "UploadKeys",
             "identity_key": identity_key,
@@ -2815,13 +2823,14 @@ impl OfflineProtocol {
             "group_id": group_id,
             "content": content
         });
-        
+
         if let Some(reply_to) = reply_to_msg {
             payload["reply_to_msg"] = serde_json::Value::String(reply_to);
         }
-        
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e)))
+
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e))
+        })
     }
 
     /// Add member to group. Admin only.
@@ -2829,7 +2838,7 @@ impl OfflineProtocol {
     pub fn group_add_member(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "AddGroupMember",
@@ -2845,15 +2854,16 @@ impl OfflineProtocol {
     pub fn group_remove_member(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "RemoveGroupMember",
             "group_id": group_id,
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e))
+        })
     }
 
     /// Set member as admin. Admin only.
@@ -2861,7 +2871,7 @@ impl OfflineProtocol {
     pub fn group_set_admin(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "SetGroupAdmin",
@@ -2877,15 +2887,16 @@ impl OfflineProtocol {
     pub fn group_remove_admin(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "RemoveGroupAdmin",
             "group_id": group_id,
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e))
+        })
     }
 
     /// Leave a group.
@@ -2948,6 +2959,7 @@ mod tests {
             encryption_enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
         }
     }
 
@@ -2963,6 +2975,7 @@ mod tests {
             encryption_enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
         }
     }
 

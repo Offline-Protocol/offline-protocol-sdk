@@ -87,6 +87,9 @@ const protocol = new OfflineProtocol({
     
     // Queue messages if no session exists yet (default: true)
     storePending: true,
+
+    // Require encrypted delivery or fail send (default: false)
+    requireEncryption: false,
   }
 });
 ```
@@ -96,6 +99,9 @@ const protocol = new OfflineProtocol({
 | `enabled` | `true` | Enable automatic encryption/decryption |
 | `autoKeyExchange` | `true` | Automatically exchange key packages on peer discovery |
 | `storePending` | `true` | Queue messages when no session exists (sent after session established) |
+| `requireEncryption` | `false` | Enforce encrypted delivery (send fails if encryption cannot be applied) |
+
+Encryption is best-effort by default. Set `requireEncryption: true` to guarantee encrypted delivery or failure.
 
 ### What Happens Automatically
 

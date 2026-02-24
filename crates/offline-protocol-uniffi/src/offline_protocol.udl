@@ -275,6 +275,7 @@ dictionary EncryptionConfig {
     boolean enabled;
     boolean auto_key_exchange;
     boolean store_pending;
+    boolean require_encryption;
 };
 
 // Extended configuration for protocol creation
@@ -289,6 +290,7 @@ dictionary ProtocolConfig {
     boolean encryption_enabled;
     boolean auto_key_exchange;
     boolean store_pending;
+    boolean require_encryption;
 };
 
 // Extended protocol configuration with all options

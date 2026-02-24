@@ -79,6 +79,7 @@ let config = ProtocolConfig::builder("my-app", "user123")
     .encryption_enabled(true)      // NEW: Auto-encryption
     .auto_key_exchange(true)       // NEW: Auto key exchange
     .store_pending_messages(true)  // NEW: Queue pending messages
+    .require_encryption(false)     // NEW: Strict encryption policy
     .build()?;
 ```
 
@@ -96,6 +97,9 @@ pub struct EncryptionConfig {
     
     /// Store pending messages when no session exists (default: true)
     pub store_pending: bool,
+
+    /// Require encryption for outbound sends (default: false)
+    pub require_encryption: bool,
 }
 ```
 
@@ -105,6 +109,7 @@ interface EncryptionConfig {
   enabled?: boolean;        // Default: true
   autoKeyExchange?: boolean; // Default: true
   storePending?: boolean;    // Default: true
+  requireEncryption?: boolean; // Default: false
 }
 ```
 
@@ -207,9 +212,8 @@ pub fn send_message(
 ) -> Result<MessageId>
 ```
 
-Sends a message. Returns `Ok(message_id)` on success or `Err` if the transport
-send failed. On error the message is automatically deferred for retry — the
-caller should treat this as "queued, pending delivery" rather than "lost".
+Sends a message. Returns `Ok(message_id)` when the message is accepted for send
+or queued for retry/pending-session delivery, or `Err` for policy and setup failures.
 
 **Example**:
 ```rust
@@ -276,6 +280,10 @@ Called when a neighbor is lost. Cleans up tracking state.
 1. Encrypts content if MLS is initialized and a session exists
 2. Creates a session and sends Welcome if we have the recipient's key package
 3. Queues the message if `store_pending` is `true` and no session/key package exists
+
+With default settings, encryption is best-effort. Set `encryption.require_encryption = true`
+to guarantee encrypted delivery or fail with a typed error (`NoKeyPackage`,
+`SessionPending`, or `EncryptFailed`).
 
 Similarly, `receive_message` automatically:
 1. Handles incoming key packages (stores them for session creation)

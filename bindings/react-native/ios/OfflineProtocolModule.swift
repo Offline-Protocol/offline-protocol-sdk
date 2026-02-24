@@ -87,6 +87,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                               ?? encryptionDict["auto_key_exchange"] as? Bool ?? true
         let storePending = encryptionDict["storePending"] as? Bool 
                            ?? encryptionDict["store_pending"] as? Bool ?? true
+        let requireEncryption = encryptionDict["requireEncryption"] as? Bool
+                                ?? encryptionDict["require_encryption"] as? Bool ?? false
         
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
@@ -98,7 +100,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
             encryptionEnabled: encryptionEnabled,
             autoKeyExchange: autoKeyExchange,
-            storePending: storePending
+            storePending: storePending,
+            requireEncryption: requireEncryption
         )
 
         return (config, raw)

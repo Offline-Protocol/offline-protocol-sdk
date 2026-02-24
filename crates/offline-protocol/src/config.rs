@@ -19,6 +19,10 @@ pub struct EncryptionConfig {
     /// Store pending messages when no session exists.
     /// Messages will be sent automatically after the session is established.
     pub store_pending: bool,
+
+    /// Require encryption for outbound messages.
+    /// When enabled, sends fail if encryption cannot be applied.
+    pub require_encryption: bool,
 }
 
 impl Default for EncryptionConfig {
@@ -27,6 +31,7 @@ impl Default for EncryptionConfig {
             enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
         }
     }
 }
@@ -38,6 +43,7 @@ impl EncryptionConfig {
             enabled: false,
             auto_key_exchange: false,
             store_pending: false,
+            require_encryption: false,
         }
     }
 }
@@ -194,6 +200,12 @@ impl ProtocolConfig {
             ));
         }
 
+        if self.encryption.require_encryption && !self.encryption.enabled {
+            return Err(crate::Error::InvalidConfiguration(
+                "encryption.require_encryption requires encryption.enabled=true".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -292,6 +304,12 @@ impl ProtocolConfigBuilder {
     /// Enables or disables storing pending messages for later encryption.
     pub fn store_pending_messages(mut self, enabled: bool) -> Self {
         self.config.encryption.store_pending = enabled;
+        self
+    }
+
+    /// Enables or disables strict encryption requirement.
+    pub fn require_encryption(mut self, required: bool) -> Self {
+        self.config.encryption.require_encryption = required;
         self
     }
 
@@ -413,6 +431,7 @@ mod tests {
         assert!(encryption.enabled);
         assert!(encryption.auto_key_exchange);
         assert!(encryption.store_pending);
+        assert!(!encryption.require_encryption);
     }
 
     #[test]
@@ -421,6 +440,7 @@ mod tests {
         assert!(!encryption.enabled);
         assert!(!encryption.auto_key_exchange);
         assert!(!encryption.store_pending);
+        assert!(!encryption.require_encryption);
     }
 
     #[test]
@@ -429,11 +449,21 @@ mod tests {
             .encryption_enabled(true)
             .auto_key_exchange(true)
             .store_pending_messages(false)
+            .require_encryption(true)
             .build()
             .unwrap();
 
         assert!(config.encryption.enabled);
         assert!(config.encryption.auto_key_exchange);
         assert!(!config.encryption.store_pending);
+        assert!(config.encryption.require_encryption);
+    }
+
+    #[test]
+    fn test_config_validation_require_encryption_requires_enabled() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.encryption.enabled = false;
+        config.encryption.require_encryption = true;
+        assert!(config.validate().is_err());
     }
 }

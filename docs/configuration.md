@@ -89,6 +89,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
     enabled: true,           // Messages automatically encrypted
     autoKeyExchange: true,   // Key packages exchanged on discovery
     storePending: true,      // Queue messages until session established
+    requireEncryption: false // Best-effort by default; set true for strict mode
   },
   
   dors: {
@@ -235,6 +236,9 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `enabled` | boolean | true | Enable automatic encryption/decryption |
 | `autoKeyExchange` | boolean | true | Auto-exchange key packages on peer discovery |
 | `storePending` | boolean | true | Queue messages when no session exists |
+| `requireEncryption` | boolean | false | Fail send unless encryption is applied |
+
+By default, encryption is best-effort. Set `requireEncryption: true` to guarantee encrypted delivery or fail the send.
 
 **Example: Disable auto-encryption (use manual MLS APIs)**:
 ```typescript
@@ -252,6 +256,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
     enabled: true,
     autoKeyExchange: false,  // Must manually exchange key packages
     storePending: true,
+    requireEncryption: true, // Strict mode: encrypted delivery or error
   }
 }
 ```
