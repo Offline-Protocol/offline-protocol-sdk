@@ -89,6 +89,41 @@ class OfflineProtocolModule: RCTEventEmitter {
                            ?? encryptionDict["store_pending"] as? Bool ?? true
         let requireEncryption = encryptionDict["requireEncryption"] as? Bool
                                 ?? encryptionDict["require_encryption"] as? Bool ?? false
+        let pendingQueueDict = encryptionDict["pendingQueue"] as? [String: Any]
+            ?? encryptionDict["pending_queue"] as? [String: Any]
+        let maxPendingPerPeer = UInt64(
+            (pendingQueueDict?["maxPendingPerPeer"] as? NSNumber)?.uint64Value
+                ?? (pendingQueueDict?["max_pending_per_peer"] as? NSNumber)?.uint64Value
+                ?? (raw["maxPendingPerPeer"] as? NSNumber)?.uint64Value
+                ?? (raw["max_pending_per_peer"] as? NSNumber)?.uint64Value
+                ?? 64
+        )
+        let maxPendingGlobal = UInt64(
+            (pendingQueueDict?["maxPendingGlobal"] as? NSNumber)?.uint64Value
+                ?? (pendingQueueDict?["max_pending_global"] as? NSNumber)?.uint64Value
+                ?? (raw["maxPendingGlobal"] as? NSNumber)?.uint64Value
+                ?? (raw["max_pending_global"] as? NSNumber)?.uint64Value
+                ?? 4096
+        )
+        let pendingTtlMs = UInt64(
+            (pendingQueueDict?["pendingTtlMs"] as? NSNumber)?.uint64Value
+                ?? (pendingQueueDict?["pending_ttl_ms"] as? NSNumber)?.uint64Value
+                ?? (raw["pendingTtlMs"] as? NSNumber)?.uint64Value
+                ?? (raw["pending_ttl_ms"] as? NSNumber)?.uint64Value
+                ?? 120_000
+        )
+        let overflowPolicyRaw = (pendingQueueDict?["overflowPolicy"] as? String)
+            ?? (pendingQueueDict?["overflow_policy"] as? String)
+            ?? (raw["overflowPolicy"] as? String)
+            ?? (raw["overflow_policy"] as? String)
+            ?? "drop_oldest"
+        let overflowPolicy: OverflowPolicy
+        switch overflowPolicyRaw.lowercased() {
+        case "drop_newest":
+            overflowPolicy = .dropNewest
+        default:
+            overflowPolicy = .dropOldest
+        }
         
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
@@ -101,7 +136,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             encryptionEnabled: encryptionEnabled,
             autoKeyExchange: autoKeyExchange,
             storePending: storePending,
-            requireEncryption: requireEncryption
+            requireEncryption: requireEncryption,
+            maxPendingPerPeer: maxPendingPerPeer,
+            maxPendingGlobal: maxPendingGlobal,
+            pendingTtlMs: pendingTtlMs,
+            overflowPolicy: overflowPolicy
         )
 
         return (config, raw)

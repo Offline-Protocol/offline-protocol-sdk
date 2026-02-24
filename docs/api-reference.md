@@ -100,6 +100,10 @@ pub struct EncryptionConfig {
 
     /// Require encryption for outbound sends (default: false)
     pub require_encryption: bool,
+
+    /// Bounds and eviction policy for encrypted messages received
+    /// before session readiness.
+    pub pending_queue: PendingQueueConfig,
 }
 ```
 
@@ -110,6 +114,12 @@ interface EncryptionConfig {
   autoKeyExchange?: boolean; // Default: true
   storePending?: boolean;    // Default: true
   requireEncryption?: boolean; // Default: false
+  pendingQueue?: {
+    maxPendingPerPeer?: number; // Default: 64
+    maxPendingGlobal?: number;  // Default: 4096
+    pendingTtlMs?: number;      // Default: 120000
+    overflowPolicy?: 'drop_oldest' | 'drop_newest'; // Default: drop_oldest
+  };
 }
 ```
 

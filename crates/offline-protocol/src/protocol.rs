@@ -14,9 +14,10 @@ use offline_protocol_reliability::{
 use offline_protocol_router::{DorsConfig, PathSelector, RelayManager, TransportSelector};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Internal message prefixes for protocol messages.
@@ -65,6 +66,10 @@ const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
 const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
 /// Timeout waiting for explicit internet send confirmation for welcome.
 const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
+const PENDING_TTL_SPIKE_WARN_THRESHOLD: usize = 25;
+const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
+const PENDING_DROP_WARN_EVERY: u64 = 100;
+const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +210,75 @@ struct PendingMessage {
     reply_to_msg: Option<MessageId>,
     /// When the message was queued (for future TTL/expiry support).
     queued_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+struct PendingDecryptMessage {
+    peer_id: String,
+    message_id: String,
+    received_at: Instant,
+    sequence: u64,
+    message: Message,
+}
+
+#[derive(Clone)]
+struct PendingDecryptEntryRef {
+    peer_id: String,
+    message_id: String,
+    sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingQueueLimit {
+    PerPeer,
+    Global,
+}
+
+impl PendingQueueLimit {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PerPeer => "per_peer",
+            Self::Global => "global",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingQueueDropReason {
+    OverflowDropOldest,
+    OverflowDropNewest,
+    TtlExpired,
+}
+
+impl PendingQueueDropReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OverflowDropOldest => "overflow_drop_oldest",
+            Self::OverflowDropNewest => "overflow_drop_newest",
+            Self::TtlExpired => "ttl_expired",
+        }
+    }
+}
+
+/// Counters and gauges for pending encrypted message queue pressure.
+#[derive(Debug, Clone, Default)]
+pub struct PendingQueueMetrics {
+    /// Total encrypted messages received before session readiness.
+    pub pending_messages_received_total: u64,
+    /// Total queued messages evicted from pending storage.
+    pub pending_messages_evicted_total: u64,
+    /// Total messages dropped due to overflow policy decisions.
+    pub pending_messages_dropped_overflow_total: u64,
+    /// Total pending messages expired due to TTL.
+    pub pending_messages_expired_total: u64,
+    /// Number of failed eviction attempts while enforcing hard bounds.
+    pub pending_messages_eviction_failures_total: u64,
+    /// Number of detected pending queue invariant violations.
+    pub pending_queue_invariant_violations_total: u64,
+    /// Current number of messages in pending queues across all peers.
+    pub pending_messages_current: usize,
+    /// Current per-peer pending queue sizes.
+    pub pending_messages_per_peer: HashMap<String, usize>,
 }
 
 /// Durable state for a peer MLS session.
@@ -385,7 +459,25 @@ pub struct OfflineProtocol {
 
     /// Encrypted messages received before session was established (sender -> messages).
     /// These are queued and processed after session confirmation.
-    pending_decryption: HashMap<String, Vec<Message>>,
+    /// Invariants:
+    /// - bounded by both per-peer and global limits
+    /// - deterministic FIFO order within each peer
+    /// - monotonic TTL expiration (Instant-based)
+    pending_decryption: HashMap<String, VecDeque<PendingDecryptMessage>>,
+    /// Global insertion order index for deterministic global oldest eviction.
+    pending_decryption_global_order: VecDeque<PendingDecryptEntryRef>,
+    /// Live sequence IDs currently present in pending queues.
+    pending_decryption_live_sequences: HashSet<u64>,
+    /// Current number of pending encrypted messages across all peers.
+    pending_decryption_total: usize,
+    /// Monotonic sequence assigned on enqueue for deterministic tie-breaking.
+    pending_decryption_next_sequence: u64,
+    /// Pending queue observability counters and gauges.
+    pending_queue_metrics: PendingQueueMetrics,
+    /// Overflow hit count per peer for warning signal emission.
+    pending_peer_overflow_hits: HashMap<String, u32>,
+    /// Drop warning counters used for log-rate limiting by reason/limit.
+    pending_drop_warning_counters: HashMap<String, u64>,
 
     /// Storage for persisting pending messages (reuses MLS storage).
     /// When set, pending messages survive app crashes/restarts.
@@ -442,6 +534,13 @@ impl OfflineProtocol {
             key_package_sent_to: std::collections::HashSet::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             pending_decryption: HashMap::new(),
+            pending_decryption_global_order: VecDeque::new(),
+            pending_decryption_live_sequences: HashSet::new(),
+            pending_decryption_total: 0,
+            pending_decryption_next_sequence: 0,
+            pending_queue_metrics: PendingQueueMetrics::default(),
+            pending_peer_overflow_hits: HashMap::new(),
+            pending_drop_warning_counters: HashMap::new(),
             message_storage: None,
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),
@@ -1673,11 +1772,543 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    fn pending_queue_ttl(&self) -> StdDuration {
+        StdDuration::from_millis(self.config.encryption.pending_queue.pending_ttl_ms)
+    }
+
+    fn update_pending_peer_gauge(&mut self, peer_id: &str) {
+        let peer_len = self
+            .pending_decryption
+            .get(peer_id)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if peer_len == 0 {
+            self.pending_queue_metrics.pending_messages_per_peer.remove(peer_id);
+        } else {
+            self.pending_queue_metrics
+                .pending_messages_per_peer
+                .insert(peer_id.to_string(), peer_len);
+        }
+    }
+
+    fn update_pending_queue_current_gauge(&mut self) {
+        self.pending_queue_metrics.pending_messages_current = self.pending_decryption_total;
+    }
+
+    fn next_pending_sequence(&mut self) -> u64 {
+        let seq = self.pending_decryption_next_sequence;
+        self.pending_decryption_next_sequence = self.pending_decryption_next_sequence.wrapping_add(1);
+        seq
+    }
+
+    fn is_pending_entry_expired(&self, entry: &PendingDecryptMessage, now: Instant) -> bool {
+        now.saturating_duration_since(entry.received_at) >= self.pending_queue_ttl()
+    }
+
+    fn cleanup_global_order_front(&mut self) {
+        while let Some(front) = self.pending_decryption_global_order.front() {
+            if self
+                .pending_decryption_live_sequences
+                .contains(&front.sequence)
+            {
+                break;
+            }
+            self.pending_decryption_global_order.pop_front();
+        }
+    }
+
+    fn remove_pending_entry_by_sequence(
+        &mut self,
+        peer_id: &str,
+        sequence: u64,
+    ) -> Option<PendingDecryptMessage> {
+        let (removed, queue_empty) = {
+            let queue = self.pending_decryption.get_mut(peer_id)?;
+            let position = queue.iter().position(|entry| entry.sequence == sequence)?;
+            let removed = queue.remove(position)?;
+            (removed, queue.is_empty())
+        };
+
+        self.pending_decryption_live_sequences.remove(&sequence);
+        self.pending_decryption_total = self.pending_decryption_total.saturating_sub(1);
+        self.update_pending_queue_current_gauge();
+
+        if queue_empty {
+            self.pending_decryption.remove(peer_id);
+        }
+        self.update_pending_peer_gauge(peer_id);
+        Some(removed)
+    }
+
+    fn record_pending_drop(
+        &mut self,
+        reason: PendingQueueDropReason,
+        limit_triggered: Option<PendingQueueLimit>,
+        peer_id: &str,
+        message_id: &str,
+    ) {
+        if matches!(
+            reason,
+            PendingQueueDropReason::OverflowDropOldest | PendingQueueDropReason::TtlExpired
+        ) {
+            self.pending_queue_metrics.pending_messages_evicted_total = self
+                .pending_queue_metrics
+                .pending_messages_evicted_total
+                .saturating_add(1);
+        }
+
+        if matches!(
+            reason,
+            PendingQueueDropReason::OverflowDropOldest | PendingQueueDropReason::OverflowDropNewest
+        ) {
+            self.pending_queue_metrics.pending_messages_dropped_overflow_total = self
+                .pending_queue_metrics
+                .pending_messages_dropped_overflow_total
+                .saturating_add(1);
+        }
+
+        if reason == PendingQueueDropReason::TtlExpired {
+            self.pending_queue_metrics.pending_messages_expired_total = self
+                .pending_queue_metrics
+                .pending_messages_expired_total
+                .saturating_add(1);
+        }
+
+        let limit_label = limit_triggered.map(PendingQueueLimit::as_str).unwrap_or("ttl");
+        let counter_key = format!("{}:{}", reason.as_str(), limit_label);
+        let drop_count = {
+            let counter = self
+                .pending_drop_warning_counters
+                .entry(counter_key)
+                .or_insert(0);
+            *counter = counter.saturating_add(1);
+            *counter
+        };
+
+        debug!(
+            reason = reason.as_str(),
+            peer_id = %peer_id,
+            message_id = %message_id,
+            queue_size = self.pending_decryption_total,
+            limit_triggered = limit_label,
+            overflow_policy = ?self.config.encryption.pending_queue.overflow_policy,
+            "Dropped pending encrypted message"
+        );
+        if drop_count == 1 || drop_count % PENDING_DROP_WARN_EVERY == 0 {
+            warn!(
+                reason = reason.as_str(),
+                limit_triggered = limit_label,
+                drops = drop_count,
+                queue_size = self.pending_decryption_total,
+                "Pending encrypted message drops continuing"
+            );
+        }
+    }
+
+    fn record_pending_eviction_failure(
+        &mut self,
+        limit_triggered: PendingQueueLimit,
+        peer_id: &str,
+        message_id: &str,
+        detail: &str,
+    ) {
+        self.pending_queue_metrics.pending_messages_eviction_failures_total = self
+            .pending_queue_metrics
+            .pending_messages_eviction_failures_total
+            .saturating_add(1);
+
+        let count = self
+            .pending_queue_metrics
+            .pending_messages_eviction_failures_total;
+        if count == 1 || count % PENDING_EVICTION_FAILURE_WARN_EVERY == 0 {
+            warn!(
+                limit_triggered = limit_triggered.as_str(),
+                peer_id = %peer_id,
+                message_id = %message_id,
+                failures = count,
+                detail = detail,
+                queue_size = self.pending_decryption_total,
+                "Pending queue eviction failure detected"
+            );
+        } else {
+            debug!(
+                limit_triggered = limit_triggered.as_str(),
+                peer_id = %peer_id,
+                message_id = %message_id,
+                detail = detail,
+                "Pending queue eviction failure detected"
+            );
+        }
+    }
+
+    fn verify_pending_queue_invariants(&mut self, context: &str) {
+        let per_peer_sum: usize = self.pending_decryption.values().map(VecDeque::len).sum();
+        let live_count = self.pending_decryption_live_sequences.len();
+        let current_gauge = self.pending_queue_metrics.pending_messages_current;
+        let total = self.pending_decryption_total;
+        let valid = per_peer_sum == total && live_count == total && current_gauge == total;
+        if valid {
+            return;
+        }
+
+        self.pending_queue_metrics.pending_queue_invariant_violations_total = self
+            .pending_queue_metrics
+            .pending_queue_invariant_violations_total
+            .saturating_add(1);
+        warn!(
+            context = context,
+            per_peer_sum,
+            live_count,
+            current_gauge,
+            total,
+            violations = self
+                .pending_queue_metrics
+                .pending_queue_invariant_violations_total,
+            "Pending queue invariant violation detected"
+        );
+    }
+
+    fn record_peer_overflow_pressure(&mut self, peer_id: &str) {
+        let hits = self
+            .pending_peer_overflow_hits
+            .entry(peer_id.to_string())
+            .or_insert(0);
+        *hits = hits.saturating_add(1);
+        if *hits % PENDING_PEER_PRESSURE_WARN_EVERY == 0 {
+            warn!(
+                peer_id = %peer_id,
+                overflow_hits = *hits,
+                per_peer_limit = self.config.encryption.pending_queue.max_pending_per_peer,
+                "Peer repeatedly hitting pending queue limits"
+            );
+        }
+    }
+
+    fn evict_global_oldest(
+        &mut self,
+        reason: PendingQueueDropReason,
+        limit_triggered: PendingQueueLimit,
+    ) -> bool {
+        self.cleanup_global_order_front();
+        let Some(entry_ref) = self.pending_decryption_global_order.pop_front() else {
+            return false;
+        };
+        if !self
+            .pending_decryption_live_sequences
+            .contains(&entry_ref.sequence)
+        {
+            return false;
+        }
+        if let Some(evicted) = self.remove_pending_entry_by_sequence(&entry_ref.peer_id, entry_ref.sequence) {
+            self.record_pending_drop(
+                reason,
+                Some(limit_triggered),
+                &evicted.peer_id,
+                &evicted.message_id,
+            );
+            return true;
+        }
+        warn!(
+            peer_id = %entry_ref.peer_id,
+            message_id = %entry_ref.message_id,
+            sequence = entry_ref.sequence,
+            "Failed to evict pending message by global order reference"
+        );
+        false
+    }
+
+    fn prune_expired_pending_for_peer(&mut self, peer_id: &str, now: Instant) -> usize {
+        let mut expired_count = 0usize;
+        let mut expired_sequences = Vec::new();
+        let mut expired_ids = Vec::new();
+        if let Some(queue) = self.pending_decryption.get(peer_id) {
+            for entry in queue {
+                if self.is_pending_entry_expired(entry, now) {
+                    expired_sequences.push(entry.sequence);
+                    expired_ids.push(entry.message_id.clone());
+                } else {
+                    break;
+                }
+            }
+        }
+
+        for (sequence, message_id) in expired_sequences.into_iter().zip(expired_ids) {
+            if self
+                .remove_pending_entry_by_sequence(peer_id, sequence)
+                .is_some()
+            {
+                self.record_pending_drop(
+                    PendingQueueDropReason::TtlExpired,
+                    None,
+                    peer_id,
+                    &message_id,
+                );
+                expired_count = expired_count.saturating_add(1);
+            }
+        }
+
+        if expired_count >= PENDING_TTL_SPIKE_WARN_THRESHOLD {
+            warn!(
+                peer_id = %peer_id,
+                expired = expired_count,
+                ttl_ms = self.config.encryption.pending_queue.pending_ttl_ms,
+                "Pending encrypted message TTL eviction spike"
+            );
+        }
+
+        self.cleanup_global_order_front();
+        expired_count
+    }
+
+    fn prune_expired_pending_global_front(&mut self, now: Instant, max_evictions: usize) -> usize {
+        let mut evicted = 0usize;
+        while evicted < max_evictions {
+            self.cleanup_global_order_front();
+            let Some(front) = self.pending_decryption_global_order.front().cloned() else {
+                break;
+            };
+            if !self
+                .pending_decryption_live_sequences
+                .contains(&front.sequence)
+            {
+                self.pending_decryption_global_order.pop_front();
+                continue;
+            }
+
+            let Some(queue) = self.pending_decryption.get(&front.peer_id) else {
+                self.pending_decryption_global_order.pop_front();
+                continue;
+            };
+            let Some(entry) = queue.iter().find(|entry| entry.sequence == front.sequence) else {
+                self.pending_decryption_global_order.pop_front();
+                continue;
+            };
+
+            if !self.is_pending_entry_expired(entry, now) {
+                break;
+            }
+
+            if let Some(expired) = self.remove_pending_entry_by_sequence(&front.peer_id, front.sequence) {
+                self.pending_decryption_global_order.pop_front();
+                self.record_pending_drop(
+                    PendingQueueDropReason::TtlExpired,
+                    None,
+                    &expired.peer_id,
+                    &expired.message_id,
+                );
+                evicted = evicted.saturating_add(1);
+            } else {
+                self.pending_decryption_global_order.pop_front();
+            }
+        }
+
+        if evicted >= PENDING_TTL_SPIKE_WARN_THRESHOLD {
+            warn!(
+                expired = evicted,
+                ttl_ms = self.config.encryption.pending_queue.pending_ttl_ms,
+                "Pending encrypted message TTL eviction spike"
+            );
+        }
+
+        evicted
+    }
+
+    fn enqueue_pending_decryption(&mut self, sender: &str, message: &Message) {
+        self.pending_queue_metrics.pending_messages_received_total = self
+            .pending_queue_metrics
+            .pending_messages_received_total
+            .saturating_add(1);
+        let incoming_message_id = message.id.as_str();
+
+        let now = Instant::now();
+        let _ = self.prune_expired_pending_for_peer(sender, now);
+        let _ = self.prune_expired_pending_global_front(now, 64);
+
+        let per_peer_limit = self.config.encryption.pending_queue.max_pending_per_peer;
+        let global_limit = self.config.encryption.pending_queue.max_pending_global;
+        let overflow_policy = self.config.encryption.pending_queue.overflow_policy;
+
+        let peer_len = self
+            .pending_decryption
+            .get(sender)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if peer_len >= per_peer_limit {
+            self.record_peer_overflow_pressure(sender);
+            match overflow_policy {
+                crate::config::OverflowPolicy::DropNewest => {
+                    self.record_pending_drop(
+                        PendingQueueDropReason::OverflowDropNewest,
+                        Some(PendingQueueLimit::PerPeer),
+                        sender,
+                        &incoming_message_id,
+                    );
+                    return;
+                }
+                crate::config::OverflowPolicy::DropOldest => {
+                    let evicted_sequence = self
+                        .pending_decryption
+                        .get(sender)
+                        .and_then(|queue| queue.front().map(|entry| entry.sequence));
+                    let mut evicted_any = false;
+                    if let Some(sequence) = evicted_sequence {
+                        if let Some(evicted) = self.remove_pending_entry_by_sequence(sender, sequence) {
+                            self.record_pending_drop(
+                                PendingQueueDropReason::OverflowDropOldest,
+                                Some(PendingQueueLimit::PerPeer),
+                                &evicted.peer_id,
+                                &evicted.message_id,
+                            );
+                            evicted_any = true;
+                        }
+                    }
+                    if !evicted_any {
+                        self.record_pending_eviction_failure(
+                            PendingQueueLimit::PerPeer,
+                            sender,
+                            &incoming_message_id,
+                            "drop_oldest failed to evict per-peer oldest",
+                        );
+                        self.record_pending_drop(
+                            PendingQueueDropReason::OverflowDropNewest,
+                            Some(PendingQueueLimit::PerPeer),
+                            sender,
+                            &incoming_message_id,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        let peer_len_after = self
+            .pending_decryption
+            .get(sender)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if peer_len_after >= per_peer_limit {
+            self.record_pending_eviction_failure(
+                PendingQueueLimit::PerPeer,
+                sender,
+                &incoming_message_id,
+                "per-peer limit still saturated after eviction",
+            );
+            self.record_pending_drop(
+                PendingQueueDropReason::OverflowDropNewest,
+                Some(PendingQueueLimit::PerPeer),
+                sender,
+                &incoming_message_id,
+            );
+            return;
+        }
+
+        if self.pending_decryption_total >= global_limit {
+            warn!(
+                queue_size = self.pending_decryption_total,
+                global_limit,
+                "Pending encrypted queue at global pressure limit"
+            );
+            match overflow_policy {
+                crate::config::OverflowPolicy::DropNewest => {
+                    self.record_pending_drop(
+                        PendingQueueDropReason::OverflowDropNewest,
+                        Some(PendingQueueLimit::Global),
+                        sender,
+                        &incoming_message_id,
+                    );
+                    return;
+                }
+                crate::config::OverflowPolicy::DropOldest => {
+                    while self.pending_decryption_total >= global_limit {
+                        if !self.evict_global_oldest(
+                            PendingQueueDropReason::OverflowDropOldest,
+                            PendingQueueLimit::Global,
+                        ) {
+                            self.record_pending_eviction_failure(
+                                PendingQueueLimit::Global,
+                                sender,
+                                &incoming_message_id,
+                                "drop_oldest failed to evict global oldest",
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if self.pending_decryption_total >= global_limit {
+            self.record_pending_drop(
+                PendingQueueDropReason::OverflowDropNewest,
+                Some(PendingQueueLimit::Global),
+                sender,
+                &incoming_message_id,
+            );
+            return;
+        }
+
+        let sequence = self.next_pending_sequence();
+        let entry = PendingDecryptMessage {
+            peer_id: sender.to_string(),
+            message_id: message.id.as_str().to_string(),
+            received_at: now,
+            sequence,
+            message: message.clone(),
+        };
+
+        self.pending_decryption
+            .entry(sender.to_string())
+            .or_default()
+            .push_back(entry.clone());
+        self.pending_decryption_global_order
+            .push_back(PendingDecryptEntryRef {
+                peer_id: sender.to_string(),
+                message_id: entry.message_id.clone(),
+                sequence,
+            });
+        self.pending_decryption_live_sequences.insert(sequence);
+        self.pending_decryption_total = self.pending_decryption_total.saturating_add(1);
+        self.update_pending_peer_gauge(sender);
+        self.update_pending_queue_current_gauge();
+        self.cleanup_global_order_front();
+        self.verify_pending_queue_invariants("enqueue");
+
+        let peer_len_post_insert = self
+            .pending_decryption
+            .get(sender)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if self.pending_decryption_total > global_limit || peer_len_post_insert > per_peer_limit {
+            let _ = self.remove_pending_entry_by_sequence(sender, sequence);
+            self.record_pending_eviction_failure(
+                if self.pending_decryption_total > global_limit {
+                    PendingQueueLimit::Global
+                } else {
+                    PendingQueueLimit::PerPeer
+                },
+                sender,
+                &incoming_message_id,
+                "post-insert hard-bound check failed; rolled back enqueue",
+            );
+            self.record_pending_drop(
+                PendingQueueDropReason::OverflowDropNewest,
+                Some(if self.pending_decryption_total > global_limit {
+                    PendingQueueLimit::Global
+                } else {
+                    PendingQueueLimit::PerPeer
+                }),
+                sender,
+                &incoming_message_id,
+            );
+        }
+    }
+
     /// Processes encrypted messages that were received before the session was established.
     ///
     /// This handles the case where encrypted messages arrive before the Welcome message.
     /// After the session is confirmed (via Welcome), we re-process these queued messages.
     fn process_pending_decryption(&mut self, sender: &str) {
+        let now = Instant::now();
+        let _ = self.prune_expired_pending_for_peer(sender, now);
+
         let messages = match self.pending_decryption.remove(sender) {
             Some(msgs) => msgs,
             None => return,
@@ -1687,14 +2318,28 @@ impl OfflineProtocol {
             return;
         }
 
-        info!(sender = %sender, count = messages.len(), "Processing pending encrypted messages");
+        let drained: Vec<PendingDecryptMessage> = messages.into_iter().collect();
+        let drained_count = drained.len();
+        for entry in &drained {
+            self.pending_decryption_live_sequences.remove(&entry.sequence);
+            self.pending_decryption_total = self.pending_decryption_total.saturating_sub(1);
+        }
+        self.update_pending_peer_gauge(sender);
+        self.update_pending_queue_current_gauge();
+        self.cleanup_global_order_front();
+        self.verify_pending_queue_invariants("process_pending_decryption_drain");
 
-        for msg in messages {
-            // Re-process each message through the internal handler
+        info!(
+            sender = %sender,
+            count = drained_count,
+            "Processing pending encrypted messages"
+        );
+
+        for entry in drained {
+            let msg = entry.message;
             if let Some(result) = self.process_internal_message(&msg) {
                 match result {
                     InternalMessageResult::Decrypted(content) => {
-                        // Successfully decrypted - add to received messages queue
                         let mut decrypted_msg = msg.clone();
                         decrypted_msg.content = content.clone();
                         decrypted_msg
@@ -1704,14 +2349,11 @@ impl OfflineProtocol {
                             .metadata
                             .insert("delayed_decrypt".to_string(), "true".to_string());
 
-                        // Advance local Lamport clock for delayed-decrypted messages
                         self.lamport_clock.merge(decrypted_msg.lamport_clock);
                         self.persist_lamport_clock();
 
                         if let Ok(mut state) = lock_shared_state(&self.shared_state) {
                             state.received_messages.push(decrypted_msg.clone());
-
-                            // Emit message received event
                             let event = Event::MessageReceived {
                                 message_id: decrypted_msg.id.as_str().to_string(),
                                 sender: decrypted_msg.sender.as_str().to_string(),
@@ -1732,7 +2374,6 @@ impl OfflineProtocol {
                         debug!(message_id = %msg.id, "Processed delayed encrypted message");
                     }
                     InternalMessageResult::Consumed => {
-                        // Message was consumed (shouldn't happen for encrypted messages, but handle it)
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
                     }
                 }
@@ -3421,10 +4062,7 @@ impl OfflineProtocol {
                     DecryptResult::SessionNotReady {
                         sender: sender_owned,
                     } => {
-                        self.pending_decryption
-                            .entry(sender_owned)
-                            .or_default()
-                            .push(message.clone());
+                        self.enqueue_pending_decryption(&sender_owned, message);
                         return Some(InternalMessageResult::Consumed);
                     }
                     DecryptResult::Failed { .. } => {
@@ -3655,6 +4293,7 @@ impl OfflineProtocol {
         self.process_timed_out_acks()?;
         self.retry_pending_session_confirmations();
         self.kick_pending_session_reconciliation("process_tick");
+        let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.cleanup_expired_entries();
         self.check_dors_escalation()?;
 
@@ -4015,6 +4654,11 @@ impl OfflineProtocol {
         self.deduplicator.stats()
     }
 
+    /// Gets pending encrypted message queue counters and gauges.
+    pub fn pending_queue_metrics(&self) -> PendingQueueMetrics {
+        self.pending_queue_metrics.clone()
+    }
+
     /// Gets the current ACK manager statistics.
     pub fn pending_ack_count(&self) -> usize {
         self.ack_manager.pending_count()
@@ -4153,6 +4797,15 @@ mod tests {
 
     fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
         ProtocolConfig::new("test-app", user_id)
+    }
+
+    fn pending_test_message(sender: &str, content: &str) -> Message {
+        Message::new(
+            UserId::new(sender).unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            content,
+        )
     }
 
     #[derive(Debug, Clone)]
@@ -6757,11 +7410,7 @@ mod tests {
             "encrypted content",
         );
 
-        protocol
-            .pending_decryption
-            .entry("sender123".to_string())
-            .or_default()
-            .push(message);
+        protocol.enqueue_pending_decryption("sender123", &message);
 
         // Check message is queued
         assert!(protocol.pending_decryption.contains_key("sender123"));
@@ -6778,11 +7427,7 @@ mod tests {
             "more encrypted content",
         );
 
-        protocol
-            .pending_decryption
-            .entry("sender123".to_string())
-            .or_default()
-            .push(message2);
+        protocol.enqueue_pending_decryption("sender123", &message2);
 
         assert_eq!(
             protocol.pending_decryption.get("sender123").unwrap().len(),
@@ -6805,11 +7450,7 @@ mod tests {
             "encrypted content",
         );
 
-        protocol
-            .pending_decryption
-            .entry("sender123".to_string())
-            .or_default()
-            .push(message);
+        protocol.enqueue_pending_decryption("sender123", &message);
 
         assert!(!protocol.pending_decryption.is_empty());
 
@@ -6928,6 +7569,229 @@ mod tests {
         assert!(matches!(result, Some(InternalMessageResult::Consumed)));
         assert!(protocol.pending_decryption.contains_key("sender123"));
         assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
+    }
+
+    #[test]
+    fn test_pending_queue_stress_memory_plateaus_with_unfinished_handshake() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 32;
+        config.encryption.pending_queue.max_pending_global = 64;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        for idx in 0..10_000 {
+            let msg = pending_test_message("sender123", &format!("encrypted-{idx}"));
+            protocol.enqueue_pending_decryption("sender123", &msg);
+        }
+
+        assert_eq!(protocol.pending_decryption_total, 32);
+        assert_eq!(protocol.pending_queue_metrics.pending_messages_current, 32);
+        assert_eq!(
+            *protocol
+                .pending_queue_metrics
+                .pending_messages_per_peer
+                .get("sender123")
+                .unwrap(),
+            32
+        );
+    }
+
+    #[test]
+    fn test_pending_queue_flood_respects_per_peer_fairness() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 3;
+        config.encryption.pending_queue.max_pending_global = 6;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        for idx in 0..100 {
+            let msg = pending_test_message("noisy-peer", &format!("noisy-{idx}"));
+            protocol.enqueue_pending_decryption("noisy-peer", &msg);
+        }
+        for idx in 0..3 {
+            let msg = pending_test_message("peer-a", &format!("a-{idx}"));
+            protocol.enqueue_pending_decryption("peer-a", &msg);
+            let msg = pending_test_message("peer-b", &format!("b-{idx}"));
+            protocol.enqueue_pending_decryption("peer-b", &msg);
+        }
+
+        assert!(protocol.pending_decryption_total <= 6);
+        assert!(
+            protocol
+                .pending_decryption
+                .get("noisy-peer")
+                .map(VecDeque::len)
+                .unwrap_or(0)
+                <= 3
+        );
+        assert!(protocol.pending_decryption.contains_key("peer-a"));
+        assert!(protocol.pending_decryption.contains_key("peer-b"));
+    }
+
+    #[test]
+    fn test_pending_queue_drop_newest_policy_enforced_for_per_peer_limit() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 1;
+        config.encryption.pending_queue.max_pending_global = 10;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let first = pending_test_message("peer-a", "first");
+        let second = pending_test_message("peer-a", "second");
+        protocol.enqueue_pending_decryption("peer-a", &first);
+        protocol.enqueue_pending_decryption("peer-a", &second);
+
+        assert_eq!(protocol.pending_decryption["peer-a"].len(), 1);
+        let queued_message = &protocol.pending_decryption["peer-a"][0];
+        assert_eq!(queued_message.message.content, "first");
+        assert_eq!(protocol.pending_queue_metrics.pending_messages_dropped_overflow_total, 1);
+    }
+
+    #[test]
+    fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 1;
+        config.encryption.pending_queue.max_pending_global = 1;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.enqueue_pending_decryption("peer-a", &pending_test_message("peer-a", "m1"));
+        assert_eq!(protocol.pending_decryption_total, 1);
+
+        // Simulate index drift: queue has data but global-order index is empty.
+        protocol.pending_decryption_global_order.clear();
+
+        protocol.enqueue_pending_decryption("peer-b", &pending_test_message("peer-b", "m2"));
+
+        assert_eq!(protocol.pending_decryption_total, 1);
+        assert!(!protocol.pending_decryption.contains_key("peer-b"));
+        assert!(protocol.pending_decryption.contains_key("peer-a"));
+        assert!(
+            protocol
+                .pending_queue_metrics
+                .pending_messages_eviction_failures_total
+                >= 1
+        );
+    }
+
+    #[test]
+    fn test_pending_queue_ttl_expiration_is_deterministic_and_monotonic() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 10;
+        config.encryption.pending_queue.max_pending_global = 100;
+        config.encryption.pending_queue.pending_ttl_ms = 1_000;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let old_msg = pending_test_message("sender123", "old");
+        let fresh_msg = pending_test_message("sender123", "fresh");
+        protocol.enqueue_pending_decryption("sender123", &old_msg);
+        protocol.enqueue_pending_decryption("sender123", &fresh_msg);
+
+        {
+            let queue = protocol.pending_decryption.get_mut("sender123").unwrap();
+            let old = queue.front_mut().unwrap();
+            old.received_at = Instant::now() - StdDuration::from_millis(2_000);
+        }
+
+        let expired = protocol.prune_expired_pending_for_peer("sender123", Instant::now());
+        assert_eq!(expired, 1);
+        assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
+        assert_eq!(protocol.pending_queue_metrics.pending_messages_expired_total, 1);
+    }
+
+    #[test]
+    fn test_pending_messages_replay_decrypt_after_session_readiness() {
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+
+        let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let welcome = alice_manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .and_then(|_| alice_manager.create_session("bob"))
+            .unwrap();
+
+        let encrypted = alice_manager.encrypt_for_user("bob", b"queued secret").unwrap();
+        let encrypted_payload = format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        );
+        let incoming = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &encrypted_payload,
+        );
+
+        let result = bob.process_internal_message(&incoming);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        assert_eq!(bob.pending_decryption["alice"].len(), 1);
+
+        {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.join_session(&welcome).unwrap();
+        }
+
+        bob.process_pending_decryption("alice");
+        assert!(!bob.pending_decryption.contains_key("alice"));
+        let metrics = bob.pending_queue_metrics();
+        assert_eq!(metrics.pending_messages_received_total, 1);
+    }
+
+    #[test]
+    fn test_pending_queue_concurrency_multi_peer_enqueue_is_bounded() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 8;
+        config.encryption.pending_queue.max_pending_global = 64;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        let protocol = Arc::new(Mutex::new(OfflineProtocol::new(config).unwrap()));
+
+        let mut handles = Vec::new();
+        for peer_idx in 0..16 {
+            let protocol = Arc::clone(&protocol);
+            handles.push(thread::spawn(move || {
+                let peer = format!("peer-{peer_idx}");
+                for msg_idx in 0..50 {
+                    let msg = Message::new(
+                        UserId::new(&peer).unwrap(),
+                        UserId::new("user123").unwrap(),
+                        AppId::new("test-app").unwrap(),
+                        &format!("concurrent-{msg_idx}"),
+                    );
+                    protocol
+                        .lock()
+                        .unwrap()
+                        .enqueue_pending_decryption(&peer, &msg);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let protocol = protocol.lock().unwrap();
+        assert!(protocol.pending_decryption_total <= 64);
+        for queue in protocol.pending_decryption.values() {
+            assert!(queue.len() <= 8);
+        }
     }
 
     // ========================================================================
