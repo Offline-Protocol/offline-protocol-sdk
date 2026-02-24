@@ -26,7 +26,13 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// MCSession has a hard limit of 8 peers. Stay at 7 to avoid overwhelming the daemon
     /// and prevent connection storms in dense environments (e.g. festival, protest).
     private let WIFI_DIRECT_MAX_PEERS_SAFE = 7
-    
+
+    /// Returns true when at or over the connection budget (so we must not invite or accept).
+    /// Used in browser and advertiser delegates; exposed for unit tests.
+    static func atConnectionBudgetLimit(connectedCount: Int) -> Bool {
+        return connectedCount >= 7
+    }
+
     private let SERVICE_TYPE = "offline-proto"
     private let DISCOVERY_TIMEOUT: TimeInterval = 30.0
     private let CONNECTION_TIMEOUT: TimeInterval = 30.0
@@ -356,7 +362,7 @@ extension WifiDirectManager: MCNearbyServiceAdvertiserDelegate {
         
         // Enforce connection budget: MCSession limit is 8; stay at 7 to avoid daemon overload.
         let currentCount = session?.connectedPeers.count ?? connectedPeers.count
-        if currentCount >= WIFI_DIRECT_MAX_PEERS_SAFE {
+        if Self.atConnectionBudgetLimit(connectedCount: currentCount) {
             emitDiagnostic("info", "Rejecting invitation: at connection budget limit", context: [
                 "connectedCount": currentCount,
                 "limit": WIFI_DIRECT_MAX_PEERS_SAFE
@@ -393,7 +399,7 @@ extension WifiDirectManager: MCNearbyServiceBrowserDelegate {
         
         // Enforce connection budget: avoid MCSession overflow and connection storms.
         let currentCount = session?.connectedPeers.count ?? connectedPeers.count
-        guard currentCount < WIFI_DIRECT_MAX_PEERS_SAFE else { return }
+        guard !Self.atConnectionBudgetLimit(connectedCount: currentCount) else { return }
         
         browser.invitePeer(peerID, to: session!, withContext: nil, timeout: CONNECTION_TIMEOUT)
     }
