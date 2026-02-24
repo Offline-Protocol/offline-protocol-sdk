@@ -102,6 +102,8 @@ const protocol = new OfflineProtocol({
 | `requireEncryption` | `false` | Enforce encrypted delivery (send fails if encryption cannot be applied) |
 
 Encryption is best-effort by default. Set `requireEncryption: true` to guarantee encrypted delivery or failure.
+In strict mode, outbound sends fail without transport transmission if encryption cannot be applied.
+Connection bootstrap APIs that depend on plaintext control messages are rejected while strict mode is enabled.
 
 ### What Happens Automatically
 

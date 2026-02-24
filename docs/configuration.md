@@ -240,6 +240,14 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 
 By default, encryption is best-effort. Set `requireEncryption: true` to guarantee encrypted delivery or fail the send.
 
+When strict mode is enabled:
+- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`NoKeyPackage`, `SessionPending`, `EncryptFailed`) and do not send transport payloads on failure.
+- plaintext connection-control APIs (`sendConnectionRequest`, `acceptConnectionRequest`, `rejectConnectionRequest`) are rejected to prevent accidental plaintext fallback.
+
+Rust migration note:
+- `EncryptionConfig` now includes `require_encryption` (default `false`).
+- If you construct `EncryptionConfig` with a struct literal, include `require_encryption` explicitly or use `..Default::default()`.
+
 **Example: Disable auto-encryption (use manual MLS APIs)**:
 ```typescript
 {

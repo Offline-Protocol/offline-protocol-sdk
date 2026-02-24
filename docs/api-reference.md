@@ -285,6 +285,14 @@ With default settings, encryption is best-effort. Set `encryption.require_encryp
 to guarantee encrypted delivery or fail with a typed error (`NoKeyPackage`,
 `SessionPending`, or `EncryptFailed`).
 
+In strict mode, send failures are fail-fast and do not transmit transport payloads.
+Connection-control APIs that require plaintext bootstrap messages are rejected while
+`encryption.require_encryption = true`.
+
+Rust migration note:
+- `offline_protocol::Error` includes strict-mode variants (`NoKeyPackage`, `SessionPending`, `EncryptFailed`).
+- exhaustive `match` blocks over `Error` should add these variants before upgrading.
+
 Similarly, `receive_message` automatically:
 1. Handles incoming key packages (stores them for session creation)
 2. Handles incoming Welcome messages (joins the session)
