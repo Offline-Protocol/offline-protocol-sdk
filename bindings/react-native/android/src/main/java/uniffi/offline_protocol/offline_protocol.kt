@@ -4546,6 +4546,8 @@ data class EncryptionConfig (
     var `storePending`: kotlin.Boolean
     , 
     var `requireEncryption`: kotlin.Boolean
+    , 
+    var `pendingQueue`: PendingQueueConfig
     
 ){
     
@@ -4564,6 +4566,7 @@ public object FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer<Encryptio
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterTypePendingQueueConfig.read(buf),
         )
     }
 
@@ -4571,7 +4574,8 @@ public object FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer<Encryptio
             FfiConverterBoolean.allocationSize(value.`enabled`) +
             FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
             FfiConverterBoolean.allocationSize(value.`storePending`) +
-            FfiConverterBoolean.allocationSize(value.`requireEncryption`)
+            FfiConverterBoolean.allocationSize(value.`requireEncryption`) +
+            FfiConverterTypePendingQueueConfig.allocationSize(value.`pendingQueue`)
     )
 
     override fun write(value: EncryptionConfig, buf: ByteBuffer) {
@@ -4579,6 +4583,7 @@ public object FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer<Encryptio
             FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
             FfiConverterBoolean.write(value.`storePending`, buf)
             FfiConverterBoolean.write(value.`requireEncryption`, buf)
+            FfiConverterTypePendingQueueConfig.write(value.`pendingQueue`, buf)
     }
 }
 
@@ -5202,6 +5207,52 @@ public object FfiConverterTypePeerDevice: FfiConverterRustBuffer<PeerDevice> {
 
 
 
+data class PendingQueueConfig (
+    var `maxPendingPerPeer`: kotlin.ULong
+    , 
+    var `maxPendingGlobal`: kotlin.ULong
+    , 
+    var `pendingTtlMs`: kotlin.ULong
+    , 
+    var `overflowPolicy`: OverflowPolicy
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePendingQueueConfig: FfiConverterRustBuffer<PendingQueueConfig> {
+    override fun read(buf: ByteBuffer): PendingQueueConfig {
+        return PendingQueueConfig(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterTypeOverflowPolicy.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PendingQueueConfig) = (
+            FfiConverterULong.allocationSize(value.`maxPendingPerPeer`) +
+            FfiConverterULong.allocationSize(value.`maxPendingGlobal`) +
+            FfiConverterULong.allocationSize(value.`pendingTtlMs`) +
+            FfiConverterTypeOverflowPolicy.allocationSize(value.`overflowPolicy`)
+    )
+
+    override fun write(value: PendingQueueConfig, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`maxPendingPerPeer`, buf)
+            FfiConverterULong.write(value.`maxPendingGlobal`, buf)
+            FfiConverterULong.write(value.`pendingTtlMs`, buf)
+            FfiConverterTypeOverflowPolicy.write(value.`overflowPolicy`, buf)
+    }
+}
+
+
+
 data class ProtocolConfig (
     var `appId`: kotlin.String
     , 
@@ -5224,6 +5275,14 @@ data class ProtocolConfig (
     var `storePending`: kotlin.Boolean
     , 
     var `requireEncryption`: kotlin.Boolean
+    , 
+    var `maxPendingPerPeer`: kotlin.ULong
+    , 
+    var `maxPendingGlobal`: kotlin.ULong
+    , 
+    var `pendingTtlMs`: kotlin.ULong
+    , 
+    var `overflowPolicy`: OverflowPolicy
     
 ){
     
@@ -5249,6 +5308,10 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterTypeOverflowPolicy.read(buf),
         )
     }
 
@@ -5263,7 +5326,11 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`encryptionEnabled`) +
             FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
             FfiConverterBoolean.allocationSize(value.`storePending`) +
-            FfiConverterBoolean.allocationSize(value.`requireEncryption`)
+            FfiConverterBoolean.allocationSize(value.`requireEncryption`) +
+            FfiConverterULong.allocationSize(value.`maxPendingPerPeer`) +
+            FfiConverterULong.allocationSize(value.`maxPendingGlobal`) +
+            FfiConverterULong.allocationSize(value.`pendingTtlMs`) +
+            FfiConverterTypeOverflowPolicy.allocationSize(value.`overflowPolicy`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -5278,6 +5345,10 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
             FfiConverterBoolean.write(value.`storePending`, buf)
             FfiConverterBoolean.write(value.`requireEncryption`, buf)
+            FfiConverterULong.write(value.`maxPendingPerPeer`, buf)
+            FfiConverterULong.write(value.`maxPendingGlobal`, buf)
+            FfiConverterULong.write(value.`pendingTtlMs`, buf)
+            FfiConverterTypeOverflowPolicy.write(value.`overflowPolicy`, buf)
     }
 }
 
@@ -5801,6 +5872,36 @@ public object FfiConverterTypeMlsStorageError : FfiConverterRustBuffer<MlsStorag
     }
 
 }
+
+
+
+
+enum class OverflowPolicy {
+    
+    DROP_OLDEST,
+    DROP_NEWEST;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOverflowPolicy: FfiConverterRustBuffer<OverflowPolicy> {
+    override fun read(buf: ByteBuffer) = try {
+        OverflowPolicy.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: OverflowPolicy) = 4UL
+
+    override fun write(value: OverflowPolicy, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 

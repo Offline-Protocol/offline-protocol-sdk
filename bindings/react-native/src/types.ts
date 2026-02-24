@@ -199,6 +199,29 @@ export interface EncryptionConfig {
    * When true, send fails if encryption cannot be applied.
    */
   requireEncryption?: boolean;
+  /**
+   * Bounds and policy for encrypted messages received before session readiness.
+   */
+  pendingQueue?: PendingQueueConfig;
+}
+
+/**
+ * Overflow policy when pending queue reaches configured limits.
+ */
+export type OverflowPolicy = 'drop_oldest' | 'drop_newest';
+
+/**
+ * Bounded pending queue settings for pre-session encrypted messages.
+ */
+export interface PendingQueueConfig {
+  /** Per-peer pending message cap (default: 64) */
+  maxPendingPerPeer?: number;
+  /** Global pending message cap (default: 4096) */
+  maxPendingGlobal?: number;
+  /** Pending message TTL in milliseconds (default: 120000) */
+  pendingTtlMs?: number;
+  /** Overflow behavior when limits are hit (default: 'drop_oldest') */
+  overflowPolicy?: OverflowPolicy;
 }
 
 /**

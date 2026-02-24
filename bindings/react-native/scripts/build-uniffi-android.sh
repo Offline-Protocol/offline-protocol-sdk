@@ -54,32 +54,77 @@ if [ -z "$ANDROID_NDK_HOME" ] && [ -z "$NDK_HOME" ]; then
   fi
 fi
 
-# Add NDK toolchain to PATH (detect OS)
-OS_NAME="$(uname -s)"
-case "$OS_NAME" in
-  Darwin)
-    ARCH_NAME="$(uname -m)"
-    if [ "$ARCH_NAME" = "arm64" ]; then
-      NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-aarch64/bin"
-    else
-      NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
-    fi
-    ;;
-  Linux)
-    NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
-    ;;
-  *)
-    echo "Warning: Unsupported OS: $OS_NAME"
-    NDK_TOOLCHAIN=""
-    ;;
-esac
-
-if [ -n "$NDK_TOOLCHAIN" ] && [ -d "$NDK_TOOLCHAIN" ]; then
-  export PATH="$NDK_TOOLCHAIN:$PATH"
-  echo "Added NDK toolchain to PATH: $NDK_TOOLCHAIN"
-else
-  echo "Warning: Could not find NDK toolchain directory"
+# Resolve NDK LLVM toolchain bin directory (supports modern NDK layouts).
+LLVM_PREBUILT_ROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt"
+if [ ! -d "$LLVM_PREBUILT_ROOT" ]; then
+  echo "Error: LLVM prebuilt toolchain root not found: $LLVM_PREBUILT_ROOT"
+  exit 1
 fi
+
+OS_NAME="$(uname -s)"
+ARCH_NAME="$(uname -m)"
+TOOLCHAIN_CANDIDATES=()
+if [ "$OS_NAME" = "Darwin" ]; then
+  if [ "$ARCH_NAME" = "arm64" ]; then
+    TOOLCHAIN_CANDIDATES=(
+      "$LLVM_PREBUILT_ROOT/darwin-arm64/bin"
+      "$LLVM_PREBUILT_ROOT/darwin-aarch64/bin"
+      "$LLVM_PREBUILT_ROOT/darwin-x86_64/bin"
+    )
+  else
+    TOOLCHAIN_CANDIDATES=(
+      "$LLVM_PREBUILT_ROOT/darwin-x86_64/bin"
+      "$LLVM_PREBUILT_ROOT/darwin-arm64/bin"
+      "$LLVM_PREBUILT_ROOT/darwin-aarch64/bin"
+    )
+  fi
+elif [ "$OS_NAME" = "Linux" ]; then
+  TOOLCHAIN_CANDIDATES=(
+    "$LLVM_PREBUILT_ROOT/linux-x86_64/bin"
+    "$LLVM_PREBUILT_ROOT/linux-aarch64/bin"
+  )
+else
+  echo "Error: Unsupported OS for Android NDK toolchain resolution: $OS_NAME"
+  exit 1
+fi
+
+NDK_TOOLCHAIN=""
+for candidate in "${TOOLCHAIN_CANDIDATES[@]}"; do
+  if [ -d "$candidate" ]; then
+    NDK_TOOLCHAIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$NDK_TOOLCHAIN" ]; then
+  echo "Error: Could not find NDK toolchain bin directory under $LLVM_PREBUILT_ROOT"
+  echo "Checked:"
+  for candidate in "${TOOLCHAIN_CANDIDATES[@]}"; do
+    echo "  - $candidate"
+  done
+  exit 1
+fi
+
+export PATH="$NDK_TOOLCHAIN:$PATH"
+echo "Using NDK toolchain: $NDK_TOOLCHAIN"
+
+# Configure Rust/Cargo Android linkers explicitly to avoid missing-linker errors.
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_TOOLCHAIN/aarch64-linux-android21-clang"
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_TOOLCHAIN/armv7a-linux-androideabi21-clang"
+export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_TOOLCHAIN/x86_64-linux-android21-clang"
+export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$NDK_TOOLCHAIN/i686-linux-android21-clang"
+export AR="$NDK_TOOLCHAIN/llvm-ar"
+
+for linker in \
+  "$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER" \
+  "$CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER" \
+  "$CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER" \
+  "$CARGO_TARGET_I686_LINUX_ANDROID_LINKER"; do
+  if [ ! -x "$linker" ]; then
+    echo "Error: required Android linker not found or not executable: $linker"
+    exit 1
+  fi
+done
 
 # Ensure targets are installed
 echo "Installing Android targets..."
@@ -114,7 +159,7 @@ echo "Android libraries built and copied to $OUTPUT_DIR"
 echo ""
 echo "Library sizes:"
 for abi in "${ABIS[@]}"; do
-  lib_path="$OUTPUT_DIR/$abi/liboffline_protocol_uniffi.so"
+  lib_path="$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
   if [ -f "$lib_path" ]; then
     size=$(du -h "$lib_path" | cut -f1)
     echo "  $abi: $size"

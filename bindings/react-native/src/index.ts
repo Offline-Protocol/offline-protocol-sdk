@@ -83,6 +83,14 @@ interface NativeConfig {
   internetEnabled: boolean;
   preferOnline: boolean;
   initialTtl: number;
+  encryptionEnabled?: boolean;
+  autoKeyExchange?: boolean;
+  storePending?: boolean;
+  requireEncryption?: boolean;
+  maxPendingPerPeer?: number;
+  maxPendingGlobal?: number;
+  pendingTtlMs?: number;
+  overflowPolicy?: 'drop_oldest' | 'drop_newest';
   dors?: {
     preferOnline: boolean;
     switchHysteresis: number;
@@ -248,6 +256,14 @@ export class OfflineProtocol {
       internetEnabled: this.config.transports?.internet?.enabled ?? false,
       preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
+      encryptionEnabled: this.config.encryption?.enabled ?? true,
+      autoKeyExchange: this.config.encryption?.autoKeyExchange ?? true,
+      storePending: this.config.encryption?.storePending ?? true,
+      requireEncryption: this.config.encryption?.requireEncryption ?? false,
+      maxPendingPerPeer: this.config.encryption?.pendingQueue?.maxPendingPerPeer ?? 64,
+      maxPendingGlobal: this.config.encryption?.pendingQueue?.maxPendingGlobal ?? 4096,
+      pendingTtlMs: this.config.encryption?.pendingQueue?.pendingTtlMs ?? 120000,
+      overflowPolicy: this.config.encryption?.pendingQueue?.overflowPolicy ?? 'drop_oldest',
     };
 
     if (dorsConfig) {

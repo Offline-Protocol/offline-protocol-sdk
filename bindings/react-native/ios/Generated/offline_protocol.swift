@@ -2300,14 +2300,16 @@ public struct EncryptionConfig: Equatable, Hashable {
     public var autoKeyExchange: Bool
     public var storePending: Bool
     public var requireEncryption: Bool
+    public var pendingQueue: PendingQueueConfig
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool) {
+    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, pendingQueue: PendingQueueConfig) {
         self.enabled = enabled
         self.autoKeyExchange = autoKeyExchange
         self.storePending = storePending
         self.requireEncryption = requireEncryption
+        self.pendingQueue = pendingQueue
     }
 
     
@@ -2327,7 +2329,8 @@ public struct FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer {
                 enabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
                 storePending: FfiConverterBool.read(from: &buf), 
-                requireEncryption: FfiConverterBool.read(from: &buf)
+                requireEncryption: FfiConverterBool.read(from: &buf), 
+                pendingQueue: FfiConverterTypePendingQueueConfig.read(from: &buf)
         )
     }
 
@@ -2336,6 +2339,7 @@ public struct FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.autoKeyExchange, into: &buf)
         FfiConverterBool.write(value.storePending, into: &buf)
         FfiConverterBool.write(value.requireEncryption, into: &buf)
+        FfiConverterTypePendingQueueConfig.write(value.pendingQueue, into: &buf)
     }
 }
 
@@ -3151,6 +3155,66 @@ public func FfiConverterTypePeerDevice_lower(_ value: PeerDevice) -> RustBuffer 
 }
 
 
+public struct PendingQueueConfig: Equatable, Hashable {
+    public var maxPendingPerPeer: UInt64
+    public var maxPendingGlobal: UInt64
+    public var pendingTtlMs: UInt64
+    public var overflowPolicy: OverflowPolicy
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy) {
+        self.maxPendingPerPeer = maxPendingPerPeer
+        self.maxPendingGlobal = maxPendingGlobal
+        self.pendingTtlMs = pendingTtlMs
+        self.overflowPolicy = overflowPolicy
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension PendingQueueConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingQueueConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingQueueConfig {
+        return
+            try PendingQueueConfig(
+                maxPendingPerPeer: FfiConverterUInt64.read(from: &buf), 
+                maxPendingGlobal: FfiConverterUInt64.read(from: &buf), 
+                pendingTtlMs: FfiConverterUInt64.read(from: &buf), 
+                overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PendingQueueConfig, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.maxPendingPerPeer, into: &buf)
+        FfiConverterUInt64.write(value.maxPendingGlobal, into: &buf)
+        FfiConverterUInt64.write(value.pendingTtlMs, into: &buf)
+        FfiConverterTypeOverflowPolicy.write(value.overflowPolicy, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingQueueConfig_lift(_ buf: RustBuffer) throws -> PendingQueueConfig {
+    return try FfiConverterTypePendingQueueConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingQueueConfig_lower(_ value: PendingQueueConfig) -> RustBuffer {
+    return FfiConverterTypePendingQueueConfig.lower(value)
+}
+
+
 public struct ProtocolConfig: Equatable, Hashable {
     public var appId: String
     public var userId: String
@@ -3163,10 +3227,14 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var autoKeyExchange: Bool
     public var storePending: Bool
     public var requireEncryption: Bool
+    public var maxPendingPerPeer: UInt64
+    public var maxPendingGlobal: UInt64
+    public var pendingTtlMs: UInt64
+    public var overflowPolicy: OverflowPolicy
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -3178,6 +3246,10 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.autoKeyExchange = autoKeyExchange
         self.storePending = storePending
         self.requireEncryption = requireEncryption
+        self.maxPendingPerPeer = maxPendingPerPeer
+        self.maxPendingGlobal = maxPendingGlobal
+        self.pendingTtlMs = pendingTtlMs
+        self.overflowPolicy = overflowPolicy
     }
 
     
@@ -3204,7 +3276,11 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 encryptionEnabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
                 storePending: FfiConverterBool.read(from: &buf), 
-                requireEncryption: FfiConverterBool.read(from: &buf)
+                requireEncryption: FfiConverterBool.read(from: &buf), 
+                maxPendingPerPeer: FfiConverterUInt64.read(from: &buf), 
+                maxPendingGlobal: FfiConverterUInt64.read(from: &buf), 
+                pendingTtlMs: FfiConverterUInt64.read(from: &buf), 
+                overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf)
         )
     }
 
@@ -3220,6 +3296,10 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.autoKeyExchange, into: &buf)
         FfiConverterBool.write(value.storePending, into: &buf)
         FfiConverterBool.write(value.requireEncryption, into: &buf)
+        FfiConverterUInt64.write(value.maxPendingPerPeer, into: &buf)
+        FfiConverterUInt64.write(value.maxPendingGlobal, into: &buf)
+        FfiConverterUInt64.write(value.pendingTtlMs, into: &buf)
+        FfiConverterTypeOverflowPolicy.write(value.overflowPolicy, into: &buf)
     }
 }
 
@@ -3964,6 +4044,71 @@ public func FfiConverterTypeMlsStorageError_lift(_ buf: RustBuffer) throws -> Ml
 public func FfiConverterTypeMlsStorageError_lower(_ value: MlsStorageError) -> RustBuffer {
     return FfiConverterTypeMlsStorageError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum OverflowPolicy: Equatable, Hashable {
+    
+    case dropOldest
+    case dropNewest
+
+
+
+}
+
+#if compiler(>=6)
+extension OverflowPolicy: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOverflowPolicy: FfiConverterRustBuffer {
+    typealias SwiftType = OverflowPolicy
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OverflowPolicy {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .dropOldest
+        
+        case 2: return .dropNewest
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: OverflowPolicy, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .dropOldest:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .dropNewest:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOverflowPolicy_lift(_ buf: RustBuffer) throws -> OverflowPolicy {
+    return try FfiConverterTypeOverflowPolicy.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOverflowPolicy_lower(_ value: OverflowPolicy) -> RustBuffer {
+    return FfiConverterTypeOverflowPolicy.lower(value)
+}
+
 
 
 public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
