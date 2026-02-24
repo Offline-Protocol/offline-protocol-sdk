@@ -23,6 +23,16 @@ public class WifiDirectManager: NSObject, TransportManager {
     
     // MARK: - Constants
     
+    /// MCSession has a hard limit of 8 peers. Stay at 7 to avoid overwhelming the daemon
+    /// and prevent connection storms in dense environments (e.g. festival, protest).
+    private let WIFI_DIRECT_MAX_PEERS_SAFE = 7
+
+    /// Returns true when at or over the connection budget (so we must not invite or accept).
+    /// Used in browser and advertiser delegates; exposed for unit tests.
+    static func atConnectionBudgetLimit(connectedCount: Int) -> Bool {
+        return connectedCount >= 7
+    }
+
     private let SERVICE_TYPE = "offline-proto"
     private let DISCOVERY_TIMEOUT: TimeInterval = 30.0
     private let CONNECTION_TIMEOUT: TimeInterval = 30.0
@@ -350,7 +360,16 @@ extension WifiDirectManager: MCNearbyServiceAdvertiserDelegate {
             "peerId": peerID.displayName
         ])
         
-        // Auto-accept invitations
+        // Enforce connection budget: MCSession limit is 8; stay at 7 to avoid daemon overload.
+        let currentCount = session?.connectedPeers.count ?? connectedPeers.count
+        if Self.atConnectionBudgetLimit(connectedCount: currentCount) {
+            emitDiagnostic("info", "Rejecting invitation: at connection budget limit", context: [
+                "connectedCount": currentCount,
+                "limit": WIFI_DIRECT_MAX_PEERS_SAFE
+            ])
+            invitationHandler(false, nil)
+            return
+        }
         invitationHandler(true, session)
     }
     
@@ -378,7 +397,10 @@ extension WifiDirectManager: MCNearbyServiceBrowserDelegate {
         // Don't invite if already connected
         guard session?.connectedPeers.contains(peerID) != true else { return }
         
-        // Invite peer to join session
+        // Enforce connection budget: avoid MCSession overflow and connection storms.
+        let currentCount = session?.connectedPeers.count ?? connectedPeers.count
+        guard !Self.atConnectionBudgetLimit(connectedCount: currentCount) else { return }
+        
         browser.invitePeer(peerID, to: session!, withContext: nil, timeout: CONNECTION_TIMEOUT)
     }
     

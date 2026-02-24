@@ -747,6 +747,26 @@ impl BleTransportBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use offline_protocol_core::{AppId, Message, MessagePriority, UserId, TTL};
+
+    fn peer_device(id: &str) -> PeerDevice {
+        PeerDevice {
+            device_id: id.to_string(),
+            address: "AA:BB:CC:DD:EE:FF".to_string(),
+            rssi: -60,
+            last_seen: std::time::SystemTime::now(),
+            connected: false,
+        }
+    }
+
+    fn small_message() -> Message {
+        Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("app").unwrap(),
+            "hi",
+        )
+    }
 
     #[test]
     fn test_ble_transport_creation() {
@@ -756,49 +776,135 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_discovery() {
+    fn test_ble_send_when_unavailable_fails() {
         let transport = BleTransport::new("test-device");
+        let msg = small_message();
+        let result = transport.send(&msg);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::TransportNotAvailable(_)));
+    }
 
-        let peer = PeerDevice {
-            device_id: "peer-1".to_string(),
-            address: "AA:BB:CC:DD:EE:FF".to_string(),
-            rssi: -60,
-            last_seen: std::time::SystemTime::now(),
-            connected: false,
-        };
+    #[test]
+    fn test_ble_start_stop() {
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+        assert_eq!(transport.status(), TransportStatus::Available);
+        transport.stop().unwrap();
+        assert_eq!(transport.status(), TransportStatus::Disconnected);
+    }
 
-        transport.on_peer_discovered(peer.clone());
+    #[test]
+    fn test_ble_on_status_changed() {
+        let transport = BleTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        assert_eq!(transport.status(), TransportStatus::Available);
+        transport.on_status_changed(TransportStatus::Error);
+        assert_eq!(transport.status(), TransportStatus::Error);
+    }
 
+    #[test]
+    fn test_ble_set_mtu_and_mtu() {
+        let transport = BleTransport::new("test-device");
+        assert_eq!(transport.mtu(), BLE_MAX_FRAGMENT_SIZE);
+        transport.set_mtu(100);
+        assert_eq!(transport.mtu(), 97); // 100 - 3 ATT overhead
+    }
+
+    #[test]
+    fn test_ble_platform_handle() {
+        let transport = BleTransport::new("test-device");
+        assert_eq!(transport.platform_handle(), None);
+        transport.set_platform_handle(42);
+        assert_eq!(transport.platform_handle(), Some(42));
+    }
+
+    #[test]
+    fn test_ble_update_metrics() {
+        let transport = BleTransport::new("test-device");
+        let mut m = TransportMetrics::default();
+        m.rssi = Some(-70);
+        transport.update_metrics(m);
+        assert_eq!(transport.metrics().rssi, Some(-70));
+    }
+
+    #[test]
+    fn test_ble_record_send_success_failure() {
+        let transport = BleTransport::new("test-device");
+        transport.record_send_success();
+        transport.record_send_success();
+        transport.record_send_failure();
+        let metrics = transport.metrics();
+        assert_eq!(metrics.success_count, 2);
+        assert_eq!(metrics.failure_count, 1);
+    }
+
+    #[test]
+    fn test_ble_peer_discovery() {
+        let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("peer-1"));
         let peers = transport.get_peers();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].device_id, "peer-1");
+        assert!(transport.get_peer("peer-1").is_some());
+        assert!(transport.get_peer("other").is_none());
     }
 
     #[test]
-    fn test_peer_lost() {
+    fn test_ble_peer_lost() {
         let transport = BleTransport::new("test-device");
-
-        let peer = PeerDevice {
-            device_id: "peer-1".to_string(),
-            address: "AA:BB:CC:DD:EE:FF".to_string(),
-            rssi: -60,
-            last_seen: std::time::SystemTime::now(),
-            connected: false,
-        };
-
-        transport.on_peer_discovered(peer);
+        transport.on_peer_discovered(peer_device("peer-1"));
         transport.on_peer_lost("peer-1");
-
-        let peers = transport.get_peers();
-        assert_eq!(peers.len(), 0);
+        assert_eq!(transport.get_peers().len(), 0);
     }
 
     #[test]
-    fn test_fragment_roundtrip() {
-        use offline_protocol_core::{AppId, Message, MessagePriority, UserId, TTL};
+    fn test_ble_has_pending_sends_dequeue_send_get_queue_depth() {
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+        let msg = small_message();
+        transport.send(&msg).unwrap();
+        assert!(transport.has_pending_sends());
+        assert_eq!(transport.get_queue_depth(), 1);
+        let dequeued = transport.dequeue_send();
+        assert!(dequeued.is_some());
+        assert!(!transport.has_pending_sends());
+        assert_eq!(transport.get_queue_depth(), 0);
+        assert!(transport.dequeue_send().is_none());
+    }
 
+    #[test]
+    fn test_ble_serialize_deserialize_message() {
         let transport = BleTransport::new("test-device");
+        let msg = small_message();
+        let data = transport.serialize_message(&msg).unwrap();
+        let back = transport.deserialize_message(&data).unwrap();
+        assert_eq!(back.id, msg.id);
+        assert_eq!(back.content, msg.content);
+    }
 
+    #[test]
+    fn test_ble_deserialize_invalid_json() {
+        let transport = BleTransport::new("test-device");
+        let result = transport.deserialize_message(b"not json");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::SerializationError(_)));
+    }
+
+    #[test]
+    fn test_ble_single_fragment_roundtrip() {
+        let transport = BleTransport::new("test-device");
+        transport.set_mtu(512);
+        let msg = small_message();
+        let fragments = transport.fragment_message(&msg).unwrap();
+        assert_eq!(fragments.len(), 1, "small message with large MTU should fit in one fragment");
+        let reconstructed = transport.process_fragment(&fragments[0]).unwrap();
+        assert!(reconstructed.is_some());
+        assert_eq!(reconstructed.unwrap().content, msg.content);
+    }
+
+    #[test]
+    fn test_ble_fragment_roundtrip() {
+        let transport = BleTransport::new("test-device");
         let sender = UserId::new("alice").unwrap();
         let recipient = UserId::new("bob").unwrap();
         let app_id = AppId::new("app").unwrap();
@@ -811,7 +917,7 @@ mod tests {
             .build();
 
         let fragments = transport.fragment_message(&message).unwrap();
-        assert!(fragments.len() > 1); // should fragment
+        assert!(fragments.len() > 1);
         for fragment in &fragments {
             assert!(fragment.len() <= BLE_MAX_FRAGMENT_SIZE);
         }
@@ -825,5 +931,95 @@ mod tests {
 
         let reconstructed = reconstructed.expect("Expected complete message");
         assert_eq!(reconstructed.content, content);
+    }
+
+    #[test]
+    fn test_ble_process_fragment_invalid_magic() {
+        let transport = BleTransport::new("test-device");
+        let mut bad = vec![0x00, 0x00, 1, 0, 0, 0, 0, 0, 0, 0]; // wrong magic
+        bad.extend_from_slice(b"{}");
+        let result = transport.process_fragment(&bad);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::Other(s) if s.contains("magic")));
+    }
+
+    #[test]
+    fn test_ble_process_fragment_too_short() {
+        let transport = BleTransport::new("test-device");
+        let result = transport.process_fragment(&[0x4f, 0x50]); // "OP" only
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::Other(s) if s.contains("short") || s.contains("truncat")));
+    }
+
+    #[test]
+    fn test_ble_process_fragment_wrong_version() {
+        let transport = BleTransport::new("test-device");
+        // Minimal header with wrong version: magic(2) + version(1)=99 + id_len(1)=0 + index(2) + total(2) + data_len(2)
+        let bad = [
+            b'O', b'P', 99u8, 0u8,
+            0u8, 0u8, 1u8, 0u8, 0u8, 0u8,
+        ];
+        let result = transport.process_fragment(&bad);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::Other(s) if s.contains("version")));
+    }
+
+    #[test]
+    fn test_ble_on_fragment_received_complete_queues_message() {
+        let transport = BleTransport::new("test-device");
+        transport.set_mtu(512);
+        let msg = small_message();
+        let fragments = transport.fragment_message(&msg).unwrap();
+        for fragment in &fragments {
+            transport.on_fragment_received(fragment.clone()).unwrap();
+        }
+        let received = transport.receive().unwrap();
+        assert!(received.is_some());
+        assert_eq!(received.unwrap().content, msg.content);
+    }
+
+    #[test]
+    fn test_ble_on_fragment_received_bad_data_drops_ok() {
+        let transport = BleTransport::new("test-device");
+        let result = transport.on_fragment_received(vec![0u8; 5]);
+        assert!(result.is_ok()); // drops bad fragment, doesn't propagate error
+    }
+
+    #[test]
+    fn test_ble_get_next_fragment_requeue() {
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+        let msg = small_message();
+        transport.send(&msg).unwrap();
+        let first = transport.get_next_fragment().unwrap();
+        assert!(first.is_some());
+        let (recipient, data) = first.unwrap();
+        transport.requeue_fragment(&recipient, data.clone());
+        let again = transport.get_next_fragment().unwrap();
+        assert!(again.is_some());
+        assert_eq!(again.unwrap().1, data);
+    }
+
+    #[test]
+    fn test_ble_get_next_fragment_none_when_empty() {
+        let transport = BleTransport::new("test-device");
+        assert!(transport.get_next_fragment().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_ble_on_message_received() {
+        let transport = BleTransport::new("test-device");
+        let msg = small_message();
+        transport.on_message_received(msg.clone());
+        let received = transport.receive().unwrap();
+        assert!(received.is_some());
+        assert_eq!(received.unwrap().id, msg.id);
+    }
+
+    #[test]
+    fn test_ble_transport_builder() {
+        let transport = BleTransportBuilder::new("my-device").build();
+        assert_eq!(transport.device_id(), "my-device");
+        assert_eq!(transport.transport_type(), TransportType::BLE);
     }
 }

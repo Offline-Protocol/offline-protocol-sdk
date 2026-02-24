@@ -401,4 +401,129 @@ mod tests {
         let deserialized = transport.deserialize_message(&data).unwrap();
         assert_eq!(deserialized.id, message.id);
     }
+
+    #[test]
+    fn test_send_when_unavailable_fails() {
+        let transport = WifiDirectTransport::new("test-device");
+        let message = create_test_message();
+        let result = transport.send(&message);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::TransportNotAvailable(_)));
+    }
+
+    #[test]
+    fn test_receive_when_empty_returns_none() {
+        let transport = WifiDirectTransport::new("test-device");
+        assert!(transport.receive().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_on_data_received_invalid_json_drops_ok() {
+        let transport = WifiDirectTransport::new("test-device");
+        let result = transport.on_data_received(b"not json".to_vec());
+        assert!(result.is_ok());
+        assert!(transport.receive().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_on_data_received_valid_queues_message() {
+        let transport = WifiDirectTransport::new("test-device");
+        let message = create_test_message();
+        let data = transport.serialize_message(&message).unwrap();
+        transport.on_data_received(data).unwrap();
+        let received = transport.receive().unwrap();
+        assert!(received.is_some());
+        assert_eq!(received.unwrap().id, message.id);
+    }
+
+    #[test]
+    fn test_on_peer_lost() {
+        let transport = WifiDirectTransport::new("test-device");
+        let peer = WifiDirectPeer {
+            device_name: "P".to_string(),
+            device_address: "00:11:22:33:44:55".to_string(),
+            is_group_owner: false,
+            last_seen: SystemTime::now(),
+            connected: true,
+        };
+        transport.on_peer_discovered(peer);
+        assert_eq!(transport.get_peers().len(), 1);
+        transport.on_peer_lost("00:11:22:33:44:55");
+        assert_eq!(transport.get_peers().len(), 0);
+    }
+
+    #[test]
+    fn test_get_peer() {
+        let transport = WifiDirectTransport::new("test-device");
+        let peer = WifiDirectPeer {
+            device_name: "P".to_string(),
+            device_address: "aa:bb:cc:dd:ee:ff".to_string(),
+            is_group_owner: true,
+            last_seen: SystemTime::now(),
+            connected: false,
+        };
+        transport.on_peer_discovered(peer.clone());
+        let found = transport.get_peer("aa:bb:cc:dd:ee:ff");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().device_name, "P");
+        assert!(transport.get_peer("other").is_none());
+    }
+
+    #[test]
+    fn test_update_metrics() {
+        let transport = WifiDirectTransport::new("test-device");
+        let mut m = TransportMetrics::default();
+        m.rssi = Some(-72);
+        transport.update_metrics(m);
+        assert_eq!(transport.metrics().rssi, Some(-72));
+    }
+
+    #[test]
+    fn test_platform_handle() {
+        let transport = WifiDirectTransport::new("test-device");
+        assert_eq!(transport.platform_handle(), None);
+        transport.set_platform_handle(99);
+        assert_eq!(transport.platform_handle(), Some(99));
+    }
+
+    #[test]
+    fn test_has_pending_sends_empty() {
+        let transport = WifiDirectTransport::new("test-device");
+        assert!(!transport.has_pending_sends());
+    }
+
+    #[test]
+    fn test_stop_sets_disconnected() {
+        let mut transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        transport.stop().unwrap();
+        assert_eq!(transport.status(), TransportStatus::Disconnected);
+    }
+
+    #[test]
+    fn test_set_on_messages_available_callback_invoked_on_send() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        let called = std::sync::Arc::new(AtomicBool::new(false));
+        let c = called.clone();
+        transport.set_on_messages_available(std::sync::Arc::new(move || c.store(true, Ordering::SeqCst)));
+        let _ = transport.send(&create_test_message());
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_get_next_message_returns_recipient_and_data() {
+        let transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        let message = create_test_message();
+        transport.send(&message).unwrap();
+        let next = transport.get_next_message().unwrap();
+        assert!(next.is_some());
+        let (recipient, data) = next.unwrap();
+        assert_eq!(recipient, message.recipient.as_str());
+        assert!(!data.is_empty());
+        let deserialized = transport.deserialize_message(&data).unwrap();
+        assert_eq!(deserialized.id, message.id);
+    }
 }

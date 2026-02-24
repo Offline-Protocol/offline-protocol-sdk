@@ -306,7 +306,8 @@ impl TransportSelector {
                 a.1.total
                     .partial_cmp(&b.1.total)
                     .unwrap_or(std::cmp::Ordering::Equal)
-            }) {
+            })
+        {
             let best_total = best_s.total;
             scored_transports
                 .iter()
@@ -2106,5 +2107,123 @@ mod tests {
 				second, current,
 				"When hysteresis blocks a switch, selection must return current transport (policy-compliant)"
 		);
+    }
+
+    #[test]
+    fn test_dors_when_wifi_direct_removed_from_available_selects_ble() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut with_wifi = HashMap::new();
+        with_wifi.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        with_wifi.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-50), 0.1, 5),
+        );
+
+        let selected_with_wifi = selector.select_transport(&message, &with_wifi).unwrap();
+        assert!(
+            matches!(selected_with_wifi, TransportType::BLE | TransportType::WiFiDirect),
+            "DORS may pick BLE or WiFi when both available"
+        );
+
+        let mut without_wifi = HashMap::new();
+        without_wifi.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        without_wifi.insert(
+            TransportType::Internet,
+            create_test_metrics(None, 0.0, 0),
+        );
+
+        let selected_without_wifi = selector.select_transport(&message, &without_wifi).unwrap();
+        assert!(
+            selected_without_wifi != TransportType::WiFiDirect,
+            "WiFi Direct must not be selected when it is not in available_transports"
+        );
+    }
+
+    #[test]
+    fn test_dors_ios_background_wifi_suspended_fallback_to_ble_or_internet() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut transports_foreground = HashMap::new();
+        transports_foreground.insert(TransportType::BLE, create_test_metrics(Some(-65), 0.2, 8));
+        transports_foreground.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 3),
+        );
+
+        let _ = selector.select_transport(&message, &transports_foreground);
+
+        let mut transports_background = HashMap::new();
+        transports_background.insert(TransportType::BLE, create_test_metrics(Some(-65), 0.2, 8));
+        transports_background.insert(
+            TransportType::Internet,
+            create_test_metrics(None, 0.0, 0),
+        );
+
+        let selected = selector.select_transport(&message, &transports_background).unwrap();
+        assert_ne!(
+            selected,
+            TransportType::WiFiDirect,
+            "WiFi Direct must not be selected when removed from available_transports (iOS background)"
+        );
+        assert!(
+            selected == TransportType::BLE || selected == TransportType::Internet,
+            "DORS must reroute through BLE or Internet when WiFi Direct is suspended by OS"
+        );
+    }
+
+    #[test]
+    fn test_dors_wifi_direct_removed_then_only_ble_available_selects_ble() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut with_both = HashMap::new();
+        with_both.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        with_both.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-50), 0.05, 2),
+        );
+        let _ = selector.select_transport(&message, &with_both);
+
+        let mut only_ble = HashMap::new();
+        only_ble.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+
+        let selected = selector.select_transport(&message, &only_ble).unwrap();
+        assert_eq!(
+            selected,
+            TransportType::BLE,
+            "When WiFi Direct is removed from available_transports (e.g. iOS background), DORS must select BLE so traffic is rerouted through BLE"
+        );
+    }
+
+    #[test]
+    fn test_dors_current_transport_wifi_then_removed_switches_immediately() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut with_wifi = HashMap::new();
+        with_wifi.insert(TransportType::BLE, create_test_metrics(Some(-70), 0.3, 15));
+        with_wifi.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 2),
+        );
+        let _first = selector.select_transport(&message, &with_wifi).unwrap();
+
+        let mut without_wifi = HashMap::new();
+        without_wifi.insert(TransportType::BLE, create_test_metrics(Some(-70), 0.3, 15));
+
+        let second = selector.select_transport(&message, &without_wifi).unwrap();
+        assert_eq!(
+            second,
+            TransportType::BLE,
+            "DORS must switch immediately when current transport (e.g. WiFi Direct) is no longer available, without waiting for cooldown"
+        );
+        assert_ne!(
+            second,
+            TransportType::WiFiDirect,
+            "WiFi Direct must not be returned when it was removed from available_transports"
+        );
     }
 }

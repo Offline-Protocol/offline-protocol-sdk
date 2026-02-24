@@ -39,11 +39,12 @@ pub struct DeduplicatorConfig {
 impl Default for DeduplicatorConfig {
     fn default() -> Self {
         Self {
-            max_tracked_messages: 10000,
+            // Exact-match mode by default: no false positives (Bloom can drop ~1% of legitimate messages).
+            max_tracked_messages: 1000,
             retention_time_secs: 3600, // 1 hour
-            use_bloom_filter: true,
+            use_bloom_filter: false,
             bloom_filter_bits: 1 << 20, // ~1MB per filter (1,048,576 bits)
-            bloom_hash_count: 7,        // ~1% false positive rate
+            bloom_hash_count: 7,        // ~1% false positive rate when Bloom is enabled
             bloom_filter_count: 4,      // 4 windows for 1-hour retention
             bloom_rotation_secs: 900,   // 15 minutes per window
         }
@@ -493,6 +494,38 @@ mod tests {
             use_bloom_filter: false,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_default_config_is_hashmap_and_capacity_1000() {
+        let config = DeduplicatorConfig::default();
+        assert!(
+            !config.use_bloom_filter,
+            "default should be exact-match HashMap to avoid false positives"
+        );
+        assert_eq!(config.max_tracked_messages, 1000);
+
+        let dedup = Deduplicator::new();
+        assert!(!dedup.is_bloom_filter_mode());
+        let stats = dedup.stats();
+        assert_eq!(stats.mode, DeduplicatorMode::HashMap);
+    }
+
+    #[test]
+    fn test_default_hashmap_no_false_positives() {
+        let mut dedup = Deduplicator::new();
+        let seen = MessageId::new();
+        dedup.mark_seen(seen.clone());
+
+        // Brand-new ID must never be reported as duplicate (HashMap is exact match)
+        for _ in 0..20 {
+            let fresh = MessageId::new();
+            assert!(
+                !dedup.is_duplicate(&fresh),
+                "fresh message ID must not be false positive"
+            );
+        }
+        assert!(dedup.is_duplicate(&seen));
     }
 
     #[test]

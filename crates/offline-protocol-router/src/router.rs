@@ -90,6 +90,8 @@ impl Default for GradientRoutingConfig {
 }
 
 /// A routing entry tracking how to reach a destination.
+/// Uses a destination sequence number (DSDV-style) to avoid loops: newer updates
+/// from the destination are preferred; stale routes are ignored.
 #[derive(Debug, Clone)]
 pub struct RouteEntry {
     /// The next-hop neighbor to reach this destination.
@@ -100,6 +102,9 @@ pub struct RouteEntry {
     pub last_seen: Instant,
     /// Quality score of this route (higher is better).
     pub quality: f32,
+    /// Destination sequence number from the destination node (DSDV).
+    /// Higher values are fresher; prefer route with higher sequence to avoid count-to-infinity.
+    pub sequence_number: u32,
 }
 
 /// Gradient routing table for directed message delivery.
@@ -128,10 +133,17 @@ impl GradientRoutingTable {
         }
     }
 
-    /// Records a route learned from an incoming message.
-    /// Called when we receive a message from a neighbor - we now know
-    /// that neighbor can reach the message's sender.
-    pub fn learn_route(&mut self, destination: &str, next_hop: &str, hop_count: u8, quality: f32) {
+    /// Records a route learned from an incoming message (DSDV-style).
+    /// Prefers higher `sequence_number` (fresher from destination) to avoid loops.
+    /// Pass 0 for sequence when the message does not carry a destination sequence.
+    pub fn learn_route(
+        &mut self,
+        destination: &str,
+        next_hop: &str,
+        hop_count: u8,
+        quality: f32,
+        sequence_number: u32,
+    ) {
         if !self.config.enabled {
             return;
         }
@@ -143,35 +155,47 @@ impl GradientRoutingTable {
 
         // Check if we already have a route through this neighbor
         if let Some(existing) = routes.iter_mut().find(|r| r.next_hop == next_hop) {
-            // Update existing route
-            existing.hop_count = hop_count;
-            existing.last_seen = now;
-            existing.quality = quality;
-        } else {
-            // Add new route
-            if routes.len() >= self.config.max_routes_per_destination {
-                // Remove worst route
-                routes.sort_by(|a, b| {
-                    b.quality
-                        .partial_cmp(&a.quality)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                routes.pop();
+            // Accept update only if fresher (higher seq) or same seq with better hop count
+            let accept = sequence_number > existing.sequence_number
+                || (sequence_number == existing.sequence_number && hop_count <= existing.hop_count);
+            if accept {
+                existing.hop_count = hop_count;
+                existing.last_seen = now;
+                existing.quality = quality;
+                existing.sequence_number = sequence_number;
             }
-
-            routes.push(RouteEntry {
-                next_hop: next_hop.to_string(),
-                hop_count,
-                last_seen: now,
-                quality,
-            });
-
-            // Update reverse mapping
-            self.neighbor_destinations
-                .entry(next_hop.to_string())
-                .or_default()
-                .push(destination.to_string());
+            return;
         }
+
+        // New route through this neighbor
+        if routes.len() >= self.config.max_routes_per_destination {
+            // Sort best-first so worst is last; pop() removes worst (lowest seq, lowest quality, highest hop_count)
+            routes.sort_by(|a, b| {
+                b.sequence_number
+                    .cmp(&a.sequence_number)
+                    .then_with(|| {
+                        b.quality
+                            .partial_cmp(&a.quality)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| a.hop_count.cmp(&b.hop_count))
+            });
+            routes.pop();
+        }
+
+        routes.push(RouteEntry {
+            next_hop: next_hop.to_string(),
+            hop_count,
+            last_seen: now,
+            quality,
+            sequence_number,
+        });
+
+        // Update reverse mapping
+        self.neighbor_destinations
+            .entry(next_hop.to_string())
+            .or_default()
+            .push(destination.to_string());
 
         // Enforce table size limit
         self.enforce_size_limit();
@@ -187,14 +211,19 @@ impl GradientRoutingTable {
         let ttl = Duration::from_secs(self.config.route_ttl_secs);
         let now = Instant::now();
 
-        // Find best non-expired route
+        // Find best non-expired route: prefer higher sequence (fresher), then quality, then lower hop_count
         routes
             .iter()
             .filter(|r| now.duration_since(r.last_seen) < ttl)
             .max_by(|a, b| {
-                a.quality
-                    .partial_cmp(&b.quality)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                a.sequence_number
+                    .cmp(&b.sequence_number)
+                    .then_with(|| {
+                        a.quality
+                            .partial_cmp(&b.quality)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| b.hop_count.cmp(&a.hop_count))
             })
     }
 
@@ -711,8 +740,13 @@ impl PathSelector {
     ) {
         let sender = message.sender.as_str();
         let hop_count = message.hop_count.value();
-        self.routing_table
-            .learn_route(sender, from_neighbor, hop_count, quality);
+        self.routing_table.learn_route(
+            sender,
+            from_neighbor,
+            hop_count,
+            quality,
+            0, // No destination sequence in message yet; use 0 for backward compatibility
+        );
     }
 
     /// Gets the best route to a destination, if known.
@@ -1025,5 +1059,70 @@ mod tests {
         assert!(decision.gossip_applied);
         // Probability should be at minimum (0.15)
         assert!((decision.probability - 0.15).abs() < 0.01);
+    }
+
+    // ---------- DSDV sequence number tests (loop-free routing) ----------
+
+    #[test]
+    fn test_dsdv_prefer_higher_sequence_number() {
+        let mut table = GradientRoutingTable::new();
+        let dest = "alice";
+
+        table.learn_route(dest, "peer_a", 2, 0.9, 1);
+        table.learn_route(dest, "peer_b", 3, 0.8, 2);
+
+        let route = table.get_route(dest).expect("should have route");
+        assert_eq!(route.next_hop, "peer_b");
+        assert_eq!(route.sequence_number, 2);
+    }
+
+    #[test]
+    fn test_dsdv_reject_stale_update_same_next_hop() {
+        let mut table = GradientRoutingTable::new();
+        let dest = "bob";
+
+        table.learn_route(dest, "peer_a", 2, 0.9, 2);
+        table.learn_route(dest, "peer_a", 5, 0.5, 1); // stale: lower sequence
+
+        let route = table.get_route(dest).expect("should have route");
+        assert_eq!(route.next_hop, "peer_a");
+        assert_eq!(route.hop_count, 2);
+        assert_eq!(route.sequence_number, 2);
+    }
+
+    #[test]
+    fn test_dsdv_accept_same_sequence_better_hop_count() {
+        let mut table = GradientRoutingTable::new();
+        let dest = "carol";
+
+        table.learn_route(dest, "peer_a", 4, 0.7, 2);
+        table.learn_route(dest, "peer_a", 2, 0.8, 2); // same seq, better hop count
+
+        let route = table.get_route(dest).expect("should have route");
+        assert_eq!(route.hop_count, 2);
+        assert_eq!(route.sequence_number, 2);
+    }
+
+    #[test]
+    fn test_dsdv_eviction_removes_worst_route() {
+        let config = GradientRoutingConfig {
+            max_routes_per_destination: 2,
+            ..Default::default()
+        };
+        let mut table = GradientRoutingTable::with_config(config);
+        let dest = "dest";
+
+        table.learn_route(dest, "hop1", 1, 0.9, 10);
+        table.learn_route(dest, "hop2", 2, 0.8, 10);
+        // At capacity: evict worst of current two (hop2), then add hop3
+        table.learn_route(dest, "hop3", 3, 0.7, 5);
+
+        let route = table.get_route(dest).expect("should have route");
+        assert_eq!(route.next_hop, "hop1");
+        let routes = table.get_routes(dest);
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().any(|r| r.next_hop == "hop1"));
+        assert!(routes.iter().any(|r| r.next_hop == "hop3"));
+        assert!(!routes.iter().any(|r| r.next_hop == "hop2"), "hop2 (worst of original two) should be evicted");
     }
 }

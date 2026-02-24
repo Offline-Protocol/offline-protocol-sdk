@@ -773,4 +773,102 @@ mod tests {
             energy_cost: _,
         } = m;
     }
+
+    #[test]
+    fn test_send_when_unavailable_fails() {
+        let transport = InternetTransport::new("test-device");
+        let message = create_test_message();
+        let result = transport.send(&message);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::TransportNotAvailable(_)));
+    }
+
+    #[test]
+    fn test_receive_when_empty_returns_none() {
+        let transport = InternetTransport::new("test-device");
+        let received = transport.receive().unwrap();
+        assert!(received.is_none());
+    }
+
+    #[test]
+    fn test_on_data_received_invalid_json_drops_ok() {
+        let transport = InternetTransport::new("test-device");
+        let result = transport.on_data_received(b"not valid json".to_vec());
+        assert!(result.is_ok());
+        assert!(transport.receive().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_on_data_received_valid_json_queues_message() {
+        let transport = InternetTransport::new("test-device");
+        let message = create_test_message();
+        let data = transport.serialize_message(&message).unwrap();
+        transport.on_data_received(data).unwrap();
+        let received = transport.receive().unwrap();
+        assert!(received.is_some());
+        assert_eq!(received.unwrap().id, message.id);
+    }
+
+    #[test]
+    fn test_update_metrics_preserves_confirmation_counts() {
+        let transport = InternetTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        let msg = create_test_message();
+        transport.send(&msg).unwrap();
+        let (id, _) = transport.get_next_message().unwrap().unwrap();
+        transport.confirm_sent(&id);
+        assert_eq!(transport.metrics().success_count, 1);
+
+        let mut incoming = TransportMetrics::default();
+        incoming.rssi = Some(-70);
+        incoming.latency_ms = Some(100);
+        transport.update_metrics(incoming);
+
+        let m = transport.metrics();
+        assert_eq!(m.rssi, Some(-70));
+        assert_eq!(m.latency_ms, Some(100));
+        assert_eq!(m.success_count, 1);
+    }
+
+    #[test]
+    fn test_platform_handle() {
+        let transport = InternetTransport::new("test-device");
+        assert_eq!(transport.platform_handle(), None);
+        transport.set_platform_handle(123);
+        assert_eq!(transport.platform_handle(), Some(123));
+    }
+
+    #[test]
+    fn test_should_reconnect_infinite_attempts() {
+        let transport = InternetTransportBuilder::new("test-device")
+            .auto_reconnect(true)
+            .max_reconnect_attempts(0)
+            .build();
+        assert!(transport.should_reconnect());
+        for _ in 0..100 {
+            transport.increment_reconnect_attempts();
+        }
+        assert!(transport.should_reconnect());
+    }
+
+    #[test]
+    fn test_confirm_sent_unknown_id_no_panic() {
+        let transport = InternetTransport::new("test-device");
+        transport.confirm_sent("nonexistent-id");
+        assert_eq!(transport.metrics().success_count, 0);
+    }
+
+    #[test]
+    fn test_report_send_failure_unknown_id_no_panic() {
+        let transport = InternetTransport::new("test-device");
+        transport.report_send_failure("nonexistent-id");
+        assert_eq!(transport.metrics().failure_count, 0);
+    }
+
+    #[test]
+    fn test_start_does_not_require_connection() {
+        let mut transport = InternetTransport::new("test-device");
+        assert!(transport.start().is_ok());
+        assert_eq!(transport.status(), TransportStatus::Unavailable);
+    }
 }
