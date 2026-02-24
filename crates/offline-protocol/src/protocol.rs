@@ -5288,7 +5288,7 @@ mod tests {
     use offline_protocol_transport::{
         mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -8170,6 +8170,200 @@ mod tests {
         );
         assert!(!alice2.pending_encrypted_messages.contains_key("bob"));
         assert!(!bob2.pending_encrypted_messages.contains_key("alice"));
+
+        assert!(alice_transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED)));
+        assert!(bob_transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED)));
+    }
+
+    #[test]
+    fn test_pending_sessions_reconcile_on_concurrent_send_after_restart() {
+        let mut alice_config = create_test_config_for_user("alice");
+        alice_config.encryption.enabled = true;
+        alice_config.encryption.store_pending = true;
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let alice_storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+
+        // Build a durable MLS session on both peers, but leave confirmation Pending.
+        let mut alice = OfflineProtocol::new(alice_config).unwrap();
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        alice.initialize_mls(alice_storage.clone()).unwrap();
+        bob.initialize_mls(bob_storage.clone()).unwrap();
+
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let welcome = {
+            let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap()
+        };
+        {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.join_session(&welcome).unwrap();
+        }
+        alice
+            .ensure_session_state_entry("bob", "test_setup")
+            .unwrap();
+        bob.ensure_session_state_entry("alice", "test_setup")
+            .unwrap();
+
+        // Restart both peers with the same storage to simulate a crash/restart cycle.
+        let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        alice2.config.encryption.enabled = true;
+        alice2.config.encryption.store_pending = true;
+        alice2.initialize_mls(alice_storage).unwrap();
+        let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob2.config.encryption.enabled = true;
+        bob2.config.encryption.store_pending = true;
+        bob2.initialize_mls(bob_storage).unwrap();
+
+        let mut alice_transport = MockTransport::new(TransportType::BLE);
+        alice_transport.start().unwrap();
+        let alice_transport_handle = alice_transport.clone();
+        alice2
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice_transport));
+        alice2.start().unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob2.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+        bob2.start().unwrap();
+
+        // Simulate dropped startup probes. Force probe schedule due now so concurrent
+        // send-path reconciliation can retry without depending on process().
+        alice_transport_handle.clear_sent_messages();
+        bob_transport_handle.clear_sent_messages();
+        alice2
+            .confirmation_probe_due_at
+            .insert("bob".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        bob2.confirmation_probe_due_at
+            .insert("alice".to_string(), Utc::now() - ChronoDuration::seconds(1));
+
+        // Start both sends at the same instant to make the race deterministic.
+        let alice_shared = Arc::new(Mutex::new(alice2));
+        let bob_shared = Arc::new(Mutex::new(bob2));
+        let start_barrier = Arc::new(Barrier::new(3));
+
+        let alice_barrier = Arc::clone(&start_barrier);
+        let alice_sender = Arc::clone(&alice_shared);
+        let alice_send_thread = thread::spawn(move || {
+            alice_barrier.wait();
+            alice_sender
+                .lock()
+                .unwrap()
+                .send_message("bob", "queued-a2b-concurrent", None::<MessagePriority>, None::<String>)
+                .unwrap();
+        });
+
+        let bob_barrier = Arc::clone(&start_barrier);
+        let bob_sender = Arc::clone(&bob_shared);
+        let bob_send_thread = thread::spawn(move || {
+            bob_barrier.wait();
+            bob_sender
+                .lock()
+                .unwrap()
+                .send_message("alice", "queued-b2a-concurrent", None::<MessagePriority>, None::<String>)
+                .unwrap();
+        });
+
+        start_barrier.wait();
+        alice_send_thread.join().unwrap();
+        bob_send_thread.join().unwrap();
+
+        let probe_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from alice send-path reconciliation");
+        let probe_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from bob send-path reconciliation");
+
+        let _ = bob_shared.lock().unwrap().process_internal_message(&probe_from_alice);
+        let _ = alice_shared
+            .lock()
+            .unwrap()
+            .process_internal_message(&probe_from_bob);
+
+        let ack_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from alice");
+        let ack_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from bob");
+
+        let _ = bob_shared.lock().unwrap().process_internal_message(&ack_from_alice);
+        let _ = alice_shared
+            .lock()
+            .unwrap()
+            .process_internal_message(&ack_from_bob);
+
+        assert_eq!(
+            alice_shared
+                .lock()
+                .unwrap()
+                .load_session_state_entry("bob")
+                .unwrap()
+                .unwrap(),
+            SessionState::Confirmed
+        );
+        assert_eq!(
+            bob_shared
+                .lock()
+                .unwrap()
+                .load_session_state_entry("alice")
+                .unwrap()
+                .unwrap(),
+            SessionState::Confirmed
+        );
+        assert!(!alice_shared
+            .lock()
+            .unwrap()
+            .pending_encrypted_messages
+            .contains_key("bob"));
+        assert!(!bob_shared
+            .lock()
+            .unwrap()
+            .pending_encrypted_messages
+            .contains_key("alice"));
 
         assert!(alice_transport_handle
             .sent_messages()
