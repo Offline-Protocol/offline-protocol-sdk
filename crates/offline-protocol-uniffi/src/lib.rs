@@ -2573,12 +2573,12 @@ impl OfflineProtocol {
 
     /// Delete a 1:1 session
     pub fn mls_delete_session(&self, other_user_id: String) -> Result<(), ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .delete_session(&other_user_id)
+            .manual_mls_delete_session(&other_user_id)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 

@@ -2595,6 +2595,20 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    fn clear_session_state_entry(&self, peer_id: &str) -> Result<()> {
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+        storage
+            .delete(storage_keys::SESSION_STATES, peer_id)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to clear session state for {}: {}",
+                    peer_id, e
+                ))
+            })
+    }
+
     fn load_welcome_lifecycle_entry(
         &self,
         peer_id: &str,
@@ -2638,6 +2652,20 @@ impl OfflineProtocol {
                 Error::Other(format!(
                     "Failed to persist welcome lifecycle for {}: {}",
                     record.peer_id, e
+                ))
+            })
+    }
+
+    fn clear_welcome_lifecycle_entry(&self, peer_id: &str) -> Result<()> {
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+        storage
+            .delete(storage_keys::WELCOME_LIFECYCLES, peer_id)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to clear welcome lifecycle for {}: {}",
+                    peer_id, e
                 ))
             })
     }
@@ -3451,6 +3479,22 @@ impl OfflineProtocol {
         Ok(welcome)
     }
 
+    /// Deletes a 1:1 session and clears protocol-level lifecycle state.
+    pub fn manual_mls_delete_session(&mut self, peer_id: &str) -> Result<()> {
+        self.clear_session_state_entry(peer_id)?;
+        self.confirmed_sessions.remove(peer_id);
+        self.clear_confirmation_recovery_tracking(peer_id);
+        self.welcome_lifecycles.remove(peer_id);
+        self.clear_welcome_lifecycle_entry(peer_id)?;
+
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let manager = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        manager.delete_session(peer_id)?;
+        Ok(())
+    }
+
     /// Joins a session from a Welcome message and synchronizes confirmation state.
     pub fn manual_mls_join_session(
         &mut self,
@@ -3510,10 +3554,14 @@ impl OfflineProtocol {
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager.decrypt(encrypted)?
         };
-        if plaintext.is_some() {
+        if plaintext.is_some() && Self::is_session_group_id(encrypted.group_id.as_str()) {
             self.handle_manual_decrypt_confirmation(&encrypted.sender_id);
         }
         Ok(plaintext)
+    }
+
+    fn is_session_group_id(group_id: &str) -> bool {
+        group_id.starts_with("session:")
     }
 
     fn handle_manual_welcome_confirmation(&mut self, peer_id: &str) {
@@ -6375,6 +6423,48 @@ mod tests {
             .any(|message| message.content.starts_with(internal_prefixes::ENCRYPTED)));
 
         protocol.stop().unwrap();
+    }
+
+    #[test]
+    fn test_manual_delete_session_clears_protocol_session_state() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let bob_manager = MlsManager::new("bob", Arc::new(InMemoryStorage::new())).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap();
+        }
+        protocol.confirm_session_state("bob", "test_setup").unwrap();
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+
+        protocol.manual_mls_delete_session("bob").unwrap();
+
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            assert!(!manager.has_session("bob").unwrap());
+        }
+        assert!(!protocol.confirmed_sessions.contains("bob"));
+        assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_session_group_detection_for_manual_decrypt_confirmation() {
+        assert!(OfflineProtocol::is_session_group_id("session:alice:bob"));
+        assert!(!OfflineProtocol::is_session_group_id("group:team"));
     }
 
     #[test]
