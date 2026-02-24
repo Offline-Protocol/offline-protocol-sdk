@@ -946,6 +946,56 @@ impl OfflineProtocol {
     /// we defer encryption until the session is "confirmed". A session is confirmed when:
     /// - We join via their Welcome message (welcome-wins), OR
     /// - We successfully decrypt their first message
+    fn encrypt_content_for_recipient_strict(
+        &mut self,
+        recipient: &str,
+        content: &str,
+    ) -> Result<String> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+
+        let has_session = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.has_session(recipient)?
+        };
+
+        if !has_session {
+            let now_ms = Utc::now().timestamp_millis() as u64;
+            let has_valid_key_package = match self.pending_key_packages.get(recipient) {
+                Some(pkg) if now_ms < pkg.local_expires_at_ms => true,
+                Some(_) => {
+                    self.pending_key_packages.remove(recipient);
+                    false
+                }
+                None => false,
+            };
+
+            if has_valid_key_package {
+                return Err(Error::SessionPending);
+            }
+
+            return Err(Error::NoKeyPackage(recipient.to_string()));
+        }
+
+        if !self.is_session_confirmed(recipient)? {
+            return Err(Error::SessionPending);
+        }
+
+        let encrypted = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager
+                .encrypt_for_user(recipient, content.as_bytes())
+                .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
+        };
+
+        let serialized =
+            serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
+        Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
+    }
+
     fn encrypt_content_for_recipient(
         &mut self,
         recipient: &str,
@@ -1049,7 +1099,7 @@ impl OfflineProtocol {
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
             manager
                 .encrypt_for_user(recipient, content.as_bytes())
-                .map_err(|e| Error::EncryptFailed(format!("recipient {}: {}", recipient, e)))?
+                .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
         };
 
         // Serialize encrypted message with prefix
@@ -1108,6 +1158,12 @@ impl OfflineProtocol {
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
+            if self.config.encryption.require_encryption {
+                return self
+                    .encrypt_content_for_recipient_strict(recipient, content)
+                    .map(OutboundSendPreparation::Ready);
+            }
+
             match self.encrypt_content_for_recipient(recipient, content, priority) {
                 Ok(encrypted) => Ok(OutboundSendPreparation::Ready(encrypted)),
                 Err(Error::NoKeyPackage(recipient_id)) => {
@@ -1151,6 +1207,16 @@ impl OfflineProtocol {
         } else {
             Ok(OutboundSendPreparation::Ready(content.to_string()))
         }
+    }
+
+    fn ensure_plaintext_control_send_allowed(&self, operation: &str) -> Result<()> {
+        if self.config.encryption.require_encryption {
+            return Err(Error::EncryptFailed(format!(
+                "{} sends plaintext control messages; disable require_encryption for bootstrap flows",
+                operation
+            )));
+        }
+        Ok(())
     }
 
     /// Sends or schedules sending of a welcome message to establish an MLS session.
@@ -2829,12 +2895,19 @@ impl OfflineProtocol {
     /// * `recipient` - The user ID of the recipient
     /// * `sender_name` - Display name of the sender
     /// * `key_package` - Optional MLS key package for encrypted session setup
+    ///
+    /// # Strict Encryption Behavior
+    ///
+    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
+    /// because bootstrap control messages are plaintext by design.
     pub fn send_connection_request(
         &mut self,
         recipient: &str,
         sender_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("send_connection_request")?;
+
         let payload = ConnectionRequestPayload {
             sender_name: sender_name.to_string(),
             timestamp_ms: Utc::now().timestamp_millis(),
@@ -2859,12 +2932,19 @@ impl OfflineProtocol {
     /// * `recipient` - The user ID of the original requester
     /// * `accepter_name` - Display name of the accepting party
     /// * `key_package` - Optional MLS key package for encrypted session setup
+    ///
+    /// # Strict Encryption Behavior
+    ///
+    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
+    /// because bootstrap control messages are plaintext by design.
     pub fn accept_connection_request(
         &mut self,
         recipient: &str,
         accepter_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("accept_connection_request")?;
+
         let payload = ConnectionAcceptedPayload {
             accepted_by_name: accepter_name.to_string(),
             timestamp_ms: Utc::now().timestamp_millis(),
@@ -2887,7 +2967,14 @@ impl OfflineProtocol {
     /// # Arguments
     ///
     /// * `recipient` - The user ID of the original requester
+    ///
+    /// # Strict Encryption Behavior
+    ///
+    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
+    /// because bootstrap control messages are plaintext by design.
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("reject_connection_request")?;
+
         let content = internal_prefixes::CONN_REJECT.to_string();
 
         let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
@@ -4973,6 +5060,111 @@ mod tests {
         let result =
             protocol.send_message("bob", "blocked", None::<MessagePriority>, None::<String>);
         assert!(matches!(result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
+    fn test_require_encryption_strict_mode_is_side_effect_free_on_session_pending() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let bob_manager =
+            crate::mls::MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new()))
+                .unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let result = protocol.send_message(
+            "bob",
+            "strict-no-side-effects",
+            None::<MessagePriority>,
+            None::<String>,
+        );
+
+        assert!(matches!(result, Err(Error::SessionPending)));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+        assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+        assert!(!protocol.welcome_lifecycles.contains_key("bob"));
+    }
+
+    #[test]
+    fn test_require_encryption_blocks_plaintext_for_send_message_via_transport() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let result = protocol.send_message_via_transport(
+            "bob",
+            "blocked-via-transport",
+            None::<MessagePriority>,
+            TransportType::BLE,
+            None::<String>,
+        );
+
+        assert!(matches!(result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
+    fn test_require_encryption_blocks_plaintext_connection_control_messages() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let request_result = protocol.send_connection_request("bob", "alice", None);
+        assert!(matches!(request_result, Err(Error::EncryptFailed(_))));
+
+        let accept_result = protocol.accept_connection_request("bob", "alice", None);
+        assert!(matches!(accept_result, Err(Error::EncryptFailed(_))));
+
+        let reject_result = protocol.reject_connection_request("bob");
+        assert!(matches!(reject_result, Err(Error::EncryptFailed(_))));
+
         assert_eq!(transport_handle.sent_messages().len(), 0);
     }
 
