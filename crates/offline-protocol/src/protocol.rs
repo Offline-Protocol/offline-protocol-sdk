@@ -1,7 +1,7 @@
 //! Main protocol engine.
 
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
-use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
+use crate::{Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
     AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL,
@@ -1235,20 +1235,7 @@ impl OfflineProtocol {
     }
 
     fn map_welcome_reason_code(error: &Error) -> crate::events::WelcomeReasonCode {
-        let message = error.to_string().to_ascii_lowercase();
-        if message.contains("timeout") {
-            return crate::events::WelcomeReasonCode::Timeout;
-        }
-        if message.contains("disconnected") || message.contains("unavailable") {
-            return crate::events::WelcomeReasonCode::PeerDisconnected;
-        }
-        if message.contains("no available transport")
-            || message.contains("transport")
-            || message.contains("all transports failed")
-        {
-            return crate::events::WelcomeReasonCode::TransportUnavailable;
-        }
-        crate::events::WelcomeReasonCode::InternalError
+        SessionStateError::classify(error).to_welcome_reason_code()
     }
 
     fn can_confirm_from_source(&self, peer_id: &str, source_event: &str) -> bool {
@@ -1587,10 +1574,7 @@ impl OfflineProtocol {
         let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
             return Ok(());
         };
-        let reason = transport_error
-            .as_ref()
-            .map(|err| Self::map_welcome_reason_code(&Error::Other(err.clone())))
-            .unwrap_or(crate::events::WelcomeReasonCode::TransportUnavailable);
+        let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
         let _ =
             self.apply_welcome_send_failure(&peer_id, reason, transport_error, "transport_failed")?;
         Ok(())
@@ -3348,17 +3332,47 @@ impl OfflineProtocol {
                                 DecryptResult::Empty
                             }
                             Err(e) => {
-                                let error_str = e.to_string();
-                                if error_str.contains("not found")
-                                    || error_str.contains("GroupNotFound")
-                                {
-                                    info!(sender = %sender, "Encrypted message received before session ready, queuing");
-                                    DecryptResult::SessionNotReady {
-                                        sender: sender.to_string(),
+                                let session_state_error = SessionStateError::from(&e);
+                                match session_state_error {
+                                    SessionStateError::SessionNotReady
+                                    | SessionStateError::GroupNotFound => {
+                                        info!(
+                                            sender = %sender,
+                                            error_code = session_state_error.code(),
+                                            "Encrypted message received before session ready, queuing"
+                                        );
+                                        debug!(
+                                            sender = %sender,
+                                            error = %e,
+                                            error_code = session_state_error.code(),
+                                            "Queued encrypted message due to session state classification"
+                                        );
+                                        DecryptResult::SessionNotReady {
+                                            sender: sender.to_string(),
+                                        }
                                     }
-                                } else {
-                                    warn!(error = %e, sender = %sender, "Failed to decrypt message");
-                                    DecryptResult::Failed { _error: error_str }
+                                    SessionStateError::NotInitialized => {
+                                        warn!(
+                                            sender = %sender,
+                                            error = %e,
+                                            error_code = session_state_error.code(),
+                                            "MLS decrypt attempted before initialization"
+                                        );
+                                        DecryptResult::MlsNotInitialized
+                                    }
+                                    SessionStateError::TransportFailure
+                                    | SessionStateError::CryptoFailure
+                                    | SessionStateError::Unknown => {
+                                        warn!(
+                                            sender = %sender,
+                                            error = %e,
+                                            error_code = session_state_error.code(),
+                                            "Failed to decrypt message"
+                                        );
+                                        DecryptResult::Failed {
+                                            _error: e.to_string(),
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -6885,6 +6899,35 @@ mod tests {
 
         // Without MLS initialized, should return placeholder text
         assert!(matches!(result, Some(InternalMessageResult::Decrypted(_))));
+    }
+
+    #[test]
+    fn test_encrypted_message_group_not_found_is_queued_with_typed_classification() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let encrypted_content = format!(
+            "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+            internal_prefixes::ENCRYPTED
+        );
+
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &encrypted_content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        assert!(protocol.pending_decryption.contains_key("sender123"));
+        assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
     }
 
     // ========================================================================

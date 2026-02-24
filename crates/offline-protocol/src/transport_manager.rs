@@ -8,7 +8,9 @@ use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_CO
 use crate::{Error, Result};
 use offline_protocol_core::Message;
 use offline_protocol_router::{DorsConfig, TransportSelector};
-use offline_protocol_transport::{Transport, TransportMetrics, TransportStatus, TransportType};
+use offline_protocol_transport::{
+    Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -166,9 +168,9 @@ impl TransportManager {
     pub fn send(&mut self, message: &Message) -> Result<()> {
         let available = self.get_available_transports();
         if available.is_empty() {
-            return Err(Error::Other(
-                "No available transport. Ensure at least one transport (BLE, WiFi Direct, or Internet) is enabled and available.".to_string(),
-            ));
+            return Err(Error::Transport(TransportError::TransportNotAvailable(
+                "No available transport".to_string(),
+            )));
         }
 
         // DORS selects the primary transport (applies hysteresis/cooldown/stability).
@@ -176,9 +178,9 @@ impl TransportManager {
             .selector
             .select_transport(message, &available)
             .ok_or_else(|| {
-                Error::Other(
-                    "No suitable transport selected from available transports.".to_string(),
-                )
+                Error::Transport(TransportError::TransportNotAvailable(
+                    "No suitable transport selected from available transports".to_string(),
+                ))
             })?;
 
         // Try the primary transport first.
@@ -253,11 +255,13 @@ impl TransportManager {
             }
         }
 
-        Err(Error::Other(format!(
-            "All transports failed (tried {:?}). Last error: {}",
-            attempted,
-            last_error.map(|e| e.to_string()).unwrap_or_default()
-        )))
+        let terminal_error = last_error.unwrap_or_else(|| {
+            TransportError::SendFailed(format!(
+                "All transports failed (tried {:?})",
+                attempted
+            ))
+        });
+        Err(Error::Transport(terminal_error))
     }
 
     /// Sends a message via a specific transport, bypassing DORS selection.
