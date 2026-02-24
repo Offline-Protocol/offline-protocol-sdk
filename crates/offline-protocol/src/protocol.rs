@@ -2934,6 +2934,30 @@ impl OfflineProtocol {
             .load_session_state_entry(peer_id)?
             .unwrap_or(SessionState::Pending);
         if matches!(persisted, SessionState::Confirmed) {
+            if !self.has_mls_session(peer_id)? {
+                warn!(
+                    peer_id = %peer_id,
+                    "Persisted confirmed state has no matching MLS session; clearing stale state"
+                );
+                self.confirmed_sessions.remove(peer_id);
+                self.clear_confirmation_recovery_tracking(peer_id);
+                self.welcome_lifecycles.remove(peer_id);
+                if let Err(err) = self.clear_session_state_entry(peer_id) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to clear stale persisted session state"
+                    );
+                }
+                if let Err(err) = self.clear_welcome_lifecycle_entry(peer_id) {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to clear stale persisted welcome lifecycle"
+                    );
+                }
+                return Ok(false);
+            }
             self.confirmed_sessions.insert(peer_id.to_string());
             return Ok(true);
         }
@@ -3481,17 +3505,18 @@ impl OfflineProtocol {
 
     /// Deletes a 1:1 session and clears protocol-level lifecycle state.
     pub fn manual_mls_delete_session(&mut self, peer_id: &str) -> Result<()> {
-        self.clear_session_state_entry(peer_id)?;
-        self.confirmed_sessions.remove(peer_id);
-        self.clear_confirmation_recovery_tracking(peer_id);
-        self.welcome_lifecycles.remove(peer_id);
-        self.clear_welcome_lifecycle_entry(peer_id)?;
-
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
         let manager = mls
             .read()
             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
         manager.delete_session(peer_id)?;
+
+        // Apply protocol-state cleanup only after MLS deletion succeeds.
+        self.confirmed_sessions.remove(peer_id);
+        self.clear_confirmation_recovery_tracking(peer_id);
+        self.welcome_lifecycles.remove(peer_id);
+        self.clear_session_state_entry(peer_id)?;
+        self.clear_welcome_lifecycle_entry(peer_id)?;
         Ok(())
     }
 
@@ -6459,6 +6484,64 @@ mod tests {
         }
         assert!(!protocol.confirmed_sessions.contains("bob"));
         assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_manual_delete_session_failure_keeps_protocol_state_unchanged() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        protocol.confirm_session_state("bob", "test_setup").unwrap();
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+        assert!(protocol.confirmed_sessions.contains("bob"));
+
+        // Force a deterministic failure path by poisoning the MLS lock.
+        let poisoned_handle = protocol.mls_manager.as_ref().unwrap().clone();
+        let poison_result = thread::spawn(move || {
+            let _guard = poisoned_handle.write().unwrap();
+            panic!("poison mls lock");
+        })
+        .join();
+        assert!(poison_result.is_err());
+
+        let result = protocol.manual_mls_delete_session("bob");
+        assert!(result.is_err());
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+        assert!(protocol.confirmed_sessions.contains("bob"));
+    }
+
+    #[test]
+    fn test_is_session_confirmed_clears_stale_confirmed_state_without_mls_session() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        protocol.confirm_session_state("bob", "test_setup").unwrap();
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+
+        assert!(!protocol.is_session_confirmed("bob").unwrap());
+        assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+        assert!(!protocol.confirmed_sessions.contains("bob"));
     }
 
     #[test]
