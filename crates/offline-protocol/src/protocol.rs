@@ -4511,9 +4511,7 @@ impl OfflineProtocol {
                                 "Failed to decrypt MLS message (empty plaintext)".to_string(),
                             ));
                         }
-                        return Some(InternalMessageResult::Decrypted(
-                            "[Decryption failed]".to_string(),
-                        ));
+                        return Some(InternalMessageResult::Consumed);
                     }
                     DecryptResult::SessionNotReady {
                         sender: sender_owned,
@@ -4546,9 +4544,7 @@ impl OfflineProtocol {
                                 format!("Failed to decrypt MLS message ({kind:?})"),
                             ));
                         }
-                        return Some(InternalMessageResult::Decrypted(
-                            "[Unable to decrypt]".to_string(),
-                        ));
+                        return Some(InternalMessageResult::Consumed);
                     }
                     DecryptResult::MlsNotInitialized => {
                         self.emit_mls_decryption_failed(
@@ -4565,9 +4561,7 @@ impl OfflineProtocol {
                                 "Failed to decrypt MLS message (not initialized)".to_string(),
                             ));
                         }
-                        return Some(InternalMessageResult::Decrypted(
-                            "[Encryption not initialized]".to_string(),
-                        ));
+                        return Some(InternalMessageResult::Consumed);
                     }
                 }
             } else {
@@ -5841,10 +5835,7 @@ mod tests {
         );
 
         let result = protocol.process_internal_message(&message);
-        assert!(matches!(
-            result,
-            Some(InternalMessageResult::Decrypted(text)) if text == "[Encryption not initialized]"
-        ));
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
         let events = emitter.take();
         assert!(events.iter().any(|event| matches!(
@@ -8587,11 +8578,10 @@ mod tests {
             &encrypted_content,
         );
 
-        // Process the message without MLS initialized - should fail gracefully
+        // Process the message without MLS initialized - should be consumed and signaled as an error
         let result = protocol.process_internal_message(&message);
 
-        // Without MLS initialized, should return placeholder text
-        assert!(matches!(result, Some(InternalMessageResult::Decrypted(_))));
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
     }
 
     #[test]
@@ -8670,6 +8660,57 @@ mod tests {
                 && code == &DecryptionFailureCode::InvalidPayload
                 && reason == "Invalid encrypted payload"
         )));
+    }
+
+    #[test]
+    fn test_receive_message_decrypt_failure_emits_error_without_message_received() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let encrypted_content = format!(
+            "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+            internal_prefixes::ENCRYPTED
+        );
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &encrypted_content,
+        );
+        mock_transport.queue_message(message.clone());
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let received = protocol.receive_message();
+        assert!(received.is_none());
+
+        let captured = events.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(
+            event,
+            Event::MessageDecryptionFailed {
+                message_id,
+                sender,
+                code,
+                ..
+            } if message_id == &message.id.as_str()
+                && sender == "sender123"
+                && code == &DecryptionFailureCode::NotInitialized
+        )));
+        assert!(!captured
+            .iter()
+            .any(|event| matches!(event, Event::MessageReceived { .. })));
     }
 
     #[test]
