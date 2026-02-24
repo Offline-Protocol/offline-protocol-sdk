@@ -8585,6 +8585,139 @@ mod tests {
     }
 
     #[test]
+    fn test_mls_pipeline_happy_path_init_send_encrypted_receive_decrypted() {
+        let mut alice_config = create_test_config_for_user("alice");
+        alice_config.encryption.enabled = true;
+        alice_config.encryption.store_pending = true;
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let mut alice = OfflineProtocol::new(alice_config).unwrap();
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        alice.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+
+        let mut alice_transport = MockTransport::new(TransportType::BLE);
+        alice_transport.start().unwrap();
+        let alice_transport_handle = alice_transport.clone();
+        alice
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice_transport));
+        alice.start().unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+        bob.start().unwrap();
+
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let welcome = {
+            let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap()
+        };
+        {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.join_session(&welcome).unwrap();
+        }
+        alice.confirm_session_state("bob", "test_setup").unwrap();
+        bob.confirm_session_state("alice", "test_setup").unwrap();
+
+        alice
+            .send_message(
+                "bob",
+                "hello-through-mls",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+        let encrypted_wire = alice_transport_handle
+            .sent_messages()
+            .last()
+            .expect("expected encrypted message from alice")
+            .clone();
+        assert!(encrypted_wire.content.starts_with(internal_prefixes::ENCRYPTED));
+
+        bob_transport_handle.queue_message(encrypted_wire);
+        let received = bob.receive_message().expect("expected decrypted message");
+        assert_eq!(received.content, "hello-through-mls");
+        assert_eq!(
+            received.metadata.get("encrypted").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
+        let mut config = create_test_config_for_user("bob");
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 1;
+        config.encryption.pending_queue.max_pending_global = 10;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+
+        let mut bob = OfflineProtocol::new(config).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+
+        let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        alice_manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        alice_manager.create_session("bob").unwrap();
+
+        let encrypted_one = alice_manager.encrypt_for_user("bob", b"first").unwrap();
+        let encrypted_two = alice_manager.encrypt_for_user("bob", b"second").unwrap();
+
+        let first_message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &format!(
+                "{}{}",
+                internal_prefixes::ENCRYPTED,
+                serde_json::to_string(&encrypted_one).unwrap()
+            ),
+        );
+        let second_message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &format!(
+                "{}{}",
+                internal_prefixes::ENCRYPTED,
+                serde_json::to_string(&encrypted_two).unwrap()
+            ),
+        );
+
+        let first_result = bob.process_internal_message(&first_message);
+        let second_result = bob.process_internal_message(&second_message);
+
+        assert!(matches!(first_result, Some(InternalMessageResult::Consumed)));
+        assert!(matches!(second_result, Some(InternalMessageResult::Consumed)));
+        assert_eq!(bob.pending_decryption["alice"].len(), 1);
+        assert_eq!(
+            bob.pending_decryption["alice"][0].message.id.as_str(),
+            first_message.id.as_str()
+        );
+        assert_eq!(
+            bob.pending_queue_metrics.pending_messages_dropped_overflow_total,
+            1
+        );
+    }
+
+    #[test]
     fn test_encrypted_message_decryption_failure_emits_app_error_event() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
