@@ -556,20 +556,52 @@ impl OfflineProtocol {
     /// backend should be a platform-native secure storage implementation
     /// (iOS Keychain, Android EncryptedSharedPreferences, etc.).
     ///
+    /// Ownership model:
+    /// - `OfflineProtocol` is the single authoritative owner of `MlsManager`
+    /// - initialization is idempotent per protocol instance
+    /// - subsequent calls return without replacing the existing manager
+    /// - manager publication is transactional: restore must succeed before
+    ///   `mls_manager` becomes visible to callers
+    ///
     /// The same storage is also used for persisting pending messages,
     /// ensuring they survive app crashes/restarts.
     pub fn initialize_mls(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
-        let manager = MlsManager::new(&self.config.user_id, storage.clone())?;
-        self.mls_manager = Some(Arc::new(RwLock::new(manager)));
+        if self.mls_manager.is_some() {
+            return Ok(());
+        }
+
+        let manager = Arc::new(RwLock::new(MlsManager::new(&self.config.user_id, storage.clone())?));
+
+        // Keep initialization transactional so a restore failure cannot leave
+        // partially-initialized MLS state visible and then permanently block retries.
+        let previous_message_storage = self.message_storage.clone();
+        let previous_pending_messages = self.pending_encrypted_messages.clone();
+        let previous_confirmed_sessions = self.confirmed_sessions.clone();
+        let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
+        let previous_lamport_clock = self.lamport_clock.value();
 
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
 
         // Restore state from previous session
-        self.restore_pending_messages()?;
-        self.restore_lamport_clock();
-        self.restore_session_states()?;
-        self.restore_welcome_lifecycles()?;
+        let restore_result = (|| {
+            self.restore_pending_messages()?;
+            self.restore_lamport_clock();
+            self.restore_session_states_from_manager(manager.clone())?;
+            self.restore_welcome_lifecycles()?;
+            Ok(())
+        })();
+
+        if let Err(err) = restore_result {
+            self.message_storage = previous_message_storage;
+            self.pending_encrypted_messages = previous_pending_messages;
+            self.confirmed_sessions = previous_confirmed_sessions;
+            self.welcome_lifecycles = previous_welcome_lifecycles;
+            self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
+            return Err(err);
+        }
+
+        self.mls_manager = Some(manager);
 
         info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
         Ok(())
@@ -2959,12 +2991,8 @@ impl OfflineProtocol {
     }
 
     /// Reconstructs runtime confirmation cache from persisted session states.
-    fn restore_session_states(&mut self) -> Result<()> {
+    fn restore_session_states_from_manager(&mut self, mls: Arc<RwLock<MlsManager>>) -> Result<()> {
         self.confirmed_sessions.clear();
-
-        let Some(mls) = self.mls_manager.clone() else {
-            return Ok(());
-        };
 
         let sessions = {
             let manager = mls
@@ -4872,6 +4900,47 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FailingPendingListStorage {
+        inner: crate::mls::InMemoryStorage,
+    }
+
+    impl MlsStorage for FailingPendingListStorage {
+        fn store(
+            &self,
+            key_type: &str,
+            key_id: &str,
+            data: &[u8],
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.store(key_type, key_id, data)
+        }
+
+        fn load(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+            self.inner.load(key_type, key_id)
+        }
+
+        fn delete(
+            &self,
+            key_type: &str,
+            key_id: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<()> {
+            self.inner.delete(key_type, key_id)
+        }
+
+        fn list_keys(&self, key_type: &str) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+            if key_type == storage_keys::PENDING_MESSAGES {
+                return Err(offline_protocol_mls::StorageError::LoadFailed(
+                    "forced restore failure".to_string(),
+                ));
+            }
+            self.inner.list_keys(key_type)
+        }
+    }
+
     #[test]
     fn test_protocol_creation() {
         let protocol = OfflineProtocol::new(create_test_config());
@@ -6011,6 +6080,124 @@ mod tests {
             .unwrap()
             .content
             .starts_with(internal_prefixes::ENCRYPTED));
+    }
+
+    #[test]
+    fn test_initialize_mls_restore_failure_does_not_publish_partial_state() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let initial_clock = protocol.lamport_clock.value();
+
+        let result = protocol.initialize_mls(Arc::new(FailingPendingListStorage::default()));
+        assert!(result.is_err());
+        assert!(protocol.mls_manager.is_none());
+        assert!(protocol.message_storage.is_none());
+        assert!(protocol.pending_encrypted_messages.is_empty());
+        assert!(protocol.confirmed_sessions.is_empty());
+        assert!(protocol.welcome_lifecycles.is_empty());
+        assert_eq!(protocol.lamport_clock.value(), initial_clock);
+    }
+
+    #[test]
+    fn test_auto_send_and_manual_mls_share_single_state_under_concurrency() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.encryption.require_encryption = false;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        let transport_handle = transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(transport));
+        protocol.start().unwrap();
+
+        let bob_manager = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap();
+        }
+        protocol.confirm_session_state("bob", "test_setup").unwrap();
+
+        let mls_handle_before = protocol.mls_manager.as_ref().unwrap().clone();
+        let sessions_before = {
+            let manager = mls_handle_before.read().unwrap();
+            manager.list_sessions().unwrap()
+        };
+        let groups_before = {
+            let manager = mls_handle_before.read().unwrap();
+            manager.list_groups().unwrap().len()
+        };
+
+        let shared = Arc::new(Mutex::new(protocol));
+        let manual_shared = Arc::clone(&shared);
+        let manual_thread = thread::spawn(move || {
+            for i in 0..24 {
+                let mls = {
+                    let guard = manual_shared.lock().unwrap();
+                    guard.mls_manager.as_ref().unwrap().clone()
+                };
+                let manager = mls.read().unwrap();
+                manager
+                    .create_group(&format!("manual-concurrent-group-{}", i))
+                    .unwrap();
+            }
+        });
+
+        let auto_shared = Arc::clone(&shared);
+        let auto_thread = thread::spawn(move || {
+            for i in 0..24 {
+                let content = format!("auto-encrypted-{}", i);
+                let mut guard = auto_shared.lock().unwrap();
+                guard
+                    .send_message("bob", &content, None::<MessagePriority>, None::<String>)
+                    .unwrap();
+            }
+        });
+
+        manual_thread.join().unwrap();
+        auto_thread.join().unwrap();
+
+        let mls_handle_after = {
+            let protocol = shared.lock().unwrap();
+            protocol.mls_manager.as_ref().unwrap().clone()
+        };
+        assert!(Arc::ptr_eq(&mls_handle_before, &mls_handle_after));
+
+        let sessions_after = {
+            let manager = mls_handle_after.read().unwrap();
+            manager.list_sessions().unwrap()
+        };
+        assert_eq!(sessions_before, sessions_after);
+
+        let sent = transport_handle.sent_messages();
+        assert!(
+            sent.iter()
+                .filter(|message| message.recipient.as_str() == "bob")
+                .all(|message| message.content.starts_with(internal_prefixes::ENCRYPTED))
+        );
+
+        let groups_after = {
+            let manager = mls_handle_after.read().unwrap();
+            manager.list_groups().unwrap().len()
+        };
+        assert_eq!(groups_after, groups_before + 24);
+
+        let mut protocol = shared.lock().unwrap();
+        protocol.stop().unwrap();
     }
 
     #[test]

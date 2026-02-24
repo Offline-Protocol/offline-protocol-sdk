@@ -806,8 +806,6 @@ pub struct OfflineProtocol {
     relay_priority: RwLock<RelayPriority>,
     forced_transport: RwLock<Option<TransportType>>,
     dors_config: RwLock<Option<DorsConfig>>,
-    /// MLS manager for end-to-end encryption
-    mls_manager: RwLock<Option<CoreMlsManager>>,
     #[allow(dead_code)]
     user_id: String,
 }
@@ -896,7 +894,6 @@ impl OfflineProtocol {
             relay_priority: RwLock::new(RelayPriority::Medium),
             forced_transport: RwLock::new(None),
             dors_config: RwLock::new(None),
-            mls_manager: RwLock::new(None),
             user_id,
         })
     }
@@ -2177,7 +2174,7 @@ impl OfflineProtocol {
         let mut path_selector = self.path_selector.lock().unwrap();
         path_selector
             .routing_table_mut()
-            .learn_route(&destination, &next_hop, hop_count, quality);
+            .learn_route(&destination, &next_hop, hop_count, quality, 0);
     }
 
     /// Gets the best (highest quality) route to a destination.
@@ -2347,50 +2344,52 @@ impl OfflineProtocol {
             provider: Arc::from(storage),
         });
 
-        // Initialize MLS in the core protocol for auto-encryption
-        {
-            let mut protocol = self.inner.lock().unwrap();
-            protocol
-                .initialize_mls(wrapper.clone())
-                .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
+        // Single-authority lifecycle:
+        // - CoreProtocol owns the only MlsManager instance for this runtime.
+        // - UniFFI manual MLS APIs must route through that owner.
+        // - Repeated calls are idempotent and never replace the existing manager.
+        let mut protocol = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        if protocol.is_mls_initialized() {
+            return Ok(());
         }
-
-        // Also store a reference for direct MLS API access
-        let user_id = {
-            let protocol = self.inner.lock().unwrap();
-            protocol.config().user_id.clone()
-        };
-
-        let manager = CoreMlsManager::new(&user_id, wrapper)
+        protocol
+            .initialize_mls(wrapper)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
-
-        *self.mls_manager.write().unwrap() = Some(manager);
         Ok(())
     }
 
     /// Check if MLS is initialized
     pub fn is_mls_initialized(&self) -> bool {
-        // Check both the wrapper's MLS manager and the core protocol's
         let protocol = self.inner.lock().unwrap();
-        protocol.is_mls_initialized() || self.mls_manager.read().unwrap().is_some()
+        protocol.is_mls_initialized()
     }
 
-    /// Helper to get MLS manager or error
-    fn get_mls_manager(
-        &self,
-    ) -> Result<std::sync::RwLockReadGuard<'_, Option<CoreMlsManager>>, ProtocolError> {
-        let guard = self.mls_manager.read().unwrap();
-        if guard.is_none() {
-            return Err(ProtocolError::MlsNotInitialized);
-        }
-        Ok(guard)
+    /// Returns the core-owned MLS manager handle.
+    ///
+    /// This is the only MLS state owner for the runtime. UniFFI must never
+    /// create or cache an independent manager because that would diverge
+    /// key-package/session/group state from auto-encryption flows.
+    fn get_mls_manager(&self) -> Result<Arc<RwLock<CoreMlsManager>>, ProtocolError> {
+        let protocol = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        protocol
+            .mls_manager()
+            .cloned()
+            .ok_or(ProtocolError::MlsNotInitialized)
     }
 
     /// Generate a key package for distribution
     pub fn mls_generate_key_package(&self) -> Result<MlsKeyPackageBundle, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .generate_key_package()
             .map(MlsKeyPackageBundle::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2398,9 +2397,11 @@ impl OfflineProtocol {
 
     /// Get an existing key package or generate a new one
     pub fn mls_get_or_create_key_package(&self) -> Result<MlsKeyPackageBundle, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .get_or_create_key_package()
             .map(MlsKeyPackageBundle::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2412,53 +2413,55 @@ impl OfflineProtocol {
         user_id: String,
         key_package_data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .import_key_package(&user_id, &key_package_data)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
     /// Get pending key packages
     pub fn mls_get_pending_key_packages(&self) -> Vec<MlsKeyPackageBundle> {
-        let guard = match self.mls_manager.read() {
-            Ok(g) => g,
-            Err(_) => {
-                return Vec::new();
-            }
+        let manager = match self.get_mls_manager() {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
         };
-        match guard.as_ref() {
-            Some(manager) => manager
-                .get_pending_key_packages()
-                .unwrap_or_default()
-                .into_iter()
-                .map(MlsKeyPackageBundle::from)
-                .collect(),
-            None => Vec::new(),
-        }
+        let guard = match manager.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard
+            .get_pending_key_packages()
+            .unwrap_or_default()
+            .into_iter()
+            .map(MlsKeyPackageBundle::from)
+            .collect()
     }
 
     /// Mark a key package as synced
     pub fn mls_mark_key_package_synced(&self, package_id: String) -> Result<(), ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .mark_key_package_synced(&package_id)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
     /// Check if a 1:1 session exists
     pub fn mls_has_session(&self, other_user_id: String) -> bool {
-        let guard = match self.mls_manager.read() {
-            Ok(g) => g,
-            Err(_) => {
-                return false;
-            }
+        let manager = match self.get_mls_manager() {
+            Ok(m) => m,
+            Err(_) => return false,
         };
-        match guard.as_ref() {
-            Some(manager) => manager.has_session(&other_user_id).unwrap_or(false),
-            None => false,
-        }
+        let guard = match manager.read() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        guard.has_session(&other_user_id).unwrap_or(false)
     }
 
     /// Check if a pending key package is available for a peer
@@ -2498,9 +2501,11 @@ impl OfflineProtocol {
         &self,
         other_user_id: String,
     ) -> Result<MlsWelcomeMessage, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .create_session(&other_user_id)
             .map(MlsWelcomeMessage::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2511,9 +2516,11 @@ impl OfflineProtocol {
         &self,
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .join_session(&welcome.into())
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2525,9 +2532,11 @@ impl OfflineProtocol {
         other_user_id: String,
         plaintext: Vec<u8>,
     ) -> Result<MlsEncryptedMessage, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .encrypt_for_user(&other_user_id, &plaintext)
             .map(MlsEncryptedMessage::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2538,41 +2547,44 @@ impl OfflineProtocol {
         &self,
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .decrypt_from_user(&encrypted.into())
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
     /// List all active 1:1 sessions
     pub fn mls_list_sessions(&self) -> Vec<String> {
-        let guard = match self.mls_manager.read() {
-            Ok(g) => g,
-            Err(_) => {
-                return Vec::new();
-            }
+        let manager = match self.get_mls_manager() {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
         };
-        match guard.as_ref() {
-            Some(manager) => manager.list_sessions().unwrap_or_default(),
-            None => Vec::new(),
-        }
+        let guard = match manager.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard.list_sessions().unwrap_or_default()
     }
 
     /// Delete a 1:1 session
     pub fn mls_delete_session(&self, other_user_id: String) -> Result<(), ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .delete_session(&other_user_id)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
     /// Get a pending Welcome message
     pub fn mls_get_pending_welcome(&self, other_user_id: String) -> Option<MlsWelcomeMessage> {
-        let guard = self.mls_manager.read().ok()?;
-        let manager = guard.as_ref()?;
-        manager
+        let manager = self.get_mls_manager().ok()?;
+        let guard = manager.read().ok()?;
+        guard
             .get_pending_welcome(&other_user_id)
             .ok()
             .flatten()
@@ -2581,18 +2593,22 @@ impl OfflineProtocol {
 
     /// Clear a pending Welcome message
     pub fn mls_clear_pending_welcome(&self, other_user_id: String) -> Result<(), ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .clear_pending_welcome(&other_user_id)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
     /// Create a new group
     pub fn mls_create_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .create_group(&group_name)
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2604,9 +2620,11 @@ impl OfflineProtocol {
         group_id: String,
         member_key_package: Vec<u8>,
     ) -> Result<MlsWelcomeMessage, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
             .map(MlsWelcomeMessage::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2618,9 +2636,11 @@ impl OfflineProtocol {
         group_id: String,
         member_id: String,
     ) -> Result<MlsEncryptedMessage, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .remove_group_member(&CoreGroupId::new(group_id), &member_id)
             .map(MlsEncryptedMessage::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2628,9 +2648,11 @@ impl OfflineProtocol {
 
     /// Leave a group
     pub fn mls_leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .leave_group(&CoreGroupId::new(group_id))
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
@@ -2641,9 +2663,11 @@ impl OfflineProtocol {
         group_id: String,
         plaintext: Vec<u8>,
     ) -> Result<MlsEncryptedMessage, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .encrypt_for_group(&CoreGroupId::new(group_id), &plaintext)
             .map(MlsEncryptedMessage::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2654,9 +2678,11 @@ impl OfflineProtocol {
         &self,
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .decrypt_from_group(&encrypted.into())
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
@@ -2666,9 +2692,11 @@ impl OfflineProtocol {
         &self,
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .join_group(&welcome.into())
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2676,28 +2704,27 @@ impl OfflineProtocol {
 
     /// List all groups
     pub fn mls_list_groups(&self) -> Vec<String> {
-        let guard = match self.mls_manager.read() {
-            Ok(g) => g,
-            Err(_) => {
-                return Vec::new();
-            }
+        let manager = match self.get_mls_manager() {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
         };
-        match guard.as_ref() {
-            Some(manager) => manager
-                .list_groups()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|g| g.as_str().to_string())
-                .collect(),
-            None => Vec::new(),
-        }
+        let guard = match manager.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard
+            .list_groups()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| g.as_str().to_string())
+            .collect()
     }
 
     /// Get information about a group
     pub fn mls_get_group_info(&self, group_id: String) -> Option<MlsGroupInfo> {
-        let guard = self.mls_manager.read().ok()?;
-        let manager = guard.as_ref()?;
-        manager
+        let manager = self.get_mls_manager().ok()?;
+        let guard = manager.read().ok()?;
+        guard
             .get_group_info(&CoreGroupId::new(group_id))
             .ok()
             .flatten()
@@ -2709,9 +2736,11 @@ impl OfflineProtocol {
         &self,
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .decrypt(&encrypted.into())
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
@@ -2721,9 +2750,11 @@ impl OfflineProtocol {
         &self,
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .process_welcome(&welcome.into())
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2738,9 +2769,11 @@ impl OfflineProtocol {
     /// This is the public key used for MLS operations and can be shared with others
     /// to establish identity and verify signatures.
     pub fn get_identity_public_key(&self) -> Result<Vec<u8>, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .get_identity_public_key()
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
@@ -2757,9 +2790,11 @@ impl OfflineProtocol {
     ///
     /// Returns the signature as raw bytes (64 bytes).
     pub fn sign_data(&self, data: Vec<u8>) -> Result<Vec<u8>, ProtocolError> {
-        let guard = self.get_mls_manager()?;
-        let manager = guard.as_ref().unwrap();
-        manager
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        guard
             .sign_data(&data)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
@@ -3011,6 +3046,52 @@ impl OfflineProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[derive(Default)]
+    struct TestMlsStorageProvider {
+        data: Mutex<HashMap<(String, String), Vec<u8>>>,
+    }
+
+    impl MlsStorageProvider for TestMlsStorageProvider {
+        fn store(
+            &self,
+            key_type: String,
+            key_id: String,
+            data: Vec<u8>,
+        ) -> Result<(), MlsStorageError> {
+            let mut guard = self.data.lock().map_err(|_| MlsStorageError::StoreFailed)?;
+            guard.insert((key_type, key_id), data);
+            Ok(())
+        }
+
+        fn load(&self, key_type: String, key_id: String) -> Result<Option<Vec<u8>>, MlsStorageError> {
+            let guard = self.data.lock().map_err(|_| MlsStorageError::LoadFailed)?;
+            Ok(guard.get(&(key_type, key_id)).cloned())
+        }
+
+        fn delete(&self, key_type: String, key_id: String) -> Result<(), MlsStorageError> {
+            let mut guard = self.data.lock().map_err(|_| MlsStorageError::DeleteFailed)?;
+            guard.remove(&(key_type, key_id));
+            Ok(())
+        }
+
+        fn list_keys(&self, key_type: String) -> Result<Vec<String>, MlsStorageError> {
+            let guard = self.data.lock().map_err(|_| MlsStorageError::LoadFailed)?;
+            Ok(guard
+                .keys()
+                .filter_map(|(stored_type, key_id)| {
+                    if stored_type == &key_type {
+                        Some(key_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect())
+        }
+    }
 
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig {
@@ -3049,6 +3130,108 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
+        }
+    }
+
+    #[test]
+    fn test_mls_initialize_is_idempotent_for_legacy_entrypoint() {
+        let config = create_test_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        protocol
+            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .unwrap();
+        let first_handle = {
+            let guard = protocol.inner.lock().unwrap();
+            guard.mls_manager().cloned().unwrap()
+        };
+
+        protocol
+            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .unwrap();
+        let second_handle = {
+            let guard = protocol.inner.lock().unwrap();
+            guard.mls_manager().cloned().unwrap()
+        };
+
+        assert!(protocol.is_mls_initialized());
+        assert!(Arc::ptr_eq(&first_handle, &second_handle));
+        assert!(protocol.mls_generate_key_package().is_ok());
+    }
+
+    #[test]
+    fn test_mls_initialize_is_race_safe_single_instance() {
+        let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
+        let mut join_handles = Vec::new();
+
+        for _ in 0..8 {
+            let protocol_clone = Arc::clone(&protocol);
+            join_handles.push(thread::spawn(move || {
+                protocol_clone
+                    .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+                    .unwrap();
+                let core_guard = protocol_clone.inner.lock().unwrap();
+                let mls_handle = core_guard.mls_manager().cloned().unwrap();
+                Arc::as_ptr(&mls_handle) as usize
+            }));
+        }
+
+        let first_ptr = join_handles.remove(0).join().unwrap();
+        for handle in join_handles {
+            let ptr = handle.join().unwrap();
+            assert_eq!(ptr, first_ptr);
+        }
+    }
+
+    #[test]
+    fn test_mls_manual_and_core_paths_share_single_state_under_concurrency() {
+        let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
+        protocol
+            .initialize_mls(Box::new(TestMlsStorageProvider::default()))
+            .unwrap();
+
+        let core_mls_handle = {
+            let core_guard = protocol.inner.lock().unwrap();
+            core_guard.mls_manager().cloned().unwrap()
+        };
+
+        let manual_protocol = Arc::clone(&protocol);
+        let manual_thread = thread::spawn(move || {
+            for i in 0..20 {
+                manual_protocol
+                    .mls_create_group(format!("manual-group-{}", i))
+                    .unwrap();
+            }
+        });
+
+        let core_thread = thread::spawn(move || {
+            for i in 0..20 {
+                let manager = core_mls_handle.read().unwrap();
+                manager.create_group(&format!("core-group-{}", i)).unwrap();
+            }
+        });
+
+        manual_thread.join().unwrap();
+        core_thread.join().unwrap();
+
+        let from_manual_api = protocol.mls_list_groups();
+        let from_core_api = {
+            let core_guard = protocol.inner.lock().unwrap();
+            let manager = core_guard.mls_manager().cloned().unwrap();
+            let groups = manager
+                .read()
+                .unwrap()
+                .list_groups()
+                .unwrap()
+                .into_iter()
+                .map(|group_id| group_id.as_str().to_string())
+                .collect::<Vec<_>>();
+            groups
+        };
+
+        assert_eq!(from_manual_api.len(), from_core_api.len());
+        for group_id in from_core_api {
+            assert!(from_manual_api.contains(&group_id));
         }
     }
 
