@@ -95,6 +95,9 @@ export enum ProtocolErrorCode {
   ALREADY_STARTED = 'AlreadyStarted',
   INVALID_CONFIGURATION = 'InvalidConfiguration',
   SEND_FAILED = 'SendFailed',
+  NO_KEY_PACKAGE = 'NoKeyPackage',
+  SESSION_PENDING = 'SessionPending',
+  ENCRYPT_FAILED = 'EncryptFailed',
   OTHER = 'Other',
 }
 

@@ -2299,13 +2299,15 @@ public struct EncryptionConfig: Equatable, Hashable {
     public var enabled: Bool
     public var autoKeyExchange: Bool
     public var storePending: Bool
+    public var requireEncryption: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool) {
+    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool) {
         self.enabled = enabled
         self.autoKeyExchange = autoKeyExchange
         self.storePending = storePending
+        self.requireEncryption = requireEncryption
     }
 
     
@@ -2324,7 +2326,8 @@ public struct FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer {
             try EncryptionConfig(
                 enabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
-                storePending: FfiConverterBool.read(from: &buf)
+                storePending: FfiConverterBool.read(from: &buf), 
+                requireEncryption: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -2332,6 +2335,7 @@ public struct FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.enabled, into: &buf)
         FfiConverterBool.write(value.autoKeyExchange, into: &buf)
         FfiConverterBool.write(value.storePending, into: &buf)
+        FfiConverterBool.write(value.requireEncryption, into: &buf)
     }
 }
 
@@ -3158,10 +3162,11 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var encryptionEnabled: Bool
     public var autoKeyExchange: Bool
     public var storePending: Bool
+    public var requireEncryption: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -3172,6 +3177,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.encryptionEnabled = encryptionEnabled
         self.autoKeyExchange = autoKeyExchange
         self.storePending = storePending
+        self.requireEncryption = requireEncryption
     }
 
     
@@ -3197,7 +3203,8 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 initialTtl: FfiConverterUInt8.read(from: &buf), 
                 encryptionEnabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
-                storePending: FfiConverterBool.read(from: &buf)
+                storePending: FfiConverterBool.read(from: &buf), 
+                requireEncryption: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -3212,6 +3219,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.encryptionEnabled, into: &buf)
         FfiConverterBool.write(value.autoKeyExchange, into: &buf)
         FfiConverterBool.write(value.storePending, into: &buf)
+        FfiConverterBool.write(value.requireEncryption, into: &buf)
     }
 }
 
@@ -3970,6 +3978,12 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     
     case SendFailed(message: String)
     
+    case NoKeyPackage(message: String)
+    
+    case SessionPending(message: String)
+    
+    case EncryptFailed(message: String)
+    
     case InvalidState(message: String)
     
     case MlsNotInitialized(message: String)
@@ -4021,19 +4035,31 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 5: return .InvalidState(
+        case 5: return .NoKeyPackage(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .MlsNotInitialized(
+        case 6: return .SessionPending(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 7: return .MlsError(
+        case 7: return .EncryptFailed(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 8: return .Other(
+        case 8: return .InvalidState(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 9: return .MlsNotInitialized(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 10: return .MlsError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 11: return .Other(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -4056,14 +4082,20 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(3))
         case .SendFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(4))
-        case .InvalidState(_ /* message is ignored*/):
+        case .NoKeyPackage(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .MlsNotInitialized(_ /* message is ignored*/):
+        case .SessionPending(_ /* message is ignored*/):
             writeInt(&buf, Int32(6))
-        case .MlsError(_ /* message is ignored*/):
+        case .EncryptFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(7))
-        case .Other(_ /* message is ignored*/):
+        case .InvalidState(_ /* message is ignored*/):
             writeInt(&buf, Int32(8))
+        case .MlsNotInitialized(_ /* message is ignored*/):
+            writeInt(&buf, Int32(9))
+        case .MlsError(_ /* message is ignored*/):
+            writeInt(&buf, Int32(10))
+        case .Other(_ /* message is ignored*/):
+            writeInt(&buf, Int32(11))
 
         
         }

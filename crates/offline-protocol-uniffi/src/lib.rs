@@ -50,6 +50,18 @@ pub enum ProtocolError {
     #[error("Failed to send message: {0}")]
     SendFailed(String),
 
+    /// No key package available for recipient
+    #[error("No key package available for recipient: {0}")]
+    NoKeyPackage(String),
+
+    /// Session setup is pending
+    #[error("Session pending, message queued")]
+    SessionPending,
+
+    /// Outbound message encryption failed
+    #[error("Failed to encrypt message: {0}")]
+    EncryptFailed(String),
+
     /// Invalid state for operation
     #[error("Invalid state: {0}")]
     InvalidState(String),
@@ -231,6 +243,11 @@ impl From<offline_protocol::Error> for ProtocolError {
             offline_protocol::Error::InvalidConfiguration(msg) => {
                 ProtocolError::InvalidConfiguration(msg)
             }
+            offline_protocol::Error::NoKeyPackage(peer_id) => ProtocolError::NoKeyPackage(peer_id),
+            offline_protocol::Error::SessionPending => ProtocolError::SessionPending,
+            offline_protocol::Error::EncryptFailed(message) => ProtocolError::EncryptFailed(message),
+            offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
+            offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
             _ => ProtocolError::Other(err.to_string()),
         }
     }
@@ -1025,11 +1042,11 @@ impl OfflineProtocol {
                     core_transport,
                     reply_to_msg,
                 )
-                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+                .map_err(ProtocolError::from)?
         } else {
             protocol
                 .send_message(&recipient, &content, Some(priority.into()), reply_to_msg)
-                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+                .map_err(ProtocolError::from)?
         };
 
         Ok(message_id.as_str())
@@ -1067,7 +1084,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .send_connection_request(&recipient, &sender_name, key_package)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -1081,7 +1098,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .accept_connection_request(&recipient, &accepter_name, key_package)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -1090,7 +1107,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .reject_connection_request(&recipient)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
