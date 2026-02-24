@@ -14,6 +14,7 @@ pub mod error;
 pub mod events;
 pub mod file_transfer;
 pub mod mls;
+pub mod mls_observability;
 pub mod protocol;
 pub mod transport_manager;
 pub mod visualization;
@@ -35,4 +36,8 @@ pub use offline_protocol_reliability::{
 // Re-export MLS types for end-to-end encryption
 pub use mls::{
     EncryptedMessage, GroupId, GroupInfo, KeyPackageBundle, MlsManager, MlsStorage, WelcomeMessage,
+};
+pub use mls_observability::{
+    DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsLifecycleEvent, MlsOperationContext,
+    NoopMlsEventEmitter,
 };

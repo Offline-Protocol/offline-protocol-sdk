@@ -21,8 +21,13 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 
 [lib]
+
+[features]
+default = []
+mls-observability = []
 

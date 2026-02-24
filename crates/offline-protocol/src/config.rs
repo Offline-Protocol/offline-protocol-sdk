@@ -500,7 +500,7 @@ mod tests {
         let reliability = ReliabilityConfig::default();
         assert_eq!(reliability.ack.default_timeout_ms, 5000);
         assert_eq!(reliability.retry.max_retries, 3);
-        assert_eq!(reliability.dedup.max_tracked_messages, 10000);
+        assert_eq!(reliability.dedup.max_tracked_messages, 1000);
     }
 
     #[test]
