@@ -1,6 +1,12 @@
 //! Main protocol engine.
 
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
+use crate::mls_observability::{
+    DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsEventRateLimiter, MlsOperationContext,
+    NoopMlsEventEmitter,
+};
+#[cfg(feature = "mls-observability")]
+use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
@@ -495,6 +501,17 @@ pub struct OfflineProtocol {
 
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
+
+    /// Sink for MLS lifecycle telemetry.
+    mls_event_emitter: Arc<dyn MlsEventEmitter>,
+
+    /// Rate limiting policy for MLS failure event floods.
+    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
+    mls_event_rate_limiter: MlsEventRateLimiter,
+
+    /// Per-instance secret used to derive non-reversible opaque telemetry IDs.
+    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
+    mls_observability_secret: [u8; 16],
 }
 
 impl OfflineProtocol {
@@ -546,6 +563,9 @@ impl OfflineProtocol {
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
+            mls_event_emitter: Arc::new(NoopMlsEventEmitter),
+            mls_event_rate_limiter: MlsEventRateLimiter::default(),
+            mls_observability_secret: *uuid::Uuid::new_v4().as_bytes(),
             config,
         })
     }
@@ -602,6 +622,7 @@ impl OfflineProtocol {
         }
 
         self.mls_manager = Some(manager);
+        self.emit_mls_initialized();
 
         info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
         Ok(())
@@ -631,6 +652,128 @@ impl OfflineProtocol {
     /// Returns whether auto-encryption should be applied.
     fn should_auto_encrypt(&self) -> bool {
         self.config.encryption.enabled && self.mls_manager.is_some()
+    }
+
+    /// Configures the MLS lifecycle event emitter.
+    pub fn set_mls_event_emitter(&mut self, emitter: Arc<dyn MlsEventEmitter>) {
+        self.mls_event_emitter = emitter;
+    }
+
+    #[cfg(feature = "mls-observability")]
+    fn session_id_for_observability(&self, peer_id: Option<&str>, group_id: Option<&str>) -> String {
+        let seed = format!("peer={}|group={}", peer_id.unwrap_or("none"), group_id.unwrap_or("none"));
+        opaque_id(&seed, &self.mls_observability_secret)
+    }
+
+    #[cfg(feature = "mls-observability")]
+    fn emit_mls_lifecycle_event(&self, event: MlsLifecycleEvent) {
+        if self.mls_event_rate_limiter.should_emit(&event) {
+            self.mls_event_emitter.emit(event);
+        }
+    }
+
+    #[cfg(feature = "mls-observability")]
+    fn emit_mls_initialized(&self) {
+        self.emit_mls_lifecycle_event(MlsLifecycleEvent::Initialized {
+            timestamp_ms: timestamp_now_ms(),
+            session_id: self.session_id_for_observability(None, None),
+            group_id: None,
+            peer_id: None,
+            context: MlsOperationContext::Initialize,
+            error_category: None,
+        });
+    }
+
+    #[cfg(not(feature = "mls-observability"))]
+    fn emit_mls_initialized(&self) {}
+
+    #[cfg(feature = "mls-observability")]
+    fn emit_mls_encryption_used(&self, recipient: &str) {
+        let peer_id = opaque_id(recipient, &self.mls_observability_secret);
+        self.emit_mls_lifecycle_event(MlsLifecycleEvent::EncryptionUsed {
+            timestamp_ms: timestamp_now_ms(),
+            session_id: self.session_id_for_observability(Some(recipient), None),
+            group_id: None,
+            peer_id: Some(peer_id),
+            context: MlsOperationContext::Send,
+            error_category: None,
+        });
+    }
+
+    #[cfg(not(feature = "mls-observability"))]
+    fn emit_mls_encryption_used(&self, _recipient: &str) {}
+
+    #[cfg(feature = "mls-observability")]
+    fn emit_mls_session_missing(
+        &self,
+        peer_id: Option<&str>,
+        group_id: Option<&str>,
+        context: MlsOperationContext,
+        error_category: MlsErrorCategory,
+    ) {
+        self.emit_mls_lifecycle_event(MlsLifecycleEvent::SessionMissing {
+            timestamp_ms: timestamp_now_ms(),
+            session_id: self.session_id_for_observability(peer_id, group_id),
+            group_id: group_id.map(|id| opaque_id(id, &self.mls_observability_secret)),
+            peer_id: peer_id.map(|id| opaque_id(id, &self.mls_observability_secret)),
+            context,
+            error_category: Some(error_category),
+        });
+    }
+
+    #[cfg(not(feature = "mls-observability"))]
+    fn emit_mls_session_missing(
+        &self,
+        _peer_id: Option<&str>,
+        _group_id: Option<&str>,
+        _context: MlsOperationContext,
+        _error_category: MlsErrorCategory,
+    ) {
+    }
+
+    #[cfg(feature = "mls-observability")]
+    fn emit_mls_decryption_failed(
+        &self,
+        sender_id: &str,
+        group_id: Option<&str>,
+        kind: DecryptionFailureKind,
+        context: MlsOperationContext,
+    ) {
+        self.emit_mls_lifecycle_event(MlsLifecycleEvent::DecryptionFailed {
+            timestamp_ms: timestamp_now_ms(),
+            session_id: self.session_id_for_observability(Some(sender_id), group_id),
+            group_id: group_id.map(|id| opaque_id(id, &self.mls_observability_secret)),
+            peer_id: Some(opaque_id(sender_id, &self.mls_observability_secret)),
+            context,
+            error_category: Some(kind.error_category()),
+            failure_kind: kind,
+        });
+    }
+
+    #[cfg(not(feature = "mls-observability"))]
+    fn emit_mls_decryption_failed(
+        &self,
+        _sender_id: &str,
+        _group_id: Option<&str>,
+        _kind: DecryptionFailureKind,
+        _context: MlsOperationContext,
+    ) {
+    }
+
+    #[cfg(feature = "mls-observability")]
+    fn emit_mls_session_ready(&self, peer_id: &str, group_id: &str, context: MlsOperationContext) {
+        self.emit_mls_lifecycle_event(MlsLifecycleEvent::SessionReady {
+            timestamp_ms: timestamp_now_ms(),
+            session_id: self.session_id_for_observability(Some(peer_id), Some(group_id)),
+            group_id: Some(opaque_id(group_id, &self.mls_observability_secret)),
+            peer_id: Some(opaque_id(peer_id, &self.mls_observability_secret)),
+            context,
+            error_category: None,
+        });
+    }
+
+    #[cfg(not(feature = "mls-observability"))]
+    fn emit_mls_session_ready(&self, _peer_id: &str, _group_id: &str, _context: MlsOperationContext) {
     }
 
     /// Starts the protocol.
@@ -1082,7 +1225,15 @@ impl OfflineProtocol {
         recipient: &str,
         content: &str,
     ) -> Result<String> {
-        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let mls = self.mls_manager.clone().ok_or_else(|| {
+            self.emit_mls_session_missing(
+                Some(recipient),
+                None,
+                MlsOperationContext::SessionLookup,
+                MlsErrorCategory::NotInitialized,
+            );
+            Error::MlsNotInitialized
+        })?;
 
         let has_session = {
             let manager = mls
@@ -1106,6 +1257,12 @@ impl OfflineProtocol {
                 return Err(Error::SessionPending);
             }
 
+            self.emit_mls_session_missing(
+                Some(recipient),
+                None,
+                MlsOperationContext::SessionLookup,
+                MlsErrorCategory::SessionStateMissing,
+            );
             return Err(Error::NoKeyPackage(recipient.to_string()));
         }
 
@@ -1124,6 +1281,7 @@ impl OfflineProtocol {
 
         let serialized =
             serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
+        self.emit_mls_encryption_used(recipient);
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
@@ -1134,7 +1292,15 @@ impl OfflineProtocol {
         _priority: MessagePriority,
     ) -> Result<String> {
         // Clone the Arc to avoid borrow issues
-        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let mls = self.mls_manager.clone().ok_or_else(|| {
+            self.emit_mls_session_missing(
+                Some(recipient),
+                None,
+                MlsOperationContext::SessionLookup,
+                MlsErrorCategory::NotInitialized,
+            );
+            Error::MlsNotInitialized
+        })?;
 
         // Check for existing session
         let has_session = {
@@ -1208,6 +1374,12 @@ impl OfflineProtocol {
                 }
             } else {
                 // No key package available
+                self.emit_mls_session_missing(
+                    Some(recipient),
+                    None,
+                    MlsOperationContext::SessionLookup,
+                    MlsErrorCategory::SessionStateMissing,
+                );
                 return Err(Error::NoKeyPackage(recipient.to_string()));
             }
         }
@@ -1237,6 +1409,7 @@ impl OfflineProtocol {
         let serialized =
             serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
 
+        self.emit_mls_encryption_used(recipient);
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
@@ -1623,13 +1796,24 @@ impl OfflineProtocol {
         Ok(false)
     }
 
-    fn maybe_emit_local_session_established(&self, peer_id: &str) {
+    fn session_ready_context_for_source(source_event: &str) -> MlsOperationContext {
+        match source_event {
+            "confirmation_ack_received" | "confirmation_probe_received" | "decrypt_success" => {
+                MlsOperationContext::Receive
+            }
+            "welcome_received" => MlsOperationContext::Welcome,
+            _ => MlsOperationContext::Send,
+        }
+    }
+
+    fn maybe_emit_local_session_established(&self, peer_id: &str, context: MlsOperationContext) {
         let Some(record) = self.welcome_lifecycles.get(peer_id) else {
             return;
         };
         if !matches!(record.state, WelcomeDeliveryState::Sent) {
             return;
         }
+        self.emit_mls_session_ready(peer_id, &record.group_id, context);
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::secure_session_established(
                 peer_id.to_string(),
@@ -3028,8 +3212,11 @@ impl OfflineProtocol {
 
         self.confirmed_sessions.insert(peer_id.to_string());
         self.clear_confirmation_recovery_tracking(peer_id);
-        if source_event != "welcome_received" {
-            self.maybe_emit_local_session_established(peer_id);
+        if source_event != "welcome_received" && source_event != "decrypt_success" {
+            self.maybe_emit_local_session_established(
+                peer_id,
+                Self::session_ready_context_for_source(source_event),
+            );
         }
         info!(
             event = "session_state_transition",
@@ -4139,6 +4326,12 @@ impl OfflineProtocol {
                             // Process any encrypted messages that arrived before the Welcome
                             self.process_pending_decryption(&sender_owned);
 
+                            self.emit_mls_session_ready(
+                                &sender_owned,
+                                &group_id,
+                                MlsOperationContext::Welcome,
+                            );
+
                             // Emit secure session established event
                             if let Ok(state) = lock_shared_state(&self.shared_state) {
                                 state.emit_event(Event::secure_session_established(
@@ -4174,10 +4367,18 @@ impl OfflineProtocol {
             if let Ok(encrypted) = serde_json::from_str::<EncryptedMessage>(data) {
                 // Track state to update after releasing MLS lock
                 enum DecryptResult {
-                    Success { text: String, sender: String },
+                    Success {
+                        text: String,
+                        sender: String,
+                        group_id: String,
+                    },
                     Empty,
                     SessionNotReady { sender: String },
-                    Failed { _error: String },
+                    Failed {
+                        sender: String,
+                        group_id: String,
+                        kind: DecryptionFailureKind,
+                    },
                     MlsNotInitialized,
                 }
 
@@ -4190,6 +4391,7 @@ impl OfflineProtocol {
                                 DecryptResult::Success {
                                     text,
                                     sender: sender.to_string(),
+                                    group_id: encrypted.group_id.as_str().to_string(),
                                 }
                             }
                             Ok(None) => {
@@ -4228,6 +4430,7 @@ impl OfflineProtocol {
                                     SessionStateError::TransportFailure
                                     | SessionStateError::CryptoFailure
                                     | SessionStateError::Unknown => {
+                                        let kind = DecryptionFailureKind::from_mls_error(&e);
                                         warn!(
                                             sender = %sender,
                                             error = %e,
@@ -4235,7 +4438,9 @@ impl OfflineProtocol {
                                             "Failed to decrypt message"
                                         );
                                         DecryptResult::Failed {
-                                            _error: e.to_string(),
+                                            sender: sender.to_string(),
+                                            group_id: encrypted.group_id.as_str().to_string(),
+                                            kind,
                                         }
                                     }
                                 }
@@ -4253,6 +4458,7 @@ impl OfflineProtocol {
                     DecryptResult::Success {
                         text,
                         sender: sender_owned,
+                        group_id,
                     } => {
                         if !self.can_confirm_from_source(&sender_owned, "decrypt_success") {
                             debug!(
@@ -4266,6 +4472,11 @@ impl OfflineProtocol {
                             Ok(true) => {
                                 info!(sender = %sender_owned, "Session confirmed via successful decryption");
                                 let _ = self.flush_pending_messages(&sender_owned);
+                                self.emit_mls_session_ready(
+                                    &sender_owned,
+                                    &group_id,
+                                    MlsOperationContext::Receive,
+                                );
                             }
                             Ok(false) => {}
                             Err(e) => {
@@ -4286,15 +4497,37 @@ impl OfflineProtocol {
                     DecryptResult::SessionNotReady {
                         sender: sender_owned,
                     } => {
+                        self.emit_mls_session_missing(
+                            Some(&sender_owned),
+                            Some(encrypted.group_id.as_str()),
+                            MlsOperationContext::SessionLookup,
+                            MlsErrorCategory::SessionStateMissing,
+                        );
                         self.enqueue_pending_decryption(&sender_owned, message);
                         return Some(InternalMessageResult::Consumed);
                     }
-                    DecryptResult::Failed { .. } => {
+                    DecryptResult::Failed {
+                        sender: sender_owned,
+                        group_id,
+                        kind,
+                    } => {
+                        self.emit_mls_decryption_failed(
+                            &sender_owned,
+                            Some(&group_id),
+                            kind,
+                            MlsOperationContext::Receive,
+                        );
                         return Some(InternalMessageResult::Decrypted(
                             "[Unable to decrypt]".to_string(),
                         ));
                     }
                     DecryptResult::MlsNotInitialized => {
+                        self.emit_mls_decryption_failed(
+                            sender,
+                            Some(encrypted.group_id.as_str()),
+                            DecryptionFailureKind::NotInitialized,
+                            MlsOperationContext::Receive,
+                        );
                         return Some(InternalMessageResult::Decrypted(
                             "[Encryption not initialized]".to_string(),
                         ));
@@ -5008,6 +5241,8 @@ impl OfflineProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "mls-observability")]
+    use crate::mls_observability::MlsLifecycleEvent;
     use offline_protocol_transport::{
         mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
     };
@@ -5021,6 +5256,27 @@ mod tests {
 
     fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
         ProtocolConfig::new("test-app", user_id)
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[derive(Default, Clone)]
+    struct RecordingMlsEmitter {
+        events: Arc<Mutex<Vec<MlsLifecycleEvent>>>,
+    }
+
+    #[cfg(feature = "mls-observability")]
+    impl MlsEventEmitter for RecordingMlsEmitter {
+        fn emit(&self, event: MlsLifecycleEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    #[cfg(feature = "mls-observability")]
+    impl RecordingMlsEmitter {
+        fn take(&self) -> Vec<MlsLifecycleEvent> {
+            let mut guard = self.events.lock().unwrap();
+            std::mem::take(&mut *guard)
+        }
     }
 
     fn pending_test_message(sender: &str, content: &str) -> Message {
@@ -5434,6 +5690,217 @@ mod tests {
 
         // Even though encryption is enabled by default, MLS is not initialized
         assert!(!protocol.is_mls_initialized());
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[test]
+    fn test_mls_observability_emits_initialized_event() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let emitter = RecordingMlsEmitter::default();
+        protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        protocol.initialize_mls(storage).unwrap();
+
+        let events = emitter.take();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, MlsLifecycleEvent::Initialized { .. })),
+            "Expected initialized lifecycle event"
+        );
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[test]
+    fn test_mls_observability_emits_session_missing_when_not_initialized() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let emitter = RecordingMlsEmitter::default();
+        protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+
+        let result = protocol.encrypt_content_for_recipient_strict("bob", "hello");
+        assert!(matches!(result, Err(Error::MlsNotInitialized)));
+
+        let events = emitter.take();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            MlsLifecycleEvent::SessionMissing {
+                error_category: Some(MlsErrorCategory::NotInitialized),
+                ..
+            }
+        )));
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[test]
+    fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let emitter = RecordingMlsEmitter::default();
+        protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let key_package = bob_manager.generate_key_package().unwrap();
+
+        {
+            let mls = protocol.mls_manager.as_ref().unwrap().clone();
+            let manager = mls.read().unwrap();
+            manager
+                .import_key_package("bob", &key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap();
+        }
+        protocol.confirm_session_state("bob", "manual_test").unwrap();
+
+        let encrypted = protocol
+            .encrypt_content_for_recipient_strict("bob", "hello secure")
+            .unwrap();
+        assert!(encrypted.starts_with(internal_prefixes::ENCRYPTED));
+
+        let events = emitter.take();
+        assert!(events.iter().any(|event| {
+            matches!(event, MlsLifecycleEvent::EncryptionUsed { .. })
+        }));
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[test]
+    fn test_mls_observability_emits_decryption_failed_not_initialized() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let emitter = RecordingMlsEmitter::default();
+        protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+
+        let encrypted = EncryptedMessage {
+            group_id: offline_protocol_mls::GroupId::new("session:alice:bob"),
+            message_type: offline_protocol_mls::MlsMessageType::Application,
+            epoch: 1,
+            ciphertext: vec![1, 2, 3],
+            sender_id: "alice".to_string(),
+            timestamp_ms: 1234,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(
+            result,
+            Some(InternalMessageResult::Decrypted(text)) if text == "[Encryption not initialized]"
+        ));
+
+        let events = emitter.take();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            MlsLifecycleEvent::DecryptionFailed {
+                failure_kind: DecryptionFailureKind::NotInitialized,
+                ..
+            }
+        )));
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[test]
+    fn test_mls_observability_no_encryption_event_on_aborted_encrypt() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let emitter = RecordingMlsEmitter::default();
+        protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: vec![1, 2, 3],
+                local_expires_at_ms: (Utc::now().timestamp_millis() as u64).saturating_add(60_000),
+            },
+        );
+
+        let result = protocol.encrypt_content_for_recipient_strict("bob", "blocked");
+        assert!(matches!(result, Err(Error::SessionPending)));
+
+        let events = emitter.take();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, MlsLifecycleEvent::EncryptionUsed { .. })),
+            "EncryptionUsed should not emit for aborted operation"
+        );
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[test]
+    fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let emitter = RecordingMlsEmitter::default();
+        protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        protocol.welcome_lifecycles.insert(
+            "bob".to_string(),
+            WelcomeLifecycleRecord {
+                peer_id: "bob".to_string(),
+                group_id: "session:user123:bob".to_string(),
+                state: WelcomeDeliveryState::Sent,
+                attempt: 1,
+                welcome_message: Message::new(
+                    UserId::new("user123").unwrap(),
+                    UserId::new("bob").unwrap(),
+                    AppId::new("test-app").unwrap(),
+                    "__MLS_WELCOME__{}",
+                ),
+                next_retry_at: None,
+                last_reason_code: None,
+                last_transport_error: None,
+                created_at: Utc::now(),
+                expires_at: Utc::now() + ChronoDuration::seconds(60),
+            },
+        );
+
+        assert!(protocol
+            .confirm_session_state("bob", "confirmation_ack_received")
+            .unwrap());
+        assert!(!protocol
+            .confirm_session_state("bob", "confirmation_ack_received")
+            .unwrap());
+
+        let events = emitter.take();
+        let ready_count = events
+            .iter()
+            .filter(|event| matches!(event, MlsLifecycleEvent::SessionReady { .. }))
+            .count();
+        assert_eq!(ready_count, 1);
+    }
+
+    #[cfg(feature = "mls-observability")]
+    #[test]
+    fn test_mls_observability_uses_opaque_identifiers() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let emitter = RecordingMlsEmitter::default();
+        protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        let events = emitter.take();
+        let initialized = events
+            .iter()
+            .find_map(|event| match event {
+                MlsLifecycleEvent::Initialized { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(initialized, "peer=none|group=none");
+        assert_eq!(initialized.len(), 32);
     }
 
     #[test]
