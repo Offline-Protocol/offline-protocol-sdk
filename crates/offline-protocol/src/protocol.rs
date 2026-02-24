@@ -9298,6 +9298,56 @@ mod tests {
     }
 
     #[test]
+    fn test_internal_prefix_malformed_payload_fuzz_is_panic_free() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let malformed_payloads = vec![
+            "".to_string(),
+            "{".to_string(),
+            "{\"unexpected\":".to_string(),
+            "{\"timestamp_ms\":\"not-a-number\"}".to_string(),
+            "{\"group_id\":null}".to_string(),
+            "[]".to_string(),
+            "x".repeat(1024),
+        ];
+        let prefixes = [
+            internal_prefixes::WELCOME,
+            internal_prefixes::ENCRYPTED,
+            internal_prefixes::CONN_REQUEST,
+            internal_prefixes::CONN_ACCEPT,
+            internal_prefixes::CONN_REJECT,
+            internal_prefixes::GROUP_CREATED,
+            internal_prefixes::GROUP_MSG,
+            internal_prefixes::GROUP_MEMBER_ADDED,
+            internal_prefixes::GROUP_MEMBER_REMOVED,
+            internal_prefixes::GROUP_INFO,
+            internal_prefixes::USER_GROUPS,
+            internal_prefixes::GROUP_ERROR,
+        ];
+
+        for prefix in prefixes {
+            for payload in &malformed_payloads {
+                let message = Message::new(
+                    UserId::new("sender123").unwrap(),
+                    UserId::new("user123").unwrap(),
+                    AppId::new("test-app").unwrap(),
+                    &format!("{prefix}{payload}"),
+                );
+
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    protocol.process_internal_message(&message)
+                }));
+
+                assert!(outcome.is_ok(), "panic for prefix {prefix:?} payload {payload:?}");
+                let result = outcome.unwrap();
+                assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+            }
+        }
+    }
+
+    #[test]
     fn test_receive_message_decrypt_failure_emits_error_without_message_received() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
@@ -9402,6 +9452,71 @@ mod tests {
                 .unwrap(),
             32
         );
+    }
+
+    #[test]
+    fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 16;
+        config.encryption.pending_queue.max_pending_global = 32;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let valid_early_encrypted = format!(
+            "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+            internal_prefixes::ENCRYPTED
+        );
+        let malformed_variants = [
+            format!("{}{{", internal_prefixes::ENCRYPTED),
+            format!("{}{{\"group_id\":\"bad\"", internal_prefixes::ENCRYPTED),
+            format!("{}[]", internal_prefixes::ENCRYPTED),
+            format!("{}{{\"ciphertext\":\"not-array\"}}", internal_prefixes::ENCRYPTED),
+        ];
+
+        let mut early_count: u64 = 0;
+        let mut invalid_count: u64 = 0;
+        for idx in 0..10_000 {
+            let content = if idx % 5 == 0 {
+                invalid_count += 1;
+                malformed_variants[(idx % malformed_variants.len()) as usize].as_str()
+            } else {
+                early_count += 1;
+                valid_early_encrypted.as_str()
+            };
+
+            let message = Message::new(
+                UserId::new("sender123").unwrap(),
+                UserId::new("user123").unwrap(),
+                AppId::new("test-app").unwrap(),
+                content,
+            );
+            let result = protocol.process_internal_message(&message);
+            assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        }
+
+        let per_peer_limit = protocol.config.encryption.pending_queue.max_pending_per_peer;
+        let global_limit = protocol.config.encryption.pending_queue.max_pending_global;
+        assert!(protocol.pending_decryption_total <= global_limit);
+        assert!(
+            protocol
+                .pending_decryption
+                .get("sender123")
+                .map(VecDeque::len)
+                .unwrap_or(0)
+                <= per_peer_limit
+        );
+
+        let metrics = protocol.pending_queue_metrics();
+        assert_eq!(metrics.pending_messages_received_total, early_count);
+        assert_eq!(metrics.pending_messages_current, protocol.pending_decryption_total);
+        assert!(metrics.pending_messages_dropped_overflow_total > 0);
+        assert_eq!(early_count + invalid_count, 10_000);
     }
 
     #[test]
