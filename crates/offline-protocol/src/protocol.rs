@@ -3429,6 +3429,129 @@ impl OfflineProtocol {
         self.pending_key_packages.contains_key(peer_id)
     }
 
+    /// Creates a session using manually imported key material.
+    ///
+    /// This entrypoint is for bindings that expose low-level MLS APIs. It must
+    /// still keep protocol-level session lifecycle state in sync with MLS state.
+    pub fn manual_mls_create_session(&mut self, peer_id: &str) -> Result<WelcomeMessage> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let welcome = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.create_session(peer_id)?
+        };
+        if let Err(err) = self.ensure_session_state_entry(peer_id, "manual_session_created") {
+            warn!(
+                peer_id = %peer_id,
+                error = %err,
+                "Failed to persist pending session state after manual session create"
+            );
+        }
+        Ok(welcome)
+    }
+
+    /// Joins a session from a Welcome message and synchronizes confirmation state.
+    pub fn manual_mls_join_session(
+        &mut self,
+        welcome: &WelcomeMessage,
+    ) -> Result<offline_protocol_mls::GroupInfo> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let group_info = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.join_session(welcome)?
+        };
+        self.handle_manual_welcome_confirmation(&welcome.inviter_id);
+        Ok(group_info)
+    }
+
+    /// Processes an MLS Welcome message and synchronizes confirmation state.
+    pub fn manual_mls_process_welcome(
+        &mut self,
+        welcome: &WelcomeMessage,
+    ) -> Result<offline_protocol_mls::GroupInfo> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let group_info = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.process_welcome(welcome)?
+        };
+        self.handle_manual_welcome_confirmation(&welcome.inviter_id);
+        Ok(group_info)
+    }
+
+    /// Decrypts a user-scoped MLS message and synchronizes confirmation state.
+    pub fn manual_mls_decrypt_from_user(
+        &mut self,
+        encrypted: &EncryptedMessage,
+    ) -> Result<Option<Vec<u8>>> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let plaintext = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.decrypt_from_user(encrypted)?
+        };
+        if plaintext.is_some() {
+            self.handle_manual_decrypt_confirmation(&encrypted.sender_id);
+        }
+        Ok(plaintext)
+    }
+
+    /// Decrypts any MLS message and synchronizes confirmation state for 1:1 flows.
+    pub fn manual_mls_decrypt(&mut self, encrypted: &EncryptedMessage) -> Result<Option<Vec<u8>>> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+        let plaintext = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.decrypt(encrypted)?
+        };
+        if plaintext.is_some() {
+            self.handle_manual_decrypt_confirmation(&encrypted.sender_id);
+        }
+        Ok(plaintext)
+    }
+
+    fn handle_manual_welcome_confirmation(&mut self, peer_id: &str) {
+        match self.confirm_session_state(peer_id, "welcome_received") {
+            Ok(true) => {
+                let _ = self.flush_pending_messages(peer_id);
+                self.process_pending_decryption(peer_id);
+            }
+            Ok(false) => {}
+            Err(err) => {
+                warn!(
+                    peer_id = %peer_id,
+                    error = %err,
+                    "Failed to persist session confirmation after manual welcome processing"
+                );
+            }
+        }
+    }
+
+    fn handle_manual_decrypt_confirmation(&mut self, peer_id: &str) {
+        if !self.can_confirm_from_source(peer_id, "decrypt_success") {
+            return;
+        }
+        match self.confirm_session_state(peer_id, "decrypt_success") {
+            Ok(true) => {
+                let _ = self.flush_pending_messages(peer_id);
+            }
+            Ok(false) => {}
+            Err(err) => {
+                warn!(
+                    peer_id = %peer_id,
+                    error = %err,
+                    "Failed to persist session confirmation after manual decrypt"
+                );
+            }
+        }
+    }
+
     /// Gets access to the MLS manager for advanced operations.
     ///
     /// Returns `None` if MLS is not initialized.
@@ -6197,6 +6320,60 @@ mod tests {
         assert_eq!(groups_after, groups_before + 24);
 
         let mut protocol = shared.lock().unwrap();
+        protocol.stop().unwrap();
+    }
+
+    #[test]
+    fn test_manual_welcome_processing_confirms_session_for_auto_encrypt_flow() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.encryption.require_encryption = false;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        let transport_handle = transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(transport));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let alice_key_package = {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        bob_manager
+            .import_key_package("alice", &alice_key_package.key_package_data)
+            .unwrap();
+        let welcome = bob_manager.create_session("alice").unwrap();
+
+        protocol.manual_mls_process_welcome(&welcome).unwrap();
+
+        let persisted = protocol.load_session_state_entry("bob").unwrap().unwrap();
+        assert_eq!(persisted, SessionState::Confirmed);
+
+        protocol
+            .send_message(
+                "bob",
+                "manual-welcome-unblocks-auto-send",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+
+        let sent = transport_handle.sent_messages();
+        assert!(sent
+            .iter()
+            .filter(|message| message.recipient.as_str() == "bob")
+            .any(|message| message.content.starts_with(internal_prefixes::ENCRYPTED)));
+
         protocol.stop().unwrap();
     }
 

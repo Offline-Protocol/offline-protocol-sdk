@@ -2501,12 +2501,12 @@ impl OfflineProtocol {
         &self,
         other_user_id: String,
     ) -> Result<MlsWelcomeMessage, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .create_session(&other_user_id)
+            .manual_mls_create_session(&other_user_id)
             .map(MlsWelcomeMessage::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
@@ -2516,12 +2516,13 @@ impl OfflineProtocol {
         &self,
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        let core_welcome: CoreWelcomeMessage = welcome.into();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .join_session(&welcome.into())
+            .manual_mls_join_session(&core_welcome)
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
@@ -2547,12 +2548,13 @@ impl OfflineProtocol {
         &self,
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        let core_encrypted: CoreEncryptedMessage = encrypted.into();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .decrypt_from_user(&encrypted.into())
+            .manual_mls_decrypt_from_user(&core_encrypted)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
@@ -2736,12 +2738,13 @@ impl OfflineProtocol {
         &self,
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        let core_encrypted: CoreEncryptedMessage = encrypted.into();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .decrypt(&encrypted.into())
+            .manual_mls_decrypt(&core_encrypted)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
@@ -2750,12 +2753,13 @@ impl OfflineProtocol {
         &self,
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
+        let core_welcome: CoreWelcomeMessage = welcome.into();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .process_welcome(&welcome.into())
+            .manual_mls_process_welcome(&core_welcome)
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
