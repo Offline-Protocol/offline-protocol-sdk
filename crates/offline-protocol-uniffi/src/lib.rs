@@ -8,7 +8,8 @@
 
 use offline_protocol::{
     file_transfer::FileTransferManager, Event as CoreEvent, NetworkVisualizer,
-    OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
+    OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
+    PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
 use offline_protocol_mls::{
@@ -613,6 +614,8 @@ pub struct EncryptionConfig {
     pub store_pending: bool,
     /// Require encryption for outbound sends (default: false)
     pub require_encryption: bool,
+    /// Pending queue configuration for encrypted pre-session messages.
+    pub pending_queue: PendingQueueConfig,
 }
 
 impl Default for EncryptionConfig {
@@ -622,6 +625,38 @@ impl Default for EncryptionConfig {
             auto_key_exchange: true,
             store_pending: true,
             require_encryption: false,
+            pending_queue: PendingQueueConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum OverflowPolicy {
+    DropOldest,
+    DropNewest,
+}
+
+impl Default for OverflowPolicy {
+    fn default() -> Self {
+        Self::DropOldest
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingQueueConfig {
+    pub max_pending_per_peer: u64,
+    pub max_pending_global: u64,
+    pub pending_ttl_ms: u64,
+    pub overflow_policy: OverflowPolicy,
+}
+
+impl Default for PendingQueueConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
         }
     }
 }
@@ -640,6 +675,10 @@ pub struct ProtocolConfig {
     pub auto_key_exchange: bool,
     pub store_pending: bool,
     pub require_encryption: bool,
+    pub max_pending_per_peer: u64,
+    pub max_pending_global: u64,
+    pub pending_ttl_ms: u64,
+    pub overflow_policy: OverflowPolicy,
 }
 
 /// Extended protocol configuration with all options
@@ -667,6 +706,15 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.encryption.auto_key_exchange = config.auto_key_exchange;
         core_config.encryption.store_pending = config.store_pending;
         core_config.encryption.require_encryption = config.require_encryption;
+        core_config.encryption.pending_queue = CorePendingQueueConfig {
+            max_pending_per_peer: config.max_pending_per_peer as usize,
+            max_pending_global: config.max_pending_global as usize,
+            pending_ttl_ms: config.pending_ttl_ms,
+            overflow_policy: match config.overflow_policy {
+                OverflowPolicy::DropOldest => CoreOverflowPolicy::DropOldest,
+                OverflowPolicy::DropNewest => CoreOverflowPolicy::DropNewest,
+            },
+        };
         core_config
     }
 }
@@ -2977,6 +3025,10 @@ mod tests {
             auto_key_exchange: true,
             store_pending: true,
             require_encryption: false,
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
         }
     }
 
@@ -2993,6 +3045,10 @@ mod tests {
             auto_key_exchange: true,
             store_pending: true,
             require_encryption: false,
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
         }
     }
 
@@ -3002,6 +3058,24 @@ mod tests {
 
         let protocol = OfflineProtocol::new(config);
         assert!(protocol.is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_maps_pending_queue_settings_to_core() {
+        let mut config = create_test_config();
+        config.max_pending_per_peer = 11;
+        config.max_pending_global = 99;
+        config.pending_ttl_ms = 55_000;
+        config.overflow_policy = OverflowPolicy::DropNewest;
+
+        let core: CoreConfig = config.into();
+        assert_eq!(core.encryption.pending_queue.max_pending_per_peer, 11);
+        assert_eq!(core.encryption.pending_queue.max_pending_global, 99);
+        assert_eq!(core.encryption.pending_queue.pending_ttl_ms, 55_000);
+        assert_eq!(
+            core.encryption.pending_queue.overflow_policy,
+            CoreOverflowPolicy::DropNewest
+        );
     }
 
     #[test]
