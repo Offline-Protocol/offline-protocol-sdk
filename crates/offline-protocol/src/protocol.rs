@@ -7759,6 +7759,292 @@ mod tests {
     }
 
     #[test]
+    fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 1;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "welcome-confirmation-never-arrives",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+
+        {
+            let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+            record.next_retry_at = Some(Utc::now() - ChronoDuration::milliseconds(1));
+        }
+
+        protocol.process().unwrap();
+
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Expired
+        );
+        assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+        assert!(!protocol.confirmed_sessions.contains("bob"));
+
+        let captured = events.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(
+            event,
+            Event::WelcomeSendExpired {
+                reason_code: crate::events::WelcomeReasonCode::RetryExhausted,
+                ..
+            }
+        )));
+        assert!(captured.iter().any(|event| matches!(
+            event,
+            Event::SecureSessionFailed { peer_id, reason }
+                if peer_id == "bob" && reason.contains("Welcome delivery failed")
+        )));
+        assert!(!captured
+            .iter()
+            .any(|event| matches!(event, Event::SecureSessionEstablished { .. })));
+    }
+
+    #[test]
+    fn test_welcome_delayed_confirmation_after_timeout_converges_to_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 3;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "welcome-confirmation-delayed",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+
+        let welcome_message_id = protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .welcome_message
+            .id
+            .as_str()
+            .to_string();
+        {
+            let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+            record.next_retry_at = Some(Utc::now() - ChronoDuration::milliseconds(1));
+        }
+
+        protocol.process().unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Failed
+        );
+
+        protocol
+            .on_transport_send_confirmed(&welcome_message_id)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+        assert!(!protocol.confirmed_sessions.contains("bob"));
+    }
+
+    #[test]
+    fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+        bob.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        alice_manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        let welcome = alice_manager.create_session("bob").unwrap();
+        let encrypted = alice_manager
+            .encrypt_for_user("bob", b"encrypted-before-welcome")
+            .unwrap();
+
+        let encrypted_wire = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &format!(
+                "{}{}",
+                internal_prefixes::ENCRYPTED,
+                serde_json::to_string(&encrypted).unwrap()
+            ),
+        );
+        let welcome_wire = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &format!(
+                "{}{}",
+                internal_prefixes::WELCOME,
+                serde_json::to_string(&welcome).unwrap()
+            ),
+        );
+
+        let encrypted_result = bob.process_internal_message(&encrypted_wire);
+        assert!(matches!(
+            encrypted_result,
+            Some(InternalMessageResult::Consumed)
+        ));
+        assert!(bob.pending_decryption.contains_key("alice"));
+        assert!(!bob.confirmed_sessions.contains("alice"));
+
+        let welcome_result = bob.process_internal_message(&welcome_wire);
+        assert!(matches!(welcome_result, Some(InternalMessageResult::Consumed)));
+        assert!(bob.confirmed_sessions.contains("alice"));
+        assert!(!bob.pending_decryption.contains_key("alice"));
+
+        let delayed_received = bob
+            .receive_message()
+            .expect("expected delayed decrypted payload");
+        assert_eq!(delayed_received.content, "encrypted-before-welcome");
+        assert_eq!(
+            delayed_received
+                .metadata
+                .get("delayed_decrypt")
+                .map(String::as_str),
+            Some("true")
+        );
+
+        let captured = events.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(
+            event,
+            Event::SecureSessionEstablished { peer_id, .. } if peer_id == "alice"
+        )));
+    }
+
+    #[test]
+    fn test_welcome_duplicate_delivery_emits_single_established_event() {
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+        bob.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        bob.start().unwrap();
+
+        let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        alice_manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        let welcome = alice_manager.create_session("bob").unwrap();
+        let welcome_wire = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &format!(
+                "{}{}",
+                internal_prefixes::WELCOME,
+                serde_json::to_string(&welcome).unwrap()
+            ),
+        );
+
+        bob_transport_handle.queue_message(welcome_wire.clone());
+        bob_transport_handle.queue_message(welcome_wire);
+        assert!(bob.receive_message().is_none());
+
+        assert!(bob.confirmed_sessions.contains("alice"));
+        let captured = events.lock().unwrap();
+        let established_count = captured
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::SecureSessionEstablished { peer_id, .. } if peer_id == "alice"
+                )
+            })
+            .count();
+        assert_eq!(established_count, 1);
+    }
+
+    #[test]
     fn test_restore_session_state_migrates_legacy_session_to_pending_without_inference() {
         let mut config = create_test_config_for_user("alice");
         config.encryption.enabled = true;
