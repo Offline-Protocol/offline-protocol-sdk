@@ -16,4 +16,6 @@ pub mod types;
 
 pub use error::{Error, Result};
 pub use message::{Message, MessageId, MessagePriority};
-pub use types::{AppId, HopCount, LamportClock, LocalInstant, Timestamp, UserId, WallClockTimestamp, TTL};
+pub use types::{
+    AppId, HopCount, LamportClock, LocalInstant, Timestamp, UserId, WallClockTimestamp, TTL,
+};

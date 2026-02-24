@@ -183,12 +183,13 @@ impl TransportManager {
 
         // Try the primary transport first.
         let primary_result = {
-            let transport = self.transports.get(&primary).ok_or_else(|| {
-                Error::Other(format!("Transport {:?} not found", primary))
-            })?;
-            let transport_lock = transport.lock().map_err(|_| {
-                Error::Other(format!("Transport mutex poisoned for {:?}", primary))
-            })?;
+            let transport = self
+                .transports
+                .get(&primary)
+                .ok_or_else(|| Error::Other(format!("Transport {:?} not found", primary)))?;
+            let transport_lock = transport
+                .lock()
+                .map_err(|_| Error::Other(format!("Transport mutex poisoned for {:?}", primary)))?;
             transport_lock.send(message)
         };
 
