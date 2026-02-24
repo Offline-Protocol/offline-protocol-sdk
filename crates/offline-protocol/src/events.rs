@@ -382,6 +382,38 @@ pub enum Event {
 
     /// A group operation failed (from relay).
     GroupError { reason: String },
+
+    // --- DORS observability (OFF-258) ---
+    /// DORS scored all available transports for this decision cycle.
+    DorsScoreUpdated {
+        /// Transport type and score pairs (descending by score).
+        scores: Vec<(String, f32)>,
+    },
+    /// DORS selected a transport for the current message.
+    DorsTransportSelected {
+        /// Selected transport.
+        transport: String,
+        /// Score of the selected transport.
+        score: f32,
+    },
+    /// DORS switched from one transport to another.
+    DorsTransportSwitched {
+        /// Previous transport (if any).
+        from: Option<String>,
+        /// New transport.
+        to: String,
+        /// Short reason (e.g. "hysteresis", "current_unavailable").
+        reason: String,
+    },
+    /// DORS escalation from BLE to Wi‑Fi (e.g. retry threshold or poor signal).
+    DorsEscalationTriggered {
+        /// Transport we escalated from (e.g. "Ble").
+        from: String,
+        /// Transport we escalated to (e.g. "WiFiDirect").
+        to: String,
+        /// Reason (e.g. "retry_failure", "poor_signal").
+        reason: String,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -775,6 +807,26 @@ impl Event {
         Self::GroupError { reason }
     }
 
+    /// Creates a DorsScoreUpdated event (DORS observability).
+    pub fn dors_score_updated(scores: Vec<(String, f32)>) -> Self {
+        Self::DorsScoreUpdated { scores }
+    }
+
+    /// Creates a DorsTransportSelected event (DORS observability).
+    pub fn dors_transport_selected(transport: String, score: f32) -> Self {
+        Self::DorsTransportSelected { transport, score }
+    }
+
+    /// Creates a DorsTransportSwitched event (DORS observability).
+    pub fn dors_transport_switched(from: Option<String>, to: String, reason: String) -> Self {
+        Self::DorsTransportSwitched { from, to, reason }
+    }
+
+    /// Creates a DorsEscalationTriggered event (DORS observability).
+    pub fn dors_escalation_triggered(from: String, to: String, reason: String) -> Self {
+        Self::DorsEscalationTriggered { from, to, reason }
+    }
+
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -1120,6 +1172,27 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::GroupError { reason } => f
                 .debug_struct("GroupError")
+                .field("reason", reason)
+                .finish(),
+            Self::DorsScoreUpdated { scores } => f
+                .debug_struct("DorsScoreUpdated")
+                .field("scores", scores)
+                .finish(),
+            Self::DorsTransportSelected { transport, score } => f
+                .debug_struct("DorsTransportSelected")
+                .field("transport", transport)
+                .field("score", score)
+                .finish(),
+            Self::DorsTransportSwitched { from, to, reason } => f
+                .debug_struct("DorsTransportSwitched")
+                .field("from", from)
+                .field("to", to)
+                .field("reason", reason)
+                .finish(),
+            Self::DorsEscalationTriggered { from, to, reason } => f
+                .debug_struct("DorsEscalationTriggered")
+                .field("from", from)
+                .field("to", to)
                 .field("reason", reason)
                 .finish(),
         }

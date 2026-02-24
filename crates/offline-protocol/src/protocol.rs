@@ -616,6 +616,17 @@ impl OfflineProtocol {
         // Start all transports
         drop(state);
         self.transport_manager.start()?;
+
+        // Wire DORS event callback so app receives dors_score_updated, dors_transport_selected,
+        // dors_transport_switched, dors_escalation_triggered (OFF-258).
+        let shared = self.shared_state.clone();
+        self.transport_manager
+            .set_dors_event_callback(Some(Arc::new(move |event| {
+                if let Ok(s) = shared.lock() {
+                    s.emit_event(event);
+                }
+            })));
+
         let mut state = lock_shared_state(&self.shared_state)?;
 
         state.state = ProtocolState::Running;
@@ -4586,6 +4597,11 @@ impl OfflineProtocol {
                 Some(TransportType::BLE),
                 TransportType::WiFiDirect,
                 "DORS suggests escalating to WiFi Direct due to BLE failures".to_string(),
+            ));
+            state.emit_event(Event::dors_escalation_triggered(
+                TransportType::BLE.to_string(),
+                TransportType::WiFiDirect.to_string(),
+                "dors_escalation_signal".to_string(),
             ));
             drop(state);
         }

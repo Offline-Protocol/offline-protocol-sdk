@@ -5,6 +5,7 @@
 //! for each message.
 
 use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD};
+use crate::events::Event;
 use crate::{Error, Result};
 use offline_protocol_core::Message;
 use offline_protocol_router::{DorsConfig, TransportSelector};
@@ -29,6 +30,9 @@ pub struct TransportManager {
 
     /// Locally observed delivery outcomes used to enrich transport metrics.
     observations: HashMap<TransportType, ObservedStats>,
+
+    /// Optional callback for DORS lifecycle/decision events (OFF-258).
+    dors_event_callback: Option<Arc<dyn Fn(Event) + Send + Sync>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -130,6 +134,19 @@ impl TransportManager {
             current_transport: None,
             selector,
             observations: HashMap::new(),
+            dors_event_callback: None,
+        }
+    }
+
+    /// Sets the callback for DORS decision events (dors_score_updated, dors_transport_selected,
+    /// dors_transport_switched, dors_escalation_triggered). Used for app observability (OFF-258).
+    pub fn set_dors_event_callback(&mut self, callback: Option<Arc<dyn Fn(Event) + Send + Sync>>) {
+        self.dors_event_callback = callback;
+    }
+
+    fn emit_dors_event(&self, event: Event) {
+        if let Some(ref cb) = self.dors_event_callback {
+            cb(event);
         }
     }
 
@@ -173,6 +190,8 @@ impl TransportManager {
             )));
         }
 
+        let previous = self.current_transport;
+
         // DORS selects the primary transport (applies hysteresis/cooldown/stability).
         let primary = self
             .selector
@@ -182,6 +201,30 @@ impl TransportManager {
                     "No suitable transport selected from available transports".to_string(),
                 ))
             })?;
+
+        // Emit DORS observability events (OFF-258).
+        let scored = self.selector.score_and_rank(message, &available);
+        let scores: Vec<(String, f32)> = scored
+            .iter()
+            .map(|(t, s)| (t.to_string(), *s))
+            .collect();
+        self.emit_dors_event(Event::dors_score_updated(scores));
+        let primary_score = scored
+            .iter()
+            .find(|(t, _)| *t == primary)
+            .map(|(_, s)| *s)
+            .unwrap_or(0.0);
+        self.emit_dors_event(Event::dors_transport_selected(
+            primary.to_string(),
+            primary_score,
+        ));
+        if previous != Some(primary) {
+            self.emit_dors_event(Event::dors_transport_switched(
+                previous.map(|t| t.to_string()),
+                primary.to_string(),
+                "dors_decision".to_string(),
+            ));
+        }
 
         // Try the primary transport first.
         let primary_result = {
@@ -220,6 +263,15 @@ impl TransportManager {
         for (transport_type, _score) in &scored {
             if *transport_type == primary {
                 continue;
+            }
+
+            // Emit escalation event when falling back from BLE to Wi‑Fi (OFF-258).
+            if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                self.emit_dors_event(Event::dors_escalation_triggered(
+                    primary.to_string(),
+                    transport_type.to_string(),
+                    "retry_fallback".to_string(),
+                ));
             }
 
             let transport = match self.transports.get(transport_type) {
@@ -502,6 +554,7 @@ mod tests {
     use offline_protocol_core::{AppId, UserId};
     use offline_protocol_router::DorsConfig;
     use offline_protocol_transport::{mock::MockTransport, TransportType};
+    use std::sync::Mutex;
 
     fn create_test_message() -> Message {
         Message::new(
@@ -543,6 +596,39 @@ mod tests {
         let message = create_test_message();
         let result = manager.send(&message);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dors_events_emitted_when_callback_set() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        let events: std::sync::Arc<Mutex<Vec<Event>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        manager.set_dors_event_callback(Some(Arc::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        })));
+
+        let message = create_test_message();
+        let _ = manager.send(&message);
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| matches!(e, crate::events::Event::DorsScoreUpdated { .. })),
+            "expected dors_score_updated"
+        );
+        assert!(
+            captured.iter().any(|e| {
+                matches!(e, crate::events::Event::DorsTransportSelected { .. })
+            }),
+            "expected dors_transport_selected"
+        );
     }
 
     #[test]
