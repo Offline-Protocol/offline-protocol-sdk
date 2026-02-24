@@ -50,6 +50,18 @@ pub enum ProtocolError {
     #[error("Failed to send message: {0}")]
     SendFailed(String),
 
+    /// No key package available for recipient
+    #[error("No key package available for recipient: {0}")]
+    NoKeyPackage(String),
+
+    /// Session setup is pending
+    #[error("Session pending, message queued")]
+    SessionPending,
+
+    /// Outbound message encryption failed
+    #[error("Failed to encrypt message: {0}")]
+    EncryptFailed(String),
+
     /// Invalid state for operation
     #[error("Invalid state: {0}")]
     InvalidState(String),
@@ -231,6 +243,11 @@ impl From<offline_protocol::Error> for ProtocolError {
             offline_protocol::Error::InvalidConfiguration(msg) => {
                 ProtocolError::InvalidConfiguration(msg)
             }
+            offline_protocol::Error::NoKeyPackage(peer_id) => ProtocolError::NoKeyPackage(peer_id),
+            offline_protocol::Error::SessionPending => ProtocolError::SessionPending,
+            offline_protocol::Error::EncryptFailed(message) => ProtocolError::EncryptFailed(message),
+            offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
+            offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
             _ => ProtocolError::Other(err.to_string()),
         }
     }
@@ -594,6 +611,8 @@ pub struct EncryptionConfig {
     pub auto_key_exchange: bool,
     /// Store pending messages when no session exists (default: true)
     pub store_pending: bool,
+    /// Require encryption for outbound sends (default: false)
+    pub require_encryption: bool,
 }
 
 impl Default for EncryptionConfig {
@@ -602,6 +621,7 @@ impl Default for EncryptionConfig {
             enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
         }
     }
 }
@@ -619,6 +639,7 @@ pub struct ProtocolConfig {
     pub encryption_enabled: bool,
     pub auto_key_exchange: bool,
     pub store_pending: bool,
+    pub require_encryption: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -645,6 +666,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.encryption.enabled = config.encryption_enabled;
         core_config.encryption.auto_key_exchange = config.auto_key_exchange;
         core_config.encryption.store_pending = config.store_pending;
+        core_config.encryption.require_encryption = config.require_encryption;
         core_config
     }
 }
@@ -979,9 +1001,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(wifi_transport) =
-                transport.as_any().downcast_ref::<WifiDirectTransport>()
-            {
+            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 let cb = callback.clone();
                 wifi_transport.set_on_messages_available(Arc::new(move || {
                     cb.on_messages_available();
@@ -1022,11 +1042,11 @@ impl OfflineProtocol {
                     core_transport,
                     reply_to_msg,
                 )
-                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+                .map_err(ProtocolError::from)?
         } else {
             protocol
                 .send_message(&recipient, &content, Some(priority.into()), reply_to_msg)
-                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+                .map_err(ProtocolError::from)?
         };
 
         Ok(message_id.as_str())
@@ -1064,7 +1084,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .send_connection_request(&recipient, &sender_name, key_package)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -1078,7 +1098,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .accept_connection_request(&recipient, &accepter_name, key_package)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -1087,7 +1107,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .reject_connection_request(&recipient)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -2731,8 +2751,9 @@ impl OfflineProtocol {
             "type": "RequestPreKeyBundle",
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e))
+        })
     }
 
     /// Upload identity key and prekeys for Signal Protocol.
@@ -2745,12 +2766,16 @@ impl OfflineProtocol {
         one_time_prekeys_json: String,
     ) -> Result<String, ProtocolError> {
         // Parse the JSON strings into values
-        let signed_prekey: serde_json::Value = serde_json::from_str(&signed_prekey_json)
-            .map_err(|e| ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e)))?;
-        
+        let signed_prekey: serde_json::Value =
+            serde_json::from_str(&signed_prekey_json).map_err(|e| {
+                ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e))
+            })?;
+
         let one_time_prekeys: Vec<serde_json::Value> = serde_json::from_str(&one_time_prekeys_json)
-            .map_err(|e| ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e)))?;
-        
+            .map_err(|e| {
+                ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e))
+            })?;
+
         let payload = serde_json::json!({
             "type": "UploadKeys",
             "identity_key": identity_key,
@@ -2815,13 +2840,14 @@ impl OfflineProtocol {
             "group_id": group_id,
             "content": content
         });
-        
+
         if let Some(reply_to) = reply_to_msg {
             payload["reply_to_msg"] = serde_json::Value::String(reply_to);
         }
-        
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e)))
+
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e))
+        })
     }
 
     /// Add member to group. Admin only.
@@ -2829,7 +2855,7 @@ impl OfflineProtocol {
     pub fn group_add_member(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "AddGroupMember",
@@ -2845,15 +2871,16 @@ impl OfflineProtocol {
     pub fn group_remove_member(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "RemoveGroupMember",
             "group_id": group_id,
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e))
+        })
     }
 
     /// Set member as admin. Admin only.
@@ -2861,7 +2888,7 @@ impl OfflineProtocol {
     pub fn group_set_admin(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "SetGroupAdmin",
@@ -2877,15 +2904,16 @@ impl OfflineProtocol {
     pub fn group_remove_admin(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "RemoveGroupAdmin",
             "group_id": group_id,
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e))
+        })
     }
 
     /// Leave a group.
@@ -2948,6 +2976,7 @@ mod tests {
             encryption_enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
         }
     }
 
@@ -2963,6 +2992,7 @@ mod tests {
             encryption_enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
         }
     }
 

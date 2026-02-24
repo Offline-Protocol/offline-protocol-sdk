@@ -306,8 +306,7 @@ impl TransportSelector {
                 a.1.total
                     .partial_cmp(&b.1.total)
                     .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        {
+            }) {
             let best_total = best_s.total;
             scored_transports
                 .iter()

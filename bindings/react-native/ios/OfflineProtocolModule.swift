@@ -87,6 +87,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                               ?? encryptionDict["auto_key_exchange"] as? Bool ?? true
         let storePending = encryptionDict["storePending"] as? Bool 
                            ?? encryptionDict["store_pending"] as? Bool ?? true
+        let requireEncryption = encryptionDict["requireEncryption"] as? Bool
+                                ?? encryptionDict["require_encryption"] as? Bool ?? false
         
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
@@ -98,7 +100,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
             encryptionEnabled: encryptionEnabled,
             autoKeyExchange: autoKeyExchange,
-            storePending: storePending
+            storePending: storePending,
+            requireEncryption: requireEncryption
         )
 
         return (config, raw)
@@ -121,6 +124,23 @@ class OfflineProtocolModule: RCTEventEmitter {
             return .high
         case "auto":
             return .medium
+        default:
+            return nil
+        }
+    }
+
+    private func mapProtocolBridgeError(_ error: Error) -> (code: String, message: String)? {
+        guard let protocolError = error as? ProtocolError else {
+            return nil
+        }
+
+        switch protocolError {
+        case .NoKeyPackage:
+            return ("NoKeyPackage", "No key package available for recipient")
+        case .SessionPending:
+            return ("SessionPending", "Session establishment is pending")
+        case .EncryptFailed:
+            return ("EncryptFailed", "Message encryption failed")
         default:
             return nil
         }
@@ -596,7 +616,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.sendMessage(recipient: recipient, content: content, priority: msgPriority, replyToMsg: replyToMsg)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_SEND", "Failed to send message: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_SEND", "Failed to send message: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -619,7 +643,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
             resolver(messageId)
         } catch {
-            rejecter("ERROR_CONNECTION_REQUEST", "Failed to send connection request: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_CONNECTION_REQUEST", "Failed to send connection request: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -642,7 +670,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
             resolver(messageId)
         } catch {
-            rejecter("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -658,7 +690,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.rejectConnectionRequest(recipient: recipient)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: \(error.localizedDescription)", error)
+            }
         }
     }
     

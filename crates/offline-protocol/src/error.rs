@@ -52,6 +52,10 @@ pub enum Error {
     #[error("Session pending, message queued")]
     SessionPending,
 
+    /// Outbound message encryption failed.
+    #[error("Failed to encrypt message: {0}")]
+    EncryptFailed(String),
+
     /// Serialization error.
     #[error("Serialization error: {0}")]
     Serialization(String),

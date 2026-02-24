@@ -100,6 +100,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val storePending = encryptionJson?.let {
             it.optBooleanCompat("storePending", "store_pending") ?: true
         } ?: true
+        val requireEncryption = encryptionJson?.let {
+            it.optBooleanCompat("requireEncryption", "require_encryption") ?: false
+        } ?: false
 
         val config = ProtocolConfig(
             appId = json.optString("appId", json.optString("app_id", "")),
@@ -111,7 +114,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte(),
             encryptionEnabled = encryptionEnabled,
             autoKeyExchange = autoKeyExchange,
-            storePending = storePending
+            storePending = storePending,
+            requireEncryption = requireEncryption
         )
 
         return ParsedConfig(config, json)
@@ -210,6 +214,29 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     ))
                 }
             }
+        }
+    }
+
+    private data class BridgeProtocolError(
+        val code: String,
+        val message: String
+    )
+
+    private fun mapProtocolBridgeError(error: Throwable): BridgeProtocolError? {
+        return when (error) {
+            is ProtocolException.NoKeyPackage -> BridgeProtocolError(
+                code = "NoKeyPackage",
+                message = "No key package available for recipient"
+            )
+            is ProtocolException.SessionPending -> BridgeProtocolError(
+                code = "SessionPending",
+                message = "Session establishment is pending"
+            )
+            is ProtocolException.EncryptFailed -> BridgeProtocolError(
+                code = "EncryptFailed",
+                message = "Message encryption failed"
+            )
+            else -> null
         }
     }
 
@@ -550,7 +577,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.sendMessage(recipient, content, msgPriority, replyToMsg)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_SEND", "Failed to send message: ${e.message}", e)
+            val mapped = mapProtocolBridgeError(e)
+            if (mapped != null) {
+                promise.reject(mapped.code, mapped.message, e)
+            } else {
+                promise.reject("ERROR_SEND", "Failed to send message: ${e.message}", e)
+            }
         }
     }
 
@@ -570,7 +602,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.sendConnectionRequest(recipient, senderName, keyPackageData)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_CONNECTION_REQUEST", "Failed to send connection request: ${e.message}", e)
+            val mapped = mapProtocolBridgeError(e)
+            if (mapped != null) {
+                promise.reject(mapped.code, mapped.message, e)
+            } else {
+                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to send connection request: ${e.message}", e)
+            }
         }
     }
 
@@ -590,7 +627,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.acceptConnectionRequest(recipient, accepterName, keyPackageData)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: ${e.message}", e)
+            val mapped = mapProtocolBridgeError(e)
+            if (mapped != null) {
+                promise.reject(mapped.code, mapped.message, e)
+            } else {
+                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: ${e.message}", e)
+            }
         }
     }
 
@@ -601,7 +643,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val messageId = proto.rejectConnectionRequest(recipient)
             promise.resolve(messageId)
         } catch (e: Exception) {
-            promise.reject("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: ${e.message}", e)
+            val mapped = mapProtocolBridgeError(e)
+            if (mapped != null) {
+                promise.reject(mapped.code, mapped.message, e)
+            } else {
+                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: ${e.message}", e)
+            }
         }
     }
 

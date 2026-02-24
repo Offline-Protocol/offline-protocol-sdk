@@ -194,6 +194,11 @@ export interface EncryptionConfig {
    * Messages will be sent automatically after the session is established.
    */
   storePending?: boolean;
+  /**
+   * Require encrypted delivery (default: false).
+   * When true, send fails if encryption cannot be applied.
+   */
+  requireEncryption?: boolean;
 }
 
 /**

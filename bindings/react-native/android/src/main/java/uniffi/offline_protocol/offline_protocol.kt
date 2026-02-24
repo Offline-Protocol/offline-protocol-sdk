@@ -4544,6 +4544,8 @@ data class EncryptionConfig (
     var `autoKeyExchange`: kotlin.Boolean
     , 
     var `storePending`: kotlin.Boolean
+    , 
+    var `requireEncryption`: kotlin.Boolean
     
 ){
     
@@ -4561,19 +4563,22 @@ public object FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer<Encryptio
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: EncryptionConfig) = (
             FfiConverterBoolean.allocationSize(value.`enabled`) +
             FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
-            FfiConverterBoolean.allocationSize(value.`storePending`)
+            FfiConverterBoolean.allocationSize(value.`storePending`) +
+            FfiConverterBoolean.allocationSize(value.`requireEncryption`)
     )
 
     override fun write(value: EncryptionConfig, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`enabled`, buf)
             FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
             FfiConverterBoolean.write(value.`storePending`, buf)
+            FfiConverterBoolean.write(value.`requireEncryption`, buf)
     }
 }
 
@@ -5217,6 +5222,8 @@ data class ProtocolConfig (
     var `autoKeyExchange`: kotlin.Boolean
     , 
     var `storePending`: kotlin.Boolean
+    , 
+    var `requireEncryption`: kotlin.Boolean
     
 ){
     
@@ -5241,6 +5248,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -5254,7 +5262,8 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterUByte.allocationSize(value.`initialTtl`) +
             FfiConverterBoolean.allocationSize(value.`encryptionEnabled`) +
             FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
-            FfiConverterBoolean.allocationSize(value.`storePending`)
+            FfiConverterBoolean.allocationSize(value.`storePending`) +
+            FfiConverterBoolean.allocationSize(value.`requireEncryption`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -5268,6 +5277,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`encryptionEnabled`, buf)
             FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
             FfiConverterBoolean.write(value.`storePending`, buf)
+            FfiConverterBoolean.write(value.`requireEncryption`, buf)
     }
 }
 
@@ -5806,6 +5816,12 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
         class SendFailed(message: String) : ProtocolException(message)
         
+        class NoKeyPackage(message: String) : ProtocolException(message)
+        
+        class SessionPending(message: String) : ProtocolException(message)
+        
+        class EncryptFailed(message: String) : ProtocolException(message)
+        
         class InvalidState(message: String) : ProtocolException(message)
         
         class MlsNotInitialized(message: String) : ProtocolException(message)
@@ -5831,10 +5847,13 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             2 -> ProtocolException.AlreadyStarted(FfiConverterString.read(buf))
             3 -> ProtocolException.InvalidConfiguration(FfiConverterString.read(buf))
             4 -> ProtocolException.SendFailed(FfiConverterString.read(buf))
-            5 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
-            6 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
-            7 -> ProtocolException.MlsException(FfiConverterString.read(buf))
-            8 -> ProtocolException.Other(FfiConverterString.read(buf))
+            5 -> ProtocolException.NoKeyPackage(FfiConverterString.read(buf))
+            6 -> ProtocolException.SessionPending(FfiConverterString.read(buf))
+            7 -> ProtocolException.EncryptFailed(FfiConverterString.read(buf))
+            8 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
+            9 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
+            10 -> ProtocolException.MlsException(FfiConverterString.read(buf))
+            11 -> ProtocolException.Other(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -5862,20 +5881,32 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
                 buf.putInt(4)
                 Unit
             }
-            is ProtocolException.InvalidState -> {
+            is ProtocolException.NoKeyPackage -> {
                 buf.putInt(5)
                 Unit
             }
-            is ProtocolException.MlsNotInitialized -> {
+            is ProtocolException.SessionPending -> {
                 buf.putInt(6)
                 Unit
             }
-            is ProtocolException.MlsException -> {
+            is ProtocolException.EncryptFailed -> {
                 buf.putInt(7)
                 Unit
             }
-            is ProtocolException.Other -> {
+            is ProtocolException.InvalidState -> {
                 buf.putInt(8)
+                Unit
+            }
+            is ProtocolException.MlsNotInitialized -> {
+                buf.putInt(9)
+                Unit
+            }
+            is ProtocolException.MlsException -> {
+                buf.putInt(10)
+                Unit
+            }
+            is ProtocolException.Other -> {
+                buf.putInt(11)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

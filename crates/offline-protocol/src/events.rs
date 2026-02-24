@@ -340,12 +340,8 @@ pub enum Event {
     },
 
     // --- Group (relay) events ---
-
     /// A group was created (from relay).
-    GroupCreated {
-        group_id: String,
-        name: String,
-    },
+    GroupCreated { group_id: String, name: String },
 
     /// A message was received in a group (from relay).
     GroupMessageReceived {
@@ -382,14 +378,10 @@ pub enum Event {
     },
 
     /// User's groups list was received (from relay).
-    UserGroups {
-        groups: Vec<UserGroupSummary>,
-    },
+    UserGroups { groups: Vec<UserGroupSummary> },
 
     /// A group operation failed (from relay).
-    GroupError {
-        reason: String,
-    },
+    GroupError { reason: String },
 }
 
 /// Member entry in GroupInfo.
@@ -748,11 +740,7 @@ impl Event {
     }
 
     /// Creates a GroupMemberRemoved event.
-    pub fn group_member_removed(
-        group_id: String,
-        user_id: String,
-        removed_by: String,
-    ) -> Self {
+    pub fn group_member_removed(group_id: String, user_id: String, removed_by: String) -> Self {
         Self::GroupMemberRemoved {
             group_id,
             user_id,
