@@ -7,6 +7,7 @@ use crate::mls_observability::{
 };
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
+use crate::events::DecryptionFailureCode;
 use crate::{Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
@@ -857,6 +858,18 @@ impl OfflineProtocol {
 
     fn transport_label(transport: TransportType) -> &'static str {
         transport.label()
+    }
+
+    fn decryption_failure_code_from_kind(kind: DecryptionFailureKind) -> DecryptionFailureCode {
+        match kind {
+            DecryptionFailureKind::NotInitialized => DecryptionFailureCode::NotInitialized,
+            DecryptionFailureKind::InvalidCiphertext => DecryptionFailureCode::InvalidCiphertext,
+            DecryptionFailureKind::IdentityMismatch => DecryptionFailureCode::IdentityMismatch,
+            DecryptionFailureKind::CryptoFailure => DecryptionFailureCode::CryptoFailure,
+            DecryptionFailureKind::SessionNotFound | DecryptionFailureKind::Unknown => {
+                DecryptionFailureCode::Unknown
+            }
+        }
     }
 
     fn handle_ack_message(&mut self, message: &Message) {
@@ -4490,6 +4503,14 @@ impl OfflineProtocol {
                         return Some(InternalMessageResult::Decrypted(text));
                     }
                     DecryptResult::Empty => {
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::message_decryption_failed(
+                                message.id.clone(),
+                                sender.to_string(),
+                                DecryptionFailureCode::InvalidCiphertext,
+                                "Failed to decrypt MLS message (empty plaintext)".to_string(),
+                            ));
+                        }
                         return Some(InternalMessageResult::Decrypted(
                             "[Decryption failed]".to_string(),
                         ));
@@ -4517,6 +4538,14 @@ impl OfflineProtocol {
                             kind,
                             MlsOperationContext::Receive,
                         );
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::message_decryption_failed(
+                                message.id.clone(),
+                                sender_owned.clone(),
+                                Self::decryption_failure_code_from_kind(kind),
+                                format!("Failed to decrypt MLS message ({kind:?})"),
+                            ));
+                        }
                         return Some(InternalMessageResult::Decrypted(
                             "[Unable to decrypt]".to_string(),
                         ));
@@ -4528,11 +4557,30 @@ impl OfflineProtocol {
                             DecryptionFailureKind::NotInitialized,
                             MlsOperationContext::Receive,
                         );
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::message_decryption_failed(
+                                message.id.clone(),
+                                sender.to_string(),
+                                DecryptionFailureCode::NotInitialized,
+                                "Failed to decrypt MLS message (not initialized)".to_string(),
+                            ));
+                        }
                         return Some(InternalMessageResult::Decrypted(
                             "[Encryption not initialized]".to_string(),
                         ));
                     }
                 }
+            } else {
+                warn!(sender = %sender, "Invalid encrypted payload");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::message_decryption_failed(
+                        message.id.clone(),
+                        sender.to_string(),
+                        DecryptionFailureCode::InvalidPayload,
+                        "Invalid encrypted payload".to_string(),
+                    ));
+                }
+                return Some(InternalMessageResult::Consumed);
             }
         }
 
@@ -8544,6 +8592,84 @@ mod tests {
 
         // Without MLS initialized, should return placeholder text
         assert!(matches!(result, Some(InternalMessageResult::Decrypted(_))));
+    }
+
+    #[test]
+    fn test_encrypted_message_decryption_failure_emits_app_error_event() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let encrypted_content = format!(
+            "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+            internal_prefixes::ENCRYPTED
+        );
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &encrypted_content,
+        );
+
+        let _ = protocol.process_internal_message(&message);
+
+        let captured = events.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(
+            event,
+            Event::MessageDecryptionFailed {
+                message_id,
+                sender,
+                code,
+                reason,
+            } if message_id == &message.id.as_str()
+                && sender == "sender123"
+                && code == &DecryptionFailureCode::NotInitialized
+                && reason.contains("not initialized")
+        )));
+    }
+
+    #[test]
+    fn test_invalid_encrypted_payload_emits_app_error_event_and_is_consumed() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let malformed_payload = format!("{}{{\"group_id\":\"bad\"", internal_prefixes::ENCRYPTED);
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &malformed_payload,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        let captured = events.lock().unwrap();
+        assert!(captured.iter().any(|event| matches!(
+            event,
+            Event::MessageDecryptionFailed {
+                message_id,
+                sender,
+                code,
+                reason,
+            } if message_id == &message.id.as_str()
+                && sender == "sender123"
+                && code == &DecryptionFailureCode::InvalidPayload
+                && reason == "Invalid encrypted payload"
+        )));
     }
 
     #[test]
