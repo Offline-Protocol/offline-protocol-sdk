@@ -6502,6 +6502,28 @@ mod tests {
     }
 
     #[test]
+    fn test_require_encryption_encrypt_failed_emits_send_error_without_transport_output() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+
+        // Keep MLS uninitialized to force strict-mode EncryptFailed path.
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let result =
+            protocol.send_message("bob", "must-never-leak", None::<MessagePriority>, None::<String>);
+        assert!(matches!(result, Err(Error::EncryptFailed(_))));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
     fn test_require_encryption_strict_mode_is_side_effect_free_on_session_pending() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
