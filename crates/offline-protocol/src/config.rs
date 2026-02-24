@@ -5,6 +5,46 @@ use offline_protocol_reliability::{AckConfig, DeduplicatorConfig, RetryConfig};
 use offline_protocol_router::{DorsConfig, PathConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
 
+/// Overflow policy for bounded pending encrypted message queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverflowPolicy {
+    /// Evict the oldest queued message to make room for the new message.
+    DropOldest,
+    /// Drop the newly received message when capacity is reached.
+    DropNewest,
+}
+
+impl Default for OverflowPolicy {
+    fn default() -> Self {
+        Self::DropOldest
+    }
+}
+
+/// Configuration for inbound encrypted messages received before session readiness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingQueueConfig {
+    /// Maximum number of pending encrypted messages per peer.
+    pub max_pending_per_peer: usize,
+    /// Maximum number of pending encrypted messages across all peers.
+    pub max_pending_global: usize,
+    /// Time-to-live for pending encrypted messages in milliseconds.
+    pub pending_ttl_ms: u64,
+    /// Overflow policy when queue limits are reached.
+    pub overflow_policy: OverflowPolicy,
+}
+
+impl Default for PendingQueueConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
+        }
+    }
+}
+
 /// Encryption configuration for automatic MLS handling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptionConfig {
@@ -19,6 +59,13 @@ pub struct EncryptionConfig {
     /// Store pending messages when no session exists.
     /// Messages will be sent automatically after the session is established.
     pub store_pending: bool,
+
+    /// Require encryption for outbound messages.
+    /// When enabled, sends fail if encryption cannot be applied.
+    pub require_encryption: bool,
+
+    /// Bounds and eviction policy for pending inbound encrypted messages.
+    pub pending_queue: PendingQueueConfig,
 }
 
 impl Default for EncryptionConfig {
@@ -27,6 +74,8 @@ impl Default for EncryptionConfig {
             enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
+            pending_queue: PendingQueueConfig::default(),
         }
     }
 }
@@ -38,6 +87,8 @@ impl EncryptionConfig {
             enabled: false,
             auto_key_exchange: false,
             store_pending: false,
+            require_encryption: false,
+            pending_queue: PendingQueueConfig::default(),
         }
     }
 }
@@ -168,6 +219,65 @@ impl ProtocolConfig {
             ));
         }
 
+        if self.reliability.retry.initial_delay_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.initial_delay_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.retry.max_delay_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.max_delay_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.reliability.retry.initial_delay_ms > self.reliability.retry.max_delay_ms {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.initial_delay_ms must be <= retry.max_delay_ms".to_string(),
+            ));
+        }
+
+        if !self.reliability.retry.backoff_multiplier.is_finite()
+            || self.reliability.retry.backoff_multiplier < 1.0
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "retry.backoff_multiplier must be finite and >= 1.0".to_string(),
+            ));
+        }
+
+        if self.encryption.require_encryption && !self.encryption.enabled {
+            return Err(crate::Error::InvalidConfiguration(
+                "encryption.require_encryption requires encryption.enabled=true".to_string(),
+            ));
+        }
+
+        if self.encryption.pending_queue.max_pending_per_peer == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "encryption.pending_queue.max_pending_per_peer must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.encryption.pending_queue.max_pending_global == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "encryption.pending_queue.max_pending_global must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.encryption.pending_queue.max_pending_global
+            < self.encryption.pending_queue.max_pending_per_peer
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "encryption.pending_queue.max_pending_global must be >= max_pending_per_peer"
+                    .to_string(),
+            ));
+        }
+
+        if self.encryption.pending_queue.pending_ttl_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "encryption.pending_queue.pending_ttl_ms must be greater than 0".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -269,6 +379,18 @@ impl ProtocolConfigBuilder {
         self
     }
 
+    /// Enables or disables strict encryption requirement.
+    pub fn require_encryption(mut self, required: bool) -> Self {
+        self.config.encryption.require_encryption = required;
+        self
+    }
+
+    /// Configures pending encrypted message queue bounds and overflow behavior.
+    pub fn pending_queue(mut self, config: PendingQueueConfig) -> Self {
+        self.config.encryption.pending_queue = config;
+        self
+    }
+
     /// Builds and validates the configuration.
     ///
     /// # Returns
@@ -327,6 +449,28 @@ mod tests {
     }
 
     #[test]
+    fn test_config_validation_retry_initial_delay_must_be_positive() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.reliability.retry.initial_delay_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_retry_delay_bounds() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.reliability.retry.initial_delay_ms = 2000;
+        config.reliability.retry.max_delay_ms = 1000;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_retry_backoff_multiplier_bounds() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.reliability.retry.backoff_multiplier = 0.5;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn test_config_builder() {
         let config = ProtocolConfig::builder("test-app", "user123")
             .ble_enabled(true)
@@ -365,6 +509,14 @@ mod tests {
         assert!(encryption.enabled);
         assert!(encryption.auto_key_exchange);
         assert!(encryption.store_pending);
+        assert!(!encryption.require_encryption);
+        assert_eq!(encryption.pending_queue.max_pending_per_peer, 64);
+        assert_eq!(encryption.pending_queue.max_pending_global, 4096);
+        assert_eq!(encryption.pending_queue.pending_ttl_ms, 120_000);
+        assert_eq!(
+            encryption.pending_queue.overflow_policy,
+            OverflowPolicy::DropOldest
+        );
     }
 
     #[test]
@@ -373,6 +525,7 @@ mod tests {
         assert!(!encryption.enabled);
         assert!(!encryption.auto_key_exchange);
         assert!(!encryption.store_pending);
+        assert!(!encryption.require_encryption);
     }
 
     #[test]
@@ -381,11 +534,57 @@ mod tests {
             .encryption_enabled(true)
             .auto_key_exchange(true)
             .store_pending_messages(false)
+            .require_encryption(true)
+            .pending_queue(PendingQueueConfig {
+                max_pending_per_peer: 32,
+                max_pending_global: 512,
+                pending_ttl_ms: 30_000,
+                overflow_policy: OverflowPolicy::DropNewest,
+            })
             .build()
             .unwrap();
 
         assert!(config.encryption.enabled);
         assert!(config.encryption.auto_key_exchange);
         assert!(!config.encryption.store_pending);
+        assert!(config.encryption.require_encryption);
+        assert_eq!(config.encryption.pending_queue.max_pending_per_peer, 32);
+        assert_eq!(config.encryption.pending_queue.max_pending_global, 512);
+        assert_eq!(config.encryption.pending_queue.pending_ttl_ms, 30_000);
+        assert_eq!(
+            config.encryption.pending_queue.overflow_policy,
+            OverflowPolicy::DropNewest
+        );
+    }
+
+    #[test]
+    fn test_config_validation_require_encryption_requires_enabled() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.encryption.enabled = false;
+        config.encryption.require_encryption = true;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_pending_queue_requires_positive_limits() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.encryption.pending_queue.max_pending_per_peer = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.encryption.pending_queue.max_pending_global = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.encryption.pending_queue.pending_ttl_ms = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_pending_queue_global_must_cover_per_peer() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.encryption.pending_queue.max_pending_per_peer = 100;
+        config.encryption.pending_queue.max_pending_global = 99;
+        assert!(config.validate().is_err());
     }
 }

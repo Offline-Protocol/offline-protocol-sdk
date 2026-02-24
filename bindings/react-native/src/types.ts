@@ -194,6 +194,34 @@ export interface EncryptionConfig {
    * Messages will be sent automatically after the session is established.
    */
   storePending?: boolean;
+  /**
+   * Require encrypted delivery (default: false).
+   * When true, send fails if encryption cannot be applied.
+   */
+  requireEncryption?: boolean;
+  /**
+   * Bounds and policy for encrypted messages received before session readiness.
+   */
+  pendingQueue?: PendingQueueConfig;
+}
+
+/**
+ * Overflow policy when pending queue reaches configured limits.
+ */
+export type OverflowPolicy = 'drop_oldest' | 'drop_newest';
+
+/**
+ * Bounded pending queue settings for pre-session encrypted messages.
+ */
+export interface PendingQueueConfig {
+  /** Per-peer pending message cap (default: 64) */
+  maxPendingPerPeer?: number;
+  /** Global pending message cap (default: 4096) */
+  maxPendingGlobal?: number;
+  /** Pending message TTL in milliseconds (default: 120000) */
+  pendingTtlMs?: number;
+  /** Overflow behavior when limits are hit (default: 'drop_oldest') */
+  overflowPolicy?: OverflowPolicy;
 }
 
 /**
@@ -500,6 +528,64 @@ export interface SecureSessionFailedEvent extends BaseEvent {
 }
 
 /**
+ * Machine-readable reason codes for welcome delivery failures.
+ */
+export type WelcomeReasonCode =
+  | 'TRANSPORT_UNAVAILABLE'
+  | 'PEER_DISCONNECTED'
+  | 'TIMEOUT'
+  | 'INTERNAL_ERROR'
+  | 'RETRY_EXHAUSTED';
+
+/**
+ * Welcome send attempted event
+ */
+export interface WelcomeSendAttemptedEvent extends BaseEvent {
+  type: 'welcome_send_attempted';
+  peer_id: string;
+  message_id: string;
+  group_id: string;
+  attempt: number;
+}
+
+/**
+ * Welcome send succeeded event
+ */
+export interface WelcomeSendSucceededEvent extends BaseEvent {
+  type: 'welcome_send_succeeded';
+  peer_id: string;
+  message_id: string;
+  group_id: string;
+  attempt: number;
+}
+
+/**
+ * Welcome send failed event
+ */
+export interface WelcomeSendFailedEvent extends BaseEvent {
+  type: 'welcome_send_failed';
+  peer_id: string;
+  message_id: string;
+  group_id: string;
+  attempt: number;
+  reason_code: WelcomeReasonCode;
+  transport_error?: string;
+  retryable: boolean;
+  next_retry_at?: number;
+}
+
+/**
+ * Welcome send expired event
+ */
+export interface WelcomeSendExpiredEvent extends BaseEvent {
+  type: 'welcome_send_expired';
+  peer_id: string;
+  message_id: string;
+  attempt: number;
+  reason_code: WelcomeReasonCode;
+}
+
+/**
  * Connection request received event
  */
 export interface ConnectionRequestReceivedEvent extends BaseEvent {
@@ -636,6 +722,10 @@ export type ProtocolEvent =
   | DiagnosticEvent
   | SecureSessionEstablishedEvent
   | SecureSessionFailedEvent
+  | WelcomeSendAttemptedEvent
+  | WelcomeSendSucceededEvent
+  | WelcomeSendFailedEvent
+  | WelcomeSendExpiredEvent
   | ConnectionRequestReceivedEvent
   | ConnectionAcceptedEvent
   | ConnectionRejectedEvent

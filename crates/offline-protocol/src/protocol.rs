@@ -1,9 +1,11 @@
 //! Main protocol engine.
 
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
-use crate::{Error, Event, EventCallback, ProtocolConfig, Result, TransportManager};
+use crate::{Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use offline_protocol_core::{AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL};
+use offline_protocol_core::{
+    AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL,
+};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{
     AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
@@ -12,8 +14,10 @@ use offline_protocol_reliability::{
 use offline_protocol_router::{DorsConfig, PathSelector, RelayManager, TransportSelector};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Internal message prefixes for protocol messages.
@@ -24,6 +28,10 @@ mod internal_prefixes {
     pub const WELCOME: &str = "__MLS_WELCOME__";
     /// Prefix for encrypted messages.
     pub const ENCRYPTED: &str = "__MLS_ENC__";
+    /// Prefix for session confirmation probe messages.
+    pub const SESSION_CONFIRM_PROBE: &str = "__MLS_CONFIRM_PROBE__";
+    /// Prefix for session confirmation acknowledgement messages.
+    pub const SESSION_CONFIRM_ACK: &str = "__MLS_CONFIRM_ACK__";
     /// Prefix for connection request messages.
     pub const CONN_REQUEST: &str = "__CONN_REQ__";
     /// Prefix for connection accepted messages.
@@ -45,6 +53,23 @@ mod internal_prefixes {
     /// Prefix for group error (relay).
     pub const GROUP_ERROR: &str = "__GROUP_ERROR__";
 }
+
+/// Retry interval for persisting session confirmation after a transient storage error.
+const CONFIRMATION_RETRY_INTERVAL_SECS: i64 = 5;
+/// Probe interval for reconciling pending sessions after restart.
+const CONFIRMATION_PROBE_INTERVAL_SECS: i64 = 5;
+/// Number of welcome retry records processed per tick.
+const WELCOME_RETRY_BATCH_SIZE: usize = 20;
+/// Hard TTL for outbound welcome lifecycle records.
+const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
+/// Jitter ratio applied to welcome retry backoff delays.
+const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
+/// Timeout waiting for explicit internet send confirmation for welcome.
+const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
+const PENDING_TTL_SPIKE_WARN_THRESHOLD: usize = 25;
+const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
+const PENDING_DROP_WARN_EVERY: u64 = 100;
+const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,10 +212,136 @@ struct PendingMessage {
     queued_at: DateTime<Utc>,
 }
 
+#[derive(Clone)]
+struct PendingDecryptMessage {
+    peer_id: String,
+    message_id: String,
+    received_at: Instant,
+    sequence: u64,
+    message: Message,
+}
+
+#[derive(Clone)]
+struct PendingDecryptEntryRef {
+    peer_id: String,
+    message_id: String,
+    sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingQueueLimit {
+    PerPeer,
+    Global,
+}
+
+impl PendingQueueLimit {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PerPeer => "per_peer",
+            Self::Global => "global",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingQueueDropReason {
+    OverflowDropOldest,
+    OverflowDropNewest,
+    TtlExpired,
+}
+
+impl PendingQueueDropReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OverflowDropOldest => "overflow_drop_oldest",
+            Self::OverflowDropNewest => "overflow_drop_newest",
+            Self::TtlExpired => "ttl_expired",
+        }
+    }
+}
+
+/// Counters and gauges for pending encrypted message queue pressure.
+#[derive(Debug, Clone, Default)]
+pub struct PendingQueueMetrics {
+    /// Total encrypted messages received before session readiness.
+    pub pending_messages_received_total: u64,
+    /// Total queued messages evicted from pending storage.
+    pub pending_messages_evicted_total: u64,
+    /// Total messages dropped due to overflow policy decisions.
+    pub pending_messages_dropped_overflow_total: u64,
+    /// Total pending messages expired due to TTL.
+    pub pending_messages_expired_total: u64,
+    /// Number of failed eviction attempts while enforcing hard bounds.
+    pub pending_messages_eviction_failures_total: u64,
+    /// Number of detected pending queue invariant violations.
+    pub pending_queue_invariant_violations_total: u64,
+    /// Current number of messages in pending queues across all peers.
+    pub pending_messages_current: usize,
+    /// Current per-peer pending queue sizes.
+    pub pending_messages_per_peer: HashMap<String, usize>,
+}
+
+/// Durable state for a peer MLS session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum SessionState {
+    Pending,
+    Confirmed,
+}
+
+impl SessionState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Confirmed => "Confirmed",
+        }
+    }
+}
+
+/// Durable lifecycle states for outbound Welcome delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum WelcomeDeliveryState {
+    Created,
+    SendAttempted,
+    Sent,
+    Failed,
+    Expired,
+}
+
+impl WelcomeDeliveryState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "Created",
+            Self::SendAttempted => "SendAttempted",
+            Self::Sent => "Sent",
+            Self::Failed => "Failed",
+            Self::Expired => "Expired",
+        }
+    }
+}
+
+/// Durable metadata for outbound Welcome reliability handling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WelcomeLifecycleRecord {
+    peer_id: String,
+    group_id: String,
+    state: WelcomeDeliveryState,
+    attempt: u32,
+    welcome_message: Message,
+    next_retry_at: Option<DateTime<Utc>>,
+    last_reason_code: Option<crate::events::WelcomeReasonCode>,
+    last_transport_error: Option<String>,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
 /// Storage key types for message persistence.
 mod storage_keys {
     /// Key type for pending encrypted messages.
     pub const PENDING_MESSAGES: &str = "pending_messages";
+    /// Key type for persisted per-peer MLS session confirmation state.
+    pub const SESSION_STATES: &str = "session_states";
+    /// Key type for persisted per-peer outbound welcome lifecycle state.
+    pub const WELCOME_LIFECYCLES: &str = "welcome_lifecycles";
     /// Key type for the Lamport clock value.
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
@@ -254,6 +405,11 @@ struct OutboxEntry {
     last_transport: Option<TransportType>,
 }
 
+enum OutboundSendPreparation {
+    Ready(String),
+    Queued(MessageId),
+}
+
 /// Main entry point for the Offline Protocol SDK.
 ///
 /// This struct combines all protocol components and provides a unified API
@@ -303,7 +459,25 @@ pub struct OfflineProtocol {
 
     /// Encrypted messages received before session was established (sender -> messages).
     /// These are queued and processed after session confirmation.
-    pending_decryption: HashMap<String, Vec<Message>>,
+    /// Invariants:
+    /// - bounded by both per-peer and global limits
+    /// - deterministic FIFO order within each peer
+    /// - monotonic TTL expiration (Instant-based)
+    pending_decryption: HashMap<String, VecDeque<PendingDecryptMessage>>,
+    /// Global insertion order index for deterministic global oldest eviction.
+    pending_decryption_global_order: VecDeque<PendingDecryptEntryRef>,
+    /// Live sequence IDs currently present in pending queues.
+    pending_decryption_live_sequences: HashSet<u64>,
+    /// Current number of pending encrypted messages across all peers.
+    pending_decryption_total: usize,
+    /// Monotonic sequence assigned on enqueue for deterministic tie-breaking.
+    pending_decryption_next_sequence: u64,
+    /// Pending queue observability counters and gauges.
+    pending_queue_metrics: PendingQueueMetrics,
+    /// Overflow hit count per peer for warning signal emission.
+    pending_peer_overflow_hits: HashMap<String, u32>,
+    /// Drop warning counters used for log-rate limiting by reason/limit.
+    pending_drop_warning_counters: HashMap<String, u64>,
 
     /// Storage for persisting pending messages (reuses MLS storage).
     /// When set, pending messages survive app crashes/restarts.
@@ -312,6 +486,15 @@ pub struct OfflineProtocol {
     /// Lamport logical clock for causal message ordering.
     /// Ticked on send, merged on receive.
     lamport_clock: LamportClock,
+
+    /// Retry schedule for peers whose confirmation persistence failed.
+    confirmation_retry_due_at: HashMap<String, DateTime<Utc>>,
+
+    /// Probe schedule for pending sessions to guarantee post-restart convergence.
+    confirmation_probe_due_at: HashMap<String, DateTime<Utc>>,
+
+    /// Outbound welcome lifecycle records keyed by peer id.
+    welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 }
 
 impl OfflineProtocol {
@@ -351,8 +534,18 @@ impl OfflineProtocol {
             key_package_sent_to: std::collections::HashSet::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             pending_decryption: HashMap::new(),
+            pending_decryption_global_order: VecDeque::new(),
+            pending_decryption_live_sequences: HashSet::new(),
+            pending_decryption_total: 0,
+            pending_decryption_next_sequence: 0,
+            pending_queue_metrics: PendingQueueMetrics::default(),
+            pending_peer_overflow_hits: HashMap::new(),
+            pending_drop_warning_counters: HashMap::new(),
             message_storage: None,
             lamport_clock: LamportClock::new(),
+            confirmation_retry_due_at: HashMap::new(),
+            confirmation_probe_due_at: HashMap::new(),
+            welcome_lifecycles: HashMap::new(),
             config,
         })
     }
@@ -375,6 +568,8 @@ impl OfflineProtocol {
         // Restore state from previous session
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
+        self.restore_session_states()?;
+        self.restore_welcome_lifecycles()?;
 
         info!(user_id = %self.config.user_id, "MLS encryption initialized with message persistence");
         Ok(())
@@ -424,6 +619,11 @@ impl OfflineProtocol {
         let mut state = lock_shared_state(&self.shared_state)?;
 
         state.state = ProtocolState::Running;
+        drop(state);
+
+        self.flush_restored_confirmed_pending_messages();
+        self.kick_pending_session_reconciliation("start");
+        self.process_welcome_retry_queue()?;
 
         Ok(())
     }
@@ -781,39 +981,15 @@ impl OfflineProtocol {
             .transpose()
             .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
 
-        // Auto-encrypt if enabled
-        let final_content = if self.should_auto_encrypt() {
-            match self.encrypt_content_for_recipient(&recipient_str, &content_str, priority) {
-                Ok(encrypted) => encrypted,
-                Err(Error::SessionPending) => {
-                    // Generate an ID without ticking the Lamport clock.
-                    // The real tick happens when flush_pending_messages re-sends
-                    // via send_message after the session is established.
-                    let message_id = MessageId::new();
-
-                    debug!(recipient = %recipient_str, message_id = %message_id, "Message queued pending session establishment");
-                    self.queue_pending_message(
-                        &recipient_str,
-                        &content_str,
-                        priority,
-                        message_id.clone(),
-                        reply_to_msg_id.clone(),
-                    );
-
-                    return Ok(message_id);
-                }
-                Err(Error::NoKeyPackage(ref r)) => {
-                    // No key package, send unencrypted if we're in a fallback mode
-                    warn!(recipient = %r, "No key package available, sending unencrypted");
-                    content_str
-                }
-                Err(e) => {
-                    warn!(error = %e, "Encryption failed, sending unencrypted");
-                    content_str
-                }
-            }
-        } else {
-            content_str
+        let final_content = match self.prepare_outbound_content(
+            &recipient_str,
+            &content_str,
+            priority,
+            reply_to_msg_id.clone(),
+            "send_message_session_pending",
+        )? {
+            OutboundSendPreparation::Ready(content) => content,
+            OutboundSendPreparation::Queued(message_id) => return Ok(message_id),
         };
 
         // Create message with potentially encrypted content
@@ -869,6 +1045,56 @@ impl OfflineProtocol {
     /// we defer encryption until the session is "confirmed". A session is confirmed when:
     /// - We join via their Welcome message (welcome-wins), OR
     /// - We successfully decrypt their first message
+    fn encrypt_content_for_recipient_strict(
+        &mut self,
+        recipient: &str,
+        content: &str,
+    ) -> Result<String> {
+        let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
+
+        let has_session = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.has_session(recipient)?
+        };
+
+        if !has_session {
+            let now_ms = Utc::now().timestamp_millis() as u64;
+            let has_valid_key_package = match self.pending_key_packages.get(recipient) {
+                Some(pkg) if now_ms < pkg.local_expires_at_ms => true,
+                Some(_) => {
+                    self.pending_key_packages.remove(recipient);
+                    false
+                }
+                None => false,
+            };
+
+            if has_valid_key_package {
+                return Err(Error::SessionPending);
+            }
+
+            return Err(Error::NoKeyPackage(recipient.to_string()));
+        }
+
+        if !self.is_session_confirmed(recipient)? {
+            return Err(Error::SessionPending);
+        }
+
+        let encrypted = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager
+                .encrypt_for_user(recipient, content.as_bytes())
+                .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
+        };
+
+        let serialized =
+            serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
+        Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
+    }
+
     fn encrypt_content_for_recipient(
         &mut self,
         recipient: &str,
@@ -900,8 +1126,7 @@ impl OfflineProtocol {
                         let manager = mls
                             .read()
                             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                        manager
-                            .import_key_package(recipient, &received_pkg.key_package_data)?;
+                        manager.import_key_package(recipient, &received_pkg.key_package_data)?;
                     }
 
                     // Create session and send welcome message
@@ -912,25 +1137,33 @@ impl OfflineProtocol {
                         manager.create_session(recipient)?
                     };
 
-                    // Send welcome as internal message
-                    self.send_welcome_message(recipient, &welcome)?;
-
                     // All operations succeeded, now safe to remove the key package
                     self.pending_key_packages.remove(recipient);
 
                     let group_id = welcome.group_id.as_str().to_string();
                     let is_session = group_id.starts_with("session:");
 
-                    debug!(recipient = %recipient, group_id = %group_id, "Created MLS session and sent welcome");
+                    if let Err(err) =
+                        self.ensure_session_state_entry(recipient, "session_created_local")
+                    {
+                        warn!(
+                            recipient = %recipient,
+                            error = %err,
+                            "Failed to persist pending session state"
+                        );
+                    }
 
-                    // Emit secure session established event
-                    if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::secure_session_established(
-                            recipient.to_string(),
-                            group_id,
-                            is_session,
-                            true, // initiated_by_local is true - we sent the Welcome
-                        ));
+                    let welcome_sent = self.send_welcome_message(recipient, &welcome)?;
+
+                    debug!(
+                        recipient = %recipient,
+                        group_id = %group_id,
+                        welcome_sent = welcome_sent,
+                        "Created MLS session and scheduled welcome lifecycle"
+                    );
+
+                    if welcome_sent {
+                        debug!(recipient = %recipient, group_id = %group_id, is_session, "Welcome synchronously sent");
                     }
 
                     // Don't encrypt immediately after creating session.
@@ -943,17 +1176,13 @@ impl OfflineProtocol {
                 }
             } else {
                 // No key package available
-                if self.config.encryption.store_pending {
-                    // Note: queue_pending_message will be called from send_message
-                    // after creating a message to get an ID
-                    return Err(Error::SessionPending);
-                }
                 return Err(Error::NoKeyPackage(recipient.to_string()));
             }
         }
 
-        // Only encrypt if session is confirmed (Welcome processed or successful decrypt)
-        if !self.confirmed_sessions.contains(recipient) {
+        // Only encrypt if session is confirmed (Welcome processed or successful decrypt).
+        // Confirmation truth comes from persisted session state.
+        if !self.is_session_confirmed(recipient)? {
             debug!(recipient = %recipient, "Session exists but not confirmed, queuing message");
             if self.config.encryption.store_pending {
                 return Err(Error::SessionPending);
@@ -967,7 +1196,9 @@ impl OfflineProtocol {
             let manager = mls
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.encrypt_for_user(recipient, content.as_bytes())?
+            manager
+                .encrypt_for_user(recipient, content.as_bytes())
+                .map_err(|_| Error::EncryptFailed("encryption operation failed".to_string()))?
         };
 
         // Serialize encrypted message with prefix
@@ -977,16 +1208,474 @@ impl OfflineProtocol {
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
-    /// Sends a welcome message to establish an MLS session.
-    fn send_welcome_message(&mut self, recipient: &str, welcome: &WelcomeMessage) -> Result<()> {
+    fn queue_message_for_session_establishment(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        priority: MessagePriority,
+        reply_to_msg_id: Option<MessageId>,
+        reconciliation_reason: &'static str,
+    ) -> Result<MessageId> {
+        // Generate an ID without ticking the Lamport clock.
+        // The real tick happens when flush_pending_messages re-sends
+        // via send_message after the session is established.
+        let message_id = MessageId::new();
+
+        debug!(
+            recipient = %recipient,
+            message_id = %message_id,
+            "Message queued pending session establishment"
+        );
+        self.queue_pending_message(
+            recipient,
+            content,
+            priority,
+            message_id.clone(),
+            reply_to_msg_id,
+        );
+        self.kick_pending_session_reconciliation(reconciliation_reason);
+        if self.has_terminal_welcome_failure(recipient) {
+            self.abort_pending_session_for_peer(
+                recipient,
+                crate::events::WelcomeReasonCode::RetryExhausted,
+            );
+            return Err(Error::Other(format!(
+                "Welcome delivery failed for {}",
+                recipient
+            )));
+        }
+
+        Ok(message_id)
+    }
+
+    fn prepare_outbound_content(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        priority: MessagePriority,
+        reply_to_msg_id: Option<MessageId>,
+        reconciliation_reason: &'static str,
+    ) -> Result<OutboundSendPreparation> {
+        if self.should_auto_encrypt() {
+            if self.config.encryption.require_encryption {
+                return self
+                    .encrypt_content_for_recipient_strict(recipient, content)
+                    .map(OutboundSendPreparation::Ready);
+            }
+
+            match self.encrypt_content_for_recipient(recipient, content, priority) {
+                Ok(encrypted) => Ok(OutboundSendPreparation::Ready(encrypted)),
+                Err(Error::NoKeyPackage(recipient_id)) => {
+                    if self.config.encryption.require_encryption
+                        || !self.config.encryption.store_pending
+                    {
+                        return Err(Error::NoKeyPackage(recipient_id));
+                    }
+
+                    let queued_id = self.queue_message_for_session_establishment(
+                        recipient,
+                        content,
+                        priority,
+                        reply_to_msg_id,
+                        reconciliation_reason,
+                    )?;
+                    Ok(OutboundSendPreparation::Queued(queued_id))
+                }
+                Err(Error::SessionPending) => {
+                    if self.config.encryption.require_encryption
+                        || !self.config.encryption.store_pending
+                    {
+                        return Err(Error::SessionPending);
+                    }
+
+                    let queued_id = self.queue_message_for_session_establishment(
+                        recipient,
+                        content,
+                        priority,
+                        reply_to_msg_id,
+                        reconciliation_reason,
+                    )?;
+                    Ok(OutboundSendPreparation::Queued(queued_id))
+                }
+                Err(e) => Err(e),
+            }
+        } else if self.config.encryption.require_encryption {
+            Err(Error::EncryptFailed(
+                "MLS encryption is required but MLS is not initialized".to_string(),
+            ))
+        } else {
+            Ok(OutboundSendPreparation::Ready(content.to_string()))
+        }
+    }
+
+    fn ensure_plaintext_control_send_allowed(&self, operation: &str) -> Result<()> {
+        if self.config.encryption.require_encryption {
+            return Err(Error::EncryptFailed(format!(
+                "{} sends plaintext control messages; disable require_encryption for bootstrap flows",
+                operation
+            )));
+        }
+        Ok(())
+    }
+
+    /// Sends or schedules sending of a welcome message to establish an MLS session.
+    ///
+    /// Returns `Ok(true)` when the welcome is delivered synchronously and `Ok(false)`
+    /// when it is deferred to retry lifecycle management.
+    fn send_welcome_message(&mut self, recipient: &str, welcome: &WelcomeMessage) -> Result<bool> {
         let serialized =
             serde_json::to_string(welcome).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::WELCOME, serialized);
-
-        // Create and send internal message with high priority
         let message = self.create_message(recipient, content, Some(MessagePriority::High), None)?;
-        let _ = self.transport_manager.send(&message);
+        let group_id = welcome.group_id.as_str().to_string();
 
+        self.upsert_welcome_lifecycle(recipient, &group_id, message, "welcome_created")?;
+        self.try_send_welcome(recipient, "welcome_initial_send")
+    }
+
+    fn map_welcome_reason_code(error: &Error) -> crate::events::WelcomeReasonCode {
+        SessionStateError::classify(error).to_welcome_reason_code()
+    }
+
+    fn can_confirm_from_source(&self, peer_id: &str, source_event: &str) -> bool {
+        if !matches!(
+            source_event,
+            "decrypt_success"
+                | "confirmation_ack_received"
+                | "confirmation_probe_received"
+                | "confirmation_retry"
+        ) {
+            return true;
+        }
+
+        match self.welcome_lifecycles.get(peer_id) {
+            Some(record) => matches!(record.state, WelcomeDeliveryState::Sent),
+            None => matches!(
+                source_event,
+                // Compatibility path for sessions created before welcome lifecycle
+                // persistence existed. Decrypt-based confirmation stays blocked
+                // until we have explicit local welcome delivery evidence.
+                "confirmation_ack_received" | "confirmation_probe_received" | "confirmation_retry"
+            ),
+        }
+    }
+
+    fn has_terminal_welcome_failure(&self, peer_id: &str) -> bool {
+        self.welcome_lifecycles
+            .get(peer_id)
+            .is_some_and(|record| matches!(record.state, WelcomeDeliveryState::Expired))
+    }
+
+    fn abort_pending_session_for_peer(
+        &mut self,
+        peer_id: &str,
+        reason: crate::events::WelcomeReasonCode,
+    ) {
+        self.pending_encrypted_messages.remove(peer_id);
+        self.clear_pending_messages_from_storage(peer_id);
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::secure_session_failed(
+                peer_id.to_string(),
+                format!("Welcome delivery failed: {}", reason.as_str()),
+            ));
+        }
+    }
+
+    fn try_send_welcome(&mut self, peer_id: &str, source_event: &str) -> Result<bool> {
+        let now = Utc::now();
+        let mut record = self
+            .welcome_lifecycles
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+
+        if matches!(record.state, WelcomeDeliveryState::Sent) {
+            return Ok(true);
+        }
+        if matches!(record.state, WelcomeDeliveryState::Expired) {
+            return Ok(false);
+        }
+
+        if record.expires_at <= now {
+            self.transition_welcome_state(peer_id, WelcomeDeliveryState::Expired, source_event)?;
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::welcome_send_expired(
+                    peer_id.to_string(),
+                    record.welcome_message.id.as_str().to_string(),
+                    record.attempt,
+                    crate::events::WelcomeReasonCode::RetryExhausted,
+                ));
+            }
+            self.abort_pending_session_for_peer(
+                peer_id,
+                crate::events::WelcomeReasonCode::RetryExhausted,
+            );
+            return Ok(false);
+        }
+
+        record.attempt = record.attempt.saturating_add(1);
+        self.welcome_lifecycles
+            .insert(peer_id.to_string(), record.clone());
+        self.persist_welcome_lifecycle_entry(&record)?;
+        self.transition_welcome_state(peer_id, WelcomeDeliveryState::SendAttempted, source_event)?;
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::welcome_send_attempted(
+                peer_id.to_string(),
+                record.welcome_message.id.as_str().to_string(),
+                record.group_id.clone(),
+                record.attempt,
+            ));
+        }
+
+        match self.transport_manager.send(&record.welcome_message) {
+            Ok(()) => {
+                let transport_used = self.transport_manager.current_transport();
+                let mut updated =
+                    self.welcome_lifecycles
+                        .get(peer_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
+                        })?;
+
+                if matches!(transport_used, Some(TransportType::Internet)) {
+                    // Internet send() only enqueues for platform polling. Keep lifecycle
+                    // non-terminal until explicit platform confirmation arrives.
+                    updated.next_retry_at = Some(
+                        Utc::now() + ChronoDuration::seconds(WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS),
+                    );
+                    updated.last_reason_code = None;
+                    updated.last_transport_error = None;
+                    self.welcome_lifecycles
+                        .insert(peer_id.to_string(), updated.clone());
+                    self.persist_welcome_lifecycle_entry(&updated)?;
+                    return Ok(false);
+                }
+
+                updated.next_retry_at = None;
+                updated.last_reason_code = None;
+                updated.last_transport_error = None;
+                self.welcome_lifecycles
+                    .insert(peer_id.to_string(), updated.clone());
+                self.persist_welcome_lifecycle_entry(&updated)?;
+                self.transition_welcome_state(peer_id, WelcomeDeliveryState::Sent, source_event)?;
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::welcome_send_succeeded(
+                        peer_id.to_string(),
+                        updated.welcome_message.id.as_str().to_string(),
+                        updated.group_id,
+                        updated.attempt,
+                    ));
+                }
+                Ok(true)
+            }
+            Err(err) => {
+                let reason = Self::map_welcome_reason_code(&err);
+                self.apply_welcome_send_failure(
+                    peer_id,
+                    reason,
+                    Some(err.to_string()),
+                    source_event,
+                )
+            }
+        }
+    }
+
+    fn apply_welcome_send_failure(
+        &mut self,
+        peer_id: &str,
+        reason: crate::events::WelcomeReasonCode,
+        transport_error: Option<String>,
+        source_event: &str,
+    ) -> Result<bool> {
+        let mut updated = self
+            .welcome_lifecycles
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+
+        if matches!(
+            updated.state,
+            WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
+        ) {
+            return Ok(matches!(updated.state, WelcomeDeliveryState::Sent));
+        }
+
+        let max_attempts = self.config.reliability.retry.max_retries.max(1);
+        let should_expire = updated.attempt >= max_attempts || updated.expires_at <= Utc::now();
+        if should_expire {
+            let terminal_reason = crate::events::WelcomeReasonCode::RetryExhausted;
+            {
+                let record = self.welcome_lifecycles.get_mut(peer_id).ok_or_else(|| {
+                    Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
+                })?;
+                record.last_reason_code = Some(terminal_reason);
+                record.last_transport_error = transport_error.clone();
+                record.next_retry_at = None;
+            }
+
+            if !matches!(updated.state, WelcomeDeliveryState::Failed) {
+                self.transition_welcome_state(peer_id, WelcomeDeliveryState::Failed, source_event)?;
+            }
+            self.transition_welcome_state(
+                peer_id,
+                WelcomeDeliveryState::Expired,
+                "welcome_retry_exhausted",
+            )?;
+
+            let expired_snapshot =
+                self.welcome_lifecycles
+                    .get(peer_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
+                    })?;
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::welcome_send_failed(
+                    peer_id.to_string(),
+                    expired_snapshot.welcome_message.id.as_str().to_string(),
+                    expired_snapshot.group_id.clone(),
+                    expired_snapshot.attempt,
+                    terminal_reason,
+                    expired_snapshot.last_transport_error.clone(),
+                    false,
+                    None,
+                ));
+                state.emit_event(Event::welcome_send_expired(
+                    peer_id.to_string(),
+                    expired_snapshot.welcome_message.id.as_str().to_string(),
+                    expired_snapshot.attempt,
+                    terminal_reason,
+                ));
+            }
+            self.abort_pending_session_for_peer(peer_id, terminal_reason);
+            return Ok(false);
+        }
+
+        let delay_ms = self.compute_welcome_retry_delay_ms(peer_id, updated.attempt);
+        let retry_at = Utc::now() + ChronoDuration::milliseconds(delay_ms as i64);
+
+        {
+            let record = self.welcome_lifecycles.get_mut(peer_id).ok_or_else(|| {
+                Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
+            })?;
+            record.last_reason_code = Some(reason);
+            record.last_transport_error = transport_error;
+            record.next_retry_at = Some(retry_at);
+        }
+
+        if !matches!(updated.state, WelcomeDeliveryState::Failed) {
+            self.transition_welcome_state(peer_id, WelcomeDeliveryState::Failed, source_event)?;
+        } else if let Some(record) = self.welcome_lifecycles.get(peer_id).cloned() {
+            self.persist_welcome_lifecycle_entry(&record)?;
+        }
+
+        updated = self
+            .welcome_lifecycles
+            .get(peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::welcome_send_failed(
+                peer_id.to_string(),
+                updated.welcome_message.id.as_str().to_string(),
+                updated.group_id,
+                updated.attempt,
+                reason,
+                updated.last_transport_error.clone(),
+                true,
+                Some(retry_at.timestamp_millis()),
+            ));
+        }
+        Ok(false)
+    }
+
+    fn maybe_emit_local_session_established(&self, peer_id: &str) {
+        let Some(record) = self.welcome_lifecycles.get(peer_id) else {
+            return;
+        };
+        if !matches!(record.state, WelcomeDeliveryState::Sent) {
+            return;
+        }
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::secure_session_established(
+                peer_id.to_string(),
+                record.group_id.clone(),
+                record.group_id.starts_with("session:"),
+                true,
+            ));
+        }
+    }
+
+    fn find_welcome_peer_by_message_id(&self, message_id: &str) -> Option<String> {
+        self.welcome_lifecycles
+            .iter()
+            .find_map(|(peer_id, record)| {
+                if record.welcome_message.id.as_str() == message_id {
+                    return Some(peer_id.clone());
+                }
+                None
+            })
+    }
+
+    /// Handles asynchronous transport confirmation for pending welcome sends.
+    pub fn on_transport_send_confirmed(&mut self, message_id: &str) -> Result<()> {
+        let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
+            return Ok(());
+        };
+
+        let updated = self
+            .welcome_lifecycles
+            .get(&peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+
+        if matches!(
+            updated.state,
+            WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
+        ) {
+            return Ok(());
+        }
+
+        {
+            let record = self.welcome_lifecycles.get_mut(&peer_id).ok_or_else(|| {
+                Error::Other(format!("Missing welcome lifecycle for {}", peer_id))
+            })?;
+            record.next_retry_at = None;
+            record.last_reason_code = None;
+            record.last_transport_error = None;
+        }
+        self.transition_welcome_state(&peer_id, WelcomeDeliveryState::Sent, "transport_confirmed")?;
+
+        let sent_snapshot = self
+            .welcome_lifecycles
+            .get(&peer_id)
+            .cloned()
+            .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::welcome_send_succeeded(
+                peer_id,
+                sent_snapshot.welcome_message.id.as_str().to_string(),
+                sent_snapshot.group_id,
+                sent_snapshot.attempt,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Handles asynchronous transport send failures for pending welcome sends.
+    pub fn on_transport_send_failed(
+        &mut self,
+        message_id: &str,
+        transport_error: Option<String>,
+    ) -> Result<()> {
+        let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
+            return Ok(());
+        };
+        let reason = crate::events::WelcomeReasonCode::TransportUnavailable;
+        let _ =
+            self.apply_welcome_send_failure(&peer_id, reason, transport_error, "transport_failed")?;
         Ok(())
     }
 
@@ -1019,30 +1708,597 @@ impl OfflineProtocol {
         debug!(recipient = %recipient, message_id = %message_id_str, "Queued message pending session establishment");
     }
 
+    fn flush_restored_confirmed_pending_messages(&mut self) {
+        let recipients: Vec<String> = self.pending_encrypted_messages.keys().cloned().collect();
+
+        for recipient in recipients {
+            match self.is_session_confirmed(&recipient) {
+                Ok(true) => {
+                    if let Err(err) = self.flush_pending_messages(&recipient) {
+                        warn!(
+                            recipient = %recipient,
+                            error = %err,
+                            "Failed to flush restored pending messages for confirmed session"
+                        );
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    warn!(
+                        recipient = %recipient,
+                        error = %err,
+                        "Failed to read session confirmation state while restoring pending messages"
+                    );
+                }
+            }
+        }
+    }
+
     /// Flushes pending messages for a recipient after session is established.
     fn flush_pending_messages(&mut self, recipient: &str) -> Result<()> {
         if let Some(pending) = self.pending_encrypted_messages.remove(recipient) {
             info!(recipient = %recipient, count = pending.len(), "Flushing pending messages");
-
-            // Clear from persistent storage since we're about to send them
-            self.clear_pending_messages_from_storage(recipient);
+            let mut remaining = Vec::new();
 
             for msg in pending {
                 // Re-attempt to send each pending message
                 // Use the stored message ID by passing reply_to_msg if it exists
                 let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
-                match self.send_message(recipient, msg.content, Some(msg.priority), reply_to_str) {
+                match self.send_message(
+                    recipient,
+                    msg.content.clone(),
+                    Some(msg.priority),
+                    reply_to_str,
+                ) {
                     Ok(id) => {
                         // Note: The new message will have a new ID, but the original ID was already returned to the caller
                         debug!(original_id = %msg.message_id, new_id = %id, "Sent pending message");
                     }
                     Err(e) => {
-                        warn!(original_id = %msg.message_id, error = %e, "Failed to send pending message")
+                        warn!(original_id = %msg.message_id, error = %e, "Failed to send pending message");
+                        remaining.push(msg);
+                    }
+                }
+            }
+
+            if remaining.is_empty() {
+                self.clear_pending_messages_from_storage(recipient);
+            } else {
+                self.persist_pending_messages_snapshot(recipient, &remaining);
+                self.pending_encrypted_messages
+                    .insert(recipient.to_string(), remaining);
+            }
+        }
+        Ok(())
+    }
+
+    fn pending_queue_ttl(&self) -> StdDuration {
+        StdDuration::from_millis(self.config.encryption.pending_queue.pending_ttl_ms)
+    }
+
+    fn update_pending_peer_gauge(&mut self, peer_id: &str) {
+        let peer_len = self
+            .pending_decryption
+            .get(peer_id)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if peer_len == 0 {
+            self.pending_queue_metrics.pending_messages_per_peer.remove(peer_id);
+        } else {
+            self.pending_queue_metrics
+                .pending_messages_per_peer
+                .insert(peer_id.to_string(), peer_len);
+        }
+    }
+
+    fn update_pending_queue_current_gauge(&mut self) {
+        self.pending_queue_metrics.pending_messages_current = self.pending_decryption_total;
+    }
+
+    fn next_pending_sequence(&mut self) -> u64 {
+        let seq = self.pending_decryption_next_sequence;
+        self.pending_decryption_next_sequence = self.pending_decryption_next_sequence.wrapping_add(1);
+        seq
+    }
+
+    fn is_pending_entry_expired(&self, entry: &PendingDecryptMessage, now: Instant) -> bool {
+        now.saturating_duration_since(entry.received_at) >= self.pending_queue_ttl()
+    }
+
+    fn cleanup_global_order_front(&mut self) {
+        while let Some(front) = self.pending_decryption_global_order.front() {
+            if self
+                .pending_decryption_live_sequences
+                .contains(&front.sequence)
+            {
+                break;
+            }
+            self.pending_decryption_global_order.pop_front();
+        }
+    }
+
+    fn remove_pending_entry_by_sequence(
+        &mut self,
+        peer_id: &str,
+        sequence: u64,
+    ) -> Option<PendingDecryptMessage> {
+        let (removed, queue_empty) = {
+            let queue = self.pending_decryption.get_mut(peer_id)?;
+            let position = queue.iter().position(|entry| entry.sequence == sequence)?;
+            let removed = queue.remove(position)?;
+            (removed, queue.is_empty())
+        };
+
+        self.pending_decryption_live_sequences.remove(&sequence);
+        self.pending_decryption_total = self.pending_decryption_total.saturating_sub(1);
+        self.update_pending_queue_current_gauge();
+
+        if queue_empty {
+            self.pending_decryption.remove(peer_id);
+        }
+        self.update_pending_peer_gauge(peer_id);
+        Some(removed)
+    }
+
+    fn record_pending_drop(
+        &mut self,
+        reason: PendingQueueDropReason,
+        limit_triggered: Option<PendingQueueLimit>,
+        peer_id: &str,
+        message_id: &str,
+    ) {
+        if matches!(
+            reason,
+            PendingQueueDropReason::OverflowDropOldest | PendingQueueDropReason::TtlExpired
+        ) {
+            self.pending_queue_metrics.pending_messages_evicted_total = self
+                .pending_queue_metrics
+                .pending_messages_evicted_total
+                .saturating_add(1);
+        }
+
+        if matches!(
+            reason,
+            PendingQueueDropReason::OverflowDropOldest | PendingQueueDropReason::OverflowDropNewest
+        ) {
+            self.pending_queue_metrics.pending_messages_dropped_overflow_total = self
+                .pending_queue_metrics
+                .pending_messages_dropped_overflow_total
+                .saturating_add(1);
+        }
+
+        if reason == PendingQueueDropReason::TtlExpired {
+            self.pending_queue_metrics.pending_messages_expired_total = self
+                .pending_queue_metrics
+                .pending_messages_expired_total
+                .saturating_add(1);
+        }
+
+        let limit_label = limit_triggered.map(PendingQueueLimit::as_str).unwrap_or("ttl");
+        let counter_key = format!("{}:{}", reason.as_str(), limit_label);
+        let drop_count = {
+            let counter = self
+                .pending_drop_warning_counters
+                .entry(counter_key)
+                .or_insert(0);
+            *counter = counter.saturating_add(1);
+            *counter
+        };
+
+        debug!(
+            reason = reason.as_str(),
+            peer_id = %peer_id,
+            message_id = %message_id,
+            queue_size = self.pending_decryption_total,
+            limit_triggered = limit_label,
+            overflow_policy = ?self.config.encryption.pending_queue.overflow_policy,
+            "Dropped pending encrypted message"
+        );
+        if drop_count == 1 || drop_count % PENDING_DROP_WARN_EVERY == 0 {
+            warn!(
+                reason = reason.as_str(),
+                limit_triggered = limit_label,
+                drops = drop_count,
+                queue_size = self.pending_decryption_total,
+                "Pending encrypted message drops continuing"
+            );
+        }
+    }
+
+    fn record_pending_eviction_failure(
+        &mut self,
+        limit_triggered: PendingQueueLimit,
+        peer_id: &str,
+        message_id: &str,
+        detail: &str,
+    ) {
+        self.pending_queue_metrics.pending_messages_eviction_failures_total = self
+            .pending_queue_metrics
+            .pending_messages_eviction_failures_total
+            .saturating_add(1);
+
+        let count = self
+            .pending_queue_metrics
+            .pending_messages_eviction_failures_total;
+        if count == 1 || count % PENDING_EVICTION_FAILURE_WARN_EVERY == 0 {
+            warn!(
+                limit_triggered = limit_triggered.as_str(),
+                peer_id = %peer_id,
+                message_id = %message_id,
+                failures = count,
+                detail = detail,
+                queue_size = self.pending_decryption_total,
+                "Pending queue eviction failure detected"
+            );
+        } else {
+            debug!(
+                limit_triggered = limit_triggered.as_str(),
+                peer_id = %peer_id,
+                message_id = %message_id,
+                detail = detail,
+                "Pending queue eviction failure detected"
+            );
+        }
+    }
+
+    fn verify_pending_queue_invariants(&mut self, context: &str) {
+        let per_peer_sum: usize = self.pending_decryption.values().map(VecDeque::len).sum();
+        let live_count = self.pending_decryption_live_sequences.len();
+        let current_gauge = self.pending_queue_metrics.pending_messages_current;
+        let total = self.pending_decryption_total;
+        let valid = per_peer_sum == total && live_count == total && current_gauge == total;
+        if valid {
+            return;
+        }
+
+        self.pending_queue_metrics.pending_queue_invariant_violations_total = self
+            .pending_queue_metrics
+            .pending_queue_invariant_violations_total
+            .saturating_add(1);
+        warn!(
+            context = context,
+            per_peer_sum,
+            live_count,
+            current_gauge,
+            total,
+            violations = self
+                .pending_queue_metrics
+                .pending_queue_invariant_violations_total,
+            "Pending queue invariant violation detected"
+        );
+    }
+
+    fn record_peer_overflow_pressure(&mut self, peer_id: &str) {
+        let hits = self
+            .pending_peer_overflow_hits
+            .entry(peer_id.to_string())
+            .or_insert(0);
+        *hits = hits.saturating_add(1);
+        if *hits % PENDING_PEER_PRESSURE_WARN_EVERY == 0 {
+            warn!(
+                peer_id = %peer_id,
+                overflow_hits = *hits,
+                per_peer_limit = self.config.encryption.pending_queue.max_pending_per_peer,
+                "Peer repeatedly hitting pending queue limits"
+            );
+        }
+    }
+
+    fn evict_global_oldest(
+        &mut self,
+        reason: PendingQueueDropReason,
+        limit_triggered: PendingQueueLimit,
+    ) -> bool {
+        self.cleanup_global_order_front();
+        let Some(entry_ref) = self.pending_decryption_global_order.pop_front() else {
+            return false;
+        };
+        if !self
+            .pending_decryption_live_sequences
+            .contains(&entry_ref.sequence)
+        {
+            return false;
+        }
+        if let Some(evicted) = self.remove_pending_entry_by_sequence(&entry_ref.peer_id, entry_ref.sequence) {
+            self.record_pending_drop(
+                reason,
+                Some(limit_triggered),
+                &evicted.peer_id,
+                &evicted.message_id,
+            );
+            return true;
+        }
+        warn!(
+            peer_id = %entry_ref.peer_id,
+            message_id = %entry_ref.message_id,
+            sequence = entry_ref.sequence,
+            "Failed to evict pending message by global order reference"
+        );
+        false
+    }
+
+    fn prune_expired_pending_for_peer(&mut self, peer_id: &str, now: Instant) -> usize {
+        let mut expired_count = 0usize;
+        let mut expired_sequences = Vec::new();
+        let mut expired_ids = Vec::new();
+        if let Some(queue) = self.pending_decryption.get(peer_id) {
+            for entry in queue {
+                if self.is_pending_entry_expired(entry, now) {
+                    expired_sequences.push(entry.sequence);
+                    expired_ids.push(entry.message_id.clone());
+                } else {
+                    break;
+                }
+            }
+        }
+
+        for (sequence, message_id) in expired_sequences.into_iter().zip(expired_ids) {
+            if self
+                .remove_pending_entry_by_sequence(peer_id, sequence)
+                .is_some()
+            {
+                self.record_pending_drop(
+                    PendingQueueDropReason::TtlExpired,
+                    None,
+                    peer_id,
+                    &message_id,
+                );
+                expired_count = expired_count.saturating_add(1);
+            }
+        }
+
+        if expired_count >= PENDING_TTL_SPIKE_WARN_THRESHOLD {
+            warn!(
+                peer_id = %peer_id,
+                expired = expired_count,
+                ttl_ms = self.config.encryption.pending_queue.pending_ttl_ms,
+                "Pending encrypted message TTL eviction spike"
+            );
+        }
+
+        self.cleanup_global_order_front();
+        expired_count
+    }
+
+    fn prune_expired_pending_global_front(&mut self, now: Instant, max_evictions: usize) -> usize {
+        let mut evicted = 0usize;
+        while evicted < max_evictions {
+            self.cleanup_global_order_front();
+            let Some(front) = self.pending_decryption_global_order.front().cloned() else {
+                break;
+            };
+            if !self
+                .pending_decryption_live_sequences
+                .contains(&front.sequence)
+            {
+                self.pending_decryption_global_order.pop_front();
+                continue;
+            }
+
+            let Some(queue) = self.pending_decryption.get(&front.peer_id) else {
+                self.pending_decryption_global_order.pop_front();
+                continue;
+            };
+            let Some(entry) = queue.iter().find(|entry| entry.sequence == front.sequence) else {
+                self.pending_decryption_global_order.pop_front();
+                continue;
+            };
+
+            if !self.is_pending_entry_expired(entry, now) {
+                break;
+            }
+
+            if let Some(expired) = self.remove_pending_entry_by_sequence(&front.peer_id, front.sequence) {
+                self.pending_decryption_global_order.pop_front();
+                self.record_pending_drop(
+                    PendingQueueDropReason::TtlExpired,
+                    None,
+                    &expired.peer_id,
+                    &expired.message_id,
+                );
+                evicted = evicted.saturating_add(1);
+            } else {
+                self.pending_decryption_global_order.pop_front();
+            }
+        }
+
+        if evicted >= PENDING_TTL_SPIKE_WARN_THRESHOLD {
+            warn!(
+                expired = evicted,
+                ttl_ms = self.config.encryption.pending_queue.pending_ttl_ms,
+                "Pending encrypted message TTL eviction spike"
+            );
+        }
+
+        evicted
+    }
+
+    fn enqueue_pending_decryption(&mut self, sender: &str, message: &Message) {
+        self.pending_queue_metrics.pending_messages_received_total = self
+            .pending_queue_metrics
+            .pending_messages_received_total
+            .saturating_add(1);
+        let incoming_message_id = message.id.as_str();
+
+        let now = Instant::now();
+        let _ = self.prune_expired_pending_for_peer(sender, now);
+        let _ = self.prune_expired_pending_global_front(now, 64);
+
+        let per_peer_limit = self.config.encryption.pending_queue.max_pending_per_peer;
+        let global_limit = self.config.encryption.pending_queue.max_pending_global;
+        let overflow_policy = self.config.encryption.pending_queue.overflow_policy;
+
+        let peer_len = self
+            .pending_decryption
+            .get(sender)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if peer_len >= per_peer_limit {
+            self.record_peer_overflow_pressure(sender);
+            match overflow_policy {
+                crate::config::OverflowPolicy::DropNewest => {
+                    self.record_pending_drop(
+                        PendingQueueDropReason::OverflowDropNewest,
+                        Some(PendingQueueLimit::PerPeer),
+                        sender,
+                        &incoming_message_id,
+                    );
+                    return;
+                }
+                crate::config::OverflowPolicy::DropOldest => {
+                    let evicted_sequence = self
+                        .pending_decryption
+                        .get(sender)
+                        .and_then(|queue| queue.front().map(|entry| entry.sequence));
+                    let mut evicted_any = false;
+                    if let Some(sequence) = evicted_sequence {
+                        if let Some(evicted) = self.remove_pending_entry_by_sequence(sender, sequence) {
+                            self.record_pending_drop(
+                                PendingQueueDropReason::OverflowDropOldest,
+                                Some(PendingQueueLimit::PerPeer),
+                                &evicted.peer_id,
+                                &evicted.message_id,
+                            );
+                            evicted_any = true;
+                        }
+                    }
+                    if !evicted_any {
+                        self.record_pending_eviction_failure(
+                            PendingQueueLimit::PerPeer,
+                            sender,
+                            &incoming_message_id,
+                            "drop_oldest failed to evict per-peer oldest",
+                        );
+                        self.record_pending_drop(
+                            PendingQueueDropReason::OverflowDropNewest,
+                            Some(PendingQueueLimit::PerPeer),
+                            sender,
+                            &incoming_message_id,
+                        );
+                        return;
                     }
                 }
             }
         }
-        Ok(())
+        let peer_len_after = self
+            .pending_decryption
+            .get(sender)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if peer_len_after >= per_peer_limit {
+            self.record_pending_eviction_failure(
+                PendingQueueLimit::PerPeer,
+                sender,
+                &incoming_message_id,
+                "per-peer limit still saturated after eviction",
+            );
+            self.record_pending_drop(
+                PendingQueueDropReason::OverflowDropNewest,
+                Some(PendingQueueLimit::PerPeer),
+                sender,
+                &incoming_message_id,
+            );
+            return;
+        }
+
+        if self.pending_decryption_total >= global_limit {
+            warn!(
+                queue_size = self.pending_decryption_total,
+                global_limit,
+                "Pending encrypted queue at global pressure limit"
+            );
+            match overflow_policy {
+                crate::config::OverflowPolicy::DropNewest => {
+                    self.record_pending_drop(
+                        PendingQueueDropReason::OverflowDropNewest,
+                        Some(PendingQueueLimit::Global),
+                        sender,
+                        &incoming_message_id,
+                    );
+                    return;
+                }
+                crate::config::OverflowPolicy::DropOldest => {
+                    while self.pending_decryption_total >= global_limit {
+                        if !self.evict_global_oldest(
+                            PendingQueueDropReason::OverflowDropOldest,
+                            PendingQueueLimit::Global,
+                        ) {
+                            self.record_pending_eviction_failure(
+                                PendingQueueLimit::Global,
+                                sender,
+                                &incoming_message_id,
+                                "drop_oldest failed to evict global oldest",
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if self.pending_decryption_total >= global_limit {
+            self.record_pending_drop(
+                PendingQueueDropReason::OverflowDropNewest,
+                Some(PendingQueueLimit::Global),
+                sender,
+                &incoming_message_id,
+            );
+            return;
+        }
+
+        let sequence = self.next_pending_sequence();
+        let entry = PendingDecryptMessage {
+            peer_id: sender.to_string(),
+            message_id: message.id.as_str().to_string(),
+            received_at: now,
+            sequence,
+            message: message.clone(),
+        };
+
+        self.pending_decryption
+            .entry(sender.to_string())
+            .or_default()
+            .push_back(entry.clone());
+        self.pending_decryption_global_order
+            .push_back(PendingDecryptEntryRef {
+                peer_id: sender.to_string(),
+                message_id: entry.message_id.clone(),
+                sequence,
+            });
+        self.pending_decryption_live_sequences.insert(sequence);
+        self.pending_decryption_total = self.pending_decryption_total.saturating_add(1);
+        self.update_pending_peer_gauge(sender);
+        self.update_pending_queue_current_gauge();
+        self.cleanup_global_order_front();
+        self.verify_pending_queue_invariants("enqueue");
+
+        let peer_len_post_insert = self
+            .pending_decryption
+            .get(sender)
+            .map(VecDeque::len)
+            .unwrap_or(0);
+        if self.pending_decryption_total > global_limit || peer_len_post_insert > per_peer_limit {
+            let _ = self.remove_pending_entry_by_sequence(sender, sequence);
+            self.record_pending_eviction_failure(
+                if self.pending_decryption_total > global_limit {
+                    PendingQueueLimit::Global
+                } else {
+                    PendingQueueLimit::PerPeer
+                },
+                sender,
+                &incoming_message_id,
+                "post-insert hard-bound check failed; rolled back enqueue",
+            );
+            self.record_pending_drop(
+                PendingQueueDropReason::OverflowDropNewest,
+                Some(if self.pending_decryption_total > global_limit {
+                    PendingQueueLimit::Global
+                } else {
+                    PendingQueueLimit::PerPeer
+                }),
+                sender,
+                &incoming_message_id,
+            );
+        }
     }
 
     /// Processes encrypted messages that were received before the session was established.
@@ -1050,6 +2306,9 @@ impl OfflineProtocol {
     /// This handles the case where encrypted messages arrive before the Welcome message.
     /// After the session is confirmed (via Welcome), we re-process these queued messages.
     fn process_pending_decryption(&mut self, sender: &str) {
+        let now = Instant::now();
+        let _ = self.prune_expired_pending_for_peer(sender, now);
+
         let messages = match self.pending_decryption.remove(sender) {
             Some(msgs) => msgs,
             None => return,
@@ -1059,14 +2318,28 @@ impl OfflineProtocol {
             return;
         }
 
-        info!(sender = %sender, count = messages.len(), "Processing pending encrypted messages");
+        let drained: Vec<PendingDecryptMessage> = messages.into_iter().collect();
+        let drained_count = drained.len();
+        for entry in &drained {
+            self.pending_decryption_live_sequences.remove(&entry.sequence);
+            self.pending_decryption_total = self.pending_decryption_total.saturating_sub(1);
+        }
+        self.update_pending_peer_gauge(sender);
+        self.update_pending_queue_current_gauge();
+        self.cleanup_global_order_front();
+        self.verify_pending_queue_invariants("process_pending_decryption_drain");
 
-        for msg in messages {
-            // Re-process each message through the internal handler
+        info!(
+            sender = %sender,
+            count = drained_count,
+            "Processing pending encrypted messages"
+        );
+
+        for entry in drained {
+            let msg = entry.message;
             if let Some(result) = self.process_internal_message(&msg) {
                 match result {
                     InternalMessageResult::Decrypted(content) => {
-                        // Successfully decrypted - add to received messages queue
                         let mut decrypted_msg = msg.clone();
                         decrypted_msg.content = content.clone();
                         decrypted_msg
@@ -1076,14 +2349,11 @@ impl OfflineProtocol {
                             .metadata
                             .insert("delayed_decrypt".to_string(), "true".to_string());
 
-                        // Advance local Lamport clock for delayed-decrypted messages
                         self.lamport_clock.merge(decrypted_msg.lamport_clock);
                         self.persist_lamport_clock();
 
                         if let Ok(mut state) = lock_shared_state(&self.shared_state) {
                             state.received_messages.push(decrypted_msg.clone());
-
-                            // Emit message received event
                             let event = Event::MessageReceived {
                                 message_id: decrypted_msg.id.as_str().to_string(),
                                 sender: decrypted_msg.sender.as_str().to_string(),
@@ -1104,7 +2374,6 @@ impl OfflineProtocol {
                         debug!(message_id = %msg.id, "Processed delayed encrypted message");
                     }
                     InternalMessageResult::Consumed => {
-                        // Message was consumed (shouldn't happen for encrypted messages, but handle it)
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
                     }
                 }
@@ -1120,10 +2389,6 @@ impl OfflineProtocol {
     ///
     /// This ensures messages survive app crashes/restarts.
     fn persist_pending_message(&self, recipient: &str, pending: &PendingMessage) {
-        let Some(storage) = &self.message_storage else {
-            return;
-        };
-
         // Load existing messages for this recipient
         let mut messages: Vec<PendingMessage> = self
             .load_pending_messages_from_storage(recipient)
@@ -1132,11 +2397,29 @@ impl OfflineProtocol {
         // Add the new message
         messages.push(pending.clone());
 
-        // Serialize and store
-        match serde_json::to_vec(&messages) {
+        self.persist_pending_messages_snapshot(recipient, &messages);
+    }
+
+    fn persist_pending_messages_snapshot(&self, recipient: &str, messages: &[PendingMessage]) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+
+        if messages.is_empty() {
+            if let Err(e) = storage.delete(storage_keys::PENDING_MESSAGES, recipient) {
+                warn!(
+                    recipient = %recipient,
+                    error = %e,
+                    "Failed to clear persisted pending messages"
+                );
+            }
+            return;
+        }
+
+        match serde_json::to_vec(messages) {
             Ok(data) => {
                 if let Err(e) = storage.store(storage_keys::PENDING_MESSAGES, recipient, &data) {
-                    warn!(recipient = %recipient, error = %e, "Failed to persist pending message");
+                    warn!(recipient = %recipient, error = %e, "Failed to persist pending messages");
                 }
             }
             Err(e) => {
@@ -1186,6 +2469,702 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// Loads a persisted session state entry (if present).
+    fn load_session_state_entry(&self, peer_id: &str) -> Result<Option<SessionState>> {
+        let Some(storage) = &self.message_storage else {
+            return Ok(None);
+        };
+
+        let Some(data) = storage
+            .load(storage_keys::SESSION_STATES, peer_id)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to load session state for {}: {}",
+                    peer_id, e
+                ))
+            })?
+        else {
+            return Ok(None);
+        };
+
+        let state = serde_json::from_slice::<SessionState>(&data).map_err(|e| {
+            Error::Other(format!(
+                "Failed to deserialize session state for {}: {}",
+                peer_id, e
+            ))
+        })?;
+
+        Ok(Some(state))
+    }
+
+    /// Persists session state atomically for a single peer key.
+    fn persist_session_state(
+        &self,
+        peer_id: &str,
+        new_state: SessionState,
+        source_event: &str,
+    ) -> Result<()> {
+        let Some(storage) = &self.message_storage else {
+            return Err(Error::MlsNotInitialized);
+        };
+
+        let encoded = serde_json::to_vec(&new_state).map_err(|e| {
+            Error::Serialization(format!("Failed to serialize session state: {}", e))
+        })?;
+        storage
+            .store(storage_keys::SESSION_STATES, peer_id, &encoded)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to persist session state for {}: {}",
+                    peer_id, e
+                ))
+            })?;
+        let persisted_data = storage
+            .load(storage_keys::SESSION_STATES, peer_id)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to verify persisted session state for {}: {}",
+                    peer_id, e
+                ))
+            })?
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "Persisted session state missing immediately after write for {}",
+                    peer_id
+                ))
+            })?;
+        let persisted_state =
+            serde_json::from_slice::<SessionState>(&persisted_data).map_err(|e| {
+                Error::Other(format!(
+                    "Failed to deserialize verified session state for {}: {}",
+                    peer_id, e
+                ))
+            })?;
+        if persisted_state != new_state {
+            return Err(Error::Other(format!(
+                "Session state verification mismatch for {}: expected {}, got {}",
+                peer_id,
+                new_state.as_str(),
+                persisted_state.as_str()
+            )));
+        }
+
+        if matches!(new_state, SessionState::Confirmed) {
+            info!(
+                event = "confirmation_persisted",
+                session_or_group_id = %peer_id,
+                previous_state = "Pending",
+                new_state = "Confirmed",
+                source_event = %source_event,
+                "confirmation_persisted"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn load_welcome_lifecycle_entry(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<WelcomeLifecycleRecord>> {
+        let Some(storage) = &self.message_storage else {
+            return Ok(None);
+        };
+
+        let Some(data) = storage
+            .load(storage_keys::WELCOME_LIFECYCLES, peer_id)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to load welcome lifecycle for {}: {}",
+                    peer_id, e
+                ))
+            })?
+        else {
+            return Ok(None);
+        };
+
+        let record = serde_json::from_slice::<WelcomeLifecycleRecord>(&data).map_err(|e| {
+            Error::Other(format!(
+                "Failed to deserialize welcome lifecycle for {}: {}",
+                peer_id, e
+            ))
+        })?;
+        Ok(Some(record))
+    }
+
+    fn persist_welcome_lifecycle_entry(&self, record: &WelcomeLifecycleRecord) -> Result<()> {
+        let Some(storage) = &self.message_storage else {
+            return Err(Error::MlsNotInitialized);
+        };
+
+        let encoded = serde_json::to_vec(record).map_err(|e| {
+            Error::Serialization(format!("Failed to serialize welcome lifecycle: {}", e))
+        })?;
+        storage
+            .store(storage_keys::WELCOME_LIFECYCLES, &record.peer_id, &encoded)
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to persist welcome lifecycle for {}: {}",
+                    record.peer_id, e
+                ))
+            })
+    }
+
+    fn restore_welcome_lifecycles(&mut self) -> Result<()> {
+        self.welcome_lifecycles.clear();
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+
+        let peers = storage
+            .list_keys(storage_keys::WELCOME_LIFECYCLES)
+            .map_err(|e| Error::Other(format!("Failed to list welcome lifecycles: {}", e)))?;
+
+        for peer_id in peers {
+            if let Some(mut record) = self.load_welcome_lifecycle_entry(&peer_id)? {
+                if matches!(
+                    record.state,
+                    WelcomeDeliveryState::Created | WelcomeDeliveryState::SendAttempted
+                ) {
+                    record.state = WelcomeDeliveryState::Failed;
+                    record.next_retry_at = Some(Utc::now());
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                    warn!(
+                        event = "welcome_lifecycle_repaired",
+                        session_or_group_id = %peer_id,
+                        repair_action = "in_flight_to_failed_retry_now",
+                        state = record.state.as_str(),
+                        attempt = record.attempt,
+                        "welcome_lifecycle_repaired"
+                    );
+                }
+                if matches!(record.state, WelcomeDeliveryState::Failed)
+                    && record.next_retry_at.is_none()
+                {
+                    if matches!(
+                        record.last_reason_code,
+                        Some(crate::events::WelcomeReasonCode::RetryExhausted)
+                    ) || record.expires_at <= Utc::now()
+                    {
+                        record.state = WelcomeDeliveryState::Expired;
+                        warn!(
+                            event = "welcome_lifecycle_repaired",
+                            session_or_group_id = %peer_id,
+                            repair_action = "failed_no_retry_to_expired",
+                            state = record.state.as_str(),
+                            attempt = record.attempt,
+                            "welcome_lifecycle_repaired"
+                        );
+                    } else {
+                        // Recover from partial-crash write where Failed was persisted
+                        // without a retry schedule.
+                        record.next_retry_at = Some(Utc::now());
+                        warn!(
+                            event = "welcome_lifecycle_repaired",
+                            session_or_group_id = %peer_id,
+                            repair_action = "failed_no_retry_to_failed_retry_now",
+                            state = record.state.as_str(),
+                            attempt = record.attempt,
+                            "welcome_lifecycle_repaired"
+                        );
+                    }
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                }
+                if matches!(
+                    record.state,
+                    WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
+                ) && record.next_retry_at.is_some()
+                {
+                    record.next_retry_at = None;
+                    self.persist_welcome_lifecycle_entry(&record)?;
+                    warn!(
+                        event = "welcome_lifecycle_repaired",
+                        session_or_group_id = %peer_id,
+                        repair_action = "terminal_clear_retry_schedule",
+                        state = record.state.as_str(),
+                        attempt = record.attempt,
+                        "welcome_lifecycle_repaired"
+                    );
+                }
+                self.welcome_lifecycles.insert(peer_id.clone(), record);
+                info!(
+                    event = "welcome_lifecycle_restored",
+                    session_or_group_id = %peer_id,
+                    "welcome_lifecycle_restored"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn can_transition_welcome_state(
+        current: WelcomeDeliveryState,
+        next: WelcomeDeliveryState,
+    ) -> bool {
+        matches!(
+            (current, next),
+            (
+                WelcomeDeliveryState::Created,
+                WelcomeDeliveryState::SendAttempted
+            ) | (WelcomeDeliveryState::Created, WelcomeDeliveryState::Expired)
+                | (
+                    WelcomeDeliveryState::SendAttempted,
+                    WelcomeDeliveryState::Sent
+                )
+                | (
+                    WelcomeDeliveryState::SendAttempted,
+                    WelcomeDeliveryState::Failed
+                )
+                | (
+                    WelcomeDeliveryState::Failed,
+                    WelcomeDeliveryState::SendAttempted
+                )
+                | (WelcomeDeliveryState::Failed, WelcomeDeliveryState::Sent)
+                | (WelcomeDeliveryState::Failed, WelcomeDeliveryState::Expired)
+        )
+    }
+
+    fn transition_welcome_state(
+        &mut self,
+        peer_id: &str,
+        next_state: WelcomeDeliveryState,
+        source_event: &str,
+    ) -> Result<()> {
+        let (previous_state, record_snapshot) = {
+            let record = self.welcome_lifecycles.get_mut(peer_id).ok_or_else(|| {
+                Error::Other(format!(
+                    "Missing welcome lifecycle for transition: {}",
+                    peer_id
+                ))
+            })?;
+
+            if record.state == next_state {
+                return Ok(());
+            }
+
+            if !Self::can_transition_welcome_state(record.state, next_state) {
+                return Err(Error::Other(format!(
+                    "Illegal welcome lifecycle transition for {}: {} -> {}",
+                    peer_id,
+                    record.state.as_str(),
+                    next_state.as_str()
+                )));
+            }
+
+            let previous = record.state;
+            record.state = next_state;
+            if matches!(
+                next_state,
+                WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
+            ) {
+                record.next_retry_at = None;
+            }
+            (previous, record.clone())
+        };
+
+        self.persist_welcome_lifecycle_entry(&record_snapshot)?;
+        info!(
+            event = "welcome_lifecycle_transition",
+            session_or_group_id = %peer_id,
+            previous_state = previous_state.as_str(),
+            new_state = next_state.as_str(),
+            source_event = %source_event,
+            attempt = record_snapshot.attempt,
+            "welcome_lifecycle_transition"
+        );
+        Ok(())
+    }
+
+    fn upsert_welcome_lifecycle(
+        &mut self,
+        peer_id: &str,
+        group_id: &str,
+        welcome_message: Message,
+        source_event: &str,
+    ) -> Result<()> {
+        if let Some(existing) = self.welcome_lifecycles.get(peer_id) {
+            if !matches!(
+                existing.state,
+                WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired
+            ) {
+                return Err(Error::Other(format!(
+                    "Refusing to overwrite active welcome lifecycle for {} in state {}",
+                    peer_id,
+                    existing.state.as_str()
+                )));
+            }
+        }
+
+        let now = Utc::now();
+        let record = WelcomeLifecycleRecord {
+            peer_id: peer_id.to_string(),
+            group_id: group_id.to_string(),
+            state: WelcomeDeliveryState::Created,
+            attempt: 0,
+            welcome_message,
+            next_retry_at: None,
+            last_reason_code: None,
+            last_transport_error: None,
+            created_at: now,
+            expires_at: now + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS),
+        };
+        self.welcome_lifecycles
+            .insert(peer_id.to_string(), record.clone());
+        self.persist_welcome_lifecycle_entry(&record)?;
+        info!(
+            event = "welcome_lifecycle_transition",
+            session_or_group_id = %peer_id,
+            previous_state = "Absent",
+            new_state = WelcomeDeliveryState::Created.as_str(),
+            source_event = %source_event,
+            attempt = 0,
+            "welcome_lifecycle_transition"
+        );
+        Ok(())
+    }
+
+    fn compute_welcome_retry_delay_ms(&self, peer_id: &str, attempt: u32) -> u64 {
+        let config = &self.config.reliability.retry;
+        let capped_attempt = attempt.saturating_sub(1);
+        let base_ms = if capped_attempt == 0 {
+            config.initial_delay_ms
+        } else {
+            let multiplier = config.backoff_multiplier.powi(capped_attempt as i32);
+            (config.initial_delay_ms as f64 * multiplier as f64) as u64
+        }
+        .min(config.max_delay_ms);
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        peer_id.hash(&mut hasher);
+        attempt.hash(&mut hasher);
+        Utc::now().timestamp_millis().hash(&mut hasher);
+        let bucket = (hasher.finish() % 10_000) as f64 / 10_000.0;
+        let jitter_factor = 1.0 + ((bucket * 2.0 - 1.0) * WELCOME_RETRY_JITTER_RATIO);
+        let jittered = (base_ms as f64 * jitter_factor).round() as i64;
+        jittered.max(1) as u64
+    }
+
+    /// Ensures a session has an explicit persisted state entry.
+    fn ensure_session_state_entry(
+        &self,
+        peer_id: &str,
+        source_event: &str,
+    ) -> Result<SessionState> {
+        let existing = self.load_session_state_entry(peer_id)?;
+        if let Some(state) = existing {
+            return Ok(state);
+        }
+
+        self.persist_session_state(peer_id, SessionState::Pending, source_event)?;
+        info!(
+            event = "session_state_transition",
+            session_or_group_id = %peer_id,
+            previous_state = "Absent",
+            new_state = "Pending",
+            source_event = %source_event,
+            "session_state_transition"
+        );
+        Ok(SessionState::Pending)
+    }
+
+    /// Returns true when persisted state marks this peer session as confirmed.
+    fn is_session_confirmed(&mut self, peer_id: &str) -> Result<bool> {
+        let persisted = self
+            .load_session_state_entry(peer_id)?
+            .unwrap_or(SessionState::Pending);
+        if matches!(persisted, SessionState::Confirmed) {
+            self.confirmed_sessions.insert(peer_id.to_string());
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn has_mls_session(&self, peer_id: &str) -> Result<bool> {
+        let Some(mls) = self.mls_manager.clone() else {
+            return Ok(false);
+        };
+
+        let manager = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        manager.has_session(peer_id).map_err(Error::Mls)
+    }
+
+    fn schedule_confirmation_retry(&mut self, peer_id: &str, source_event: &str) {
+        self.confirmation_retry_due_at
+            .insert(peer_id.to_string(), Utc::now());
+        warn!(
+            event = "session_confirmation_retry_scheduled",
+            session_or_group_id = %peer_id,
+            source_event = %source_event,
+            "session_confirmation_retry_scheduled"
+        );
+    }
+
+    fn clear_confirmation_recovery_tracking(&mut self, peer_id: &str) {
+        self.confirmation_retry_due_at.remove(peer_id);
+        self.confirmation_probe_due_at.remove(peer_id);
+    }
+
+    /// Monotonic state transition helper: Pending -> Confirmed only.
+    fn confirm_session_state(&mut self, peer_id: &str, source_event: &str) -> Result<bool> {
+        if !self.can_confirm_from_source(peer_id, source_event) {
+            warn!(
+                event = "session_confirmation_blocked",
+                session_or_group_id = %peer_id,
+                source_event = %source_event,
+                "session_confirmation_blocked"
+            );
+            return Ok(false);
+        }
+
+        let previous = self.ensure_session_state_entry(peer_id, source_event)?;
+
+        if matches!(previous, SessionState::Confirmed) {
+            self.confirmed_sessions.insert(peer_id.to_string());
+            self.clear_confirmation_recovery_tracking(peer_id);
+            info!(
+                event = "session_state_transition",
+                session_or_group_id = %peer_id,
+                previous_state = "Confirmed",
+                new_state = "Confirmed",
+                source_event = %source_event,
+                "session_state_transition"
+            );
+            return Ok(false);
+        }
+
+        // Persist first, then publish in-memory view.
+        if let Err(err) = self.persist_session_state(peer_id, SessionState::Confirmed, source_event)
+        {
+            self.schedule_confirmation_retry(peer_id, source_event);
+            return Err(err);
+        }
+
+        self.confirmed_sessions.insert(peer_id.to_string());
+        self.clear_confirmation_recovery_tracking(peer_id);
+        if source_event != "welcome_received" {
+            self.maybe_emit_local_session_established(peer_id);
+        }
+        info!(
+            event = "session_state_transition",
+            session_or_group_id = %peer_id,
+            previous_state = previous.as_str(),
+            new_state = "Confirmed",
+            source_event = %source_event,
+            "session_state_transition"
+        );
+        Ok(true)
+    }
+
+    /// Reconstructs runtime confirmation cache from persisted session states.
+    fn restore_session_states(&mut self) -> Result<()> {
+        self.confirmed_sessions.clear();
+
+        let Some(mls) = self.mls_manager.clone() else {
+            return Ok(());
+        };
+
+        let sessions = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.list_sessions()?
+        };
+
+        for peer_id in sessions {
+            let state = match self.load_session_state_entry(&peer_id)? {
+                Some(state) => state,
+                None => self.bootstrap_missing_session_state(&peer_id)?,
+            };
+            if matches!(state, SessionState::Confirmed) {
+                self.confirmed_sessions.insert(peer_id.clone());
+            }
+            info!(
+                event = "session_state_restored",
+                session_or_group_id = %peer_id,
+                previous_state = "Pending",
+                new_state = %state.as_str(),
+                source_event = "initialize_mls",
+                "session_state_restored"
+            );
+        }
+
+        Ok(())
+    }
+
+    fn bootstrap_missing_session_state(&self, peer_id: &str) -> Result<SessionState> {
+        // Legacy session records without explicit state are treated as Pending.
+        // Recovery is driven by probe/ack reconciliation, never by implicit inference.
+        let restored_state = SessionState::Pending;
+        self.persist_session_state(
+            peer_id,
+            restored_state,
+            "initialize_mls_missing_state_migration",
+        )?;
+        info!(
+            event = "session_state_transition",
+            session_or_group_id = %peer_id,
+            previous_state = "Absent",
+            new_state = %restored_state.as_str(),
+            source_event = "initialize_mls_missing_state_migration",
+            "session_state_transition"
+        );
+
+        Ok(restored_state)
+    }
+
+    fn collect_pending_session_peers(&mut self) -> Result<Vec<String>> {
+        let Some(mls) = self.mls_manager.clone() else {
+            return Ok(Vec::new());
+        };
+
+        let sessions = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.list_sessions()?
+        };
+
+        let mut pending = Vec::new();
+        for peer_id in sessions {
+            if !self.is_session_confirmed(&peer_id)? {
+                pending.push(peer_id);
+            }
+        }
+
+        Ok(pending)
+    }
+
+    fn send_session_confirmation_probe(&mut self, peer_id: &str, source_event: &str) {
+        match self.send_internal_message(
+            peer_id,
+            internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
+            MessagePriority::High,
+        ) {
+            Ok(_) => {
+                info!(
+                    event = "session_confirmation_probe_sent",
+                    session_or_group_id = %peer_id,
+                    source_event = %source_event,
+                    "session_confirmation_probe_sent"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    event = "session_confirmation_probe_failed",
+                    session_or_group_id = %peer_id,
+                    source_event = %source_event,
+                    error = %err,
+                    "session_confirmation_probe_failed"
+                );
+            }
+        }
+    }
+
+    fn kick_pending_session_reconciliation(&mut self, source_event: &str) {
+        let now = Utc::now();
+        let pending_peers = match self.collect_pending_session_peers() {
+            Ok(peers) => peers,
+            Err(err) => {
+                warn!(
+                    event = "session_confirmation_probe_scan_failed",
+                    source_event = %source_event,
+                    error = %err,
+                    "session_confirmation_probe_scan_failed"
+                );
+                return;
+            }
+        };
+
+        let pending_set: HashSet<String> = pending_peers.iter().cloned().collect();
+        self.confirmation_probe_due_at
+            .retain(|peer, _| pending_set.contains(peer));
+
+        for peer_id in pending_peers {
+            let due_at = self
+                .confirmation_probe_due_at
+                .get(&peer_id)
+                .copied()
+                .unwrap_or(now);
+            if due_at > now {
+                continue;
+            }
+
+            self.send_session_confirmation_probe(&peer_id, source_event);
+            self.confirmation_probe_due_at.insert(
+                peer_id,
+                now + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS),
+            );
+        }
+    }
+
+    fn retry_pending_session_confirmations(&mut self) {
+        let now = Utc::now();
+        let due_peers: Vec<String> = self
+            .confirmation_retry_due_at
+            .iter()
+            .filter_map(|(peer_id, due_at)| {
+                if *due_at <= now {
+                    Some(peer_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for peer_id in due_peers {
+            match self.has_mls_session(&peer_id) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.confirmation_retry_due_at.remove(&peer_id);
+                    continue;
+                }
+                Err(err) => {
+                    warn!(
+                        event = "session_confirmation_retry_scan_failed",
+                        session_or_group_id = %peer_id,
+                        error = %err,
+                        "session_confirmation_retry_scan_failed"
+                    );
+                    self.confirmation_retry_due_at.insert(
+                        peer_id,
+                        now + ChronoDuration::seconds(CONFIRMATION_RETRY_INTERVAL_SECS),
+                    );
+                    continue;
+                }
+            }
+
+            if !self.can_confirm_from_source(&peer_id, "confirmation_retry") {
+                debug!(
+                    peer_id = %peer_id,
+                    "Skipping confirmation retry until welcome delivery is sent"
+                );
+                continue;
+            }
+
+            match self.confirm_session_state(&peer_id, "confirmation_retry") {
+                Ok(_) => {
+                    let _ = self.flush_pending_messages(&peer_id);
+                    self.process_pending_decryption(&peer_id);
+                }
+                Err(err) => {
+                    warn!(
+                        event = "session_confirmation_retry_failed",
+                        session_or_group_id = %peer_id,
+                        error = %err,
+                        "session_confirmation_retry_failed"
+                    );
+                    self.confirmation_retry_due_at.insert(
+                        peer_id,
+                        now + ChronoDuration::seconds(CONFIRMATION_RETRY_INTERVAL_SECS),
+                    );
+                }
+            }
+        }
+    }
+
     // ========================================================================
     // LAMPORT CLOCK PERSISTENCE
     // ========================================================================
@@ -1213,14 +3192,11 @@ impl OfflineProtocol {
         let Some(storage) = &self.message_storage else {
             return;
         };
-        if let Ok(Some(data)) = storage.load(
-            storage_keys::LAMPORT_CLOCK,
-            storage_keys::LAMPORT_CLOCK_ID,
-        ) {
+        if let Ok(Some(data)) =
+            storage.load(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
+        {
             if data.len() == 8 {
-                let restored = u64::from_le_bytes(
-                    data.try_into().expect("verified length is 8"),
-                );
+                let restored = u64::from_le_bytes(data.try_into().expect("verified length is 8"));
                 let restored_clock = LamportClock::from_value(restored);
                 if restored_clock > self.lamport_clock {
                     self.lamport_clock = restored_clock;
@@ -1378,24 +3354,26 @@ impl OfflineProtocol {
                 };
 
                 // Send welcome message to peer
-                self.send_welcome_message(peer_id, &welcome)?;
+                let welcome_sent = self.send_welcome_message(peer_id, &welcome)?;
 
                 // All operations succeeded, now safe to remove the key package
                 self.pending_key_packages.remove(peer_id);
 
                 let group_id = welcome.group_id.as_str().to_string();
                 let is_session = group_id.starts_with("session:");
+                if let Err(err) = self.ensure_session_state_entry(peer_id, "session_created_local")
+                {
+                    warn!(
+                        peer_id = %peer_id,
+                        error = %err,
+                        "Failed to persist pending session state"
+                    );
+                }
 
                 info!(peer_id = %peer_id, group_id = %group_id, "Established secure session");
 
-                // Emit secure session established event
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::secure_session_established(
-                        peer_id.to_string(),
-                        group_id,
-                        is_session,
-                        true, // initiated_by_local is true - we sent the Welcome
-                    ));
+                if welcome_sent {
+                    debug!(peer_id = %peer_id, group_id = %group_id, is_session, "Welcome synchronously sent");
                 }
 
                 return Ok(Some(welcome));
@@ -1459,14 +3437,34 @@ impl OfflineProtocol {
             }
         }
 
+        let recipient_str: String = recipient.into();
+        let content_str: String = content.into();
+        let priority = priority.unwrap_or(MessagePriority::Medium);
+
         // Parse reply_to_msg if provided
         let reply_to_msg_id = reply_to_msg
             .map(|r| MessageId::from_str(&r.into()))
             .transpose()
             .map_err(|e| Error::Other(format!("Invalid reply_to_msg: {}", e)))?;
 
+        let final_content = match self.prepare_outbound_content(
+            &recipient_str,
+            &content_str,
+            priority,
+            reply_to_msg_id.clone(),
+            "send_message_via_transport_session_pending",
+        )? {
+            OutboundSendPreparation::Ready(content) => content,
+            OutboundSendPreparation::Queued(message_id) => return Ok(message_id),
+        };
+
         // Create message
-        let message = self.create_message(recipient, content, priority, reply_to_msg_id)?;
+        let message = self.create_message(
+            &recipient_str,
+            final_content,
+            Some(priority),
+            reply_to_msg_id,
+        )?;
         let message_id = message.id.clone();
 
         // Check for duplicates
@@ -1522,12 +3520,19 @@ impl OfflineProtocol {
     /// * `recipient` - The user ID of the recipient
     /// * `sender_name` - Display name of the sender
     /// * `key_package` - Optional MLS key package for encrypted session setup
+    ///
+    /// # Strict Encryption Behavior
+    ///
+    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
+    /// because bootstrap control messages are plaintext by design.
     pub fn send_connection_request(
         &mut self,
         recipient: &str,
         sender_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("send_connection_request")?;
+
         let payload = ConnectionRequestPayload {
             sender_name: sender_name.to_string(),
             timestamp_ms: Utc::now().timestamp_millis(),
@@ -1538,8 +3543,7 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_REQUEST, serialized);
 
-        let message_id =
-            self.send_internal_message(recipient, content, MessagePriority::High)?;
+        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
         info!(recipient = %recipient, "Sent connection request");
         Ok(message_id)
     }
@@ -1553,12 +3557,19 @@ impl OfflineProtocol {
     /// * `recipient` - The user ID of the original requester
     /// * `accepter_name` - Display name of the accepting party
     /// * `key_package` - Optional MLS key package for encrypted session setup
+    ///
+    /// # Strict Encryption Behavior
+    ///
+    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
+    /// because bootstrap control messages are plaintext by design.
     pub fn accept_connection_request(
         &mut self,
         recipient: &str,
         accepter_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("accept_connection_request")?;
+
         let payload = ConnectionAcceptedPayload {
             accepted_by_name: accepter_name.to_string(),
             timestamp_ms: Utc::now().timestamp_millis(),
@@ -1569,8 +3580,7 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_ACCEPT, serialized);
 
-        let message_id =
-            self.send_internal_message(recipient, content, MessagePriority::High)?;
+        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
         info!(recipient = %recipient, "Accepted connection request");
         Ok(message_id)
     }
@@ -1582,11 +3592,17 @@ impl OfflineProtocol {
     /// # Arguments
     ///
     /// * `recipient` - The user ID of the original requester
+    ///
+    /// # Strict Encryption Behavior
+    ///
+    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
+    /// because bootstrap control messages are plaintext by design.
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("reject_connection_request")?;
+
         let content = internal_prefixes::CONN_REJECT.to_string();
 
-        let message_id =
-            self.send_internal_message(recipient, content, MessagePriority::High)?;
+        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
         info!(recipient = %recipient, "Rejected connection request");
         Ok(message_id)
     }
@@ -1612,12 +3628,20 @@ impl OfflineProtocol {
             error!("Failed to lock shared state in receive_message");
             return None;
         };
+        let protocol_running = state.state == ProtocolState::Running;
 
         if !state.received_messages.is_empty() {
             return Some(state.received_messages.remove(0));
         }
 
         drop(state);
+
+        // Drive confirmation maintenance from receive polling as an additional
+        // liveness source when the app does not call process() on a timer.
+        if protocol_running {
+            self.retry_pending_session_confirmations();
+            self.kick_pending_session_reconciliation("receive_message_poll");
+        }
 
         loop {
             match self.transport_manager.receive() {
@@ -1743,6 +3767,105 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        if content.starts_with(internal_prefixes::SESSION_CONFIRM_PROBE) {
+            let sender_owned = sender.to_string();
+            match self.has_mls_session(&sender_owned) {
+                Ok(true) => {
+                    if !self.can_confirm_from_source(&sender_owned, "confirmation_probe_received") {
+                        debug!(
+                            sender = %sender_owned,
+                            "Skipping probe confirmation until welcome delivery is sent"
+                        );
+                    } else {
+                        match self
+                            .confirm_session_state(&sender_owned, "confirmation_probe_received")
+                        {
+                            Ok(_) => {
+                                let _ = self.flush_pending_messages(&sender_owned);
+                                self.process_pending_decryption(&sender_owned);
+                            }
+                            Err(err) => {
+                                warn!(
+                                    sender = %sender_owned,
+                                    error = %err,
+                                    "Failed to persist session confirmation after probe"
+                                );
+                            }
+                        }
+                    }
+
+                    if let Err(err) = self.send_internal_message(
+                        &sender_owned,
+                        internal_prefixes::SESSION_CONFIRM_ACK.to_string(),
+                        MessagePriority::High,
+                    ) {
+                        warn!(
+                            sender = %sender_owned,
+                            error = %err,
+                            "Failed to send session confirmation ack"
+                        );
+                    }
+                }
+                Ok(false) => {
+                    debug!(
+                        sender = %sender_owned,
+                        "Ignoring confirmation probe without local MLS session"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        sender = %sender_owned,
+                        error = %err,
+                        "Failed to validate local MLS session for confirmation probe"
+                    );
+                }
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::SESSION_CONFIRM_ACK) {
+            let sender_owned = sender.to_string();
+            match self.has_mls_session(&sender_owned) {
+                Ok(true) => {
+                    if !self.can_confirm_from_source(&sender_owned, "confirmation_ack_received") {
+                        debug!(
+                            sender = %sender_owned,
+                            "Skipping ack confirmation until welcome delivery is sent"
+                        );
+                    } else {
+                        match self.confirm_session_state(&sender_owned, "confirmation_ack_received")
+                        {
+                            Ok(_) => {
+                                let _ = self.flush_pending_messages(&sender_owned);
+                                self.process_pending_decryption(&sender_owned);
+                            }
+                            Err(err) => {
+                                warn!(
+                                    sender = %sender_owned,
+                                    error = %err,
+                                    "Failed to persist session confirmation after ack"
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(false) => {
+                    debug!(
+                        sender = %sender_owned,
+                        "Ignoring confirmation ack without local MLS session"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        sender = %sender_owned,
+                        error = %err,
+                        "Failed to validate local MLS session for confirmation ack"
+                    );
+                }
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // Handle welcome messages (session invitation)
         if content.starts_with(internal_prefixes::WELCOME) {
             let data = &content[internal_prefixes::WELCOME.len()..];
@@ -1784,23 +3907,32 @@ impl OfflineProtocol {
 
                 // Confirm session and process queued items after releasing the MLS lock
                 if should_flush {
-                    // Mark session as confirmed - we're using their session state
-                    self.confirmed_sessions.insert(sender_owned.clone());
+                    match self.confirm_session_state(&sender_owned, "welcome_received") {
+                        Ok(_) => {
+                            // Flush pending outgoing messages
+                            let _ = self.flush_pending_messages(&sender_owned);
 
-                    // Flush pending outgoing messages
-                    let _ = self.flush_pending_messages(&sender_owned);
+                            // Process any encrypted messages that arrived before the Welcome
+                            self.process_pending_decryption(&sender_owned);
 
-                    // Process any encrypted messages that arrived before the Welcome
-                    self.process_pending_decryption(&sender_owned);
-
-                    // Emit secure session established event
-                    if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::secure_session_established(
-                            sender_owned,
-                            group_id,
-                            is_session,
-                            false, // initiated_by_local is false - we received the Welcome
-                        ));
+                            // Emit secure session established event
+                            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                state.emit_event(Event::secure_session_established(
+                                    sender_owned,
+                                    group_id,
+                                    is_session,
+                                    false, // initiated_by_local is false - we received the Welcome
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                state.emit_event(Event::secure_session_failed(
+                                    sender_owned,
+                                    format!("Failed to persist confirmation: {}", e),
+                                ));
+                            }
+                        }
                     }
                 } else if let Some(reason) = error_reason {
                     // Emit secure session failed event
@@ -1841,17 +3973,47 @@ impl OfflineProtocol {
                                 DecryptResult::Empty
                             }
                             Err(e) => {
-                                let error_str = e.to_string();
-                                if error_str.contains("not found")
-                                    || error_str.contains("GroupNotFound")
-                                {
-                                    info!(sender = %sender, "Encrypted message received before session ready, queuing");
-                                    DecryptResult::SessionNotReady {
-                                        sender: sender.to_string(),
+                                let session_state_error = SessionStateError::from(&e);
+                                match session_state_error {
+                                    SessionStateError::SessionNotReady
+                                    | SessionStateError::GroupNotFound => {
+                                        info!(
+                                            sender = %sender,
+                                            error_code = session_state_error.code(),
+                                            "Encrypted message received before session ready, queuing"
+                                        );
+                                        debug!(
+                                            sender = %sender,
+                                            error = %e,
+                                            error_code = session_state_error.code(),
+                                            "Queued encrypted message due to session state classification"
+                                        );
+                                        DecryptResult::SessionNotReady {
+                                            sender: sender.to_string(),
+                                        }
                                     }
-                                } else {
-                                    warn!(error = %e, sender = %sender, "Failed to decrypt message");
-                                    DecryptResult::Failed { _error: error_str }
+                                    SessionStateError::NotInitialized => {
+                                        warn!(
+                                            sender = %sender,
+                                            error = %e,
+                                            error_code = session_state_error.code(),
+                                            "MLS decrypt attempted before initialization"
+                                        );
+                                        DecryptResult::MlsNotInitialized
+                                    }
+                                    SessionStateError::TransportFailure
+                                    | SessionStateError::CryptoFailure
+                                    | SessionStateError::Unknown => {
+                                        warn!(
+                                            sender = %sender,
+                                            error = %e,
+                                            error_code = session_state_error.code(),
+                                            "Failed to decrypt message"
+                                        );
+                                        DecryptResult::Failed {
+                                            _error: e.to_string(),
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1868,10 +4030,27 @@ impl OfflineProtocol {
                         text,
                         sender: sender_owned,
                     } => {
-                        if !self.confirmed_sessions.contains(&sender_owned) {
-                            info!(sender = %sender_owned, "Session confirmed via successful decryption");
-                            self.confirmed_sessions.insert(sender_owned.clone());
-                            let _ = self.flush_pending_messages(&sender_owned);
+                        if !self.can_confirm_from_source(&sender_owned, "decrypt_success") {
+                            debug!(
+                                sender = %sender_owned,
+                                "Skipping decrypt-based confirmation until welcome delivery is sent"
+                            );
+                            return Some(InternalMessageResult::Decrypted(text));
+                        }
+
+                        match self.confirm_session_state(&sender_owned, "decrypt_success") {
+                            Ok(true) => {
+                                info!(sender = %sender_owned, "Session confirmed via successful decryption");
+                                let _ = self.flush_pending_messages(&sender_owned);
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                warn!(
+                                    sender = %sender_owned,
+                                    error = %e,
+                                    "Failed to persist session confirmation after decrypt"
+                                );
+                            }
                         }
                         return Some(InternalMessageResult::Decrypted(text));
                     }
@@ -1883,10 +4062,7 @@ impl OfflineProtocol {
                     DecryptResult::SessionNotReady {
                         sender: sender_owned,
                     } => {
-                        self.pending_decryption
-                            .entry(sender_owned)
-                            .or_default()
-                            .push(message.clone());
+                        self.enqueue_pending_decryption(&sender_owned, message);
                         return Some(InternalMessageResult::Consumed);
                     }
                     DecryptResult::Failed { .. } => {
@@ -1957,10 +4133,7 @@ impl OfflineProtocol {
             if let Ok(payload) = serde_json::from_str::<GroupCreatedPayload>(data) {
                 info!(group_id = %payload.group_id, "Group created");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::group_created(
-                        payload.group_id,
-                        payload.name,
-                    ));
+                    state.emit_event(Event::group_created(payload.group_id, payload.name));
                 }
             } else {
                 warn!("Failed to parse GroupCreated payload");
@@ -2116,9 +4289,65 @@ impl OfflineProtocol {
         }
 
         self.process_retry_queue()?;
+        self.process_welcome_retry_queue()?;
         self.process_timed_out_acks()?;
+        self.retry_pending_session_confirmations();
+        self.kick_pending_session_reconciliation("process_tick");
+        let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.cleanup_expired_entries();
         self.check_dors_escalation()?;
+
+        Ok(())
+    }
+
+    fn process_welcome_retry_queue(&mut self) -> Result<()> {
+        let now = Utc::now();
+        let timed_out_attempts: Vec<String> = self
+            .welcome_lifecycles
+            .iter()
+            .filter_map(|(peer_id, record)| {
+                if matches!(record.state, WelcomeDeliveryState::SendAttempted)
+                    && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
+                {
+                    return Some(peer_id.clone());
+                }
+                None
+            })
+            .take(WELCOME_RETRY_BATCH_SIZE)
+            .collect();
+
+        for peer_id in timed_out_attempts {
+            let _ = self.apply_welcome_send_failure(
+                &peer_id,
+                crate::events::WelcomeReasonCode::Timeout,
+                Some("Welcome send confirmation timed out".to_string()),
+                "welcome_confirm_timeout",
+            )?;
+        }
+
+        let due_peers: Vec<String> = self
+            .welcome_lifecycles
+            .iter()
+            .filter_map(|(peer_id, record)| {
+                if matches!(record.state, WelcomeDeliveryState::Failed)
+                    && record.next_retry_at.is_some_and(|retry_at| retry_at <= now)
+                {
+                    return Some(peer_id.clone());
+                }
+                None
+            })
+            .take(WELCOME_RETRY_BATCH_SIZE)
+            .collect();
+
+        for peer_id in due_peers {
+            if let Err(err) = self.try_send_welcome(&peer_id, "welcome_retry") {
+                warn!(
+                    peer_id = %peer_id,
+                    error = %err,
+                    "Failed to process welcome retry"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -2425,6 +4654,11 @@ impl OfflineProtocol {
         self.deduplicator.stats()
     }
 
+    /// Gets pending encrypted message queue counters and gauges.
+    pub fn pending_queue_metrics(&self) -> PendingQueueMetrics {
+        self.pending_queue_metrics.clone()
+    }
+
     /// Gets the current ACK manager statistics.
     pub fn pending_ack_count(&self) -> usize {
         self.ack_manager.pending_count()
@@ -2550,13 +4784,92 @@ impl OfflineProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
+    use offline_protocol_transport::{
+        mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
+    };
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig::new("test-app", "user123")
+    }
+
+    fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
+        ProtocolConfig::new("test-app", user_id)
+    }
+
+    fn pending_test_message(sender: &str, content: &str) -> Message {
+        Message::new(
+            UserId::new(sender).unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            content,
+        )
+    }
+
+    #[derive(Debug, Clone)]
+    struct FlakyTransport {
+        transport_type: TransportType,
+        status: Arc<Mutex<TransportStatus>>,
+        sent_messages: Arc<Mutex<Vec<Message>>>,
+        failures_remaining: Arc<Mutex<u32>>,
+    }
+
+    impl FlakyTransport {
+        fn fail_first(transport_type: TransportType, failures: u32) -> Self {
+            Self {
+                transport_type,
+                status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
+                sent_messages: Arc::new(Mutex::new(Vec::new())),
+                failures_remaining: Arc::new(Mutex::new(failures)),
+            }
+        }
+    }
+
+    impl Transport for FlakyTransport {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn transport_type(&self) -> TransportType {
+            self.transport_type
+        }
+
+        fn status(&self) -> TransportStatus {
+            *self.status.lock().unwrap()
+        }
+
+        fn metrics(&self) -> TransportMetrics {
+            TransportMetrics::default()
+        }
+
+        fn send(&self, message: &Message) -> offline_protocol_transport::Result<()> {
+            let mut remaining = self.failures_remaining.lock().unwrap();
+            if *remaining > 0 {
+                *remaining = remaining.saturating_sub(1);
+                return Err(offline_protocol_transport::Error::SendFailed(
+                    "forced failure".to_string(),
+                ));
+            }
+
+            self.sent_messages.lock().unwrap().push(message.clone());
+            Ok(())
+        }
+
+        fn receive(&self) -> offline_protocol_transport::Result<Option<Message>> {
+            Ok(None)
+        }
+
+        fn start(&mut self) -> offline_protocol_transport::Result<()> {
+            *self.status.lock().unwrap() = TransportStatus::Available;
+            Ok(())
+        }
+
+        fn stop(&mut self) -> offline_protocol_transport::Result<()> {
+            *self.status.lock().unwrap() = TransportStatus::Disconnected;
+            Ok(())
+        }
     }
 
     #[test]
@@ -2905,6 +5218,14 @@ mod tests {
         assert_eq!(internal_prefixes::KEY_PACKAGE, "__MLS_KEY_PKG__");
         assert_eq!(internal_prefixes::WELCOME, "__MLS_WELCOME__");
         assert_eq!(internal_prefixes::ENCRYPTED, "__MLS_ENC__");
+        assert_eq!(
+            internal_prefixes::SESSION_CONFIRM_PROBE,
+            "__MLS_CONFIRM_PROBE__"
+        );
+        assert_eq!(
+            internal_prefixes::SESSION_CONFIRM_ACK,
+            "__MLS_CONFIRM_ACK__"
+        );
         assert_eq!(internal_prefixes::CONN_REQUEST, "__CONN_REQ__");
         assert_eq!(internal_prefixes::CONN_ACCEPT, "__CONN_ACC__");
         assert_eq!(internal_prefixes::CONN_REJECT, "__CONN_REJ__");
@@ -3289,6 +5610,265 @@ mod tests {
     }
 
     #[test]
+    fn test_require_encryption_blocks_plaintext_when_mls_uninitialized() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let result = protocol.send_message("bob", "Hello", None::<MessagePriority>, None::<String>);
+        assert!(matches!(result, Err(Error::EncryptFailed(_))));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
+    fn test_require_encryption_returns_typed_failures() {
+        // NoKeyPackage
+        let mut no_key_config = create_test_config();
+        no_key_config.encryption.require_encryption = true;
+        let mut no_key_protocol = OfflineProtocol::new(no_key_config).unwrap();
+        let mut no_key_transport = MockTransport::new(TransportType::BLE);
+        no_key_transport.start().unwrap();
+        no_key_protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(no_key_transport));
+        no_key_protocol.start().unwrap();
+        no_key_protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+        let no_key_result =
+            no_key_protocol.send_message("bob", "nkp", None::<MessagePriority>, None::<String>);
+        assert!(matches!(no_key_result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+
+        // SessionPending
+        let mut pending_config = create_test_config();
+        pending_config.encryption.require_encryption = true;
+        let mut pending_protocol = OfflineProtocol::new(pending_config).unwrap();
+        let mut pending_transport = MockTransport::new(TransportType::BLE);
+        pending_transport.start().unwrap();
+        pending_protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(pending_transport));
+        pending_protocol.start().unwrap();
+        pending_protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+        let bob_manager =
+            crate::mls::MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new()))
+                .unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = pending_protocol
+                .mls_manager
+                .as_ref()
+                .unwrap()
+                .read()
+                .unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap();
+        }
+        let pending_result = pending_protocol.send_message(
+            "bob",
+            "pending",
+            None::<MessagePriority>,
+            None::<String>,
+        );
+        assert!(matches!(pending_result, Err(Error::SessionPending)));
+
+        // EncryptFailed
+        let mut encrypt_fail_config = create_test_config();
+        encrypt_fail_config.encryption.require_encryption = true;
+        let mut encrypt_fail_protocol = OfflineProtocol::new(encrypt_fail_config).unwrap();
+        let mut encrypt_fail_transport = MockTransport::new(TransportType::BLE);
+        encrypt_fail_transport.start().unwrap();
+        encrypt_fail_protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(encrypt_fail_transport));
+        encrypt_fail_protocol.start().unwrap();
+        let encrypt_fail_result = encrypt_fail_protocol.send_message(
+            "bob",
+            "encrypt-failed",
+            None::<MessagePriority>,
+            None::<String>,
+        );
+        assert!(matches!(encrypt_fail_result, Err(Error::EncryptFailed(_))));
+    }
+
+    #[test]
+    fn test_require_encryption_failure_does_not_send_transport_payload() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let result =
+            protocol.send_message("bob", "blocked", None::<MessagePriority>, None::<String>);
+        assert!(matches!(result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
+    fn test_require_encryption_strict_mode_is_side_effect_free_on_session_pending() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let bob_manager =
+            crate::mls::MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new()))
+                .unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let result = protocol.send_message(
+            "bob",
+            "strict-no-side-effects",
+            None::<MessagePriority>,
+            None::<String>,
+        );
+
+        assert!(matches!(result, Err(Error::SessionPending)));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+        assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+        assert!(!protocol.welcome_lifecycles.contains_key("bob"));
+    }
+
+    #[test]
+    fn test_require_encryption_blocks_plaintext_for_send_message_via_transport() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+        config.encryption.store_pending = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let result = protocol.send_message_via_transport(
+            "bob",
+            "blocked-via-transport",
+            None::<MessagePriority>,
+            TransportType::BLE,
+            None::<String>,
+        );
+
+        assert!(matches!(result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
+    fn test_require_encryption_blocks_plaintext_connection_control_messages() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let request_result = protocol.send_connection_request("bob", "alice", None);
+        assert!(matches!(request_result, Err(Error::EncryptFailed(_))));
+
+        let accept_result = protocol.accept_connection_request("bob", "alice", None);
+        assert!(matches!(accept_result, Err(Error::EncryptFailed(_))));
+
+        let reject_result = protocol.reject_connection_request("bob");
+        assert!(matches!(reject_result, Err(Error::EncryptFailed(_))));
+
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
+    fn test_non_strict_mode_preserves_pending_queue_behavior() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.encryption.require_encryption = false;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let result =
+            protocol.send_message("bob", "queued", None::<MessagePriority>, None::<String>);
+        assert!(result.is_ok());
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+        assert_eq!(
+            protocol
+                .pending_encrypted_messages
+                .get("bob")
+                .map_or(0, std::vec::Vec::len),
+            1
+        );
+    }
+
+    #[test]
     fn test_confirmed_sessions_tracking() {
         let mut config = create_test_config();
         config.encryption.enabled = true;
@@ -3304,6 +5884,1512 @@ mod tests {
 
         assert!(protocol.confirmed_sessions.contains("peer123"));
         assert!(!protocol.confirmed_sessions.contains("peer456"));
+    }
+
+    #[test]
+    fn test_session_confirmation_persists_across_restart_bidirectional_send() {
+        let mut alice_config = create_test_config_for_user("alice");
+        alice_config.encryption.enabled = true;
+        alice_config.encryption.store_pending = true;
+
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let alice_storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+
+        let mut alice = OfflineProtocol::new(alice_config).unwrap();
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+
+        alice.initialize_mls(alice_storage.clone()).unwrap();
+        bob.initialize_mls(bob_storage.clone()).unwrap();
+
+        let mut alice_transport = MockTransport::new(TransportType::BLE);
+        alice_transport.start().unwrap();
+        let alice_transport_handle = alice_transport.clone();
+        alice
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice_transport));
+        alice.start().unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+        bob.start().unwrap();
+
+        // Establish session from Alice -> Bob.
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        alice.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        // This creates session + Welcome and queues plaintext until confirmed.
+        let _ = alice
+            .send_message("bob", "bootstrap", None::<MessagePriority>, None::<String>)
+            .unwrap();
+
+        let welcome_wire = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| msg.content.starts_with(internal_prefixes::WELCOME))
+            .map(|msg| msg.content)
+            .expect("expected welcome message sent by initiator");
+        let welcome_msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &welcome_wire,
+        );
+        let _ = bob.process_internal_message(&welcome_msg);
+
+        // Bob sends encrypted message; Alice decrypts and confirms.
+        bob.send_message("alice", "hello", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        let bob_sent = bob_transport_handle.sent_messages();
+        let last = bob_sent.last().unwrap().clone();
+        let _ = alice.process_internal_message(&last);
+
+        // Simulate restart on both peers with same storage.
+        let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        alice2.config.encryption.enabled = true;
+        alice2.config.encryption.store_pending = true;
+        alice2.initialize_mls(alice_storage.clone()).unwrap();
+        let mut alice2_transport = MockTransport::new(TransportType::BLE);
+        alice2_transport.start().unwrap();
+        let alice2_transport_handle = alice2_transport.clone();
+        alice2
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice2_transport));
+        alice2.start().unwrap();
+
+        let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob2.config.encryption.enabled = true;
+        bob2.config.encryption.store_pending = true;
+        bob2.initialize_mls(bob_storage.clone()).unwrap();
+        let mut bob2_transport = MockTransport::new(TransportType::BLE);
+        bob2_transport.start().unwrap();
+        let bob2_transport_handle = bob2_transport.clone();
+        bob2.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob2_transport));
+        bob2.start().unwrap();
+
+        alice2
+            .send_message(
+                "bob",
+                "after-restart-a2b",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+        bob2.send_message(
+            "alice",
+            "after-restart-b2a",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+
+        let a2b = alice2_transport_handle.sent_messages();
+        let b2a = bob2_transport_handle.sent_messages();
+        assert!(a2b
+            .last()
+            .unwrap()
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED));
+        assert!(b2a
+            .last()
+            .unwrap()
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED));
+    }
+
+    #[test]
+    fn test_confirmation_crash_recovery_before_first_send() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Build a real session in MLS storage without using protocol transport.
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("bob").unwrap();
+            bob_manager.join_session(&welcome).unwrap();
+        }
+
+        // Persist confirmation and "crash" before first outbound post-confirm send.
+        protocol.confirm_session_state("bob", "test_setup").unwrap();
+
+        let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        restarted.config.encryption.enabled = true;
+        restarted.config.encryption.store_pending = true;
+        restarted.initialize_mls(storage).unwrap();
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        let transport_handle = transport.clone();
+        restarted
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(transport));
+        restarted.start().unwrap();
+
+        restarted
+            .send_message(
+                "bob",
+                "post-crash-send",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+        let sent = transport_handle.sent_messages();
+        assert!(sent
+            .last()
+            .unwrap()
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED));
+    }
+
+    #[test]
+    fn test_confirmation_transition_idempotent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // First confirmation transitions Pending -> Confirmed.
+        assert!(protocol
+            .confirm_session_state("peer123", "idempotency_test")
+            .unwrap());
+        // Replay confirmation is a no-op and remains Confirmed.
+        assert!(!protocol
+            .confirm_session_state("peer123", "idempotency_test")
+            .unwrap());
+
+        let persisted = protocol
+            .load_session_state_entry("peer123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted, SessionState::Confirmed);
+    }
+
+    #[test]
+    fn test_pending_session_state_blocks_send_until_confirmed() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        // Provide a key package so first send creates a session and persists Pending.
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        protocol
+            .send_message("bob", "queued-1", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        protocol
+            .send_message("bob", "queued-2", None::<MessagePriority>, None::<String>)
+            .unwrap();
+
+        assert_eq!(
+            protocol
+                .pending_encrypted_messages
+                .get("bob")
+                .unwrap()
+                .len(),
+            2
+        );
+        let persisted = protocol.load_session_state_entry("bob").unwrap().unwrap();
+        assert_eq!(persisted, SessionState::Pending);
+    }
+
+    #[test]
+    fn test_welcome_send_failure_keeps_session_pending_and_emits_reason_code() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 3;
+        config.reliability.retry.initial_delay_ms = 1;
+        config.reliability.retry.max_delay_ms = 5;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+
+        let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let observed_events_clone = observed_events.clone();
+        protocol.on_event(move |event| {
+            observed_events_clone.lock().unwrap().push(event);
+        });
+
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "queued-after-welcome-fail",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Pending
+        );
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(lifecycle.state, WelcomeDeliveryState::Failed);
+        assert!(protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .is_some_and(|messages| !messages.is_empty()));
+
+        let events = observed_events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::WelcomeSendFailed {
+                reason_code: crate::events::WelcomeReasonCode::TransportUnavailable,
+                retryable: true,
+                ..
+            }
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::SecureSessionEstablished { .. })));
+    }
+
+    #[test]
+    fn test_welcome_retry_exhaustion_expires_and_aborts_pending_queue() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 1;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 10);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+
+        let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let observed_events_clone = observed_events.clone();
+        protocol.on_event(move |event| {
+            observed_events_clone.lock().unwrap().push(event);
+        });
+
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let result = protocol.send_message(
+            "bob",
+            "should-fail-terminally",
+            None::<MessagePriority>,
+            None::<String>,
+        );
+        assert!(result.is_err());
+
+        let lifecycle = protocol.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(lifecycle.state, WelcomeDeliveryState::Expired);
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Pending
+        );
+        assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+
+        let events = observed_events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::WelcomeSendExpired {
+                reason_code: crate::events::WelcomeReasonCode::RetryExhausted,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_welcome_partial_success_after_retry_reaches_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 3;
+        config.reliability.retry.initial_delay_ms = 1;
+        config.reliability.retry.max_delay_ms = 5;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "queued-after-flaky-send",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Failed
+        );
+
+        thread::sleep(Duration::from_millis(10));
+        protocol.process().unwrap();
+
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+    }
+
+    #[test]
+    fn test_welcome_internet_requires_async_confirmation_before_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "queued-over-internet",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+
+        let welcome_message_id = protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .welcome_message
+            .id
+            .as_str()
+            .to_string();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::SendAttempted
+        );
+        assert!(protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .next_retry_at
+            .is_some());
+
+        protocol
+            .on_transport_send_confirmed(&welcome_message_id)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+    }
+
+    #[test]
+    fn test_welcome_terminal_lifecycle_can_be_overwritten() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message.clone(), "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::Sent, "test_sent")
+            .unwrap();
+
+        let overwrite =
+            protocol.upsert_welcome_lifecycle("bob", "session:bob:2", message, "test_overwrite");
+        assert!(overwrite.is_ok());
+    }
+
+    #[test]
+    fn test_welcome_non_terminal_lifecycle_cannot_be_overwritten() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message.clone(), "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+
+        let overwrite =
+            protocol.upsert_welcome_lifecycle("bob", "session:bob:2", message, "test_overwrite");
+        assert!(overwrite.is_err());
+    }
+
+    #[test]
+    fn test_welcome_lifecycle_rejects_illegal_transition_from_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "welcome-sent",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+
+        let illegal = protocol.transition_welcome_state(
+            "bob",
+            WelcomeDeliveryState::Failed,
+            "test_illegal_transition",
+        );
+        assert!(illegal.is_err());
+    }
+
+    #[test]
+    fn test_welcome_restart_recovery_restores_failed_lifecycle() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+        config.reliability.retry.max_retries = 3;
+        config.reliability.retry.initial_delay_ms = 50;
+        config.reliability.retry.max_delay_ms = 50;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let mut flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        flaky.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "restart-recovery",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Failed
+        );
+
+        let mut restarted = OfflineProtocol::new(config).unwrap();
+        restarted.initialize_mls(storage).unwrap();
+        let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(restored.state, WelcomeDeliveryState::Failed);
+        assert!(restored.next_retry_at.is_some());
+    }
+
+    #[test]
+    fn test_welcome_restore_repairs_failed_without_retry_schedule() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+            .unwrap();
+
+        {
+            let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+            record.last_reason_code = Some(crate::events::WelcomeReasonCode::TransportUnavailable);
+            record.next_retry_at = None;
+        }
+        let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+        protocol
+            .persist_welcome_lifecycle_entry(&persisted)
+            .unwrap();
+
+        let mut restarted = OfflineProtocol::new(config).unwrap();
+        restarted.initialize_mls(storage).unwrap();
+        let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(restored.state, WelcomeDeliveryState::Failed);
+        assert!(restored.next_retry_at.is_some());
+    }
+
+    #[test]
+    fn test_welcome_restore_promotes_retry_exhausted_failed_to_expired() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config.clone()).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__MLS_WELCOME__dummy".to_string(),
+        );
+        protocol
+            .upsert_welcome_lifecycle("bob", "session:bob:1", message, "test_created")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_attempted")
+            .unwrap();
+        protocol
+            .transition_welcome_state("bob", WelcomeDeliveryState::Failed, "test_failed")
+            .unwrap();
+
+        {
+            let record = protocol.welcome_lifecycles.get_mut("bob").unwrap();
+            record.last_reason_code = Some(crate::events::WelcomeReasonCode::RetryExhausted);
+            record.next_retry_at = None;
+        }
+        let persisted = protocol.welcome_lifecycles.get("bob").cloned().unwrap();
+        protocol
+            .persist_welcome_lifecycle_entry(&persisted)
+            .unwrap();
+
+        let mut restarted = OfflineProtocol::new(config).unwrap();
+        restarted.initialize_mls(storage).unwrap();
+        let restored = restarted.welcome_lifecycles.get("bob").unwrap();
+        assert_eq!(restored.state, WelcomeDeliveryState::Expired);
+        assert!(restored.next_retry_at.is_none());
+    }
+
+    #[test]
+    fn test_welcome_transport_callbacks_out_of_order_converge_to_sent() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        let _ = protocol
+            .send_message(
+                "bob",
+                "queued-over-internet",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+        let welcome_message_id = protocol
+            .welcome_lifecycles
+            .get("bob")
+            .unwrap()
+            .welcome_message
+            .id
+            .as_str()
+            .to_string();
+
+        protocol
+            .on_transport_send_failed(
+                &welcome_message_id,
+                Some("Internet transport send failed".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Failed
+        );
+
+        protocol
+            .on_transport_send_confirmed(&welcome_message_id)
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+
+        protocol
+            .on_transport_send_failed(
+                &welcome_message_id,
+                Some("Late failure callback".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            protocol.welcome_lifecycles.get("bob").unwrap().state,
+            WelcomeDeliveryState::Sent
+        );
+    }
+
+    #[test]
+    fn test_restore_session_state_migrates_legacy_session_to_pending_without_inference() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Build a real session in MLS storage but leave session state absent.
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("bob").unwrap();
+            bob_manager.join_session(&welcome).unwrap();
+        }
+
+        assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+
+        let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        restarted.config.encryption.enabled = true;
+        restarted.config.encryption.store_pending = true;
+        restarted.initialize_mls(storage).unwrap();
+
+        let restored = restarted.load_session_state_entry("bob").unwrap().unwrap();
+        assert_eq!(restored, SessionState::Pending);
+    }
+
+    #[test]
+    fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Build a real session in MLS storage but leave session state absent.
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("bob").unwrap();
+            bob_manager.join_session(&welcome).unwrap();
+        }
+
+        protocol.queue_pending_message(
+            "bob",
+            "queued-before-restart",
+            MessagePriority::Medium,
+            MessageId::new(),
+            None,
+        );
+        assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+
+        let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        restarted.config.encryption.enabled = true;
+        restarted.config.encryption.store_pending = true;
+        restarted.initialize_mls(storage).unwrap();
+
+        let restored = restarted.load_session_state_entry("bob").unwrap().unwrap();
+        assert_eq!(restored, SessionState::Pending);
+        assert_eq!(
+            restarted
+                .pending_encrypted_messages
+                .get("bob")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Build a real session and mark it confirmed.
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("bob").unwrap();
+            bob_manager.join_session(&welcome).unwrap();
+        }
+        protocol.confirm_session_state("bob", "test_setup").unwrap();
+
+        protocol.queue_pending_message(
+            "bob",
+            "queued-before-crash",
+            MessagePriority::Medium,
+            MessageId::new(),
+            None,
+        );
+
+        let mut restarted = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        restarted.config.encryption.enabled = true;
+        restarted.config.encryption.store_pending = true;
+        restarted.initialize_mls(storage).unwrap();
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        let transport_handle = transport.clone();
+        restarted
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(transport));
+        restarted.start().unwrap();
+
+        assert!(!restarted.pending_encrypted_messages.contains_key("bob"));
+        assert!(restarted
+            .load_pending_messages_from_storage("bob")
+            .is_none());
+
+        let sent = transport_handle.sent_messages();
+        assert!(sent
+            .last()
+            .unwrap()
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED));
+    }
+
+    #[test]
+    fn test_pending_sessions_reconcile_via_probe_after_restart() {
+        let mut alice_config = create_test_config_for_user("alice");
+        alice_config.encryption.enabled = true;
+        alice_config.encryption.store_pending = true;
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let alice_storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+
+        // Build a durable MLS session on both peers, but leave confirmation Pending.
+        let mut alice = OfflineProtocol::new(alice_config).unwrap();
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        alice.initialize_mls(alice_storage.clone()).unwrap();
+        bob.initialize_mls(bob_storage.clone()).unwrap();
+
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let welcome = {
+            let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap()
+        };
+        {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.join_session(&welcome).unwrap();
+        }
+        alice
+            .ensure_session_state_entry("bob", "test_setup")
+            .unwrap();
+        bob.ensure_session_state_entry("alice", "test_setup")
+            .unwrap();
+
+        // Restart both peers with the same storage to simulate a crash/restart cycle.
+        let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        alice2.config.encryption.enabled = true;
+        alice2.config.encryption.store_pending = true;
+        alice2.initialize_mls(alice_storage).unwrap();
+        let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob2.config.encryption.enabled = true;
+        bob2.config.encryption.store_pending = true;
+        bob2.initialize_mls(bob_storage).unwrap();
+
+        let mut alice_transport = MockTransport::new(TransportType::BLE);
+        alice_transport.start().unwrap();
+        let alice_transport_handle = alice_transport.clone();
+        alice2
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice_transport));
+        alice2.start().unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob2.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+        bob2.start().unwrap();
+
+        let probe_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from alice");
+        let probe_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from bob");
+
+        let _ = bob2.process_internal_message(&probe_from_alice);
+        let _ = alice2.process_internal_message(&probe_from_bob);
+
+        let ack_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from alice");
+        let ack_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from bob");
+
+        let _ = bob2.process_internal_message(&ack_from_alice);
+        let _ = alice2.process_internal_message(&ack_from_bob);
+
+        assert_eq!(
+            alice2.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+        assert_eq!(
+            bob2.load_session_state_entry("alice").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+
+        alice2
+            .send_message("bob", "a2b", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        bob2.send_message("alice", "b2a", None::<MessagePriority>, None::<String>)
+            .unwrap();
+
+        assert!(alice_transport_handle
+            .sent_messages()
+            .last()
+            .unwrap()
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED));
+        assert!(bob_transport_handle
+            .sent_messages()
+            .last()
+            .unwrap()
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED));
+    }
+
+    #[test]
+    fn test_pending_sessions_reconcile_on_send_without_process_tick() {
+        let mut alice_config = create_test_config_for_user("alice");
+        alice_config.encryption.enabled = true;
+        alice_config.encryption.store_pending = true;
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let alice_storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+
+        // Build a durable MLS session on both peers, but leave confirmation Pending.
+        let mut alice = OfflineProtocol::new(alice_config).unwrap();
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        alice.initialize_mls(alice_storage.clone()).unwrap();
+        bob.initialize_mls(bob_storage.clone()).unwrap();
+
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let welcome = {
+            let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap()
+        };
+        {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.join_session(&welcome).unwrap();
+        }
+        alice
+            .ensure_session_state_entry("bob", "test_setup")
+            .unwrap();
+        bob.ensure_session_state_entry("alice", "test_setup")
+            .unwrap();
+
+        // Restart both peers with the same storage to simulate a crash/restart cycle.
+        let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        alice2.config.encryption.enabled = true;
+        alice2.config.encryption.store_pending = true;
+        alice2.initialize_mls(alice_storage).unwrap();
+        let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob2.config.encryption.enabled = true;
+        bob2.config.encryption.store_pending = true;
+        bob2.initialize_mls(bob_storage).unwrap();
+
+        let mut alice_transport = MockTransport::new(TransportType::BLE);
+        alice_transport.start().unwrap();
+        let alice_transport_handle = alice_transport.clone();
+        alice2
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice_transport));
+        alice2.start().unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob2.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+        bob2.start().unwrap();
+
+        // Simulate dropped startup probes. Force probe schedule due now so send-path
+        // reconciliation can retry without depending on process().
+        alice2
+            .confirmation_probe_due_at
+            .insert("bob".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        bob2.confirmation_probe_due_at
+            .insert("alice".to_string(), Utc::now() - ChronoDuration::seconds(1));
+
+        // Active sends while pending should queue and trigger a fresh probe attempt.
+        alice2
+            .send_message("bob", "queued-a2b", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        bob2.send_message(
+            "alice",
+            "queued-b2a",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+
+        let probe_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from alice send-path reconciliation");
+        let probe_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from bob send-path reconciliation");
+
+        let _ = bob2.process_internal_message(&probe_from_alice);
+        let _ = alice2.process_internal_message(&probe_from_bob);
+
+        let ack_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from alice");
+        let ack_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .rev()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from bob");
+
+        let _ = bob2.process_internal_message(&ack_from_alice);
+        let _ = alice2.process_internal_message(&ack_from_bob);
+
+        assert_eq!(
+            alice2.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+        assert_eq!(
+            bob2.load_session_state_entry("alice").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+        assert!(!alice2.pending_encrypted_messages.contains_key("bob"));
+        assert!(!bob2.pending_encrypted_messages.contains_key("alice"));
+
+        assert!(alice_transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED)));
+        assert!(bob_transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED)));
+    }
+
+    #[test]
+    fn test_send_message_via_transport_respects_session_confirmation_gating() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        let transport_handle = transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(transport));
+        protocol.start().unwrap();
+
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data,
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+
+        protocol
+            .send_message_via_transport(
+                "bob",
+                "forced-transport-pending",
+                None::<MessagePriority>,
+                TransportType::BLE,
+                None::<String>,
+            )
+            .unwrap();
+
+        assert_eq!(
+            protocol
+                .pending_encrypted_messages
+                .get("bob")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            protocol.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Pending
+        );
+        assert!(!transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content == "forced-transport-pending"));
+    }
+
+    #[test]
+    fn test_send_message_fails_closed_when_confirmation_state_is_corrupted() {
+        let mut config = create_test_config_for_user("alice");
+        config.encryption.enabled = true;
+        config.encryption.store_pending = true;
+
+        let storage = Arc::new(InMemoryStorage::new());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        let transport_handle = transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(transport));
+        protocol.start().unwrap();
+
+        // Create a real MLS session to ensure send path reaches confirmation-state read.
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        {
+            let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("bob").unwrap();
+            bob_manager.join_session(&welcome).unwrap();
+        }
+
+        storage
+            .store(storage_keys::SESSION_STATES, "bob", b"not-valid-json")
+            .unwrap();
+
+        let result =
+            protocol.send_message("bob", "sensitive", None::<MessagePriority>, None::<String>);
+        assert!(result.is_err());
+        assert!(!transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content == "sensitive"));
+    }
+
+    #[test]
+    fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_new_sends() {
+        let mut alice_config = create_test_config_for_user("alice");
+        alice_config.encryption.enabled = true;
+        alice_config.encryption.store_pending = true;
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+
+        let alice_storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+
+        // Build a durable MLS session on both peers, but leave confirmation Pending.
+        let mut alice = OfflineProtocol::new(alice_config).unwrap();
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        alice.initialize_mls(alice_storage.clone()).unwrap();
+        bob.initialize_mls(bob_storage.clone()).unwrap();
+
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let welcome = {
+            let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap()
+        };
+        {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.join_session(&welcome).unwrap();
+        }
+        alice
+            .ensure_session_state_entry("bob", "test_setup")
+            .unwrap();
+        bob.ensure_session_state_entry("alice", "test_setup")
+            .unwrap();
+
+        // Queue pending messages before restart so we can verify they flush
+        // after poll-driven reconciliation.
+        alice.queue_pending_message(
+            "bob",
+            "queued-before-restart-a2b",
+            MessagePriority::Medium,
+            MessageId::new(),
+            None,
+        );
+        bob.queue_pending_message(
+            "alice",
+            "queued-before-restart-b2a",
+            MessagePriority::Medium,
+            MessageId::new(),
+            None,
+        );
+
+        let mut alice2 = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        alice2.config.encryption.enabled = true;
+        alice2.config.encryption.store_pending = true;
+        alice2.initialize_mls(alice_storage).unwrap();
+        let mut bob2 = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        bob2.config.encryption.enabled = true;
+        bob2.config.encryption.store_pending = true;
+        bob2.initialize_mls(bob_storage).unwrap();
+
+        let mut alice_transport = MockTransport::new(TransportType::BLE);
+        alice_transport.start().unwrap();
+        let alice_transport_handle = alice_transport.clone();
+        alice2
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice_transport));
+        alice2.start().unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob2.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+        bob2.start().unwrap();
+
+        // Simulate dropped startup probes and force receive-poll-driven retries.
+        alice_transport_handle.clear_sent_messages();
+        bob_transport_handle.clear_sent_messages();
+        alice2
+            .confirmation_probe_due_at
+            .insert("bob".to_string(), Utc::now() - ChronoDuration::seconds(1));
+        bob2.confirmation_probe_due_at
+            .insert("alice".to_string(), Utc::now() - ChronoDuration::seconds(1));
+
+        // No process() calls and no new sends here.
+        let _ = alice2.receive_message();
+        let _ = bob2.receive_message();
+
+        let probe_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from alice receive poll");
+        let probe_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .expect("expected confirmation probe from bob receive poll");
+
+        let _ = bob2.process_internal_message(&probe_from_alice);
+        let _ = alice2.process_internal_message(&probe_from_bob);
+
+        let ack_from_alice = alice_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from alice");
+        let ack_from_bob = bob_transport_handle
+            .sent_messages()
+            .into_iter()
+            .find(|msg| {
+                msg.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_ACK)
+            })
+            .expect("expected confirmation ack from bob");
+
+        let _ = bob2.process_internal_message(&ack_from_alice);
+        let _ = alice2.process_internal_message(&ack_from_bob);
+
+        assert_eq!(
+            alice2.load_session_state_entry("bob").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+        assert_eq!(
+            bob2.load_session_state_entry("alice").unwrap().unwrap(),
+            SessionState::Confirmed
+        );
+        assert!(!alice2.pending_encrypted_messages.contains_key("bob"));
+        assert!(!bob2.pending_encrypted_messages.contains_key("alice"));
+        assert!(alice_transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED)));
+        assert!(bob_transport_handle
+            .sent_messages()
+            .iter()
+            .any(|msg| msg.content.starts_with(internal_prefixes::ENCRYPTED)));
     }
 
     #[test]
@@ -3324,11 +7410,7 @@ mod tests {
             "encrypted content",
         );
 
-        protocol
-            .pending_decryption
-            .entry("sender123".to_string())
-            .or_default()
-            .push(message);
+        protocol.enqueue_pending_decryption("sender123", &message);
 
         // Check message is queued
         assert!(protocol.pending_decryption.contains_key("sender123"));
@@ -3345,11 +7427,7 @@ mod tests {
             "more encrypted content",
         );
 
-        protocol
-            .pending_decryption
-            .entry("sender123".to_string())
-            .or_default()
-            .push(message2);
+        protocol.enqueue_pending_decryption("sender123", &message2);
 
         assert_eq!(
             protocol.pending_decryption.get("sender123").unwrap().len(),
@@ -3372,11 +7450,7 @@ mod tests {
             "encrypted content",
         );
 
-        protocol
-            .pending_decryption
-            .entry("sender123".to_string())
-            .or_default()
-            .push(message);
+        protocol.enqueue_pending_decryption("sender123", &message);
 
         assert!(!protocol.pending_decryption.is_empty());
 
@@ -3466,6 +7540,258 @@ mod tests {
 
         // Without MLS initialized, should return placeholder text
         assert!(matches!(result, Some(InternalMessageResult::Decrypted(_))));
+    }
+
+    #[test]
+    fn test_encrypted_message_group_not_found_is_queued_with_typed_classification() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol
+            .initialize_mls(Arc::new(crate::mls::InMemoryStorage::new()))
+            .unwrap();
+
+        let encrypted_content = format!(
+            "{}{{\"group_id\":\"session:sender123:user123\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"sender123\",\"timestamp_ms\":12345}}",
+            internal_prefixes::ENCRYPTED
+        );
+
+        let message = Message::new(
+            UserId::new("sender123").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &encrypted_content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        assert!(protocol.pending_decryption.contains_key("sender123"));
+        assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
+    }
+
+    #[test]
+    fn test_pending_queue_stress_memory_plateaus_with_unfinished_handshake() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 32;
+        config.encryption.pending_queue.max_pending_global = 64;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        for idx in 0..10_000 {
+            let msg = pending_test_message("sender123", &format!("encrypted-{idx}"));
+            protocol.enqueue_pending_decryption("sender123", &msg);
+        }
+
+        assert_eq!(protocol.pending_decryption_total, 32);
+        assert_eq!(protocol.pending_queue_metrics.pending_messages_current, 32);
+        assert_eq!(
+            *protocol
+                .pending_queue_metrics
+                .pending_messages_per_peer
+                .get("sender123")
+                .unwrap(),
+            32
+        );
+    }
+
+    #[test]
+    fn test_pending_queue_flood_respects_per_peer_fairness() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 3;
+        config.encryption.pending_queue.max_pending_global = 6;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        for idx in 0..100 {
+            let msg = pending_test_message("noisy-peer", &format!("noisy-{idx}"));
+            protocol.enqueue_pending_decryption("noisy-peer", &msg);
+        }
+        for idx in 0..3 {
+            let msg = pending_test_message("peer-a", &format!("a-{idx}"));
+            protocol.enqueue_pending_decryption("peer-a", &msg);
+            let msg = pending_test_message("peer-b", &format!("b-{idx}"));
+            protocol.enqueue_pending_decryption("peer-b", &msg);
+        }
+
+        assert!(protocol.pending_decryption_total <= 6);
+        assert!(
+            protocol
+                .pending_decryption
+                .get("noisy-peer")
+                .map(VecDeque::len)
+                .unwrap_or(0)
+                <= 3
+        );
+        assert!(protocol.pending_decryption.contains_key("peer-a"));
+        assert!(protocol.pending_decryption.contains_key("peer-b"));
+    }
+
+    #[test]
+    fn test_pending_queue_drop_newest_policy_enforced_for_per_peer_limit() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 1;
+        config.encryption.pending_queue.max_pending_global = 10;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let first = pending_test_message("peer-a", "first");
+        let second = pending_test_message("peer-a", "second");
+        protocol.enqueue_pending_decryption("peer-a", &first);
+        protocol.enqueue_pending_decryption("peer-a", &second);
+
+        assert_eq!(protocol.pending_decryption["peer-a"].len(), 1);
+        let queued_message = &protocol.pending_decryption["peer-a"][0];
+        assert_eq!(queued_message.message.content, "first");
+        assert_eq!(protocol.pending_queue_metrics.pending_messages_dropped_overflow_total, 1);
+    }
+
+    #[test]
+    fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 1;
+        config.encryption.pending_queue.max_pending_global = 1;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropOldest;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.enqueue_pending_decryption("peer-a", &pending_test_message("peer-a", "m1"));
+        assert_eq!(protocol.pending_decryption_total, 1);
+
+        // Simulate index drift: queue has data but global-order index is empty.
+        protocol.pending_decryption_global_order.clear();
+
+        protocol.enqueue_pending_decryption("peer-b", &pending_test_message("peer-b", "m2"));
+
+        assert_eq!(protocol.pending_decryption_total, 1);
+        assert!(!protocol.pending_decryption.contains_key("peer-b"));
+        assert!(protocol.pending_decryption.contains_key("peer-a"));
+        assert!(
+            protocol
+                .pending_queue_metrics
+                .pending_messages_eviction_failures_total
+                >= 1
+        );
+    }
+
+    #[test]
+    fn test_pending_queue_ttl_expiration_is_deterministic_and_monotonic() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 10;
+        config.encryption.pending_queue.max_pending_global = 100;
+        config.encryption.pending_queue.pending_ttl_ms = 1_000;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let old_msg = pending_test_message("sender123", "old");
+        let fresh_msg = pending_test_message("sender123", "fresh");
+        protocol.enqueue_pending_decryption("sender123", &old_msg);
+        protocol.enqueue_pending_decryption("sender123", &fresh_msg);
+
+        {
+            let queue = protocol.pending_decryption.get_mut("sender123").unwrap();
+            let old = queue.front_mut().unwrap();
+            old.received_at = Instant::now() - StdDuration::from_millis(2_000);
+        }
+
+        let expired = protocol.prune_expired_pending_for_peer("sender123", Instant::now());
+        assert_eq!(expired, 1);
+        assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
+        assert_eq!(protocol.pending_queue_metrics.pending_messages_expired_total, 1);
+    }
+
+    #[test]
+    fn test_pending_messages_replay_decrypt_after_session_readiness() {
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+
+        let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let welcome = alice_manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .and_then(|_| alice_manager.create_session("bob"))
+            .unwrap();
+
+        let encrypted = alice_manager.encrypt_for_user("bob", b"queued secret").unwrap();
+        let encrypted_payload = format!(
+            "{}{}",
+            internal_prefixes::ENCRYPTED,
+            serde_json::to_string(&encrypted).unwrap()
+        );
+        let incoming = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &encrypted_payload,
+        );
+
+        let result = bob.process_internal_message(&incoming);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        assert_eq!(bob.pending_decryption["alice"].len(), 1);
+
+        {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.join_session(&welcome).unwrap();
+        }
+
+        bob.process_pending_decryption("alice");
+        assert!(!bob.pending_decryption.contains_key("alice"));
+        let metrics = bob.pending_queue_metrics();
+        assert_eq!(metrics.pending_messages_received_total, 1);
+    }
+
+    #[test]
+    fn test_pending_queue_concurrency_multi_peer_enqueue_is_bounded() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.pending_queue.max_pending_per_peer = 8;
+        config.encryption.pending_queue.max_pending_global = 64;
+        config.encryption.pending_queue.pending_ttl_ms = 60_000;
+        let protocol = Arc::new(Mutex::new(OfflineProtocol::new(config).unwrap()));
+
+        let mut handles = Vec::new();
+        for peer_idx in 0..16 {
+            let protocol = Arc::clone(&protocol);
+            handles.push(thread::spawn(move || {
+                let peer = format!("peer-{peer_idx}");
+                for msg_idx in 0..50 {
+                    let msg = Message::new(
+                        UserId::new(&peer).unwrap(),
+                        UserId::new("user123").unwrap(),
+                        AppId::new("test-app").unwrap(),
+                        &format!("concurrent-{msg_idx}"),
+                    );
+                    protocol
+                        .lock()
+                        .unwrap()
+                        .enqueue_pending_decryption(&peer, &msg);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let protocol = protocol.lock().unwrap();
+        assert!(protocol.pending_decryption_total <= 64);
+        for queue in protocol.pending_decryption.values() {
+            assert!(queue.len() <= 8);
+        }
     }
 
     // ========================================================================
@@ -3588,10 +7914,9 @@ mod tests {
             let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
             let mut mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
-            protocol.transport_manager_mut().add_transport(
-                TransportType::BLE,
-                Box::new(mock_transport),
-            );
+            protocol
+                .transport_manager_mut()
+                .add_transport(TransportType::BLE, Box::new(mock_transport));
 
             protocol
                 .enable_message_persistence(storage.clone())
@@ -3617,10 +7942,9 @@ mod tests {
             let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
             let mut mock_transport = MockTransport::new(TransportType::BLE);
             mock_transport.start().unwrap();
-            protocol.transport_manager_mut().add_transport(
-                TransportType::BLE,
-                Box::new(mock_transport),
-            );
+            protocol
+                .transport_manager_mut()
+                .add_transport(TransportType::BLE, Box::new(mock_transport));
 
             assert_eq!(protocol.lamport_clock.value(), 0);
 
@@ -3634,7 +7958,12 @@ mod tests {
             // Next send should be 6, not 1
             protocol.start().unwrap();
             protocol
-                .send_message("bob", "after restart", None::<MessagePriority>, None::<String>)
+                .send_message(
+                    "bob",
+                    "after restart",
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
                 .unwrap();
             assert_eq!(protocol.lamport_clock.value(), 6);
         }
@@ -3858,8 +8187,14 @@ mod tests {
         let now_ms = Utc::now().timestamp_millis() as u64;
         let thirty_days_ms: u64 = 30 * 24 * 60 * 60 * 1000;
         // Should expire roughly 30 days from now (within 1 second tolerance)
-        let diff = received.local_expires_at_ms.abs_diff(now_ms + thirty_days_ms);
-        assert!(diff < 1000, "Expiry should be ~30 days from now, diff was {}", diff);
+        let diff = received
+            .local_expires_at_ms
+            .abs_diff(now_ms + thirty_days_ms);
+        assert!(
+            diff < 1000,
+            "Expiry should be ~30 days from now, diff was {}",
+            diff
+        );
     }
 
     #[test]

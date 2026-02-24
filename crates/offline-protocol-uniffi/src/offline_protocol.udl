@@ -81,6 +81,9 @@ enum ProtocolError {
     "AlreadyStarted",
     "InvalidConfiguration",
     "SendFailed",
+    "NoKeyPackage",
+    "SessionPending",
+    "EncryptFailed",
     "InvalidState",
     "MlsNotInitialized",
     "MlsError",
@@ -270,11 +273,25 @@ dictionary TransportConfig {
     boolean internet_enabled;
 };
 
+enum OverflowPolicy {
+    "DropOldest",
+    "DropNewest",
+};
+
+dictionary PendingQueueConfig {
+    u64 max_pending_per_peer;
+    u64 max_pending_global;
+    u64 pending_ttl_ms;
+    OverflowPolicy overflow_policy;
+};
+
 // Encryption configuration for automatic MLS handling
 dictionary EncryptionConfig {
     boolean enabled;
     boolean auto_key_exchange;
     boolean store_pending;
+    boolean require_encryption;
+    PendingQueueConfig pending_queue;
 };
 
 // Extended configuration for protocol creation
@@ -289,6 +306,11 @@ dictionary ProtocolConfig {
     boolean encryption_enabled;
     boolean auto_key_exchange;
     boolean store_pending;
+    boolean require_encryption;
+    u64 max_pending_per_peer;
+    u64 max_pending_global;
+    u64 pending_ttl_ms;
+    OverflowPolicy overflow_policy;
 };
 
 // Extended protocol configuration with all options
@@ -404,6 +426,8 @@ interface OfflineProtocol {
     void internet_confirm_sent(string message_id);
     
     void internet_send_failed(string message_id);
+    
+    void internet_send_failed_with_reason(string message_id, string? reason);
     
     // WiFi Direct transport operations
     [Throws=ProtocolError]

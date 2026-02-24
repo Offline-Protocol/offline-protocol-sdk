@@ -89,6 +89,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
     enabled: true,           // Messages automatically encrypted
     autoKeyExchange: true,   // Key packages exchanged on discovery
     storePending: true,      // Queue messages until session established
+    requireEncryption: false // Best-effort by default; set true for strict mode
   },
   
   dors: {
@@ -235,6 +236,27 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `enabled` | boolean | true | Enable automatic encryption/decryption |
 | `autoKeyExchange` | boolean | true | Auto-exchange key packages on peer discovery |
 | `storePending` | boolean | true | Queue messages when no session exists |
+| `requireEncryption` | boolean | false | Fail send unless encryption is applied |
+| `pendingQueue.maxPendingPerPeer` | number | 64 | Max queued encrypted pre-session messages per peer |
+| `pendingQueue.maxPendingGlobal` | number | 4096 | Max queued encrypted pre-session messages across all peers |
+| `pendingQueue.pendingTtlMs` | number | 120000 | TTL for queued encrypted pre-session messages |
+| `pendingQueue.overflowPolicy` | string | `drop_oldest` | Overflow action: `drop_oldest` or `drop_newest` |
+
+By default, encryption is best-effort. Set `requireEncryption: true` to guarantee encrypted delivery or fail the send.
+
+Pending encrypted-message queue behavior (before MLS session readiness):
+- Queueing is bounded by both per-peer and global limits.
+- TTL eviction uses monotonic clock semantics.
+- Overflow behavior is explicit and deterministic (`drop_oldest` / `drop_newest`).
+- Every overflow/TTL drop emits structured warning logs with reason and triggered limit.
+
+When strict mode is enabled:
+- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`NoKeyPackage`, `SessionPending`, `EncryptFailed`) and do not send transport payloads on failure.
+- plaintext connection-control APIs (`sendConnectionRequest`, `acceptConnectionRequest`, `rejectConnectionRequest`) are rejected to prevent accidental plaintext fallback.
+
+Rust migration note:
+- `EncryptionConfig` now includes `require_encryption` (default `false`).
+- If you construct `EncryptionConfig` with a struct literal, include `require_encryption` explicitly or use `..Default::default()`.
 
 **Example: Disable auto-encryption (use manual MLS APIs)**:
 ```typescript
@@ -252,6 +274,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
     enabled: true,
     autoKeyExchange: false,  // Must manually exchange key packages
     storePending: true,
+    requireEncryption: true, // Strict mode: encrypted delivery or error
   }
 }
 ```

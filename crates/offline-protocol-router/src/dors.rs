@@ -2226,5 +2226,4 @@ mod tests {
             "WiFi Direct must not be returned when it was removed from available_transports"
         );
     }
-
 }

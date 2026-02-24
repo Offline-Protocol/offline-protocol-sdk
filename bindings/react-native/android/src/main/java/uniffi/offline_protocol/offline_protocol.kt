@@ -850,6 +850,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_inte
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized(
@@ -1135,6 +1137,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_g
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1558,6 +1562,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 21563.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243.toShort()) {
@@ -2396,6 +2403,8 @@ public interface OfflineProtocolInterface {
     fun `internetMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
     
     fun `internetSendFailed`(`messageId`: kotlin.String)
+    
+    fun `internetSendFailedWithReason`(`messageId`: kotlin.String, `reason`: kotlin.String?)
     
     fun `internetStatusChanged`(`isConnected`: kotlin.Boolean)
     
@@ -3357,6 +3366,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(
         it,
         FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    
+    
+
+    override fun `internetSendFailedWithReason`(`messageId`: kotlin.String, `reason`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(
+        it,
+        FfiConverterString.lower(`messageId`),FfiConverterOptionalString.lower(`reason`),_status)
 }
     }
     
@@ -4523,6 +4544,10 @@ data class EncryptionConfig (
     var `autoKeyExchange`: kotlin.Boolean
     , 
     var `storePending`: kotlin.Boolean
+    , 
+    var `requireEncryption`: kotlin.Boolean
+    , 
+    var `pendingQueue`: PendingQueueConfig
     
 ){
     
@@ -4540,19 +4565,25 @@ public object FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer<Encryptio
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterTypePendingQueueConfig.read(buf),
         )
     }
 
     override fun allocationSize(value: EncryptionConfig) = (
             FfiConverterBoolean.allocationSize(value.`enabled`) +
             FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
-            FfiConverterBoolean.allocationSize(value.`storePending`)
+            FfiConverterBoolean.allocationSize(value.`storePending`) +
+            FfiConverterBoolean.allocationSize(value.`requireEncryption`) +
+            FfiConverterTypePendingQueueConfig.allocationSize(value.`pendingQueue`)
     )
 
     override fun write(value: EncryptionConfig, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`enabled`, buf)
             FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
             FfiConverterBoolean.write(value.`storePending`, buf)
+            FfiConverterBoolean.write(value.`requireEncryption`, buf)
+            FfiConverterTypePendingQueueConfig.write(value.`pendingQueue`, buf)
     }
 }
 
@@ -5176,6 +5207,52 @@ public object FfiConverterTypePeerDevice: FfiConverterRustBuffer<PeerDevice> {
 
 
 
+data class PendingQueueConfig (
+    var `maxPendingPerPeer`: kotlin.ULong
+    , 
+    var `maxPendingGlobal`: kotlin.ULong
+    , 
+    var `pendingTtlMs`: kotlin.ULong
+    , 
+    var `overflowPolicy`: OverflowPolicy
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePendingQueueConfig: FfiConverterRustBuffer<PendingQueueConfig> {
+    override fun read(buf: ByteBuffer): PendingQueueConfig {
+        return PendingQueueConfig(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterTypeOverflowPolicy.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PendingQueueConfig) = (
+            FfiConverterULong.allocationSize(value.`maxPendingPerPeer`) +
+            FfiConverterULong.allocationSize(value.`maxPendingGlobal`) +
+            FfiConverterULong.allocationSize(value.`pendingTtlMs`) +
+            FfiConverterTypeOverflowPolicy.allocationSize(value.`overflowPolicy`)
+    )
+
+    override fun write(value: PendingQueueConfig, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`maxPendingPerPeer`, buf)
+            FfiConverterULong.write(value.`maxPendingGlobal`, buf)
+            FfiConverterULong.write(value.`pendingTtlMs`, buf)
+            FfiConverterTypeOverflowPolicy.write(value.`overflowPolicy`, buf)
+    }
+}
+
+
+
 data class ProtocolConfig (
     var `appId`: kotlin.String
     , 
@@ -5196,6 +5273,16 @@ data class ProtocolConfig (
     var `autoKeyExchange`: kotlin.Boolean
     , 
     var `storePending`: kotlin.Boolean
+    , 
+    var `requireEncryption`: kotlin.Boolean
+    , 
+    var `maxPendingPerPeer`: kotlin.ULong
+    , 
+    var `maxPendingGlobal`: kotlin.ULong
+    , 
+    var `pendingTtlMs`: kotlin.ULong
+    , 
+    var `overflowPolicy`: OverflowPolicy
     
 ){
     
@@ -5220,6 +5307,11 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterTypeOverflowPolicy.read(buf),
         )
     }
 
@@ -5233,7 +5325,12 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterUByte.allocationSize(value.`initialTtl`) +
             FfiConverterBoolean.allocationSize(value.`encryptionEnabled`) +
             FfiConverterBoolean.allocationSize(value.`autoKeyExchange`) +
-            FfiConverterBoolean.allocationSize(value.`storePending`)
+            FfiConverterBoolean.allocationSize(value.`storePending`) +
+            FfiConverterBoolean.allocationSize(value.`requireEncryption`) +
+            FfiConverterULong.allocationSize(value.`maxPendingPerPeer`) +
+            FfiConverterULong.allocationSize(value.`maxPendingGlobal`) +
+            FfiConverterULong.allocationSize(value.`pendingTtlMs`) +
+            FfiConverterTypeOverflowPolicy.allocationSize(value.`overflowPolicy`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -5247,6 +5344,11 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`encryptionEnabled`, buf)
             FfiConverterBoolean.write(value.`autoKeyExchange`, buf)
             FfiConverterBoolean.write(value.`storePending`, buf)
+            FfiConverterBoolean.write(value.`requireEncryption`, buf)
+            FfiConverterULong.write(value.`maxPendingPerPeer`, buf)
+            FfiConverterULong.write(value.`maxPendingGlobal`, buf)
+            FfiConverterULong.write(value.`pendingTtlMs`, buf)
+            FfiConverterTypeOverflowPolicy.write(value.`overflowPolicy`, buf)
     }
 }
 
@@ -5774,6 +5876,36 @@ public object FfiConverterTypeMlsStorageError : FfiConverterRustBuffer<MlsStorag
 
 
 
+enum class OverflowPolicy {
+    
+    DROP_OLDEST,
+    DROP_NEWEST;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOverflowPolicy: FfiConverterRustBuffer<OverflowPolicy> {
+    override fun read(buf: ByteBuffer) = try {
+        OverflowPolicy.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: OverflowPolicy) = 4UL
+
+    override fun write(value: OverflowPolicy, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 
 sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
@@ -5784,6 +5916,12 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         class InvalidConfiguration(message: String) : ProtocolException(message)
         
         class SendFailed(message: String) : ProtocolException(message)
+        
+        class NoKeyPackage(message: String) : ProtocolException(message)
+        
+        class SessionPending(message: String) : ProtocolException(message)
+        
+        class EncryptFailed(message: String) : ProtocolException(message)
         
         class InvalidState(message: String) : ProtocolException(message)
         
@@ -5810,10 +5948,13 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             2 -> ProtocolException.AlreadyStarted(FfiConverterString.read(buf))
             3 -> ProtocolException.InvalidConfiguration(FfiConverterString.read(buf))
             4 -> ProtocolException.SendFailed(FfiConverterString.read(buf))
-            5 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
-            6 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
-            7 -> ProtocolException.MlsException(FfiConverterString.read(buf))
-            8 -> ProtocolException.Other(FfiConverterString.read(buf))
+            5 -> ProtocolException.NoKeyPackage(FfiConverterString.read(buf))
+            6 -> ProtocolException.SessionPending(FfiConverterString.read(buf))
+            7 -> ProtocolException.EncryptFailed(FfiConverterString.read(buf))
+            8 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
+            9 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
+            10 -> ProtocolException.MlsException(FfiConverterString.read(buf))
+            11 -> ProtocolException.Other(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -5841,20 +5982,32 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
                 buf.putInt(4)
                 Unit
             }
-            is ProtocolException.InvalidState -> {
+            is ProtocolException.NoKeyPackage -> {
                 buf.putInt(5)
                 Unit
             }
-            is ProtocolException.MlsNotInitialized -> {
+            is ProtocolException.SessionPending -> {
                 buf.putInt(6)
                 Unit
             }
-            is ProtocolException.MlsException -> {
+            is ProtocolException.EncryptFailed -> {
                 buf.putInt(7)
                 Unit
             }
-            is ProtocolException.Other -> {
+            is ProtocolException.InvalidState -> {
                 buf.putInt(8)
+                Unit
+            }
+            is ProtocolException.MlsNotInitialized -> {
+                buf.putInt(9)
+                Unit
+            }
+            is ProtocolException.MlsException -> {
+                buf.putInt(10)
+                Unit
+            }
+            is ProtocolException.Other -> {
+                buf.putInt(11)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

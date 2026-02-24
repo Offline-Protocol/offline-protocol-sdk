@@ -698,6 +698,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func internetSendFailed(messageId: String) 
     
+    func internetSendFailedWithReason(messageId: String, reason: String?) 
+    
     func internetStatusChanged(isConnected: Bool) throws 
     
     func isMlsInitialized()  -> Bool
@@ -1351,6 +1353,15 @@ open func internetSendFailed(messageId: String)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
+open func internetSendFailedWithReason(messageId: String, reason: String?)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterOptionString.lower(reason),$0
     )
 }
 }
@@ -2288,13 +2299,17 @@ public struct EncryptionConfig: Equatable, Hashable {
     public var enabled: Bool
     public var autoKeyExchange: Bool
     public var storePending: Bool
+    public var requireEncryption: Bool
+    public var pendingQueue: PendingQueueConfig
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool) {
+    public init(enabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, pendingQueue: PendingQueueConfig) {
         self.enabled = enabled
         self.autoKeyExchange = autoKeyExchange
         self.storePending = storePending
+        self.requireEncryption = requireEncryption
+        self.pendingQueue = pendingQueue
     }
 
     
@@ -2313,7 +2328,9 @@ public struct FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer {
             try EncryptionConfig(
                 enabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
-                storePending: FfiConverterBool.read(from: &buf)
+                storePending: FfiConverterBool.read(from: &buf), 
+                requireEncryption: FfiConverterBool.read(from: &buf), 
+                pendingQueue: FfiConverterTypePendingQueueConfig.read(from: &buf)
         )
     }
 
@@ -2321,6 +2338,8 @@ public struct FfiConverterTypeEncryptionConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.enabled, into: &buf)
         FfiConverterBool.write(value.autoKeyExchange, into: &buf)
         FfiConverterBool.write(value.storePending, into: &buf)
+        FfiConverterBool.write(value.requireEncryption, into: &buf)
+        FfiConverterTypePendingQueueConfig.write(value.pendingQueue, into: &buf)
     }
 }
 
@@ -3136,6 +3155,66 @@ public func FfiConverterTypePeerDevice_lower(_ value: PeerDevice) -> RustBuffer 
 }
 
 
+public struct PendingQueueConfig: Equatable, Hashable {
+    public var maxPendingPerPeer: UInt64
+    public var maxPendingGlobal: UInt64
+    public var pendingTtlMs: UInt64
+    public var overflowPolicy: OverflowPolicy
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy) {
+        self.maxPendingPerPeer = maxPendingPerPeer
+        self.maxPendingGlobal = maxPendingGlobal
+        self.pendingTtlMs = pendingTtlMs
+        self.overflowPolicy = overflowPolicy
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension PendingQueueConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingQueueConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingQueueConfig {
+        return
+            try PendingQueueConfig(
+                maxPendingPerPeer: FfiConverterUInt64.read(from: &buf), 
+                maxPendingGlobal: FfiConverterUInt64.read(from: &buf), 
+                pendingTtlMs: FfiConverterUInt64.read(from: &buf), 
+                overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PendingQueueConfig, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.maxPendingPerPeer, into: &buf)
+        FfiConverterUInt64.write(value.maxPendingGlobal, into: &buf)
+        FfiConverterUInt64.write(value.pendingTtlMs, into: &buf)
+        FfiConverterTypeOverflowPolicy.write(value.overflowPolicy, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingQueueConfig_lift(_ buf: RustBuffer) throws -> PendingQueueConfig {
+    return try FfiConverterTypePendingQueueConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingQueueConfig_lower(_ value: PendingQueueConfig) -> RustBuffer {
+    return FfiConverterTypePendingQueueConfig.lower(value)
+}
+
+
 public struct ProtocolConfig: Equatable, Hashable {
     public var appId: String
     public var userId: String
@@ -3147,10 +3226,15 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var encryptionEnabled: Bool
     public var autoKeyExchange: Bool
     public var storePending: Bool
+    public var requireEncryption: Bool
+    public var maxPendingPerPeer: UInt64
+    public var maxPendingGlobal: UInt64
+    public var pendingTtlMs: UInt64
+    public var overflowPolicy: OverflowPolicy
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -3161,6 +3245,11 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.encryptionEnabled = encryptionEnabled
         self.autoKeyExchange = autoKeyExchange
         self.storePending = storePending
+        self.requireEncryption = requireEncryption
+        self.maxPendingPerPeer = maxPendingPerPeer
+        self.maxPendingGlobal = maxPendingGlobal
+        self.pendingTtlMs = pendingTtlMs
+        self.overflowPolicy = overflowPolicy
     }
 
     
@@ -3186,7 +3275,12 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 initialTtl: FfiConverterUInt8.read(from: &buf), 
                 encryptionEnabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
-                storePending: FfiConverterBool.read(from: &buf)
+                storePending: FfiConverterBool.read(from: &buf), 
+                requireEncryption: FfiConverterBool.read(from: &buf), 
+                maxPendingPerPeer: FfiConverterUInt64.read(from: &buf), 
+                maxPendingGlobal: FfiConverterUInt64.read(from: &buf), 
+                pendingTtlMs: FfiConverterUInt64.read(from: &buf), 
+                overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf)
         )
     }
 
@@ -3201,6 +3295,11 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.encryptionEnabled, into: &buf)
         FfiConverterBool.write(value.autoKeyExchange, into: &buf)
         FfiConverterBool.write(value.storePending, into: &buf)
+        FfiConverterBool.write(value.requireEncryption, into: &buf)
+        FfiConverterUInt64.write(value.maxPendingPerPeer, into: &buf)
+        FfiConverterUInt64.write(value.maxPendingGlobal, into: &buf)
+        FfiConverterUInt64.write(value.pendingTtlMs, into: &buf)
+        FfiConverterTypeOverflowPolicy.write(value.overflowPolicy, into: &buf)
     }
 }
 
@@ -3946,6 +4045,71 @@ public func FfiConverterTypeMlsStorageError_lower(_ value: MlsStorageError) -> R
     return FfiConverterTypeMlsStorageError.lower(value)
 }
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum OverflowPolicy: Equatable, Hashable {
+    
+    case dropOldest
+    case dropNewest
+
+
+
+}
+
+#if compiler(>=6)
+extension OverflowPolicy: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOverflowPolicy: FfiConverterRustBuffer {
+    typealias SwiftType = OverflowPolicy
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OverflowPolicy {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .dropOldest
+        
+        case 2: return .dropNewest
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: OverflowPolicy, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .dropOldest:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .dropNewest:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOverflowPolicy_lift(_ buf: RustBuffer) throws -> OverflowPolicy {
+    return try FfiConverterTypeOverflowPolicy.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOverflowPolicy_lower(_ value: OverflowPolicy) -> RustBuffer {
+    return FfiConverterTypeOverflowPolicy.lower(value)
+}
+
+
 
 public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -3958,6 +4122,12 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     case InvalidConfiguration(message: String)
     
     case SendFailed(message: String)
+    
+    case NoKeyPackage(message: String)
+    
+    case SessionPending(message: String)
+    
+    case EncryptFailed(message: String)
     
     case InvalidState(message: String)
     
@@ -4010,19 +4180,31 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 5: return .InvalidState(
+        case 5: return .NoKeyPackage(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .MlsNotInitialized(
+        case 6: return .SessionPending(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 7: return .MlsError(
+        case 7: return .EncryptFailed(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 8: return .Other(
+        case 8: return .InvalidState(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 9: return .MlsNotInitialized(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 10: return .MlsError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 11: return .Other(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -4045,14 +4227,20 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(3))
         case .SendFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(4))
-        case .InvalidState(_ /* message is ignored*/):
+        case .NoKeyPackage(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .MlsNotInitialized(_ /* message is ignored*/):
+        case .SessionPending(_ /* message is ignored*/):
             writeInt(&buf, Int32(6))
-        case .MlsError(_ /* message is ignored*/):
+        case .EncryptFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(7))
-        case .Other(_ /* message is ignored*/):
+        case .InvalidState(_ /* message is ignored*/):
             writeInt(&buf, Int32(8))
+        case .MlsNotInitialized(_ /* message is ignored*/):
+            writeInt(&buf, Int32(9))
+        case .MlsError(_ /* message is ignored*/):
+            writeInt(&buf, Int32(10))
+        case .Other(_ /* message is ignored*/):
+            writeInt(&buf, Int32(11))
 
         
         }
@@ -5551,6 +5739,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 21563) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243) {

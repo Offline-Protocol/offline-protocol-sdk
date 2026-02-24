@@ -8,7 +8,8 @@
 
 use offline_protocol::{
     file_transfer::FileTransferManager, Event as CoreEvent, NetworkVisualizer,
-    OfflineProtocol as CoreProtocol, ProtocolConfig as CoreConfig,
+    OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
+    PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::MessagePriority as CorePriority;
 use offline_protocol_mls::{
@@ -49,6 +50,18 @@ pub enum ProtocolError {
     /// Send operation failed
     #[error("Failed to send message: {0}")]
     SendFailed(String),
+
+    /// No key package available for recipient
+    #[error("No key package available for recipient: {0}")]
+    NoKeyPackage(String),
+
+    /// Session setup is pending
+    #[error("Session pending, message queued")]
+    SessionPending,
+
+    /// Outbound message encryption failed
+    #[error("Failed to encrypt message: {0}")]
+    EncryptFailed(String),
 
     /// Invalid state for operation
     #[error("Invalid state: {0}")]
@@ -231,6 +244,11 @@ impl From<offline_protocol::Error> for ProtocolError {
             offline_protocol::Error::InvalidConfiguration(msg) => {
                 ProtocolError::InvalidConfiguration(msg)
             }
+            offline_protocol::Error::NoKeyPackage(peer_id) => ProtocolError::NoKeyPackage(peer_id),
+            offline_protocol::Error::SessionPending => ProtocolError::SessionPending,
+            offline_protocol::Error::EncryptFailed(message) => ProtocolError::EncryptFailed(message),
+            offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
+            offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
             _ => ProtocolError::Other(err.to_string()),
         }
     }
@@ -594,6 +612,10 @@ pub struct EncryptionConfig {
     pub auto_key_exchange: bool,
     /// Store pending messages when no session exists (default: true)
     pub store_pending: bool,
+    /// Require encryption for outbound sends (default: false)
+    pub require_encryption: bool,
+    /// Pending queue configuration for encrypted pre-session messages.
+    pub pending_queue: PendingQueueConfig,
 }
 
 impl Default for EncryptionConfig {
@@ -602,6 +624,39 @@ impl Default for EncryptionConfig {
             enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
+            pending_queue: PendingQueueConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum OverflowPolicy {
+    DropOldest,
+    DropNewest,
+}
+
+impl Default for OverflowPolicy {
+    fn default() -> Self {
+        Self::DropOldest
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingQueueConfig {
+    pub max_pending_per_peer: u64,
+    pub max_pending_global: u64,
+    pub pending_ttl_ms: u64,
+    pub overflow_policy: OverflowPolicy,
+}
+
+impl Default for PendingQueueConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
         }
     }
 }
@@ -619,6 +674,11 @@ pub struct ProtocolConfig {
     pub encryption_enabled: bool,
     pub auto_key_exchange: bool,
     pub store_pending: bool,
+    pub require_encryption: bool,
+    pub max_pending_per_peer: u64,
+    pub max_pending_global: u64,
+    pub pending_ttl_ms: u64,
+    pub overflow_policy: OverflowPolicy,
 }
 
 /// Extended protocol configuration with all options
@@ -645,6 +705,16 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.encryption.enabled = config.encryption_enabled;
         core_config.encryption.auto_key_exchange = config.auto_key_exchange;
         core_config.encryption.store_pending = config.store_pending;
+        core_config.encryption.require_encryption = config.require_encryption;
+        core_config.encryption.pending_queue = CorePendingQueueConfig {
+            max_pending_per_peer: config.max_pending_per_peer as usize,
+            max_pending_global: config.max_pending_global as usize,
+            pending_ttl_ms: config.pending_ttl_ms,
+            overflow_policy: match config.overflow_policy {
+                OverflowPolicy::DropOldest => CoreOverflowPolicy::DropOldest,
+                OverflowPolicy::DropNewest => CoreOverflowPolicy::DropNewest,
+            },
+        };
         core_config
     }
 }
@@ -676,7 +746,8 @@ pub struct BleFragment {
 #[derive(Debug, Clone)]
 pub struct InternetMessage {
     /// Unique message identifier. Use this with `internet_confirm_sent()` or
-    /// `internet_send_failed()` to report the send outcome.
+    /// `internet_send_failed()`/`internet_send_failed_with_reason()` to report
+    /// the send outcome.
     pub message_id: String,
     pub recipient_id: String,
     pub data: Vec<u8>,
@@ -978,9 +1049,7 @@ impl OfflineProtocol {
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
-            if let Some(wifi_transport) =
-                transport.as_any().downcast_ref::<WifiDirectTransport>()
-            {
+            if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 let cb = callback.clone();
                 wifi_transport.set_on_messages_available(Arc::new(move || {
                     cb.on_messages_available();
@@ -1021,11 +1090,11 @@ impl OfflineProtocol {
                     core_transport,
                     reply_to_msg,
                 )
-                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+                .map_err(ProtocolError::from)?
         } else {
             protocol
                 .send_message(&recipient, &content, Some(priority.into()), reply_to_msg)
-                .map_err(|e| ProtocolError::SendFailed(e.to_string()))?
+                .map_err(ProtocolError::from)?
         };
 
         Ok(message_id.as_str())
@@ -1063,7 +1132,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .send_connection_request(&recipient, &sender_name, key_package)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -1077,7 +1146,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .accept_connection_request(&recipient, &accepter_name, key_package)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -1086,7 +1155,7 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
             .reject_connection_request(&recipient)
-            .map_err(|e| ProtocolError::SendFailed(e.to_string()))?;
+            .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }
 
@@ -1391,7 +1460,8 @@ impl OfflineProtocol {
     ///
     /// Returns the next queued message with its `message_id`. After sending
     /// over the wire, the platform **must** call either `internet_confirm_sent(message_id)`
-    /// or `internet_send_failed(message_id)` to close the feedback loop.
+    /// or `internet_send_failed(message_id)`/`internet_send_failed_with_reason(message_id, reason)`
+    /// to close the feedback loop.
     pub fn internet_get_next_message(&self) -> Option<InternetMessage> {
         {
             let internet_state = self.internet_state.lock().unwrap();
@@ -1484,7 +1554,14 @@ impl OfflineProtocol {
     /// This feeds real delivery data into transport metrics so DORS can make
     /// accurate routing decisions.
     pub fn internet_confirm_sent(&self, message_id: String) {
-        let protocol = self.inner.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
+        if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
+            tracing::warn!(
+                message_id = %message_id,
+                error = %err,
+                "Failed to apply welcome lifecycle transport confirmation"
+            );
+        }
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
@@ -1504,7 +1581,25 @@ impl OfflineProtocol {
     ///
     /// The platform must call this when the WebSocket send fails.
     pub fn internet_send_failed(&self, message_id: String) {
-        let protocol = self.inner.lock().unwrap();
+        self.internet_send_failed_with_reason(
+            message_id,
+            Some("Internet transport send failed".to_string()),
+        );
+    }
+
+    /// Internet: Report that a message failed to send over the wire.
+    ///
+    /// `reason` should carry platform-specific error context so reliability
+    /// telemetry can classify root causes more accurately.
+    pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
+        let mut protocol = self.inner.lock().unwrap();
+        if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+            tracing::warn!(
+                message_id = %message_id,
+                error = %err,
+                "Failed to apply welcome lifecycle transport failure"
+            );
+        }
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
@@ -2704,8 +2799,9 @@ impl OfflineProtocol {
             "type": "RequestPreKeyBundle",
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RequestPreKeyBundle: {}", e))
+        })
     }
 
     /// Upload identity key and prekeys for Signal Protocol.
@@ -2718,12 +2814,16 @@ impl OfflineProtocol {
         one_time_prekeys_json: String,
     ) -> Result<String, ProtocolError> {
         // Parse the JSON strings into values
-        let signed_prekey: serde_json::Value = serde_json::from_str(&signed_prekey_json)
-            .map_err(|e| ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e)))?;
-        
+        let signed_prekey: serde_json::Value =
+            serde_json::from_str(&signed_prekey_json).map_err(|e| {
+                ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e))
+            })?;
+
         let one_time_prekeys: Vec<serde_json::Value> = serde_json::from_str(&one_time_prekeys_json)
-            .map_err(|e| ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e)))?;
-        
+            .map_err(|e| {
+                ProtocolError::Other(format!("Failed to parse one_time_prekeys JSON: {}", e))
+            })?;
+
         let payload = serde_json::json!({
             "type": "UploadKeys",
             "identity_key": identity_key,
@@ -2788,13 +2888,14 @@ impl OfflineProtocol {
             "group_id": group_id,
             "content": content
         });
-        
+
         if let Some(reply_to) = reply_to_msg {
             payload["reply_to_msg"] = serde_json::Value::String(reply_to);
         }
-        
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e)))
+
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e))
+        })
     }
 
     /// Add member to group. Admin only.
@@ -2802,7 +2903,7 @@ impl OfflineProtocol {
     pub fn group_add_member(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "AddGroupMember",
@@ -2818,15 +2919,16 @@ impl OfflineProtocol {
     pub fn group_remove_member(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "RemoveGroupMember",
             "group_id": group_id,
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e))
+        })
     }
 
     /// Set member as admin. Admin only.
@@ -2834,7 +2936,7 @@ impl OfflineProtocol {
     pub fn group_set_admin(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "SetGroupAdmin",
@@ -2850,15 +2952,16 @@ impl OfflineProtocol {
     pub fn group_remove_admin(
         &self,
         group_id: String,
-        username: String
+        username: String,
     ) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
             "type": "RemoveGroupAdmin",
             "group_id": group_id,
             "username": username
         });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e)))
+        serde_json::to_string(&payload).map_err(|e| {
+            ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e))
+        })
     }
 
     /// Leave a group.
@@ -2921,6 +3024,11 @@ mod tests {
             encryption_enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
         }
     }
 
@@ -2936,6 +3044,11 @@ mod tests {
             encryption_enabled: true,
             auto_key_exchange: true,
             store_pending: true,
+            require_encryption: false,
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
         }
     }
 
@@ -2945,6 +3058,24 @@ mod tests {
 
         let protocol = OfflineProtocol::new(config);
         assert!(protocol.is_ok());
+    }
+
+    #[test]
+    fn test_protocol_config_maps_pending_queue_settings_to_core() {
+        let mut config = create_test_config();
+        config.max_pending_per_peer = 11;
+        config.max_pending_global = 99;
+        config.pending_ttl_ms = 55_000;
+        config.overflow_policy = OverflowPolicy::DropNewest;
+
+        let core: CoreConfig = config.into();
+        assert_eq!(core.encryption.pending_queue.max_pending_per_peer, 11);
+        assert_eq!(core.encryption.pending_queue.max_pending_global, 99);
+        assert_eq!(core.encryption.pending_queue.pending_ttl_ms, 55_000);
+        assert_eq!(
+            core.encryption.pending_queue.overflow_policy,
+            CoreOverflowPolicy::DropNewest
+        );
     }
 
     #[test]

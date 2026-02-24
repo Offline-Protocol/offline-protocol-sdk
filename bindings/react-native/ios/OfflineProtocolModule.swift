@@ -129,6 +129,43 @@ class OfflineProtocolModule: RCTEventEmitter {
                               ?? encryptionDict["auto_key_exchange"] as? Bool ?? true
         let storePending = encryptionDict["storePending"] as? Bool 
                            ?? encryptionDict["store_pending"] as? Bool ?? true
+        let requireEncryption = encryptionDict["requireEncryption"] as? Bool
+                                ?? encryptionDict["require_encryption"] as? Bool ?? false
+        let pendingQueueDict = encryptionDict["pendingQueue"] as? [String: Any]
+            ?? encryptionDict["pending_queue"] as? [String: Any]
+        let maxPendingPerPeer = UInt64(
+            (pendingQueueDict?["maxPendingPerPeer"] as? NSNumber)?.uint64Value
+                ?? (pendingQueueDict?["max_pending_per_peer"] as? NSNumber)?.uint64Value
+                ?? (raw["maxPendingPerPeer"] as? NSNumber)?.uint64Value
+                ?? (raw["max_pending_per_peer"] as? NSNumber)?.uint64Value
+                ?? 64
+        )
+        let maxPendingGlobal = UInt64(
+            (pendingQueueDict?["maxPendingGlobal"] as? NSNumber)?.uint64Value
+                ?? (pendingQueueDict?["max_pending_global"] as? NSNumber)?.uint64Value
+                ?? (raw["maxPendingGlobal"] as? NSNumber)?.uint64Value
+                ?? (raw["max_pending_global"] as? NSNumber)?.uint64Value
+                ?? 4096
+        )
+        let pendingTtlMs = UInt64(
+            (pendingQueueDict?["pendingTtlMs"] as? NSNumber)?.uint64Value
+                ?? (pendingQueueDict?["pending_ttl_ms"] as? NSNumber)?.uint64Value
+                ?? (raw["pendingTtlMs"] as? NSNumber)?.uint64Value
+                ?? (raw["pending_ttl_ms"] as? NSNumber)?.uint64Value
+                ?? 120_000
+        )
+        let overflowPolicyRaw = (pendingQueueDict?["overflowPolicy"] as? String)
+            ?? (pendingQueueDict?["overflow_policy"] as? String)
+            ?? (raw["overflowPolicy"] as? String)
+            ?? (raw["overflow_policy"] as? String)
+            ?? "drop_oldest"
+        let overflowPolicy: OverflowPolicy
+        switch overflowPolicyRaw.lowercased() {
+        case "drop_newest":
+            overflowPolicy = .dropNewest
+        default:
+            overflowPolicy = .dropOldest
+        }
         
         let config = ProtocolConfig(
             appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
@@ -140,7 +177,12 @@ class OfflineProtocolModule: RCTEventEmitter {
             initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
             encryptionEnabled: encryptionEnabled,
             autoKeyExchange: autoKeyExchange,
-            storePending: storePending
+            storePending: storePending,
+            requireEncryption: requireEncryption,
+            maxPendingPerPeer: maxPendingPerPeer,
+            maxPendingGlobal: maxPendingGlobal,
+            pendingTtlMs: pendingTtlMs,
+            overflowPolicy: overflowPolicy
         )
 
         return (config, raw)
@@ -163,6 +205,23 @@ class OfflineProtocolModule: RCTEventEmitter {
             return .high
         case "auto":
             return .medium
+        default:
+            return nil
+        }
+    }
+
+    private func mapProtocolBridgeError(_ error: Error) -> (code: String, message: String)? {
+        guard let protocolError = error as? ProtocolError else {
+            return nil
+        }
+
+        switch protocolError {
+        case .NoKeyPackage:
+            return ("NoKeyPackage", "No key package available for recipient")
+        case .SessionPending:
+            return ("SessionPending", "Session establishment is pending")
+        case .EncryptFailed:
+            return ("EncryptFailed", "Message encryption failed")
         default:
             return nil
         }
@@ -638,7 +697,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.sendMessage(recipient: recipient, content: content, priority: msgPriority, replyToMsg: replyToMsg)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_SEND", "Failed to send message: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_SEND", "Failed to send message: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -661,7 +724,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
             resolver(messageId)
         } catch {
-            rejecter("ERROR_CONNECTION_REQUEST", "Failed to send connection request: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_CONNECTION_REQUEST", "Failed to send connection request: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -684,7 +751,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
             resolver(messageId)
         } catch {
-            rejecter("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_CONNECTION_REQUEST", "Failed to accept connection request: \(error.localizedDescription)", error)
+            }
         }
     }
 
@@ -700,7 +771,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             let messageId = try proto.rejectConnectionRequest(recipient: recipient)
             resolver(messageId)
         } catch {
-            rejecter("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: \(error.localizedDescription)", error)
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_CONNECTION_REQUEST", "Failed to reject connection request: \(error.localizedDescription)", error)
+            }
         }
     }
     
