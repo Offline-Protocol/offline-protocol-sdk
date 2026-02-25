@@ -518,8 +518,9 @@ interface OfflineProtocol {
     DorsConfig get_dors_config();
     
     // Gradient routing table operations
-    // Learn a route from an incoming message - call when receiving a message from a neighbor
-    void learn_route(string destination, string next_hop, u8 hop_count, f32 quality);
+    // Learn a route from an incoming message - call when receiving a message from a neighbor.
+    // sequence_number: DSDV-style; pass 0 when the message does not carry a destination sequence.
+    void learn_route(string destination, string next_hop, u8 hop_count, f32 quality, u32 sequence_number);
     
     // Get the best (highest quality) route to a destination
     RouteEntry? get_best_route(string destination);

@@ -2170,11 +2170,22 @@ impl OfflineProtocol {
     /// Learns a route from an incoming message.
     /// Call this when receiving a message from a neighbor to record that
     /// the neighbor can reach the message's original sender.
-    pub fn learn_route(&self, destination: String, next_hop: String, hop_count: u8, quality: f32) {
+    pub fn learn_route(
+        &self,
+        destination: String,
+        next_hop: String,
+        hop_count: u8,
+        quality: f32,
+        sequence_number: u32,
+    ) {
         let mut path_selector = self.path_selector.lock().unwrap();
-        path_selector
-            .routing_table_mut()
-            .learn_route(&destination, &next_hop, hop_count, quality, 0);
+        path_selector.routing_table_mut().learn_route(
+            &destination,
+            &next_hop,
+            hop_count,
+            quality,
+            sequence_number,
+        );
     }
 
     /// Gets the best (highest quality) route to a destination.
@@ -3367,6 +3378,7 @@ mod tests {
             "peer1".to_string(),
             2,   // hop count
             0.8, // quality
+            0,   // sequence_number (none from message)
         );
 
         // Should now have a route
@@ -3387,9 +3399,9 @@ mod tests {
         let protocol = OfflineProtocol::new(config).unwrap();
 
         // Learn multiple routes to the same destination
-        protocol.learn_route("bob".to_string(), "peer1".to_string(), 3, 0.7);
-        protocol.learn_route("bob".to_string(), "peer2".to_string(), 2, 0.9);
-        protocol.learn_route("bob".to_string(), "peer3".to_string(), 1, 0.6);
+        protocol.learn_route("bob".to_string(), "peer1".to_string(), 3, 0.7, 0);
+        protocol.learn_route("bob".to_string(), "peer2".to_string(), 2, 0.9, 0);
+        protocol.learn_route("bob".to_string(), "peer3".to_string(), 1, 0.6, 0);
 
         // Best route should be through peer2 (highest quality)
         let best = protocol.get_best_route("bob".to_string());
@@ -3408,11 +3420,11 @@ mod tests {
         let protocol = OfflineProtocol::new(config).unwrap();
 
         // Learn routes through peer1
-        protocol.learn_route("alice".to_string(), "peer1".to_string(), 2, 0.8);
-        protocol.learn_route("bob".to_string(), "peer1".to_string(), 3, 0.7);
+        protocol.learn_route("alice".to_string(), "peer1".to_string(), 2, 0.8, 0);
+        protocol.learn_route("bob".to_string(), "peer1".to_string(), 3, 0.7, 0);
 
         // Learn route through peer2
-        protocol.learn_route("charlie".to_string(), "peer2".to_string(), 1, 0.9);
+        protocol.learn_route("charlie".to_string(), "peer2".to_string(), 1, 0.9, 0);
 
         // All destinations should be reachable
         assert!(protocol.has_route("alice".to_string()));
@@ -3442,9 +3454,9 @@ mod tests {
         assert_eq!(stats.route_count, 0);
 
         // Add some routes
-        protocol.learn_route("alice".to_string(), "peer1".to_string(), 2, 0.8);
-        protocol.learn_route("alice".to_string(), "peer2".to_string(), 3, 0.6);
-        protocol.learn_route("bob".to_string(), "peer1".to_string(), 1, 0.9);
+        protocol.learn_route("alice".to_string(), "peer1".to_string(), 2, 0.8, 0);
+        protocol.learn_route("alice".to_string(), "peer2".to_string(), 3, 0.6, 0);
+        protocol.learn_route("bob".to_string(), "peer1".to_string(), 1, 0.9, 0);
 
         let stats = protocol.get_routing_stats();
         assert_eq!(stats.destination_count, 2); // alice and bob
