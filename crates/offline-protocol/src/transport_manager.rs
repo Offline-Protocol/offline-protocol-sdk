@@ -162,6 +162,7 @@ impl TransportManager {
             EscalationTriggerReason::PoorSignal => DorsEscalationReasonCode::PoorSignal,
             EscalationTriggerReason::Congestion => DorsEscalationReasonCode::Congestion,
             EscalationTriggerReason::LowTtl => DorsEscalationReasonCode::LowTtl,
+            EscalationTriggerReason::LowSuccessRate => DorsEscalationReasonCode::LowSuccessRate,
         }
     }
 
