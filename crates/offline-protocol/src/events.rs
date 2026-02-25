@@ -70,6 +70,26 @@ impl DorsReasonCode {
     }
 }
 
+/// Phase of DORS escalation: recommendation (trigger boundary) vs actual transition (applied).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DorsEscalationPhase {
+    /// DORS decided to escalate (typed trigger reason); fallback may not succeed.
+    Triggered,
+    /// BLE→WiFi fallback send succeeded; escalation was applied.
+    Applied,
+}
+
+impl DorsEscalationPhase {
+    /// Returns the stable string representation (TRIGGERED / APPLIED).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Triggered => "TRIGGERED",
+            Self::Applied => "APPLIED",
+        }
+    }
+}
+
 /// Machine-readable reason for DORS escalation (BLE→Wi‑Fi) observability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -504,8 +524,10 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason_detail: Option<String>,
     },
-    /// DORS escalation from BLE to Wi‑Fi (e.g. retry threshold or poor signal).
+    /// DORS escalation from BLE to Wi‑Fi. Use `phase` to distinguish recommendation vs applied.
     DorsEscalationTriggered {
+        /// TRIGGERED = DORS decided to escalate (reason = trigger); APPLIED = fallback succeeded.
+        phase: DorsEscalationPhase,
         /// Transport we escalated from (e.g. "ble").
         from: String,
         /// Transport we escalated to (e.g. "wifiDirect").
@@ -961,13 +983,16 @@ impl Event {
     }
 
     /// Creates a DorsEscalationTriggered event (DORS observability).
+    /// Use phase Triggered at the DORS trigger boundary, Applied when fallback succeeds.
     pub fn dors_escalation_triggered(
+        phase: DorsEscalationPhase,
         from: String,
         to: String,
         reason_code: DorsEscalationReasonCode,
         reason_detail: Option<String>,
     ) -> Self {
         Self::DorsEscalationTriggered {
+            phase,
             from,
             to,
             reason_code,
@@ -1363,12 +1388,14 @@ impl fmt::Debug for Event {
                 .field("reason_detail", reason_detail)
                 .finish(),
             Self::DorsEscalationTriggered {
+                phase,
                 from,
                 to,
                 reason_code,
                 reason_detail,
             } => f
                 .debug_struct("DorsEscalationTriggered")
+                .field("phase", phase)
                 .field("from", from)
                 .field("to", to)
                 .field("reason_code", reason_code)

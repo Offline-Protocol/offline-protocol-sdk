@@ -5,7 +5,7 @@
 //! for each message.
 
 use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD};
-use crate::events::{DorsEscalationReasonCode, DorsReasonCode, Event};
+use crate::events::{DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event};
 use crate::{Error, Result};
 use offline_protocol_core::Message;
 use offline_protocol_router::{DorsConfig, EscalationTriggerReason, TransportSelector};
@@ -184,6 +184,7 @@ impl TransportManager {
         if emit {
             self.last_escalation_trigger_emitted = Some((reason_code, now));
             self.emit_dors_event(Event::dors_escalation_triggered(
+                DorsEscalationPhase::Triggered,
                 from,
                 to,
                 reason_code,
@@ -370,6 +371,7 @@ impl TransportManager {
                     // Escalation applied only when BLE→WiFi fallback actually succeeded.
                     if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
                         self.emit_dors_event(Event::dors_escalation_triggered(
+                            DorsEscalationPhase::Applied,
                             primary.to_string(),
                             transport_type.to_string(),
                             DorsEscalationReasonCode::FallbackSuccess,
