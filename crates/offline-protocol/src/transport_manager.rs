@@ -8,7 +8,7 @@ use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_CO
 use crate::events::{DorsEscalationReasonCode, DorsReasonCode, Event};
 use crate::{Error, Result};
 use offline_protocol_core::Message;
-use offline_protocol_router::{DorsConfig, TransportSelector};
+use offline_protocol_router::{DorsConfig, EscalationTriggerReason, TransportSelector};
 use offline_protocol_transport::{
     Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
 };
@@ -33,7 +33,13 @@ pub struct TransportManager {
 
     /// Optional callback for DORS lifecycle/decision events (OFF-258).
     dors_event_callback: Option<Arc<dyn Fn(Event) + Send + Sync>>,
+
+    /// Last escalation trigger event emitted (reason, time) for dedupe window.
+    last_escalation_trigger_emitted: Option<(DorsEscalationReasonCode, std::time::Instant)>,
 }
+
+/// Dedupe window: don't re-emit same escalation trigger reason within this duration.
+const ESCALATION_TRIGGER_DEDUPE_SECS: u64 = 30;
 
 #[derive(Debug, Default, Clone)]
 struct ObservedStats {
@@ -135,6 +141,7 @@ impl TransportManager {
             selector,
             observations: HashMap::new(),
             dors_event_callback: None,
+            last_escalation_trigger_emitted: None,
         }
     }
 
@@ -146,6 +153,42 @@ impl TransportManager {
     fn emit_dors_event(&self, event: Event) {
         if let Some(ref cb) = self.dors_event_callback {
             cb(event);
+        }
+    }
+
+    fn escalation_trigger_reason_to_code(r: EscalationTriggerReason) -> DorsEscalationReasonCode {
+        match r {
+            EscalationTriggerReason::RetryThreshold => DorsEscalationReasonCode::RetryThreshold,
+            EscalationTriggerReason::PoorSignal => DorsEscalationReasonCode::PoorSignal,
+            EscalationTriggerReason::Congestion => DorsEscalationReasonCode::Congestion,
+            EscalationTriggerReason::LowTtl => DorsEscalationReasonCode::LowTtl,
+        }
+    }
+
+    /// Emit dors_escalation_triggered at trigger boundary (typed reason), deduped by reason + time window.
+    fn emit_escalation_trigger_if_deduped(
+        &mut self,
+        reason_code: DorsEscalationReasonCode,
+        from: String,
+        to: String,
+        reason_detail: Option<String>,
+    ) {
+        let now = std::time::Instant::now();
+        let emit = match &self.last_escalation_trigger_emitted {
+            Some((last_code, last_at)) => {
+                *last_code != reason_code
+                    || last_at.elapsed().as_secs() >= ESCALATION_TRIGGER_DEDUPE_SECS
+            }
+            None => true,
+        };
+        if emit {
+            self.last_escalation_trigger_emitted = Some((reason_code, now));
+            self.emit_dors_event(Event::dors_escalation_triggered(
+                from,
+                to,
+                reason_code,
+                reason_detail,
+            ));
         }
     }
 
@@ -274,6 +317,20 @@ impl TransportManager {
         for (transport_type, _score) in &scored {
             if *transport_type == primary {
                 continue;
+            }
+
+            // Emit escalation trigger at DORS boundary (typed reason), deduped.
+            if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                if let Some(trigger_reason) = self.selector.escalation_trigger_reason() {
+                    let reason_code =
+                        Self::escalation_trigger_reason_to_code(trigger_reason);
+                    self.emit_escalation_trigger_if_deduped(
+                        reason_code,
+                        primary.to_string(),
+                        transport_type.to_string(),
+                        None,
+                    );
+                }
             }
 
             let transport = match self.transports.get(transport_type) {

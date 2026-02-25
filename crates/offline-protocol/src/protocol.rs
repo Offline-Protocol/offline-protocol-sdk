@@ -794,7 +794,6 @@ impl OfflineProtocol {
         self.transport_manager.start()?;
 
         // Wire DORS event callback so app receives dors_score_updated, dors_transport_selected,
-        // dors_transport_switched, dors_escalation_triggered (OFF-258).
         let shared = self.shared_state.clone();
         self.transport_manager
             .set_dors_event_callback(Some(Arc::new(move |event| {
@@ -4805,7 +4804,6 @@ impl OfflineProtocol {
         self.kick_pending_session_reconciliation("process_tick");
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.cleanup_expired_entries();
-        self.check_dors_escalation()?;
 
         Ok(())
     }
@@ -5073,33 +5071,6 @@ impl OfflineProtocol {
         // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
         self.ack_manager
             .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes
-    }
-
-    /// Checks for DORS escalation signals and emits events if needed.
-    fn check_dors_escalation(&mut self) -> Result<()> {
-        if !self.transport_manager.should_escalate_to_wifi() {
-            return Ok(());
-        }
-
-        use offline_protocol_transport::TransportType;
-        let active_transports = self.transport_manager.get_active_transports();
-
-        if active_transports.contains(&TransportType::WiFiDirect) {
-            let state = lock_shared_state(&self.shared_state).map_err(|e| {
-                error!(
-                    "Failed to lock shared state for WiFi escalation event: {}",
-                    e
-                );
-                e
-            })?;
-            state.emit_event(Event::transport_switched(
-                Some(TransportType::BLE),
-                TransportType::WiFiDirect,
-                "DORS suggests escalating to WiFi Direct due to BLE failures".to_string(),
-            ));
-            drop(state);
-        }
-        Ok(())
     }
 
     /// Gets the current protocol state.

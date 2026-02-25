@@ -99,6 +99,19 @@ fn transport_tie_break_priority(transport_type: TransportType) -> u8 {
     }
 }
 
+/// Reason DORS decided to escalate from BLE to Wi‑Fi (for observability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationTriggerReason {
+    /// BLE retry failures reached threshold.
+    RetryThreshold,
+    /// Poor BLE signal for sustained duration.
+    PoorSignal,
+    /// BLE congestion / queue depth exceeded.
+    Congestion,
+    /// Message TTL near exhaustion.
+    LowTtl,
+}
+
 /// Score breakdown for transport selection.
 #[derive(Debug, Clone)]
 pub struct TransportScore {
@@ -1005,6 +1018,83 @@ impl TransportSelector {
     /// Resets retry count for a transport (e.g., after successful delivery).
     pub fn reset_retry_count(&mut self, transport_type: TransportType) {
         self.retry_counts.insert(transport_type, 0);
+    }
+
+    /// Returns which condition triggered escalation, if any. Call when considering
+    /// BLE→WiFi fallback to emit typed dors_escalation_triggered at the trigger boundary.
+    pub fn escalation_trigger_reason(&self) -> Option<EscalationTriggerReason> {
+        let retry_failure = self
+            .retry_counts
+            .get(&TransportType::BLE)
+            .map(|count| *count >= self.config.ble_to_wifi_retry_threshold)
+            .unwrap_or(false);
+
+        let now = Utc::now();
+
+        let poor_signal = self
+            .ble_poor_signal_since
+            .map(|since| {
+                now.signed_duration_since(since)
+                    >= Duration::seconds(self.config.poor_signal_duration_secs as i64)
+            })
+            .unwrap_or(false);
+
+        let high_congestion_active = self
+            .ble_high_congestion_since
+            .map(|since| {
+                now.signed_duration_since(since)
+                    >= Duration::seconds(self.config.congestion_duration_secs as i64)
+            })
+            .unwrap_or(false);
+
+        let load_exceeded = self
+            .transport_history
+            .get(&TransportType::BLE)
+            .and_then(|history| history.average_queue_depth())
+            .map(|avg| {
+                let threshold = self.config.congestion_queue_threshold.max(1) as f32;
+                avg >= threshold
+            })
+            .unwrap_or(false);
+
+        let high_congestion = high_congestion_active && load_exceeded;
+
+        let low_ttl_recent = self
+            .low_ttl_detected_at
+            .map(|since| {
+                now.signed_duration_since(since)
+                    <= Duration::seconds(self.config.ttl_escalation_hold_secs as i64)
+            })
+            .unwrap_or(false);
+
+        let battery_too_low = self
+            .last_metrics
+            .get(&TransportType::BLE)
+            .and_then(|(metrics, _)| {
+                metrics
+                    .battery_level
+                    .map(|level| (level, metrics.is_charging))
+            })
+            .map(|(level, charging)| level < self.config.relay_min_battery_level && !charging)
+            .unwrap_or(false);
+
+        if battery_too_low {
+            return None;
+        }
+
+        if retry_failure {
+            return Some(EscalationTriggerReason::RetryThreshold);
+        }
+        if poor_signal {
+            return Some(EscalationTriggerReason::PoorSignal);
+        }
+        if high_congestion {
+            return Some(EscalationTriggerReason::Congestion);
+        }
+        if low_ttl_recent {
+            return Some(EscalationTriggerReason::LowTtl);
+        }
+        None
     }
 
     /// Checks if escalation from BLE to Wi-Fi Direct is needed.

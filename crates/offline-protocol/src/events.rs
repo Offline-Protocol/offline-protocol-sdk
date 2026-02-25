@@ -97,6 +97,8 @@ impl DorsEscalationReasonCode {
             Self::LowTtl => "LOW_TTL",
         }
     }
+}
+
 /// Machine-readable reason taxonomy for inbound decryption failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
