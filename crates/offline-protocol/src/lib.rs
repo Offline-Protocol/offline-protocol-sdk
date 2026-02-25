@@ -31,6 +31,9 @@ pub use visualization::{
     MessageStats, NetworkLink, NetworkNode, NetworkTopology, NetworkVisualizer, NodeRole,
 };
 
+#[cfg(test)]
+mod dors_integration_tests;
+
 // Re-export reliability types for configuration
 pub use offline_protocol_reliability::{
     AckConfig, DeduplicatorConfig, DeduplicatorMode, DeduplicatorStats, RetryConfig,
