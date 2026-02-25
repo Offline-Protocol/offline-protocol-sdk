@@ -4585,7 +4585,7 @@ impl OfflineProtocol {
         use offline_protocol_transport::TransportType;
         let active_transports = self.transport_manager.get_active_transports();
 
-        if !active_transports.contains(&TransportType::WiFiDirect) {
+        if active_transports.contains(&TransportType::WiFiDirect) {
             let state = lock_shared_state(&self.shared_state).map_err(|e| {
                 error!(
                     "Failed to lock shared state for WiFi escalation event: {}",
@@ -4597,11 +4597,6 @@ impl OfflineProtocol {
                 Some(TransportType::BLE),
                 TransportType::WiFiDirect,
                 "DORS suggests escalating to WiFi Direct due to BLE failures".to_string(),
-            ));
-            state.emit_event(Event::dors_escalation_triggered(
-                TransportType::BLE.to_string(),
-                TransportType::WiFiDirect.to_string(),
-                "dors_escalation_signal".to_string(),
             ));
             drop(state);
         }

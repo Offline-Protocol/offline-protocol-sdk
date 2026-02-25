@@ -5,7 +5,7 @@
 //! for each message.
 
 use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD};
-use crate::events::Event;
+use crate::events::{DorsEscalationReasonCode, DorsReasonCode, Event};
 use crate::{Error, Result};
 use offline_protocol_core::Message;
 use offline_protocol_router::{DorsConfig, TransportSelector};
@@ -139,7 +139,6 @@ impl TransportManager {
     }
 
     /// Sets the callback for DORS decision events (dors_score_updated, dors_transport_selected,
-    /// dors_transport_switched, dors_escalation_triggered). Used for app observability (OFF-258).
     pub fn set_dors_event_callback(&mut self, callback: Option<Arc<dyn Fn(Event) + Send + Sync>>) {
         self.dors_event_callback = callback;
     }
@@ -202,7 +201,7 @@ impl TransportManager {
                 ))
             })?;
 
-        // Emit DORS observability events (OFF-258).
+        // Emit DORS observability: scores and selection (before send attempt).
         let scored = self.selector.score_and_rank(message, &available);
         let scores: Vec<(String, f32)> = scored
             .iter()
@@ -214,17 +213,17 @@ impl TransportManager {
             .find(|(t, _)| *t == primary)
             .map(|(_, s)| *s)
             .unwrap_or(0.0);
+        let selection_reason = if previous.is_none() {
+            DorsReasonCode::InitialSelection
+        } else {
+            DorsReasonCode::PrimarySelected
+        };
         self.emit_dors_event(Event::dors_transport_selected(
+            previous.map(|t| t.to_string()),
             primary.to_string(),
+            selection_reason,
             primary_score,
         ));
-        if previous != Some(primary) {
-            self.emit_dors_event(Event::dors_transport_switched(
-                previous.map(|t| t.to_string()),
-                primary.to_string(),
-                "dors_decision".to_string(),
-            ));
-        }
 
         // Try the primary transport first.
         let primary_result = {
@@ -241,6 +240,18 @@ impl TransportManager {
         match primary_result {
             Ok(()) => {
                 self.current_transport = Some(primary);
+                // Emit switch only when active transport actually changed (after successful send).
+                if previous != Some(primary) {
+                    let reason_code = previous.is_some_and(|p| !available.contains_key(&p))
+                        .then_some(DorsReasonCode::CurrentUnavailable)
+                        .unwrap_or(DorsReasonCode::PrimarySuccess);
+                    self.emit_dors_event(Event::dors_transport_switched(
+                        previous.map(|t| t.to_string()),
+                        primary.to_string(),
+                        reason_code,
+                        None,
+                    ));
+                }
                 return Ok(());
             }
             Err(e) => {
@@ -265,15 +276,6 @@ impl TransportManager {
                 continue;
             }
 
-            // Emit escalation event when falling back from BLE to Wi‑Fi (OFF-258).
-            if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
-                self.emit_dors_event(Event::dors_escalation_triggered(
-                    primary.to_string(),
-                    transport_type.to_string(),
-                    "retry_fallback".to_string(),
-                ));
-            }
-
             let transport = match self.transports.get(transport_type) {
                 Some(t) => t,
                 None => continue,
@@ -293,6 +295,30 @@ impl TransportManager {
                 Ok(()) => {
                     self.current_transport = Some(*transport_type);
                     self.selector.set_current_transport(*transport_type);
+                    // Emit switch only when active transport actually changed (fallback success).
+                    if previous != Some(*transport_type) {
+                        let reason_code =
+                            if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                                DorsReasonCode::EscalationApplied
+                            } else {
+                                DorsReasonCode::FallbackSuccess
+                            };
+                        self.emit_dors_event(Event::dors_transport_switched(
+                            previous.map(|t| t.to_string()),
+                            transport_type.to_string(),
+                            reason_code,
+                            Some("primary send failed, fallback succeeded".to_string()),
+                        ));
+                    }
+                    // Escalation applied only when BLE→WiFi fallback actually succeeded.
+                    if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                        self.emit_dors_event(Event::dors_escalation_triggered(
+                            primary.to_string(),
+                            transport_type.to_string(),
+                            DorsEscalationReasonCode::FallbackSuccess,
+                            Some("primary BLE send failed, fallback to WiFi succeeded".to_string()),
+                        ));
+                    }
                     return Ok(());
                 }
                 Err(e) => {

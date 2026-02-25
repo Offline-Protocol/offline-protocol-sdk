@@ -20,7 +20,9 @@ pub mod visualization;
 
 pub use config::{EncryptionConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig};
 pub use error::{Error, Result, SessionStateError};
-pub use events::{Event, EventCallback, GroupInfoMember, UserGroupSummary};
+pub use events::{
+    DorsEscalationReasonCode, DorsReasonCode, Event, EventCallback, GroupInfoMember, UserGroupSummary,
+};
 pub use protocol::OfflineProtocol;
 pub use transport_manager::TransportManager;
 pub use visualization::{
