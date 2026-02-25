@@ -260,3 +260,48 @@ fn dors_integration_noisy_path_anti_flap_prevents_rapid_oscillation() {
         selected_transports
     );
 }
+
+/// Noisy metric changes: alternate BLE vs WiFi strength so scores move around thresholds.
+/// Anti-flap (hysteresis + cooldown + stability) must suppress frequent switching.
+#[test]
+fn dors_integration_noisy_metrics_switch_suppression() {
+    let config = DorsConfig::default();
+    let selector = TransportSelector::with_config(config);
+    let mut manager = crate::TransportManager::new(selector);
+
+    let ble = add_started_mock(&mut manager, TransportType::BLE, ble_strong_metrics());
+    let wifi = add_started_mock(&mut manager, TransportType::WiFiDirect, wifi_weak_metrics());
+
+    let mut switch_count = 0u32;
+    let mut prev = None::<TransportType>;
+
+    for step in 0..16 {
+        // Alternate metrics so "best" changes every few steps (noisy)
+        match step % 3 {
+            0 => {
+                ble.lock().unwrap().set_metrics(ble_strong_metrics());
+                wifi.lock().unwrap().set_metrics(wifi_weak_metrics());
+            }
+            1 => {
+                ble.lock().unwrap().set_metrics(ble_weak_metrics());
+                wifi.lock().unwrap().set_metrics(wifi_strong_metrics());
+            }
+            _ => {
+                ble.lock().unwrap().set_metrics(ble_strong_metrics());
+                wifi.lock().unwrap().set_metrics(wifi_strong_metrics());
+            }
+        }
+        manager.send(&test_message()).unwrap();
+        let current = manager.current_transport().expect("selected");
+        if prev.map(|p| p != current).unwrap_or(false) {
+            switch_count += 1;
+        }
+        prev = Some(current);
+    }
+
+    assert!(
+        switch_count <= 2,
+        "noisy metric changes must not cause flapping; switch_count should be at most 2, got {}",
+        switch_count
+    );
+}

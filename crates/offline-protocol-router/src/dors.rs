@@ -1357,6 +1357,12 @@ impl TransportSelector {
                 .map(|(t, _)| *t)
         }
     }
+
+    /// Sets last switch time for testing cooldown. With cooldown_secs > 0, setting this to
+    /// Utc::now() makes the next select_transport consider us still in cooldown.
+    pub fn set_last_switch_time_for_test(&mut self, t: Option<DateTime<Utc>>) {
+        self.last_switch_time = t;
+    }
 }
 
 #[cfg(test)]
@@ -1542,6 +1548,175 @@ mod tests {
         // Should stay with same transport due to hysteresis
         let second = selector.select_transport(&message, &transports).unwrap();
         assert_eq!(first, second);
+    }
+
+    /// Anti-flap: switch only when score delta beats hysteresis threshold.
+    /// When improvement is below threshold, must stay on current transport.
+    #[test]
+    fn test_anti_flap_hysteresis_score_delta_below_threshold() {
+        let config = DorsConfig {
+            switch_hysteresis: 20.0,
+            switch_cooldown_secs: 0,
+            stability_window_secs: 0,
+            ..Default::default()
+        };
+        let mut selector = TransportSelector::with_config(config);
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 5),
+        );
+
+        let first = selector.select_transport(&message, &transports).unwrap();
+        // Slightly favor WiFi (e.g. better RSSI) but not by 20 points — delta below hysteresis.
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-70), 0.25, 12));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-58), 0.12, 6),
+        );
+
+        let second = selector.select_transport(&message, &transports).unwrap();
+        assert_eq!(
+            first, second,
+            "switch must be blocked when score delta is below hysteresis threshold"
+        );
+    }
+
+    /// Anti-flap: cooldown blocks immediate re-switch after a transport change.
+    #[test]
+    fn test_anti_flap_cooldown_blocks_immediate_reswitch() {
+        let config = DorsConfig {
+            switch_hysteresis: 5.0,
+            switch_cooldown_secs: 1,
+            stability_window_secs: 0,
+            ..Default::default()
+        };
+        let mut selector = TransportSelector::with_config(config);
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 5),
+        );
+
+        let first = selector.select_transport(&message, &transports).unwrap();
+        // Simulate that we just switched (cooldown starts now)
+        selector.set_last_switch_time_for_test(Some(Utc::now()));
+        // Make WiFi clearly better so hysteresis would allow switch
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-88), 0.5, 40));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-50), 0.05, 3),
+        );
+
+        let second = selector.select_transport(&message, &transports).unwrap();
+        assert_eq!(
+            first, second,
+            "cooldown must block immediate re-switch; should stay on {:?}",
+            first
+        );
+    }
+
+    /// Anti-flap: stability window requires sustained superiority before switching.
+    /// Candidate briefly better (no history of sustained lead) must not switch.
+    #[test]
+    fn test_anti_flap_stability_window_blocks_switch_without_sustained_superiority() {
+        let config = DorsConfig {
+            switch_hysteresis: 10.0,
+            switch_cooldown_secs: 0,
+            stability_window_secs: 8,
+            history_window_size: 20,
+            ..Default::default()
+        };
+        let mut selector = TransportSelector::with_config(config);
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-55), 0.1, 5));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-75), 0.3, 25),
+        );
+
+        // Build history: many selects with BLE winning (BLE consistently better)
+        for _ in 0..15 {
+            selector.select_transport(&message, &transports).unwrap();
+        }
+        assert_eq!(selector.current_transport(), Some(TransportType::BLE));
+
+        // One round where WiFi is much better (would beat hysteresis)
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-90), 0.6, 50));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-52), 0.08, 4),
+        );
+
+        let after = selector.select_transport(&message, &transports).unwrap();
+        assert_eq!(
+            after,
+            TransportType::BLE,
+            "stability window must block switch when candidate was not consistently better in window"
+        );
+    }
+
+    /// Anti-flap: noisy metric changes around threshold must not cause frequent switching.
+    #[test]
+    fn test_anti_flap_noisy_metrics_switch_suppression() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-62), 0.15, 8),
+        );
+
+        let mut switch_count = 0u32;
+        let mut prev = None::<TransportType>;
+
+        // Alternate metrics so scores move around (BLE vs WiFi close); then one big swing
+        for step in 0..20 {
+            match step % 3 {
+                0 => {
+                    transports.insert(TransportType::BLE, create_test_metrics(Some(-58), 0.18, 8));
+                    transports.insert(
+                        TransportType::WiFiDirect,
+                        create_test_metrics(Some(-64), 0.2, 12),
+                    );
+                }
+                1 => {
+                    transports.insert(TransportType::BLE, create_test_metrics(Some(-64), 0.22, 14));
+                    transports.insert(
+                        TransportType::WiFiDirect,
+                        create_test_metrics(Some(-59), 0.14, 6),
+                    );
+                }
+                _ => {
+                    transports.insert(TransportType::BLE, create_test_metrics(Some(-61), 0.2, 10));
+                    transports.insert(
+                        TransportType::WiFiDirect,
+                        create_test_metrics(Some(-62), 0.16, 9),
+                    );
+                }
+            }
+            let selected = selector.select_transport(&message, &transports).unwrap();
+            if prev.map(|p| p != selected).unwrap_or(false) {
+                switch_count += 1;
+            }
+            prev = Some(selected);
+        }
+
+        assert!(
+            switch_count <= 1,
+            "noisy metrics must not cause flapping; switch_count should be at most 1, got {}",
+            switch_count
+        );
     }
 
     #[test]
