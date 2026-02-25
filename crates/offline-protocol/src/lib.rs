@@ -14,15 +14,14 @@ pub mod error;
 pub mod events;
 pub mod file_transfer;
 pub mod mls;
+pub mod mls_observability;
 pub mod protocol;
 pub mod transport_manager;
 pub mod visualization;
 
 pub use config::{EncryptionConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig};
 pub use error::{Error, Result, SessionStateError};
-pub use events::{
-    DorsEscalationReasonCode, DorsReasonCode, Event, EventCallback, GroupInfoMember, UserGroupSummary,
-};
+pub use events::{DecryptionFailureCode, DorsEscalationReasonCode, DorsReasonCode, Event, EventCallback, GroupInfoMember, UserGroupSummary};
 pub use protocol::OfflineProtocol;
 pub use transport_manager::TransportManager;
 pub use visualization::{
@@ -37,4 +36,8 @@ pub use offline_protocol_reliability::{
 // Re-export MLS types for end-to-end encryption
 pub use mls::{
     EncryptedMessage, GroupId, GroupInfo, KeyPackageBundle, MlsManager, MlsStorage, WelcomeMessage,
+};
+pub use mls_observability::{
+    DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsLifecycleEvent, MlsOperationContext,
+    NoopMlsEventEmitter,
 };

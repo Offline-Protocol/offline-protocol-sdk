@@ -97,6 +97,22 @@ impl DorsEscalationReasonCode {
             Self::LowTtl => "LOW_TTL",
         }
     }
+/// Machine-readable reason taxonomy for inbound decryption failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DecryptionFailureCode {
+    /// Incoming encrypted payload is malformed and cannot be parsed.
+    InvalidPayload,
+    /// MLS subsystem is not initialized locally.
+    NotInitialized,
+    /// Ciphertext is invalid or cannot be decrypted.
+    InvalidCiphertext,
+    /// Sender identity/signature verification failed.
+    IdentityMismatch,
+    /// Cryptographic operation failed.
+    CryptoFailure,
+    /// Failure class is unknown.
+    Unknown,
 }
 
 /// Events that can occur in the protocol.
@@ -171,6 +187,18 @@ pub enum Event {
         reason: String,
         /// Number of retries attempted.
         retry_count: u32,
+    },
+
+    /// Failed to decrypt an inbound encrypted message.
+    MessageDecryptionFailed {
+        /// ID of the message that could not be decrypted.
+        message_id: String,
+        /// Sender's user ID.
+        sender: String,
+        /// Machine-readable decryption failure code.
+        code: DecryptionFailureCode,
+        /// Clear failure reason for application handling/logging.
+        reason: String,
     },
 
     /// Transport was switched by DORS.
@@ -549,6 +577,21 @@ impl Event {
             message_id: message_id.as_str(),
             reason,
             retry_count,
+        }
+    }
+
+    /// Creates a MessageDecryptionFailed event.
+    pub fn message_decryption_failed(
+        message_id: MessageId,
+        sender: String,
+        code: DecryptionFailureCode,
+        reason: String,
+    ) -> Self {
+        Self::MessageDecryptionFailed {
+            message_id: message_id.as_str(),
+            sender,
+            code,
+            reason,
         }
     }
 
@@ -1009,6 +1052,18 @@ impl fmt::Debug for Event {
                 .field("message_id", message_id)
                 .field("reason", reason)
                 .field("retry_count", retry_count)
+                .finish(),
+            Self::MessageDecryptionFailed {
+                message_id,
+                sender: _,
+                code,
+                reason,
+            } => f
+                .debug_struct("MessageDecryptionFailed")
+                .field("message_id", message_id)
+                .field("sender", &"[REDACTED]")
+                .field("code", code)
+                .field("reason", reason)
                 .finish(),
             Self::TransportSwitched { from, to, reason } => f
                 .debug_struct("TransportSwitched")
