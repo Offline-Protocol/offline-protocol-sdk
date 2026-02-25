@@ -38,6 +38,87 @@ impl WelcomeReasonCode {
     }
 }
 
+/// Machine-readable reason for DORS selection or switch (observability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DorsReasonCode {
+    /// First selection; no previous transport.
+    InitialSelection,
+    /// DORS selected primary (before send attempt).
+    PrimarySelected,
+    /// Primary send succeeded; active transport is now primary.
+    PrimarySuccess,
+    /// Primary failed; fallback send succeeded.
+    FallbackSuccess,
+    /// BLE → WiFi fallback succeeded (escalation applied).
+    EscalationApplied,
+    /// Previous transport unavailable; switched to best available.
+    CurrentUnavailable,
+}
+
+impl DorsReasonCode {
+    /// Returns the stable machine-readable reason code.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InitialSelection => "INITIAL_SELECTION",
+            Self::PrimarySelected => "PRIMARY_SELECTED",
+            Self::PrimarySuccess => "PRIMARY_SUCCESS",
+            Self::FallbackSuccess => "FALLBACK_SUCCESS",
+            Self::EscalationApplied => "ESCALATION_APPLIED",
+            Self::CurrentUnavailable => "CURRENT_UNAVAILABLE",
+        }
+    }
+}
+
+/// Phase of DORS escalation: recommendation (trigger boundary) vs actual transition (applied).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DorsEscalationPhase {
+    /// DORS decided to escalate (typed trigger reason); fallback may not succeed.
+    Triggered,
+    /// BLE→WiFi fallback send succeeded; escalation was applied.
+    Applied,
+}
+
+impl DorsEscalationPhase {
+    /// Returns the stable string representation (TRIGGERED / APPLIED).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Triggered => "TRIGGERED",
+            Self::Applied => "APPLIED",
+        }
+    }
+}
+
+/// Machine-readable reason for DORS escalation (BLE→Wi‑Fi) observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum DorsEscalationReasonCode {
+    /// Fallback to WiFi succeeded after primary (BLE) send failed.
+    FallbackSuccess,
+    /// Escalation suggested due to retry threshold (e.g. ble_to_wifi_retry_threshold).
+    RetryThreshold,
+    /// Escalation suggested due to sustained poor BLE signal.
+    PoorSignal,
+    /// Escalation suggested due to congestion.
+    Congestion,
+    /// Escalation suggested due to low TTL on messages.
+    LowTtl,
+}
+
+impl DorsEscalationReasonCode {
+    /// Returns the stable machine-readable reason code.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::FallbackSuccess => "FALLBACK_SUCCESS",
+            Self::RetryThreshold => "RETRY_THRESHOLD",
+            Self::PoorSignal => "POOR_SIGNAL",
+            Self::Congestion => "CONGESTION",
+            Self::LowTtl => "LOW_TTL",
+        }
+    }
+}
+
 /// Machine-readable reason taxonomy for inbound decryption failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -412,6 +493,51 @@ pub enum Event {
 
     /// A group operation failed (from relay).
     GroupError { reason: String },
+
+    // --- DORS observability (OFF-258) ---
+    /// DORS scored all available transports for this decision cycle.
+    DorsScoreUpdated {
+        /// Transport type and score pairs (descending by score).
+        scores: Vec<(String, f32)>,
+    },
+    /// DORS selected a transport for the current message.
+    DorsTransportSelected {
+        /// Previous transport (if any); provides decision boundary context.
+        from: Option<String>,
+        /// Selected transport.
+        transport: String,
+        /// Typed reason for selection (initial vs primary selected).
+        reason_code: DorsReasonCode,
+        /// Score of the selected transport (supplemental).
+        score: f32,
+    },
+    /// DORS switched from one transport to another. Emitted only when active transport
+    /// actually changes after a successful send.
+    DorsTransportSwitched {
+        /// Previous transport (if any).
+        from: Option<String>,
+        /// New transport (now active).
+        to: String,
+        /// Stable enum-backed reason for the transition.
+        reason_code: DorsReasonCode,
+        /// Optional human-readable context (e.g. "primary failed, fallback succeeded").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason_detail: Option<String>,
+    },
+    /// DORS escalation from BLE to Wi‑Fi. Use `phase` to distinguish recommendation vs applied.
+    DorsEscalationTriggered {
+        /// TRIGGERED = DORS decided to escalate (reason = trigger); APPLIED = fallback succeeded.
+        phase: DorsEscalationPhase,
+        /// Transport we escalated from (e.g. "ble").
+        from: String,
+        /// Transport we escalated to (e.g. "wifiDirect").
+        to: String,
+        /// Stable enum-backed reason code.
+        reason_code: DorsEscalationReasonCode,
+        /// Optional human-readable context.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason_detail: Option<String>,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -820,6 +946,60 @@ impl Event {
         Self::GroupError { reason }
     }
 
+    /// Creates a DorsScoreUpdated event (DORS observability).
+    pub fn dors_score_updated(scores: Vec<(String, f32)>) -> Self {
+        Self::DorsScoreUpdated { scores }
+    }
+
+    /// Creates a DorsTransportSelected event (DORS observability).
+    pub fn dors_transport_selected(
+        from: Option<String>,
+        transport: String,
+        reason_code: DorsReasonCode,
+        score: f32,
+    ) -> Self {
+        Self::DorsTransportSelected {
+            from,
+            transport,
+            reason_code,
+            score,
+        }
+    }
+
+    /// Creates a DorsTransportSwitched event (DORS observability).
+    /// Emitted only when active transport actually changes after a successful send.
+    pub fn dors_transport_switched(
+        from: Option<String>,
+        to: String,
+        reason_code: DorsReasonCode,
+        reason_detail: Option<String>,
+    ) -> Self {
+        Self::DorsTransportSwitched {
+            from,
+            to,
+            reason_code,
+            reason_detail,
+        }
+    }
+
+    /// Creates a DorsEscalationTriggered event (DORS observability).
+    /// Use phase Triggered at the DORS trigger boundary, Applied when fallback succeeds.
+    pub fn dors_escalation_triggered(
+        phase: DorsEscalationPhase,
+        from: String,
+        to: String,
+        reason_code: DorsEscalationReasonCode,
+        reason_detail: Option<String>,
+    ) -> Self {
+        Self::DorsEscalationTriggered {
+            phase,
+            from,
+            to,
+            reason_code,
+            reason_detail,
+        }
+    }
+
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -1178,6 +1358,48 @@ impl fmt::Debug for Event {
             Self::GroupError { reason } => f
                 .debug_struct("GroupError")
                 .field("reason", reason)
+                .finish(),
+            Self::DorsScoreUpdated { scores } => f
+                .debug_struct("DorsScoreUpdated")
+                .field("scores", scores)
+                .finish(),
+            Self::DorsTransportSelected {
+                from,
+                transport,
+                reason_code,
+                score,
+            } => f
+                .debug_struct("DorsTransportSelected")
+                .field("from", from)
+                .field("transport", transport)
+                .field("reason_code", reason_code)
+                .field("score", score)
+                .finish(),
+            Self::DorsTransportSwitched {
+                from,
+                to,
+                reason_code,
+                reason_detail,
+            } => f
+                .debug_struct("DorsTransportSwitched")
+                .field("from", from)
+                .field("to", to)
+                .field("reason_code", reason_code)
+                .field("reason_detail", reason_detail)
+                .finish(),
+            Self::DorsEscalationTriggered {
+                phase,
+                from,
+                to,
+                reason_code,
+                reason_detail,
+            } => f
+                .debug_struct("DorsEscalationTriggered")
+                .field("phase", phase)
+                .field("from", from)
+                .field("to", to)
+                .field("reason_code", reason_code)
+                .field("reason_detail", reason_detail)
                 .finish(),
         }
     }

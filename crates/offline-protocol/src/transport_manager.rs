@@ -5,9 +5,10 @@
 //! for each message.
 
 use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD};
+use crate::events::{DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event};
 use crate::{Error, Result};
 use offline_protocol_core::Message;
-use offline_protocol_router::{DorsConfig, TransportSelector};
+use offline_protocol_router::{DorsConfig, EscalationTriggerReason, TransportSelector};
 use offline_protocol_transport::{
     Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
 };
@@ -29,7 +30,16 @@ pub struct TransportManager {
 
     /// Locally observed delivery outcomes used to enrich transport metrics.
     observations: HashMap<TransportType, ObservedStats>,
+
+    /// Optional callback for DORS lifecycle/decision events (OFF-258).
+    dors_event_callback: Option<Arc<dyn Fn(Event) + Send + Sync>>,
+
+    /// Last escalation trigger event emitted (reason, time) for dedupe window.
+    last_escalation_trigger_emitted: Option<(DorsEscalationReasonCode, std::time::Instant)>,
 }
+
+/// Dedupe window: don't re-emit same escalation trigger reason within this duration.
+const ESCALATION_TRIGGER_DEDUPE_SECS: u64 = 30;
 
 #[derive(Debug, Default, Clone)]
 struct ObservedStats {
@@ -130,6 +140,56 @@ impl TransportManager {
             current_transport: None,
             selector,
             observations: HashMap::new(),
+            dors_event_callback: None,
+            last_escalation_trigger_emitted: None,
+        }
+    }
+
+    /// Sets the callback for DORS decision events (dors_score_updated, dors_transport_selected,
+    pub fn set_dors_event_callback(&mut self, callback: Option<Arc<dyn Fn(Event) + Send + Sync>>) {
+        self.dors_event_callback = callback;
+    }
+
+    fn emit_dors_event(&self, event: Event) {
+        if let Some(ref cb) = self.dors_event_callback {
+            cb(event);
+        }
+    }
+
+    fn escalation_trigger_reason_to_code(r: EscalationTriggerReason) -> DorsEscalationReasonCode {
+        match r {
+            EscalationTriggerReason::RetryThreshold => DorsEscalationReasonCode::RetryThreshold,
+            EscalationTriggerReason::PoorSignal => DorsEscalationReasonCode::PoorSignal,
+            EscalationTriggerReason::Congestion => DorsEscalationReasonCode::Congestion,
+            EscalationTriggerReason::LowTtl => DorsEscalationReasonCode::LowTtl,
+        }
+    }
+
+    /// Emit dors_escalation_triggered at trigger boundary (typed reason), deduped by reason + time window.
+    fn emit_escalation_trigger_if_deduped(
+        &mut self,
+        reason_code: DorsEscalationReasonCode,
+        from: String,
+        to: String,
+        reason_detail: Option<String>,
+    ) {
+        let now = std::time::Instant::now();
+        let emit = match &self.last_escalation_trigger_emitted {
+            Some((last_code, last_at)) => {
+                *last_code != reason_code
+                    || last_at.elapsed().as_secs() >= ESCALATION_TRIGGER_DEDUPE_SECS
+            }
+            None => true,
+        };
+        if emit {
+            self.last_escalation_trigger_emitted = Some((reason_code, now));
+            self.emit_dors_event(Event::dors_escalation_triggered(
+                DorsEscalationPhase::Triggered,
+                from,
+                to,
+                reason_code,
+                reason_detail,
+            ));
         }
     }
 
@@ -173,6 +233,8 @@ impl TransportManager {
             )));
         }
 
+        let previous = self.current_transport;
+
         // DORS selects the primary transport (applies hysteresis/cooldown/stability).
         let primary = self
             .selector
@@ -182,6 +244,30 @@ impl TransportManager {
                     "No suitable transport selected from available transports".to_string(),
                 ))
             })?;
+
+        // Emit DORS observability: scores and selection (before send attempt).
+        let scored = self.selector.score_and_rank(message, &available);
+        let scores: Vec<(String, f32)> = scored
+            .iter()
+            .map(|(t, s)| (t.to_string(), *s))
+            .collect();
+        self.emit_dors_event(Event::dors_score_updated(scores));
+        let primary_score = scored
+            .iter()
+            .find(|(t, _)| *t == primary)
+            .map(|(_, s)| *s)
+            .unwrap_or(0.0);
+        let selection_reason = if previous.is_none() {
+            DorsReasonCode::InitialSelection
+        } else {
+            DorsReasonCode::PrimarySelected
+        };
+        self.emit_dors_event(Event::dors_transport_selected(
+            previous.map(|t| t.to_string()),
+            primary.to_string(),
+            selection_reason,
+            primary_score,
+        ));
 
         // Try the primary transport first.
         let primary_result = {
@@ -198,6 +284,18 @@ impl TransportManager {
         match primary_result {
             Ok(()) => {
                 self.current_transport = Some(primary);
+                // Emit switch only when active transport actually changed (after successful send).
+                if previous != Some(primary) {
+                    let reason_code = previous.is_some_and(|p| !available.contains_key(&p))
+                        .then_some(DorsReasonCode::CurrentUnavailable)
+                        .unwrap_or(DorsReasonCode::PrimarySuccess);
+                    self.emit_dors_event(Event::dors_transport_switched(
+                        previous.map(|t| t.to_string()),
+                        primary.to_string(),
+                        reason_code,
+                        None,
+                    ));
+                }
                 return Ok(());
             }
             Err(e) => {
@@ -222,6 +320,20 @@ impl TransportManager {
                 continue;
             }
 
+            // Emit escalation trigger at DORS boundary (typed reason), deduped.
+            if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                if let Some(trigger_reason) = self.selector.escalation_trigger_reason() {
+                    let reason_code =
+                        Self::escalation_trigger_reason_to_code(trigger_reason);
+                    self.emit_escalation_trigger_if_deduped(
+                        reason_code,
+                        primary.to_string(),
+                        transport_type.to_string(),
+                        None,
+                    );
+                }
+            }
+
             let transport = match self.transports.get(transport_type) {
                 Some(t) => t,
                 None => continue,
@@ -241,6 +353,31 @@ impl TransportManager {
                 Ok(()) => {
                     self.current_transport = Some(*transport_type);
                     self.selector.set_current_transport(*transport_type);
+                    // Emit switch only when active transport actually changed (fallback success).
+                    if previous != Some(*transport_type) {
+                        let reason_code =
+                            if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                                DorsReasonCode::EscalationApplied
+                            } else {
+                                DorsReasonCode::FallbackSuccess
+                            };
+                        self.emit_dors_event(Event::dors_transport_switched(
+                            previous.map(|t| t.to_string()),
+                            transport_type.to_string(),
+                            reason_code,
+                            Some("primary send failed, fallback succeeded".to_string()),
+                        ));
+                    }
+                    // Escalation applied only when BLE→WiFi fallback actually succeeded.
+                    if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                        self.emit_dors_event(Event::dors_escalation_triggered(
+                            DorsEscalationPhase::Applied,
+                            primary.to_string(),
+                            transport_type.to_string(),
+                            DorsEscalationReasonCode::FallbackSuccess,
+                            Some("primary BLE send failed, fallback to WiFi succeeded".to_string()),
+                        ));
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -502,6 +639,7 @@ mod tests {
     use offline_protocol_core::{AppId, UserId};
     use offline_protocol_router::DorsConfig;
     use offline_protocol_transport::{mock::MockTransport, TransportType};
+    use std::sync::Mutex;
 
     fn create_test_message() -> Message {
         Message::new(
@@ -543,6 +681,39 @@ mod tests {
         let message = create_test_message();
         let result = manager.send(&message);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dors_events_emitted_when_callback_set() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let mut transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        let events: std::sync::Arc<Mutex<Vec<Event>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        manager.set_dors_event_callback(Some(Arc::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        })));
+
+        let message = create_test_message();
+        let _ = manager.send(&message);
+
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| matches!(e, crate::events::Event::DorsScoreUpdated { .. })),
+            "expected dors_score_updated"
+        );
+        assert!(
+            captured.iter().any(|e| {
+                matches!(e, crate::events::Event::DorsTransportSelected { .. })
+            }),
+            "expected dors_transport_selected"
+        );
     }
 
     #[test]
