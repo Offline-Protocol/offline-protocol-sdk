@@ -185,6 +185,7 @@ dictionary DorsConfig {
     u64 switch_cooldown_secs;
     u32 ble_to_wifi_retry_threshold;
     f32 min_success_rate_before_escalation;
+    u64 min_ble_samples_before_success_rate_escalation;
     i16 rssi_switch_threshold;
     u64 congestion_queue_threshold;
     u64 stability_window_secs;

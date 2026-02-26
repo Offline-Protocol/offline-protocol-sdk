@@ -25,6 +25,10 @@ pub struct DorsConfig {
     /// Minimum BLE success rate (0.0–1.0) below which we escalate to WiFi (quality degradation).
     pub min_success_rate_before_escalation: f32,
 
+    /// Minimum BLE success-ratio samples (observation volume) before evaluating low-success-rate
+    /// escalation. Prevents a single early failure from triggering escalation on sparse data.
+    pub min_ble_samples_before_success_rate_escalation: usize,
+
     /// RSSI threshold for switching from BLE to Wi-Fi Direct (dBm).
     pub rssi_switch_threshold: i16,
 
@@ -72,6 +76,7 @@ impl Default for DorsConfig {
             switch_cooldown_secs: 20,
             ble_to_wifi_retry_threshold: 2,
             min_success_rate_before_escalation: 0.30,
+            min_ble_samples_before_success_rate_escalation: 5,
             rssi_switch_threshold: -85,
             congestion_queue_threshold: 50,
             stability_window_secs: 8,
@@ -214,6 +219,11 @@ impl TransportHistory {
 
     fn average_success_ratio(&self) -> Option<f32> {
         average_f32(&self.success_ratios)
+    }
+
+    /// Number of success-ratio samples in history (observation volume for escalation gating).
+    fn success_ratio_sample_count(&self) -> usize {
+        self.success_ratios.len()
     }
 }
 
@@ -573,12 +583,15 @@ impl TransportSelector {
             return true;
         }
 
-        // Check historical success rate (quality degradation)
+        // Check historical success rate (quality degradation), gated on observation volume
         let min_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
+        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
         if let Some(history) = self.transport_history.get(&transport) {
-            if let Some(success_rate) = history.average_success_ratio() {
-                if success_rate < min_rate {
-                    return true;
+            if history.success_ratio_sample_count() >= min_samples {
+                if let Some(success_rate) = history.average_success_ratio() {
+                    if success_rate < min_rate {
+                        return true;
+                    }
                 }
             }
         }
@@ -1035,7 +1048,8 @@ impl TransportSelector {
     /// - **Poor signal**: BLE RSSI ≤ `rssi_switch_threshold` for ≥ `poor_signal_duration_secs`
     /// - **Congestion**: BLE queue depth ≥ `congestion_queue_threshold` for ≥ `congestion_duration_secs`
     /// - **Low TTL**: Message TTL ≤ `ttl_escalation_threshold` (held for `ttl_escalation_hold_secs`)
-    /// - **Low success rate**: BLE average success ratio < `min_success_rate_before_escalation`
+    /// - **Low success rate**: BLE success-ratio samples ≥ `min_ble_samples_before_success_rate_escalation`
+    ///   AND average success ratio < `min_success_rate_before_escalation`
     pub fn escalation_trigger_reason(&self) -> Option<EscalationTriggerReason> {
         let retry_failure = self
             .retry_counts
@@ -1097,9 +1111,11 @@ impl TransportSelector {
         }
 
         let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
+        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
         let low_success_rate = self
             .transport_history
             .get(&TransportType::BLE)
+            .filter(|h| h.success_ratio_sample_count() >= min_samples)
             .and_then(|h| h.average_success_ratio())
             .map(|rate| rate < min_success_rate)
             .unwrap_or(false);
@@ -1180,9 +1196,11 @@ impl TransportSelector {
             .unwrap_or(false);
 
         let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
+        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
         let low_success_rate = self
             .transport_history
             .get(&TransportType::BLE)
+            .filter(|h| h.success_ratio_sample_count() >= min_samples)
             .and_then(|h| h.average_success_ratio())
             .map(|rate| rate < min_success_rate)
             .unwrap_or(false);
@@ -1279,9 +1297,11 @@ impl TransportSelector {
             .unwrap_or(false);
 
         let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
+        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
         let low_success_rate = self
             .transport_history
             .get(&TransportType::BLE)
+            .filter(|h| h.success_ratio_sample_count() >= min_samples)
             .and_then(|h| h.average_success_ratio())
             .map(|rate| rate < min_success_rate)
             .unwrap_or(false);
@@ -1596,12 +1616,13 @@ mod tests {
         assert!(selector.should_escalate_to_wifi());
     }
 
-    /// Degradation-based escalation: when BLE success rate drops below configured minimum,
-    /// escalation to WiFi is triggered (deterministic, config-driven).
+    /// Degradation-based escalation: when BLE success rate drops below configured minimum
+    /// after sufficient observation volume, escalation is triggered (deterministic, config-driven).
     #[test]
     fn test_low_success_rate_escalation() {
         let config = DorsConfig {
             min_success_rate_before_escalation: 0.30,
+            min_ble_samples_before_success_rate_escalation: 1, // one sample enough for test
             ..Default::default()
         };
         let mut selector = TransportSelector::with_config(config);
@@ -1617,7 +1638,51 @@ mod tests {
         selector.select_transport(&message, &transports);
         assert!(
             selector.should_escalate_to_wifi(),
-            "BLE success rate 0.2 < 0.30 should trigger escalation"
+            "BLE success rate 0.2 < 0.30 with sample floor met should trigger escalation"
+        );
+        assert_eq!(
+            selector.escalation_trigger_reason(),
+            Some(EscalationTriggerReason::LowSuccessRate)
+        );
+    }
+
+    /// Sparse data must not trigger low-success-rate escalation: single sample below threshold
+    /// is gated by min_ble_samples_before_success_rate_escalation (default 5).
+    #[test]
+    fn test_low_success_rate_escalation_gated_by_sample_floor() {
+        let config = DorsConfig {
+            min_success_rate_before_escalation: 0.30,
+            min_ble_samples_before_success_rate_escalation: 5, // require 5 samples
+            ..Default::default()
+        };
+        let mut selector = TransportSelector::with_config(config);
+        let message = create_test_message();
+
+        // One observation with very low success (0.2) — below threshold but only 1 sample
+        let mut ble_metrics = create_test_metrics(Some(-60), 0.1, 5);
+        ble_metrics.success_count = 2;
+        ble_metrics.failure_count = 8;
+
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::BLE, ble_metrics);
+
+        selector.select_transport(&message, &transports);
+        assert!(
+            !selector.should_escalate_to_wifi(),
+            "single sample below rate threshold must not trigger escalation when floor is 5"
+        );
+        assert_ne!(
+            selector.escalation_trigger_reason(),
+            Some(EscalationTriggerReason::LowSuccessRate)
+        );
+
+        // After 5 select_transport calls we have 5 samples; then low rate should trigger
+        for _ in 0..4 {
+            selector.select_transport(&message, &transports);
+        }
+        assert!(
+            selector.should_escalate_to_wifi(),
+            "after 5 samples, low success rate should trigger escalation"
         );
         assert_eq!(
             selector.escalation_trigger_reason(),
