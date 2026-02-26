@@ -56,8 +56,9 @@ const protocol = new OfflineProtocol({
 
 await protocol.start();
 
-// Initialize MLS with secure storage (required once)
-await protocol.initializeMlsWithSecureStorage();
+// MLS is auto-initialized on start() when encryption is enabled (default).
+// Optional: call explicitly if you want to initialize earlier.
+// await protocol.initializeMlsWithSecureStorage();
 
 // Just send messages - encryption happens automatically!
 await protocol.sendMessage({
@@ -241,8 +242,8 @@ let encrypted = try protocol.mlsEncryptForGroup(
 ### 4. Receive and Decrypt Messages
 
 ```swift
-// When receiving a message, check if it's encrypted
-if message.metadata["mls_encrypted"] == "true" {
+// When receiving a message, check if it was encrypted
+if message.metadata["encrypted"] == "true" {
     let encrypted = parseEncryptedMessage(message.content)
     if let plaintext = try protocol.mlsDecrypt(encrypted: encrypted) {
         let text = String(data: plaintext, encoding: .utf8)
@@ -408,19 +409,19 @@ When offline, key packages can be exchanged via:
 
 ### Message Format
 
-Encrypted messages use the existing `Message` structure with metadata:
+Encrypted messages are transported using the existing `Message` structure.
+For auto-decrypted messages surfaced to the app, the SDK sets `metadata.encrypted = "true"`:
 
 ```json
 {
   "content": "<base64-encoded MLS ciphertext>",
   "metadata": {
-    "mls_encrypted": "true",
-    "mls_group_id": "group:abc123",
-    "mls_epoch": "5",
-    "mls_message_type": "Application"
+    "encrypted": "true"
   }
 }
 ```
+
+MLS control payloads (key package / welcome / ciphertext envelopes) are encoded as internal message content and handled by the SDK before app delivery.
 
 ---
 
