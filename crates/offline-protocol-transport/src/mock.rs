@@ -7,13 +7,23 @@ use std::sync::{Arc, Mutex};
 /// Mock transport for testing purposes.
 ///
 /// This transport simulates message sending and receiving without actual network operations.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MockTransport {
     transport_type: TransportType,
     status: Arc<Mutex<TransportStatus>>,
     sent_messages: Arc<Mutex<Vec<Message>>>,
     receive_queue: Arc<Mutex<Vec<Message>>>,
     metrics: Arc<Mutex<TransportMetrics>>,
+    /// When > 0, next send() calls fail this many times (for escalation/fallback tests).
+    fail_next_sends: Arc<Mutex<usize>>,
+}
+
+impl std::fmt::Debug for MockTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockTransport")
+            .field("transport_type", &self.transport_type)
+            .finish()
+    }
 }
 
 impl MockTransport {
@@ -25,7 +35,13 @@ impl MockTransport {
             sent_messages: Arc::new(Mutex::new(Vec::new())),
             receive_queue: Arc::new(Mutex::new(Vec::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
+            fail_next_sends: Arc::new(Mutex::new(0)),
         }
+    }
+
+    /// Makes the next `n` send attempts return an error (for retry-failure / escalation tests).
+    pub fn set_fail_next_sends(&self, n: usize) {
+        *self.fail_next_sends.lock().unwrap() = n;
     }
 
     /// Adds a message to the receive queue for testing.
@@ -68,6 +84,21 @@ impl Transport for MockTransport {
     }
 
     fn send(&self, message: &Message) -> Result<()> {
+        {
+            let mut fail = self.fail_next_sends.lock().unwrap();
+            if *fail > 0 {
+                *fail = fail.saturating_sub(1);
+                let mut metrics = self.metrics.lock().unwrap();
+                metrics.failure_count += 1;
+                let total = metrics.success_count + metrics.failure_count;
+                if total > 0 {
+                    metrics.delivery_ratio = Some((metrics.success_count as f32 / total as f32).clamp(0.0, 1.0));
+                    metrics.drop_rate = Some((1.0 - metrics.delivery_ratio.unwrap()).clamp(0.0, 1.0));
+                }
+                return Err(crate::Error::SendFailed("mock fail_next_sends".to_string()));
+            }
+        }
+
         let mut sent = self.sent_messages.lock().unwrap();
         sent.push(message.clone());
 

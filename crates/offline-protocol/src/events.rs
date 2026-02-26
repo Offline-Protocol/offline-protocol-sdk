@@ -104,6 +104,8 @@ pub enum DorsEscalationReasonCode {
     Congestion,
     /// Escalation suggested due to low TTL on messages.
     LowTtl,
+    /// Escalation suggested due to BLE success rate below configured minimum (quality degradation).
+    LowSuccessRate,
 }
 
 impl DorsEscalationReasonCode {
@@ -115,6 +117,7 @@ impl DorsEscalationReasonCode {
             Self::PoorSignal => "POOR_SIGNAL",
             Self::Congestion => "CONGESTION",
             Self::LowTtl => "LOW_TTL",
+            Self::LowSuccessRate => "LOW_SUCCESS_RATE",
         }
     }
 }

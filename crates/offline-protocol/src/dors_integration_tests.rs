@@ -167,6 +167,73 @@ fn dors_integration_change_path_metric_shift_causes_valid_switch_after_policy_ch
     );
 }
 
+// ========== Degradation-based escalation: retry-failure ==========
+
+/// Escalation triggers when BLE repeatedly fails: after threshold failures we try WiFi;
+/// send succeeds via WiFi and current transport switches (deterministic, config-driven).
+#[test]
+fn dors_integration_escalation_retry_failure() {
+    let config = DorsConfig {
+        ble_to_wifi_retry_threshold: 2,
+        ..DorsConfig::default()
+    };
+    let selector = TransportSelector::with_config(config);
+    let mut manager = crate::TransportManager::new(selector);
+
+    let ble = add_started_mock(&mut manager, TransportType::BLE, ble_strong_metrics());
+    add_started_mock(&mut manager, TransportType::WiFiDirect, wifi_weak_metrics());
+
+    // BLE fails next 2 sends so retry count reaches threshold.
+    ble.lock().unwrap().set_fail_next_sends(2);
+
+    // First send: BLE primary, fails (retry_count=1), fallback WiFi succeeds.
+    manager.send(&test_message()).unwrap();
+    assert_eq!(
+        manager.current_transport(),
+        Some(TransportType::WiFiDirect),
+        "after first BLE failure fallback WiFi should succeed"
+    );
+
+    // Reset so next send picks BLE again (strong metrics). Then BLE fails again.
+    ble.lock().unwrap().set_fail_next_sends(1);
+    manager.send(&test_message()).unwrap();
+    // Second send: BLE is primary again (strong metrics), fails (retry_count=2), fallback WiFi succeeds.
+    assert_eq!(
+        manager.current_transport(),
+        Some(TransportType::WiFiDirect),
+        "escalation: after second BLE failure we stay on WiFi (escalation applied)"
+    );
+}
+
+// ========== Degradation-based escalation: low-signal ==========
+
+/// Escalation is recommended when BLE signal is below threshold for configured duration
+/// (deterministic: poor_signal_duration_secs 0 so immediate).
+#[test]
+fn dors_integration_escalation_low_signal_trigger() {
+    let config = DorsConfig {
+        rssi_switch_threshold: -80,
+        poor_signal_duration_secs: 0,
+        ..DorsConfig::default()
+    };
+    let mut selector = TransportSelector::with_config(config);
+    let message = test_message();
+
+    let mut transports = std::collections::HashMap::new();
+    transports.insert(TransportType::BLE, ble_weak_metrics()); // RSSI -92
+    transports.insert(TransportType::WiFiDirect, wifi_strong_metrics());
+
+    selector.select_transport(&message, &transports);
+    assert!(
+        selector.should_escalate_to_wifi(),
+        "low-signal: BLE RSSI below threshold with duration 0 should trigger escalation"
+    );
+    assert_eq!(
+        selector.escalation_trigger_reason(),
+        Some(offline_protocol_router::EscalationTriggerReason::PoorSignal)
+    );
+}
+
 // ========== Noisy path: anti-flap controls prevent rapid oscillation ==========
 
 #[test]
