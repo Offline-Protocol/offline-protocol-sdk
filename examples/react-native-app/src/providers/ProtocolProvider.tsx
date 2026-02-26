@@ -17,48 +17,8 @@ import {
   type WifiDirectTransportConfig,
 } from '@offline-protocol/mesh-sdk';
 
-// MLS types (defined locally until SDK is rebuilt)
-interface MlsEncryptedMessage {
-  groupId: string;
-  messageType: string;
-  epoch: number;
-  ciphertext: number[];
-  senderId: string;
-  timestampMs: number;
-}
-
-interface MlsWelcome {
-  groupId: string;
-  welcomeData: number[];
-  inviterId: string;
-  timestampMs: number;
-}
-
-// Extended protocol type with MLS methods
 interface OfflineProtocolWithMls extends OfflineProtocol {
-  initializeMlsWithSecureStorage(): Promise<void>;
   isMlsInitialized(): Promise<boolean>;
-  mlsGetOrCreateKeyPackage(): Promise<{
-    packageId: string;
-    userId: string;
-    keyPackageData: number[];
-    createdAt: number;
-    isSynced: boolean;
-  }>;
-  mlsImportKeyPackage(userId: string, keyPackageData: number[]): Promise<void>;
-  mlsHasSession(otherUserId: string): Promise<boolean>;
-  mlsCreateSession(otherUserId: string): Promise<MlsWelcome>;
-  mlsJoinSession(welcome: MlsWelcome): Promise<{
-    otherUserId: string;
-    groupId: string;
-    epoch: number;
-    createdAt: number;
-  }>;
-  mlsEncryptForUser(
-    otherUserId: string,
-    plaintext: number[],
-  ): Promise<MlsEncryptedMessage>;
-  mlsDecrypt(encrypted: MlsEncryptedMessage): Promise<number[] | null>;
 }
 import { useOfflineProtocol } from '../hooks/useOfflineProtocol';
 import { generateUserId } from '../utils/user';
@@ -68,9 +28,6 @@ import {
   PRESENCE_MESSAGE_PREFIX,
   PRESENCE_REBROADCAST_INTERVAL_MS,
   PROCESSED_MESSAGE_RETENTION_MS,
-  KEY_PACKAGE_MESSAGE_PREFIX,
-  MLS_WELCOME_MESSAGE_PREFIX,
-  ENCRYPTED_MESSAGE_PREFIX,
 } from '../constants';
 
 // Relay (WebSocket) types – used for groups and online messaging
@@ -309,8 +266,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   // MLS encryption state
   const [isMlsInitialized, setIsMlsInitialized] = useState(false);
   const [encryptedPeers, setEncryptedPeers] = useState<Set<string>>(new Set());
-  const peerKeyPackagesRef = useRef<Map<string, number[]>>(new Map());
-  const keyPackageSentPeersRef = useRef<Set<string>>(new Set());
 
   // Relay (WebSocket) state – inlined from former WebSocketRelayProvider
   const [relayStatus, setRelayStatus] = useState<ConnectionStatus>('disconnected');
@@ -789,54 +744,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     };
   }, []);
 
-  // Helper to convert string to byte array (React Native compatible)
-  const stringToBytes = useCallback((str: string): number[] => {
-    const bytes: number[] = [];
-    for (let i = 0; i < str.length; i++) {
-      const code = str.charCodeAt(i);
-      if (code < 0x80) {
-        bytes.push(code);
-      } else if (code < 0x800) {
-        bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-      } else if (code < 0x10000) {
-        bytes.push(
-          0xe0 | (code >> 12),
-          0x80 | ((code >> 6) & 0x3f),
-          0x80 | (code & 0x3f),
-        );
-      }
-    }
-    return bytes;
-  }, []);
-
-  // Helper to convert byte array to string (React Native compatible)
-  const bytesToString = useCallback((bytes: number[]): string => {
-    let result = '';
-    let i = 0;
-    while (i < bytes.length) {
-      const byte = bytes[i];
-      if (byte < 0x80) {
-        result += String.fromCharCode(byte);
-        i++;
-      } else if ((byte & 0xe0) === 0xc0) {
-        result += String.fromCharCode(
-          ((byte & 0x1f) << 6) | (bytes[i + 1] & 0x3f),
-        );
-        i += 2;
-      } else if ((byte & 0xf0) === 0xe0) {
-        result += String.fromCharCode(
-          ((byte & 0x0f) << 12) |
-            ((bytes[i + 1] & 0x3f) << 6) |
-            (bytes[i + 2] & 0x3f),
-        );
-        i += 3;
-      } else {
-        i++;
-      }
-    }
-    return result;
-  }, []);
-
   const {
     protocol,
     isStarted: isOnline,
@@ -904,7 +811,10 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       relayPriority: 'auto',
     },
     encryption: {
-      enabled: false,
+      enabled: true,
+      autoKeyExchange: true,
+      storePending: true,
+      requireEncryption: false,
     },
   });
 
@@ -998,47 +908,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     },
     [protocol, currentUserName, getPeerDisplayName],
   );
-  // Send key package to a peer for MLS session establishment
-  const sendKeyPackageToPeer = useCallback(
-    async (peerId: string) => {
-      if (!protocol || !isMlsInitialized || peerId === currentUserId) {
-        return;
-      }
-
-      // Only send key package once per peer
-      if (keyPackageSentPeersRef.current.has(peerId)) {
-        return;
-      }
-
-      try {
-        const mlsProtocol = protocol as OfflineProtocolWithMls;
-        const keyPackage = await mlsProtocol.mlsGetOrCreateKeyPackage();
-        const payload = {
-          type: 'keyPackage',
-          userId: currentUserId,
-          keyPackageData: keyPackage.keyPackageData,
-          timestamp: Date.now(),
-        };
-
-        await protocolSendMessage(
-          peerId,
-          `${KEY_PACKAGE_MESSAGE_PREFIX}${JSON.stringify(payload)}`,
-          MessagePriority.Low,
-        );
-
-        keyPackageSentPeersRef.current.add(peerId);
-        console.log(`[ProtocolProvider] Sent key package to ${peerId}`);
-      } catch (err) {
-        console.warn(
-          '[ProtocolProvider] Failed to send key package',
-          peerId,
-          err,
-        );
-      }
-    },
-    [protocol, isMlsInitialized, currentUserId, protocolSendMessage],
-  );
-
   const sendPresenceToPeer = useCallback(
     async (peerId: string) => {
       if (peerId === currentUserId) {
@@ -1071,9 +940,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               [peerId]: timestamp,
             };
           });
-
-          // Also send key package for MLS encryption
-          void sendKeyPackageToPeer(peerId);
         }
       } catch (err) {
         console.warn(
@@ -1083,7 +949,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         );
       }
     },
-    [protocolSendMessage, currentUserId, currentUserName, sendKeyPackageToPeer],
+    [protocolSendMessage, currentUserId, currentUserName],
   );
 
   // Initialize protocol
@@ -1116,33 +982,30 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     }
   }, [isInitialized, permissionsGranted, requestPermissions]);
 
+  const refreshMlsStatus = useCallback(async () => {
+    if (!protocol || !isOnline) {
+      setIsMlsInitialized(false);
+      return;
+    }
+    try {
+      const mlsProtocol = protocol as OfflineProtocolWithMls;
+      const initialized = await mlsProtocol.isMlsInitialized();
+      setIsMlsInitialized(initialized);
+    } catch (mlsError) {
+      console.warn('[ProtocolProvider] MLS status check failed:', mlsError);
+      setIsMlsInitialized(false);
+    }
+  }, [protocol, isOnline]);
+
   // Start protocol
   const start = useCallback(async () => {
     try {
       await protocolStart();
-
-      // Initialize MLS encryption after protocol starts
-      if (protocol && !isMlsInitialized) {
-        try {
-          console.log('[ProtocolProvider] Initializing MLS encryption...');
-          const mlsProtocol = protocol as OfflineProtocolWithMls;
-          await mlsProtocol.initializeMlsWithSecureStorage();
-          setIsMlsInitialized(true);
-          console.log(
-            '[ProtocolProvider] MLS encryption initialized successfully',
-          );
-        } catch (mlsError) {
-          console.warn(
-            '[ProtocolProvider] MLS initialization failed, continuing without encryption:',
-            mlsError,
-          );
-        }
-      }
     } catch (err) {
       console.error('Failed to start protocol:', err);
       Alert.alert('Connection Error', 'Failed to start the messaging service.');
     }
-  }, [protocolStart, protocol, isMlsInitialized]);
+  }, [protocolStart]);
 
   // Stop protocol
   const stop = useCallback(async () => {
@@ -1153,7 +1016,13 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     }
   }, [protocolStop]);
 
-  // Send message with optional encryption
+  useEffect(() => {
+    refreshMlsStatus().catch(err => {
+      console.warn('[ProtocolProvider] Failed to refresh MLS status:', err);
+    });
+  }, [refreshMlsStatus]);
+
+  // Send message (SDK handles MLS encryption/decryption automatically)
   const sendMessage = useCallback(
     async (
       recipientId: string,
@@ -1166,93 +1035,12 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           `[ProtocolProvider] Sending message to ${recipientId}: "${content}" (priority: ${priority})`,
         );
 
-        let messageToSend = content;
-        let isEncrypted = false;
-
-        // Try to encrypt the message if MLS is initialized
-        if (protocol && isMlsInitialized) {
-          try {
-            const mlsProtocol = protocol as OfflineProtocolWithMls;
-            // Check if we have a session or can create one
-            const hasSession = await mlsProtocol.mlsHasSession(recipientId);
-
-            if (!hasSession) {
-              // Check if we have the peer's key package
-              const peerKeyPackage =
-                peerKeyPackagesRef.current.get(recipientId);
-              if (peerKeyPackage) {
-                console.log(
-                  `[ProtocolProvider] Importing key package for ${recipientId}`,
-                );
-                await mlsProtocol.mlsImportKeyPackage(
-                  recipientId,
-                  peerKeyPackage,
-                );
-
-                // Create session and get welcome message
-                const welcome = await mlsProtocol.mlsCreateSession(recipientId);
-
-                // Send welcome message to recipient
-                const welcomePayload = {
-                  groupId: welcome.groupId,
-                  welcomeData: welcome.welcomeData,
-                  inviterId: welcome.inviterId,
-                  timestampMs: welcome.timestampMs,
-                };
-                await protocolSendMessage(
-                  recipientId,
-                  `${MLS_WELCOME_MESSAGE_PREFIX}${JSON.stringify(
-                    welcomePayload,
-                  )}`,
-                  MessagePriority.High,
-                );
-                console.log(
-                  `[ProtocolProvider] Sent MLS welcome to ${recipientId}`,
-                );
-              }
-            }
-
-            // Try to encrypt if we now have a session
-            const canEncrypt = await mlsProtocol.mlsHasSession(recipientId);
-            if (canEncrypt) {
-              const plainBytes = stringToBytes(content);
-              const encrypted = await mlsProtocol.mlsEncryptForUser(
-                recipientId,
-                plainBytes,
-              );
-
-              // Wrap encrypted message with prefix
-              const encryptedPayload = {
-                groupId: encrypted.groupId,
-                messageType: encrypted.messageType,
-                epoch: encrypted.epoch,
-                ciphertext: encrypted.ciphertext,
-                senderId: encrypted.senderId,
-                timestampMs: encrypted.timestampMs,
-              };
-              messageToSend = `${ENCRYPTED_MESSAGE_PREFIX}${JSON.stringify(
-                encryptedPayload,
-              )}`;
-              isEncrypted = true;
-
-              // Track this peer as encrypted
-              setEncryptedPeers(prev => new Set(prev).add(recipientId));
-              console.log(
-                `[ProtocolProvider] Message encrypted for ${recipientId}`,
-              );
-            }
-          } catch (encryptError) {
-            console.warn(
-              '[ProtocolProvider] Encryption failed, sending plaintext:',
-              encryptError,
-            );
-          }
-        }
+        const isEncrypted = isMlsInitialized && encryptedPeers.has(recipientId);
 
         // Send message - SDK returns the final message ID
         const messageId = await protocolSendMessage(
           recipientId,
-          messageToSend,
+          content,
           priority,
           replyToMsg,
         );
@@ -1330,8 +1118,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       protocolSendMessage,
       currentUserId,
       getPeerDisplayName,
-      protocol,
       isMlsInitialized,
+      encryptedPeers,
     ],
   );
 
@@ -1370,7 +1158,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       const discoveredPeers = new Set<string>();
       const newlyDiscoveredPeers = new Set<string>(); // Track peers discovered in this batch
       const receivedMessages: Message[] = [];
-      const messageSenders = new Set<string>();
       const sentMessageIds = new Set<string>();
       const deliveredMessageIds = new Set<string>();
       const failedMessageIds = new Set<string>();
@@ -1485,6 +1272,13 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             }
             break;
           }
+          case 'secure_session_established': {
+            const secureEvent = event as { peer_id?: string };
+            if (secureEvent.peer_id) {
+              setEncryptedPeers(prev => new Set(prev).add(secureEvent.peer_id!));
+            }
+            break;
+          }
           case 'message_received': {
             const msgEvent = event as any;
             if (!msgEvent) {
@@ -1507,7 +1301,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
             const rawContent =
               typeof msgEvent.content === 'string' ? msgEvent.content : '';
-            messageSenders.add(msgEvent.sender);
 
             // Handle presence messages
             if (rawContent.startsWith(PRESENCE_MESSAGE_PREFIX)) {
@@ -1528,62 +1321,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               } catch (err) {
                 console.warn(
                   '[ProtocolProvider] Failed to parse presence payload',
-                  err,
-                );
-              }
-              break;
-            }
-
-            // Handle key package messages for MLS
-            if (rawContent.startsWith(KEY_PACKAGE_MESSAGE_PREFIX)) {
-              try {
-                const payload = JSON.parse(
-                  rawContent.slice(KEY_PACKAGE_MESSAGE_PREFIX.length),
-                );
-                if (
-                  payload?.keyPackageData &&
-                  Array.isArray(payload.keyPackageData)
-                ) {
-                  peerKeyPackagesRef.current.set(
-                    msgEvent.sender,
-                    payload.keyPackageData,
-                  );
-                  console.log(
-                    `[ProtocolProvider] Received key package from ${msgEvent.sender}`,
-                  );
-                }
-              } catch (err) {
-                console.warn(
-                  '[ProtocolProvider] Failed to parse key package payload',
-                  err,
-                );
-              }
-              break;
-            }
-
-            // Handle MLS welcome messages
-            if (rawContent.startsWith(MLS_WELCOME_MESSAGE_PREFIX)) {
-              try {
-                const payload = JSON.parse(
-                  rawContent.slice(MLS_WELCOME_MESSAGE_PREFIX.length),
-                );
-                if (protocol && isMlsInitialized && payload?.welcomeData) {
-                  const mlsProtocol = protocol as OfflineProtocolWithMls;
-                  const welcome: MlsWelcome = {
-                    groupId: payload.groupId,
-                    welcomeData: payload.welcomeData,
-                    inviterId: payload.inviterId,
-                    timestampMs: payload.timestampMs,
-                  };
-                  await mlsProtocol.mlsJoinSession(welcome);
-                  setEncryptedPeers(prev => new Set(prev).add(msgEvent.sender));
-                  console.log(
-                    `[ProtocolProvider] Joined MLS session with ${msgEvent.sender}`,
-                  );
-                }
-              } catch (err) {
-                console.warn(
-                  '[ProtocolProvider] Failed to join MLS session',
                   err,
                 );
               }
@@ -1620,55 +1357,16 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               return MessagePriority.Medium;
             };
 
-            // Check if message is encrypted and try to decrypt
-            let displayContent = rawContent;
-            let isEncrypted = false;
-
-            if (rawContent.startsWith(ENCRYPTED_MESSAGE_PREFIX)) {
-              isEncrypted = true;
-              try {
-                const encryptedPayload = JSON.parse(
-                  rawContent.slice(ENCRYPTED_MESSAGE_PREFIX.length),
-                );
-                if (protocol && isMlsInitialized) {
-                  const mlsProtocol = protocol as OfflineProtocolWithMls;
-                  const encrypted: MlsEncryptedMessage = {
-                    groupId: encryptedPayload.groupId,
-                    messageType: encryptedPayload.messageType,
-                    epoch: encryptedPayload.epoch,
-                    ciphertext: encryptedPayload.ciphertext,
-                    senderId: encryptedPayload.senderId,
-                    timestampMs: encryptedPayload.timestampMs,
-                  };
-                  const decryptedBytes = await mlsProtocol.mlsDecrypt(
-                    encrypted,
-                  );
-                  if (decryptedBytes) {
-                    displayContent = bytesToString(decryptedBytes);
-                    console.log(
-                      `[ProtocolProvider] Decrypted message from ${msgEvent.sender}`,
-                    );
-                  } else {
-                    displayContent = '[Encrypted message - unable to decrypt]';
-                    console.warn('[ProtocolProvider] Decryption returned null');
-                  }
-                } else {
-                  displayContent = '[Encrypted message - MLS not initialized]';
-                }
-              } catch (decryptError) {
-                console.warn(
-                  '[ProtocolProvider] Failed to decrypt message:',
-                  decryptError,
-                );
-                displayContent = '[Encrypted message - decryption failed]';
-              }
+            const isEncrypted = Boolean(msgEvent.encrypted);
+            if (isEncrypted && msgEvent.sender) {
+              setEncryptedPeers(prev => new Set(prev).add(msgEvent.sender));
             }
 
             const receivedMessage: Message = {
               id: messageId,
               senderId: msgEvent.sender,
               recipientId: msgEvent.recipient ?? currentUserId,
-              content: displayContent,
+              content: rawContent,
               timestamp: msgEvent.timestamp || Date.now(),
               priority: normalizePriority(msgEvent.priority),
               status: 'delivered',
@@ -2036,9 +1734,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     events,
     currentUserId,
     peerProfiles,
-    protocol,
-    isMlsInitialized,
-    bytesToString,
     sendPresenceToPeer,
     getPeerDisplayName,
     applyGroupCreated,

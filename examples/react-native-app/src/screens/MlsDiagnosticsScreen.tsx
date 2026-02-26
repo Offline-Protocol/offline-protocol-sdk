@@ -89,6 +89,33 @@ export function MlsDiagnosticsScreen({ onBack }: MlsDiagnosticsScreenProps) {
     if (!protocol) return;
 
     try {
+      let keyPackageCount = 0;
+      let sessionCount = 0;
+      let groupCount = 0;
+
+      if (isMlsInitialized) {
+        try {
+          const pendingKeyPackages = await protocol.mlsGetPendingKeyPackages();
+          keyPackageCount = pendingKeyPackages.length;
+        } catch {
+          keyPackageCount = 0;
+        }
+
+        try {
+          const sessions = await protocol.mlsListSessions();
+          sessionCount = sessions.length;
+        } catch {
+          sessionCount = encryptedPeers.size;
+        }
+
+        try {
+          const groups = await protocol.mlsListGroups();
+          groupCount = groups.length;
+        } catch {
+          groupCount = 0;
+        }
+      }
+
       // Count encrypted messages from chats
       let encryptedCount = 0;
       let totalCount = 0;
@@ -100,9 +127,9 @@ export function MlsDiagnosticsScreen({ onBack }: MlsDiagnosticsScreenProps) {
       });
 
       setDiagnostics({
-        keyPackageCount: 0, // Would need MLS API to get this
-        sessionCount: encryptedPeers.size,
-        groupCount: 0, // Would need MLS API to get this
+        keyPackageCount,
+        sessionCount,
+        groupCount,
         encryptedMessagesCount: encryptedCount,
         totalMessagesCount: totalCount,
       });
@@ -178,6 +205,35 @@ export function MlsDiagnosticsScreen({ onBack }: MlsDiagnosticsScreenProps) {
             value={diagnostics.sessionCount}
             status={diagnostics.sessionCount > 0 ? 'success' : 'neutral'}
             description={`Active MLS sessions with ${diagnostics.sessionCount} peer(s)`}
+          />
+
+          <DiagnosticItem
+            label="Pending Key Packages"
+            value={diagnostics.keyPackageCount}
+            status={diagnostics.keyPackageCount > 0 ? 'warning' : 'neutral'}
+            description={
+              diagnostics.keyPackageCount > 0
+                ? 'Key packages waiting to be synced to a server'
+                : 'No pending key packages in local MLS storage'
+            }
+          />
+
+          <DiagnosticItem
+            label="MLS Groups"
+            value={diagnostics.groupCount}
+            status={diagnostics.groupCount > 0 ? 'success' : 'neutral'}
+            description={
+              diagnostics.groupCount > 0
+                ? `Joined ${diagnostics.groupCount} MLS group(s)`
+                : 'No MLS groups created or joined yet'
+            }
+          />
+
+          <DiagnosticItem
+            label="Relay Groups E2EE"
+            value={false}
+            status="warning"
+            description="Group chat in this example app currently uses relay JSON APIs, not MLS group encryption."
           />
         </View>
 
