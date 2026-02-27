@@ -132,14 +132,19 @@ export function useOfflineProtocol(
         if (annotatedEvent.type === 'diagnostic') {
           const diagnostic = annotatedEvent as DiagnosticEvent;
           const message = diagnostic.message.toLowerCase();
-          // Only log important diagnostics, skip verbose BLE operations
+          // Log important diagnostics: errors, warnings, relay/auth, sessions, messages
           if (
             message.includes('error') ||
             message.includes('warning') ||
             message.includes('peer discovered') ||
             message.includes('peer lost') ||
             message.includes('message received') ||
-            message.includes('message sent')
+            message.includes('message sent') ||
+            message.includes('relay') ||
+            message.includes('auth') ||
+            message.includes('authenticated') ||
+            message.includes('connected') ||
+            message.includes('session')
           ) {
             console.log('🔍', diagnostic.message, diagnostic.context ?? '');
           }
@@ -149,14 +154,19 @@ export function useOfflineProtocol(
             console.log('🎉 MESSAGE_RECEIVED EVENT:', annotatedEvent);
           }
 
-          // Only log important protocol events
+          // Log important protocol events (including relay/MLS for debugging)
           if (
             annotatedEvent.type === 'neighbor_discovered' ||
             annotatedEvent.type === 'neighbor_lost' ||
             annotatedEvent.type === 'message_received' ||
             annotatedEvent.type === 'message_sent' ||
             annotatedEvent.type === 'message_delivered' ||
-            annotatedEvent.type === 'message_failed'
+            annotatedEvent.type === 'message_failed' ||
+            annotatedEvent.type === 'secure_session_established' ||
+            annotatedEvent.type === 'secure_session_failed' ||
+            annotatedEvent.type === 'connection_request_received' ||
+            annotatedEvent.type === 'connection_accepted' ||
+            annotatedEvent.type === 'connection_rejected'
           ) {
             console.log('Protocol event:', annotatedEvent.type, annotatedEvent);
           }

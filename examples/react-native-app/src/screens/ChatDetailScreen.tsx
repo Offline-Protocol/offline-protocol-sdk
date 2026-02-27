@@ -50,8 +50,6 @@ function MessageBubble({
       allChatsMessages?.find(m => m.id === message.replyToMsg)
     : undefined;
 
-  console.log({ allMessages });
-
   // Determine the sender label for the reply preview
   const getReplySenderLabel = () => {
     if (!repliedToMessage) return 'Original message';
