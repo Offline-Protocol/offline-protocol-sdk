@@ -1305,6 +1305,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val config = protocol?.getDorsConfig()
             if (config != null) {
+                // DORS config fields are u64 in the core but serialized as Int for the RN bridge; values must be in Int range (e.g. minBleSamplesBeforeSuccessRateEscalation, sample counts).
                 val map = Arguments.createMap()
                 map.putBoolean("preferOnline", config.preferOnline)
                 map.putDouble("switchHysteresis", config.switchHysteresis.toDouble())
