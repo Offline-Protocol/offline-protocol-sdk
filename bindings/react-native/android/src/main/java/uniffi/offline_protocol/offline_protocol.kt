@@ -1146,7 +1146,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_mls_ini
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(`ptr`: Long,`destination`: RustBuffer.ByValue,`nextHop`: RustBuffer.ByValue,`hopCount`: Byte,`quality`: Float,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(`ptr`: Long,`destination`: RustBuffer.ByValue,`nextHop`: RustBuffer.ByValue,`hopCount`: Byte,`quality`: Float,`sequenceNumber`: Int,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_add_group_member(`ptr`: Long,`groupId`: RustBuffer.ByValue,`memberKeyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1576,7 +1576,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 38824.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 29659.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member() != 22947.toShort()) {
@@ -2412,7 +2412,7 @@ public interface OfflineProtocolInterface {
     
     fun `isRelay`(): kotlin.Boolean
     
-    fun `learnRoute`(`destination`: kotlin.String, `nextHop`: kotlin.String, `hopCount`: kotlin.UByte, `quality`: kotlin.Float)
+    fun `learnRoute`(`destination`: kotlin.String, `nextHop`: kotlin.String, `hopCount`: kotlin.UByte, `quality`: kotlin.Float, `sequenceNumber`: kotlin.UInt)
     
     fun `mlsAddGroupMember`(`groupId`: kotlin.String, `memberKeyPackage`: List<kotlin.UByte>): MlsWelcomeMessage
     
@@ -3422,13 +3422,13 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
-    override fun `learnRoute`(`destination`: kotlin.String, `nextHop`: kotlin.String, `hopCount`: kotlin.UByte, `quality`: kotlin.Float)
+    override fun `learnRoute`(`destination`: kotlin.String, `nextHop`: kotlin.String, `hopCount`: kotlin.UByte, `quality`: kotlin.Float, `sequenceNumber`: kotlin.UInt)
         = 
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(
         it,
-        FfiConverterString.lower(`destination`),FfiConverterString.lower(`nextHop`),FfiConverterUByte.lower(`hopCount`),FfiConverterFloat.lower(`quality`),_status)
+        FfiConverterString.lower(`destination`),FfiConverterString.lower(`nextHop`),FfiConverterUByte.lower(`hopCount`),FfiConverterFloat.lower(`quality`),FfiConverterUInt.lower(`sequenceNumber`),_status)
 }
     }
     
@@ -4456,6 +4456,10 @@ data class DorsConfig (
     , 
     var `bleToWifiRetryThreshold`: kotlin.UInt
     , 
+    var `minSuccessRateBeforeEscalation`: kotlin.Float
+    , 
+    var `minBleSamplesBeforeSuccessRateEscalation`: kotlin.ULong
+    , 
     var `rssiSwitchThreshold`: kotlin.Short
     , 
     var `congestionQueueThreshold`: kotlin.ULong
@@ -4491,6 +4495,8 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterFloat.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterULong.read(buf),
             FfiConverterShort.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
@@ -4508,6 +4514,8 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterFloat.allocationSize(value.`switchHysteresis`) +
             FfiConverterULong.allocationSize(value.`switchCooldownSecs`) +
             FfiConverterUInt.allocationSize(value.`bleToWifiRetryThreshold`) +
+            FfiConverterFloat.allocationSize(value.`minSuccessRateBeforeEscalation`) +
+            FfiConverterULong.allocationSize(value.`minBleSamplesBeforeSuccessRateEscalation`) +
             FfiConverterShort.allocationSize(value.`rssiSwitchThreshold`) +
             FfiConverterULong.allocationSize(value.`congestionQueueThreshold`) +
             FfiConverterULong.allocationSize(value.`stabilityWindowSecs`) +
@@ -4524,6 +4532,8 @@ public object FfiConverterTypeDorsConfig: FfiConverterRustBuffer<DorsConfig> {
             FfiConverterFloat.write(value.`switchHysteresis`, buf)
             FfiConverterULong.write(value.`switchCooldownSecs`, buf)
             FfiConverterUInt.write(value.`bleToWifiRetryThreshold`, buf)
+            FfiConverterFloat.write(value.`minSuccessRateBeforeEscalation`, buf)
+            FfiConverterULong.write(value.`minBleSamplesBeforeSuccessRateEscalation`, buf)
             FfiConverterShort.write(value.`rssiSwitchThreshold`, buf)
             FfiConverterULong.write(value.`congestionQueueThreshold`, buf)
             FfiConverterULong.write(value.`stabilityWindowSecs`, buf)

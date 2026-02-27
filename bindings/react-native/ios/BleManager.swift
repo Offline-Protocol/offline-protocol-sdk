@@ -1132,12 +1132,14 @@ public class BleManager: NSObject, TransportManager {
         let rssi = neighborUUID.flatMap { peripheralRSSI[$0] }.map { Int($0) }
         let quality = computeRouteQuality(rssi: rssi)
         
-        // Learn the route: sender can be reached through neighborId
+        // Learn the route: sender can be reached through neighborId (sequence_number from message or 0)
+        let seqNum = (json["sequence_number"] as? NSNumber)?.uint32Value ?? 0
         protocolInstance.learnRoute(
             destination: sender,
             nextHop: neighborId,
             hopCount: UInt8(min(255, hopCount + 1)),
-            quality: quality
+            quality: quality,
+            sequenceNumber: seqNum
         )
     }
     
@@ -2522,7 +2524,8 @@ extension BleManager: CBPeripheralDelegate {
                     destination: derivedUserId,
                     nextHop: derivedUserId,
                     hopCount: 1,
-                    quality: Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0)))
+                    quality: Float(min(1.0, max(0.0, (Double(rssi) + 100.0) / 80.0))),
+                    sequenceNumber: 0
                 )
             } else {
                 print("[BleManager] ⚠️ Invalid signature for peer \(peripheral.identifier)")
