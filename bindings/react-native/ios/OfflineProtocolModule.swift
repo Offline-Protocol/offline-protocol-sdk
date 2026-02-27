@@ -1628,12 +1628,14 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
             return
         }
+        // Clamp to match Android (coerceAtLeast(0)); avoids negative wrapping to uint32 (e.g. -1 → 2^32-1).
+        let seq = max(0, sequenceNumber.intValue)
         proto.learnRoute(
             destination: destination,
             nextHop: nextHop,
             hopCount: UInt8(min(255, max(0, hopCount))),
             quality: Float(quality),
-            sequenceNumber: sequenceNumber.uint32Value
+            sequenceNumber: UInt32(seq)
         )
         resolver(nil)
     }
