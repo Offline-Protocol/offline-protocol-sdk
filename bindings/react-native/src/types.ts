@@ -251,6 +251,10 @@ export interface ProtocolConfig {
     switchCooldownSecs?: number;
     /** Number of retry failures before escalating from BLE to Wi-Fi Direct (default: 2) */
     bleToWifiRetryThreshold?: number;
+    /** Min BLE success rate (0–1) before escalation; below this triggers escalation (default: 0.3) */
+    minSuccessRateBeforeEscalation?: number;
+    /** Min BLE samples required before using success-rate escalation (default: 5) */
+    minBleSamplesBeforeSuccessRateEscalation?: number;
     /** RSSI threshold for switching from BLE to Wi-Fi Direct in dBm (default: -85) */
     rssiSwitchThreshold?: number;
     /** Queue depth threshold for detecting congestion (default: 50) */
@@ -703,6 +707,73 @@ export interface GroupErrorEvent extends BaseEvent {
   reason: string;
 }
 
+// ============================================================================
+// DORS OBSERVABILITY EVENTS (from SDK DORS decision / escalation)
+// ============================================================================
+
+/** Reason code for DORS transport selection/switch. */
+export type DorsReasonCode =
+  | 'INITIAL_SELECTION'
+  | 'PRIMARY_SELECTED'
+  | 'PRIMARY_SUCCESS'
+  | 'FALLBACK_SUCCESS'
+  | 'ESCALATION_APPLIED'
+  | 'CURRENT_UNAVAILABLE';
+
+/** Phase of DORS escalation: TRIGGERED = recommendation, APPLIED = fallback succeeded. */
+export type DorsEscalationPhase = 'TRIGGERED' | 'APPLIED';
+
+/** Reason code for DORS BLE→Wi‑Fi escalation. */
+export type DorsEscalationReasonCode =
+  | 'FALLBACK_SUCCESS'
+  | 'RETRY_THRESHOLD'
+  | 'POOR_SIGNAL'
+  | 'CONGESTION'
+  | 'LOW_TTL'
+  | 'LOW_SUCCESS_RATE';
+
+/**
+ * DORS score updated event (per-transport scores).
+ */
+export interface DorsScoreUpdatedEvent extends BaseEvent {
+  type: 'dors_score_updated';
+  scores: Array<[string, number]>;
+}
+
+/**
+ * DORS transport selected event (current choice and reason).
+ */
+export interface DorsTransportSelectedEvent extends BaseEvent {
+  type: 'dors_transport_selected';
+  from: string | null;
+  transport: string;
+  reason_code: DorsReasonCode;
+  score?: number;
+}
+
+/**
+ * DORS transport switched event (transition with reason).
+ */
+export interface DorsTransportSwitchedEvent extends BaseEvent {
+  type: 'dors_transport_switched';
+  from: string | null;
+  to: string;
+  reason_code: DorsReasonCode;
+  reason_detail?: string;
+}
+
+/**
+ * DORS escalation triggered (BLE→Wi‑Fi recommendation or applied).
+ */
+export interface DorsEscalationTriggeredEvent extends BaseEvent {
+  type: 'dors_escalation_triggered';
+  phase: DorsEscalationPhase;
+  from: string;
+  to: string;
+  reason_code: DorsEscalationReasonCode;
+  reason_detail?: string;
+}
+
 /**
  * Union type of all events
  */
@@ -735,7 +806,11 @@ export type ProtocolEvent =
   | GroupMemberRemovedEvent
   | GroupInfoEvent
   | UserGroupsEvent
-  | GroupErrorEvent;
+  | GroupErrorEvent
+  | DorsScoreUpdatedEvent
+  | DorsTransportSelectedEvent
+  | DorsTransportSwitchedEvent
+  | DorsEscalationTriggeredEvent;
 
 /**
  * Event listener type

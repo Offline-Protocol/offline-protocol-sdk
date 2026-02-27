@@ -36,6 +36,24 @@ export function EventLog({ events, onClear }: EventLogProps) {
         return '#cddc39';
       case 'diagnostic':
         return '#607d8b';
+      case 'dors_score_updated':
+        return '#0ea5e9';
+      case 'dors_transport_selected':
+        return '#06b6d4';
+      case 'dors_transport_switched':
+        return '#ff9800';
+      case 'dors_escalation_triggered':
+        return '#f59e0b';
+      case 'secure_session_established':
+      case 'secure_session_failed':
+        return '#8b5cf6';
+      case 'welcome_send_attempted':
+      case 'welcome_send_succeeded':
+      case 'welcome_send_failed':
+      case 'welcome_send_expired':
+        return '#a78bfa';
+      case 'message_decryption_failed':
+        return '#ef4444';
       default:
         return '#9e9e9e';
     }

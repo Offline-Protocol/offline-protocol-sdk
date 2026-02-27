@@ -796,6 +796,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       switchHysteresis: 15.0,
       switchCooldownSecs: 20,
       bleToWifiRetryThreshold: 2,
+      minSuccessRateBeforeEscalation: 0.3,
+      minBleSamplesBeforeSuccessRateEscalation: 5,
       rssiSwitchThreshold: -85,
       congestionQueueThreshold: 50,
       stabilityWindowSecs: 8,

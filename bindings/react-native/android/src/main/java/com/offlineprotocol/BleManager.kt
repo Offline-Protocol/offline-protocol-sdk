@@ -2116,12 +2116,14 @@ class BleManager(
             val rssi = neighborAddress?.let { lastSeenRssi[it]?.toInt() }
             val quality = computeRouteQuality(rssi)
             
-            // Learn the route: sender can be reached through neighborId
+            // Learn the route: sender can be reached through neighborId (sequence_number from message or 0)
+            val seqNum = json.optInt("sequence_number", 0).coerceAtLeast(0).toUInt()
             protocol.learnRoute(
-                destination = sender,
-                nextHop = neighborId,
-                hopCount = minOf(255, hopCount + 1).toUByte(),
-                quality = quality
+                sender,
+                neighborId,
+                minOf(255, hopCount + 1).toUByte(),
+                quality,
+                seqNum
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to learn route from message: ${e.message}")
@@ -2744,7 +2746,7 @@ class BleManager(
                     // Update routing with the cryptographically derived user ID
                     val rssi = lastSeenRssi[address] ?: (-60).toShort()
                     val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
-                    protocol.learnRoute(derivedUserId, derivedUserId, 1.toUByte(), quality)
+                    protocol.learnRoute(derivedUserId, derivedUserId, 1.toUByte(), quality, 0u)
                 } else {
                     Log.w(TAG, "⚠️ Invalid signature for peer $address")
                     emitDiagnostic("warning", "Invalid peer signature", mapOf("address" to address))
