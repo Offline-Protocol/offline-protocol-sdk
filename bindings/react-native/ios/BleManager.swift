@@ -1132,8 +1132,9 @@ public class BleManager: NSObject, TransportManager {
         let rssi = neighborUUID.flatMap { peripheralRSSI[$0] }.map { Int($0) }
         let quality = computeRouteQuality(rssi: rssi)
         
-        // Learn the route: sender can be reached through neighborId (sequence_number from message or 0)
-        let seqNum = (json["sequence_number"] as? NSNumber)?.uint32Value ?? 0
+        // Learn the route: sender can be reached through neighborId (sequence_number from message or 0). Clamp to avoid negative wrapping to uint32.
+        let seqRaw = (json["sequence_number"] as? NSNumber)?.intValue ?? 0
+        let seqNum = UInt32(max(0, seqRaw))
         protocolInstance.learnRoute(
             destination: sender,
             nextHop: neighborId,

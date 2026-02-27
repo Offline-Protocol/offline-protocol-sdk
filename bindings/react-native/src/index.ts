@@ -1143,12 +1143,14 @@ export class OfflineProtocol {
     quality: number,
     sequenceNumber: number = 0
   ): Promise<void> {
+    // Clamp to match Android (coerceAtLeast(0)); avoids negative wrapping to uint32 (e.g. -1 → 2^32-1).
+    const clampedSequenceNumber = Math.max(0, sequenceNumber);
     return await OfflineProtocolNativeModule.learnRoute(
       destination,
       nextHop,
       hopCount,
       quality,
-      sequenceNumber
+      clampedSequenceNumber
     );
   }
 
