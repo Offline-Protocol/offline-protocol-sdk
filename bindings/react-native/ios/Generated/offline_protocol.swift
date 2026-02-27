@@ -706,7 +706,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func isRelay()  -> Bool
     
-    func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float) 
+    func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float, sequenceNumber: UInt32) 
     
     func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8]) throws  -> MlsWelcomeMessage
     
@@ -1390,13 +1390,14 @@ open func isRelay() -> Bool  {
 })
 }
     
-open func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float)  {try! rustCall() {
+open func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float, sequenceNumber: UInt32)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(destination),
         FfiConverterString.lower(nextHop),
         FfiConverterUInt8.lower(hopCount),
-        FfiConverterFloat.lower(quality),$0
+        FfiConverterFloat.lower(quality),
+        FfiConverterUInt32.lower(sequenceNumber),$0
     )
 }
 }
@@ -2204,6 +2205,8 @@ public struct DorsConfig: Equatable, Hashable {
     public var switchHysteresis: Float
     public var switchCooldownSecs: UInt64
     public var bleToWifiRetryThreshold: UInt32
+    public var minSuccessRateBeforeEscalation: Float
+    public var minBleSamplesBeforeSuccessRateEscalation: UInt64
     public var rssiSwitchThreshold: Int16
     public var congestionQueueThreshold: UInt64
     public var stabilityWindowSecs: UInt64
@@ -2216,11 +2219,13 @@ public struct DorsConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64, poorSignalDurationSecs: UInt64, ttlEscalationThreshold: UInt8, congestionDurationSecs: UInt64, ttlEscalationHoldSecs: UInt64, historyWindowSize: UInt64, queueRecoveryRatio: Float) {
+    public init(preferOnline: Bool, switchHysteresis: Float, switchCooldownSecs: UInt64, bleToWifiRetryThreshold: UInt32, minSuccessRateBeforeEscalation: Float, minBleSamplesBeforeSuccessRateEscalation: UInt64, rssiSwitchThreshold: Int16, congestionQueueThreshold: UInt64, stabilityWindowSecs: UInt64, poorSignalDurationSecs: UInt64, ttlEscalationThreshold: UInt8, congestionDurationSecs: UInt64, ttlEscalationHoldSecs: UInt64, historyWindowSize: UInt64, queueRecoveryRatio: Float) {
         self.preferOnline = preferOnline
         self.switchHysteresis = switchHysteresis
         self.switchCooldownSecs = switchCooldownSecs
         self.bleToWifiRetryThreshold = bleToWifiRetryThreshold
+        self.minSuccessRateBeforeEscalation = minSuccessRateBeforeEscalation
+        self.minBleSamplesBeforeSuccessRateEscalation = minBleSamplesBeforeSuccessRateEscalation
         self.rssiSwitchThreshold = rssiSwitchThreshold
         self.congestionQueueThreshold = congestionQueueThreshold
         self.stabilityWindowSecs = stabilityWindowSecs
@@ -2250,6 +2255,8 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
                 switchHysteresis: FfiConverterFloat.read(from: &buf), 
                 switchCooldownSecs: FfiConverterUInt64.read(from: &buf), 
                 bleToWifiRetryThreshold: FfiConverterUInt32.read(from: &buf), 
+                minSuccessRateBeforeEscalation: FfiConverterFloat.read(from: &buf), 
+                minBleSamplesBeforeSuccessRateEscalation: FfiConverterUInt64.read(from: &buf), 
                 rssiSwitchThreshold: FfiConverterInt16.read(from: &buf), 
                 congestionQueueThreshold: FfiConverterUInt64.read(from: &buf), 
                 stabilityWindowSecs: FfiConverterUInt64.read(from: &buf), 
@@ -2267,6 +2274,8 @@ public struct FfiConverterTypeDorsConfig: FfiConverterRustBuffer {
         FfiConverterFloat.write(value.switchHysteresis, into: &buf)
         FfiConverterUInt64.write(value.switchCooldownSecs, into: &buf)
         FfiConverterUInt32.write(value.bleToWifiRetryThreshold, into: &buf)
+        FfiConverterFloat.write(value.minSuccessRateBeforeEscalation, into: &buf)
+        FfiConverterUInt64.write(value.minBleSamplesBeforeSuccessRateEscalation, into: &buf)
         FfiConverterInt16.write(value.rssiSwitchThreshold, into: &buf)
         FfiConverterUInt64.write(value.congestionQueueThreshold, into: &buf)
         FfiConverterUInt64.write(value.stabilityWindowSecs, into: &buf)
@@ -5753,7 +5762,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 38824) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 29659) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member() != 22947) {
