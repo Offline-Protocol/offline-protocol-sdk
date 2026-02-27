@@ -333,7 +333,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| **learnRoute** | `learnRoute(destination, nextHop, hopCount, quality): Promise<void>` | Records a route from an incoming message. |
+| **learnRoute** | `learnRoute(destination, nextHop, hopCount, quality, sequenceNumber?): Promise<void>` | Records a route from an incoming message. `sequenceNumber` is DSDV-style (default 0); pass 0 when the message does not carry one. Negative values are clamped to 0. |
 | **getBestRoute** | `getBestRoute(destination): Promise<{nextHop, hopCount, quality, lastSeenMs} \| null>` | Best route to destination. |
 | **getAllRoutes** | `getAllRoutes(destination): Promise<Array<{...}>>` | All valid routes to destination. |
 | **hasRoute** | `hasRoute(destination): Promise<boolean>` | Whether any route exists. |

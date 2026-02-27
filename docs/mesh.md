@@ -565,7 +565,7 @@ The gradient routing table is exposed via the `OfflineProtocol` interface with t
 
 | Method | Description |
 |--------|-------------|
-| `learn_route(destination, next_hop, hop_count, quality)` | Record a learned route from an incoming message |
+| `learn_route(destination, next_hop, hop_count, quality, sequence_number)` | Record a learned route from an incoming message. `sequence_number` is DSDV-style; pass 0 when the message does not carry one. |
 | `get_best_route(destination) -> RouteEntry?` | Get the highest-quality route to a destination |
 | `get_all_routes(destination) -> [RouteEntry]` | Get all valid (non-expired) routes to a destination |
 | `has_route(destination) -> bool` | Check if any route exists to the destination |
@@ -580,6 +580,7 @@ When a message is received, the native layer should call `learn_route()`:
 1. The sender can be reached through the delivering neighbor
 2. The hop count is incremented from the message's hop count
 3. Route quality is computed from link metrics (RSSI, connection stability)
+4. Use the message's DSDV-style sequence number when present, or 0 otherwise (negative values are clamped to 0 on the React Native bridge)
 
 If the destination already has maximum routes, the lowest-quality route is evicted.
 
@@ -598,7 +599,8 @@ protocol.learnRoute(
     destination: message.sender,
     nextHop: neighborId,
     hopCount: UInt8(message.hopCount + 1),
-    quality: computeQuality(rssi: rssi, stability: linkStability)
+    quality: computeQuality(rssi: rssi, stability: linkStability),
+    sequenceNumber: message.sequenceNumber ?? 0
 )
 
 // On send - use directed delivery if route known:
@@ -625,7 +627,8 @@ protocol.learnRoute(
     destination = message.sender,
     nextHop = neighborId,
     hopCount = (message.hopCount + 1).toUByte(),
-    quality = computeQuality(rssi, linkStability)
+    quality = computeQuality(rssi, linkStability),
+    sequenceNumber = (message.sequenceNumber ?: 0).coerceAtLeast(0).toUInt()
 )
 
 // On send - use directed delivery if route known:
