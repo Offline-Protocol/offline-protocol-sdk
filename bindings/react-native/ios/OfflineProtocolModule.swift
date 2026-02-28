@@ -239,6 +239,13 @@ class OfflineProtocolModule: RCTEventEmitter {
             let bleRetry = UInt32((dorsDict["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value
                                   ?? (dorsDict["ble_to_wifi_retry_threshold"] as? NSNumber)?.uint32Value
                                   ?? 2)
+            let minSuccessRate = Float((dorsDict["minSuccessRateBeforeEscalation"] as? NSNumber)?.floatValue
+                                   ?? (dorsDict["min_success_rate_before_escalation"] as? NSNumber)?.floatValue
+                                   ?? 0.3)
+            let minSuccessRateClamped = min(max(minSuccessRate, 0.0), 1.0)
+            let minBleSamples = UInt64((dorsDict["minBleSamplesBeforeSuccessRateEscalation"] as? NSNumber)?.uint64Value
+                                      ?? (dorsDict["min_ble_samples_before_success_rate_escalation"] as? NSNumber)?.uint64Value
+                                      ?? 5)
             let rssiThreshold = Int16((dorsDict["rssiSwitchThreshold"] as? NSNumber)?.int16Value
                                       ?? (dorsDict["rssi_switch_threshold"] as? NSNumber)?.int16Value
                                       ?? -85)
@@ -274,6 +281,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 switchHysteresis: switchHysteresis,
                 switchCooldownSecs: switchCooldown,
                 bleToWifiRetryThreshold: bleRetry,
+                minSuccessRateBeforeEscalation: minSuccessRateClamped,
+                minBleSamplesBeforeSuccessRateEscalation: minBleSamples,
                 rssiSwitchThreshold: rssiThreshold,
                 congestionQueueThreshold: congestionThreshold,
                 stabilityWindowSecs: stabilityWindow,
@@ -1434,11 +1443,16 @@ class OfflineProtocolModule: RCTEventEmitter {
             let rawQueueRecovery = (config["queueRecoveryRatio"] as? NSNumber)?.floatValue ?? 0.5
             let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
             
+            let minSuccessRate = (config["minSuccessRateBeforeEscalation"] as? NSNumber)?.floatValue ?? 0.3
+            let minSuccessRateClamped = min(max(minSuccessRate, 0.0), 1.0)
+            let minBleSamples = (config["minBleSamplesBeforeSuccessRateEscalation"] as? NSNumber)?.uint64Value ?? 5
             let dorsConfig = DorsConfig(
                 preferOnline: config["preferOnline"] as? Bool ?? false,
                 switchHysteresis: max((config["switchHysteresis"] as? NSNumber)?.floatValue ?? 15.0, 0),
                 switchCooldownSecs: max((config["switchCooldownSecs"] as? NSNumber)?.uint64Value ?? 20, 0),
                 bleToWifiRetryThreshold: (config["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value ?? 2,
+                minSuccessRateBeforeEscalation: minSuccessRateClamped,
+                minBleSamplesBeforeSuccessRateEscalation: minBleSamples,
                 rssiSwitchThreshold: (config["rssiSwitchThreshold"] as? NSNumber)?.int16Value ?? -85,
                 congestionQueueThreshold: (config["congestionQueueThreshold"] as? NSNumber)?.uint64Value ?? 50,
                 stabilityWindowSecs: (config["stabilityWindowSecs"] as? NSNumber)?.uint64Value ?? 8,
@@ -1469,6 +1483,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             "switchHysteresis": config.switchHysteresis,
             "switchCooldownSecs": config.switchCooldownSecs,
             "bleToWifiRetryThreshold": config.bleToWifiRetryThreshold,
+            "minSuccessRateBeforeEscalation": config.minSuccessRateBeforeEscalation,
+            "minBleSamplesBeforeSuccessRateEscalation": config.minBleSamplesBeforeSuccessRateEscalation,
             "rssiSwitchThreshold": config.rssiSwitchThreshold,
             "congestionQueueThreshold": config.congestionQueueThreshold,
             "stabilityWindowSecs": config.stabilityWindowSecs,
@@ -1605,17 +1621,21 @@ class OfflineProtocolModule: RCTEventEmitter {
                           nextHop: String,
                           hopCount: Int,
                           quality: Double,
+                          sequenceNumber: NSNumber,
                           resolver: @escaping RCTPromiseResolveBlock,
                           rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
             rejecter("ERROR_ROUTING", "Protocol not initialized", nil)
             return
         }
+        // Clamp to match Android (coerceAtLeast(0)); avoids negative wrapping to uint32 (e.g. -1 → 2^32-1).
+        let seq = max(0, sequenceNumber.intValue)
         proto.learnRoute(
             destination: destination,
             nextHop: nextHop,
             hopCount: UInt8(min(255, max(0, hopCount))),
-            quality: Float(quality)
+            quality: Float(quality),
+            sequenceNumber: UInt32(seq)
         )
         resolver(nil)
     }

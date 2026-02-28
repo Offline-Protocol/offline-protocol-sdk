@@ -204,6 +204,7 @@ RCT_EXTERN_METHOD(learnRoute:(NSString *)destination
                   nextHop:(NSString *)nextHop
                   hopCount:(nonnull NSNumber *)hopCount
                   quality:(nonnull NSNumber *)quality
+                  sequenceNumber:(nonnull NSNumber *)sequenceNumber
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

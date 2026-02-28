@@ -96,6 +96,8 @@ interface NativeConfig {
     switchHysteresis: number;
     switchCooldownSecs: number;
     bleToWifiRetryThreshold: number;
+    minSuccessRateBeforeEscalation?: number;
+    minBleSamplesBeforeSuccessRateEscalation?: number;
     rssiSwitchThreshold: number;
     congestionQueueThreshold: number;
     stabilityWindowSecs: number;
@@ -218,6 +220,9 @@ export class OfflineProtocol {
           switchHysteresis: dorsSource.switchHysteresis ?? 15.0,
           switchCooldownSecs: dorsSource.switchCooldownSecs ?? 20,
           bleToWifiRetryThreshold: dorsSource.bleToWifiRetryThreshold ?? 2,
+          minSuccessRateBeforeEscalation: dorsSource.minSuccessRateBeforeEscalation ?? 0.3,
+          minBleSamplesBeforeSuccessRateEscalation:
+            dorsSource.minBleSamplesBeforeSuccessRateEscalation ?? 5,
           rssiSwitchThreshold: dorsSource.rssiSwitchThreshold ?? -85,
           congestionQueueThreshold: dorsSource.congestionQueueThreshold ?? 50,
           stabilityWindowSecs: dorsSource.stabilityWindowSecs ?? 8,
@@ -980,6 +985,8 @@ export class OfflineProtocol {
     switchHysteresis?: number;
     switchCooldownSecs?: number;
     bleToWifiRetryThreshold?: number;
+    minSuccessRateBeforeEscalation?: number;
+    minBleSamplesBeforeSuccessRateEscalation?: number;
     rssiSwitchThreshold?: number;
     congestionQueueThreshold?: number;
     stabilityWindowSecs?: number;
@@ -1036,6 +1043,8 @@ export class OfflineProtocol {
     switchHysteresis: number;
     switchCooldownSecs: number;
     bleToWifiRetryThreshold: number;
+    minSuccessRateBeforeEscalation: number;
+    minBleSamplesBeforeSuccessRateEscalation: number;
     rssiSwitchThreshold: number;
     congestionQueueThreshold: number;
     stabilityWindowSecs: number;
@@ -1125,18 +1134,23 @@ export class OfflineProtocol {
    * @param nextHop - Neighbor ID that delivered the message
    * @param hopCount - Number of hops to reach destination
    * @param quality - Route quality score (0.0 - 1.0)
+   * @param sequenceNumber - DSDV-style sequence number; pass 0 when the message does not carry one
    */
   async learnRoute(
     destination: string,
     nextHop: string,
     hopCount: number,
-    quality: number
+    quality: number,
+    sequenceNumber: number = 0
   ): Promise<void> {
+    // Clamp to match Android (coerceAtLeast(0)); avoids negative wrapping to uint32 (e.g. -1 → 2^32-1).
+    const clampedSequenceNumber = Math.max(0, sequenceNumber);
     return await OfflineProtocolNativeModule.learnRoute(
       destination,
       nextHop,
       hopCount,
-      quality
+      quality,
+      clampedSequenceNumber
     );
   }
 

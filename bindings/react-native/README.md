@@ -622,7 +622,7 @@ interface TransportMetrics {
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `learnRoute(destination, nextHop, hopCount, quality)` | `Promise<void>` | Learn a route from incoming message |
+| `learnRoute(destination, nextHop, hopCount, quality, sequenceNumber?)` | `Promise<void>` | Learn a route from incoming message. `sequenceNumber` is DSDV-style; pass `0` when the message does not carry one. Negative values are clamped to 0 before passing to the native layer. |
 | `getBestRoute(destination)` | `Promise<RouteEntry \| null>` | Get best route to destination |
 | `getAllRoutes(destination)` | `Promise<RouteEntry[]>` | Get all routes to destination |
 | `hasRoute(destination)` | `Promise<boolean>` | Check if route exists |

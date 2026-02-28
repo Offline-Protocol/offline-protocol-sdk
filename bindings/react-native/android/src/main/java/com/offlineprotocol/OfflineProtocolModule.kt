@@ -182,6 +182,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         ?.coerceAtLeast(0)
                         ?.toUInt()
                         ?: baseConfig.bleToWifiRetryThreshold,
+                    minSuccessRateBeforeEscalation = dorsJson.optDoubleCompat("minSuccessRateBeforeEscalation", "min_success_rate_before_escalation")
+                        ?.toFloat()
+                        ?.coerceIn(0f, 1f)
+                        ?: baseConfig.minSuccessRateBeforeEscalation,
+                    minBleSamplesBeforeSuccessRateEscalation = dorsJson.optLongCompat("minBleSamplesBeforeSuccessRateEscalation", "min_ble_samples_before_success_rate_escalation")
+                        ?.coerceAtLeast(0)
+                        ?.toULong()
+                        ?: baseConfig.minBleSamplesBeforeSuccessRateEscalation,
                     rssiSwitchThreshold = dorsJson.optIntCompat("rssiSwitchThreshold", "rssi_switch_threshold")
                         ?.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
                         ?.toShort()
@@ -1272,6 +1280,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 switchHysteresis = json.optDouble("switchHysteresis", 15.0).toFloat().coerceAtLeast(0f),
                 switchCooldownSecs = json.optLong("switchCooldownSecs", 20).coerceAtLeast(0).toULong(),
                 bleToWifiRetryThreshold = json.optInt("bleToWifiRetryThreshold", 2).toUInt(),
+                minSuccessRateBeforeEscalation = json.optDouble("minSuccessRateBeforeEscalation", 0.3).toFloat().coerceIn(0f, 1f),
+                minBleSamplesBeforeSuccessRateEscalation = json.optLong("minBleSamplesBeforeSuccessRateEscalation", 5).coerceAtLeast(0).toULong(),
                 rssiSwitchThreshold = json.optInt("rssiSwitchThreshold", Constants.DEFAULT_RSSI_THRESHOLD.toInt()).toShort(),
                 congestionQueueThreshold = json.optLong("congestionQueueThreshold", Constants.DEFAULT_CONGESTION_QUEUE).toULong(),
                 stabilityWindowSecs = json.optLong("stabilityWindowSecs", Constants.DEFAULT_STABILITY_WINDOW).toULong(),
@@ -1295,11 +1305,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val config = protocol?.getDorsConfig()
             if (config != null) {
+                // DORS config fields are u64 in the core but serialized as Int for the RN bridge; values must be in Int range (e.g. minBleSamplesBeforeSuccessRateEscalation, sample counts).
                 val map = Arguments.createMap()
                 map.putBoolean("preferOnline", config.preferOnline)
                 map.putDouble("switchHysteresis", config.switchHysteresis.toDouble())
                 map.putInt("switchCooldownSecs", config.switchCooldownSecs.toInt())
                 map.putInt("bleToWifiRetryThreshold", config.bleToWifiRetryThreshold.toInt())
+                map.putDouble("minSuccessRateBeforeEscalation", config.minSuccessRateBeforeEscalation.toDouble())
+                map.putInt("minBleSamplesBeforeSuccessRateEscalation", config.minBleSamplesBeforeSuccessRateEscalation.toInt())
                 map.putInt("rssiSwitchThreshold", config.rssiSwitchThreshold.toInt())
                 map.putInt("congestionQueueThreshold", config.congestionQueueThreshold.toInt())
                 map.putInt("stabilityWindowSecs", config.stabilityWindowSecs.toInt())
@@ -1415,14 +1428,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     // ========================================================================
 
     @ReactMethod
-    fun learnRoute(destination: String, nextHop: String, hopCount: Int, quality: Double, promise: Promise) {
+    fun learnRoute(destination: String, nextHop: String, hopCount: Int, quality: Double, sequenceNumber: Int, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             proto.learnRoute(
                 destination,
                 nextHop,
                 hopCount.coerceIn(0, 255).toUByte(),
-                quality.toFloat()
+                quality.toFloat(),
+                sequenceNumber.coerceAtLeast(0).toUInt()
             )
             promise.resolve(null)
         } catch (e: Exception) {
