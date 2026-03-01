@@ -97,9 +97,16 @@ for i in "${!ABIS[@]}"; do
   # Create output directory for this ABI
   mkdir -p "$OUTPUT_DIR/$abi"
   
+  # Cargo may put the cdylib in release/ or release/deps/
+  so_root="$PROJECT_ROOT/target/$target/release"
+  if [ -f "$so_root/liboffline_protocol_uniffi.so" ]; then
+    so_path="$so_root/liboffline_protocol_uniffi.so"
+  else
+    so_path="$so_root/deps/liboffline_protocol_uniffi.so"
+  fi
+  
   # Copy library to jniLibs
-  cp "$PROJECT_ROOT/target/$target/release/liboffline_protocol_uniffi.so" \
-     "$OUTPUT_DIR/$abi/"
+  cp "$so_path" "$OUTPUT_DIR/$abi/"
   
   echo "✅ Built and copied library for $abi"
 done

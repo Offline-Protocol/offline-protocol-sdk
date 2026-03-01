@@ -15,18 +15,29 @@ cargo build --release --target aarch64-apple-ios
 cargo build --release --target x86_64-apple-ios # Simulator
 cargo build --release --target aarch64-apple-ios-sim # M1 Simulator
 
+# Cargo may put the staticlib in release/ or release/deps/
+static_lib() {
+  local arch=$1
+  local root="../../target/$arch/release"
+  if [[ -f "$root/liboffline_protocol_uniffi.a" ]]; then
+    echo "$root/liboffline_protocol_uniffi.a"
+  else
+    echo "$root/deps/liboffline_protocol_uniffi.a"
+  fi
+}
+
 # Create universal library for iOS
 echo "Creating universal iOS library..."
 mkdir -p ../../bindings/react-native/ios/libs
 
 lipo -create \
-  ../../target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a \
-  ../../target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a \
+  "$(static_lib aarch64-apple-ios)" \
+  "$(static_lib x86_64-apple-ios)" \
   -output ../../bindings/react-native/ios/libs/liboffline_protocol_uniffi_device.a
 
 lipo -create \
-  ../../target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a \
-  ../../target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a \
+  "$(static_lib aarch64-apple-ios-sim)" \
+  "$(static_lib x86_64-apple-ios)" \
   -output ../../bindings/react-native/ios/libs/liboffline_protocol_uniffi_sim.a
 
 # Create XCFramework (optional, for better Xcode integration)
@@ -34,6 +45,17 @@ lipo -create \
 #   -library ../../target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a \
 #   -library ../../target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a \
 #   -output ../../bindings/react-native/ios/OfflineProtocolUniFFI.xcframework
+
+# Cargo may put the cdylib in release/ or release/deps/
+so_lib() {
+  local arch=$1
+  local root="../../target/$arch/release"
+  if [[ -f "$root/liboffline_protocol_uniffi.so" ]]; then
+    echo "$root/liboffline_protocol_uniffi.so"
+  else
+    echo "$root/deps/liboffline_protocol_uniffi.so"
+  fi
+}
 
 # Android builds
 echo "Building for Android..."
@@ -46,16 +68,16 @@ cargo build --release --target i686-linux-android
 echo "Copying Android libraries..."
 mkdir -p ../../bindings/react-native/android/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64,x86}
 
-cp ../../target/aarch64-linux-android/release/liboffline_protocol_uniffi.so \
+cp "$(so_lib aarch64-linux-android)" \
    ../../bindings/react-native/android/src/main/jniLibs/arm64-v8a/
 
-cp ../../target/armv7-linux-androideabi/release/liboffline_protocol_uniffi.so \
+cp "$(so_lib armv7-linux-androideabi)" \
    ../../bindings/react-native/android/src/main/jniLibs/armeabi-v7a/
 
-cp ../../target/x86_64-linux-android/release/liboffline_protocol_uniffi.so \
+cp "$(so_lib x86_64-linux-android)" \
    ../../bindings/react-native/android/src/main/jniLibs/x86_64/
 
-cp ../../target/i686-linux-android/release/liboffline_protocol_uniffi.so \
+cp "$(so_lib i686-linux-android)" \
    ../../bindings/react-native/android/src/main/jniLibs/x86/
 
 echo "✅ Native libraries built successfully!"

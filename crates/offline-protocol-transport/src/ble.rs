@@ -682,7 +682,6 @@ impl Transport for BleTransport {
     fn send(&self, message: &Message) -> Result<()> {
         let status = self.status();
 
-        // Check status
         if status != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(format!(
                 "BLE transport is not available (status: {:?})",
@@ -690,18 +689,24 @@ impl Transport for BleTransport {
             )));
         }
 
-        // Determine recipient and add to send queue
         let recipient = message.recipient.as_str().to_string();
+
+        {
+            let peers = self.peers.lock().unwrap();
+            if !peers.contains_key(&recipient) {
+                return Err(crate::Error::PeerNotReachable(format!(
+                    "BLE: no connected peer for recipient {}",
+                    recipient
+                )));
+            }
+        }
+
         {
             let mut queue = self.send_queue.lock().unwrap();
             queue.push_back((recipient, message.clone()));
         }
 
         self.update_queue_metric();
-
-        // Notify platform that fragments are available to send.
-        // This replaces timer-based polling — the platform will call
-        // get_next_fragment() in response to this callback.
         self.notify_fragments_available();
 
         Ok(())
@@ -861,6 +866,7 @@ mod tests {
     fn test_ble_has_pending_sends_dequeue_send_get_queue_depth() {
         let mut transport = BleTransport::new("test-device");
         transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("bob"));
         let msg = small_message();
         transport.send(&msg).unwrap();
         assert!(transport.has_pending_sends());
@@ -989,6 +995,7 @@ mod tests {
     fn test_ble_get_next_fragment_requeue() {
         let mut transport = BleTransport::new("test-device");
         transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("bob"));
         let msg = small_message();
         transport.send(&msg).unwrap();
         let first = transport.get_next_fragment().unwrap();
@@ -1014,6 +1021,36 @@ mod tests {
         let received = transport.receive().unwrap();
         assert!(received.is_some());
         assert_eq!(received.unwrap().id, msg.id);
+    }
+
+    #[test]
+    fn test_ble_send_rejects_unknown_peer() {
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+        let msg = small_message();
+        let result = transport.send(&msg);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::PeerNotReachable(_)));
+    }
+
+    #[test]
+    fn test_ble_send_allows_known_peer() {
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("bob"));
+        let msg = small_message();
+        assert!(transport.send(&msg).is_ok());
+    }
+
+    #[test]
+    fn test_ble_send_after_peer_lost() {
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("bob"));
+        assert!(transport.send(&small_message()).is_ok());
+        transport.on_peer_lost("bob");
+        let result = transport.send(&small_message());
+        assert!(matches!(result.unwrap_err(), crate::Error::PeerNotReachable(_)));
     }
 
     #[test]

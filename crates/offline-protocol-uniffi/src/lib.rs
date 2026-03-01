@@ -7,6 +7,7 @@
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
 use offline_protocol::{
+    EstablishmentState as CoreEstablishmentState,
     file_transfer::FileTransferManager, Event as CoreEvent, NetworkVisualizer,
     OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
     PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
@@ -32,6 +33,26 @@ use std::time::SystemTime;
 // Include the UniFFI scaffolding
 uniffi::include_scaffolding!("offline_protocol");
 
+/// Per-peer establishment state (for SessionNotReady and get_establishment_state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstablishmentState {
+    NoKeyPackage,
+    HaveKeyPackage,
+    SessionPending,
+    SessionConfirmed,
+}
+
+impl From<CoreEstablishmentState> for EstablishmentState {
+    fn from(s: CoreEstablishmentState) -> Self {
+        match s {
+            CoreEstablishmentState::NoKeyPackage => EstablishmentState::NoKeyPackage,
+            CoreEstablishmentState::HaveKeyPackage => EstablishmentState::HaveKeyPackage,
+            CoreEstablishmentState::SessionPending => EstablishmentState::SessionPending,
+            CoreEstablishmentState::SessionConfirmed => EstablishmentState::SessionConfirmed,
+        }
+    }
+}
+
 /// Error types for protocol operations
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
@@ -55,9 +76,9 @@ pub enum ProtocolError {
     #[error("No key package available for recipient: {0}")]
     NoKeyPackage(String),
 
-    /// Session setup is pending
-    #[error("Session pending, message queued")]
-    SessionPending,
+    /// Session not ready; establishment in progress (state included for UI/retry).
+    #[error("Session not ready: {0:?}")]
+    SessionNotReady(EstablishmentState),
 
     /// Outbound message encryption failed
     #[error("Failed to encrypt message: {0}")]
@@ -245,7 +266,9 @@ impl From<offline_protocol::Error> for ProtocolError {
                 ProtocolError::InvalidConfiguration(msg)
             }
             offline_protocol::Error::NoKeyPackage(peer_id) => ProtocolError::NoKeyPackage(peer_id),
-            offline_protocol::Error::SessionPending => ProtocolError::SessionPending,
+            offline_protocol::Error::SessionNotReady(state) => {
+                ProtocolError::SessionNotReady(state.into())
+            }
             offline_protocol::Error::EncryptFailed(message) => ProtocolError::EncryptFailed(message),
             offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
             offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
@@ -1178,6 +1201,28 @@ impl OfflineProtocol {
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
 
+        // Register peer with the BLE transport so send() can route to them
+        {
+            let protocol = self.inner.lock().unwrap();
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                let transport = transport_arc.lock().unwrap();
+                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble_transport.on_peer_discovered(
+                        offline_protocol_transport::ble::PeerDevice {
+                            device_id: peer_id.clone(),
+                            address: String::new(),
+                            rssi,
+                            last_seen: SystemTime::now(),
+                            connected: true,
+                        },
+                    );
+                }
+            }
+        }
+
         // Notify the core protocol of neighbor discovery for auto key exchange
         {
             let mut protocol = self.inner.lock().unwrap();
@@ -1201,6 +1246,20 @@ impl OfflineProtocol {
         ble_state.peers.remove(&peer_id);
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
+
+        // Unregister peer from the BLE transport
+        {
+            let protocol = self.inner.lock().unwrap();
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                let transport = transport_arc.lock().unwrap();
+                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble_transport.on_peer_lost(&peer_id);
+                }
+            }
+        }
 
         // Notify the core protocol of neighbor loss
         {
@@ -2492,12 +2551,27 @@ impl OfflineProtocol {
         guard.has_pending_key_package(&peer_id)
     }
 
+    /// Returns the current establishment state for a peer.
+    pub fn get_establishment_state(
+        &self,
+        peer_id: String,
+    ) -> Result<EstablishmentState, ProtocolError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .get_establishment_state(&peer_id)
+            .map(Into::into)
+            .map_err(ProtocolError::from)
+    }
+
     /// Establish a secure session with a peer (high-level API)
     ///
     /// This method handles the complete session establishment flow:
     /// - If session already exists, returns None
     /// - If a pending key package is available, imports it, creates session, sends Welcome
-    /// - If no key package is available, returns an error
+    /// - If no key package is available, returns SessionNotReady(state) so caller can retry
     pub fn establish_secure_session(
         &self,
         peer_id: String,
@@ -2510,7 +2584,7 @@ impl OfflineProtocol {
         guard
             .establish_secure_session(&peer_id)
             .map(|opt| opt.map(MlsWelcomeMessage::from))
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+            .map_err(ProtocolError::from)
     }
 
     /// Create a 1:1 session

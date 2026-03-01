@@ -8,6 +8,9 @@ import type {
   NeighborLostEvent,
   ProtocolEvent,
   TransportSwitchedEvent,
+  DorsTransportSwitchedEvent,
+  DorsTransportSelectedEvent,
+  DorsEscalationTriggeredEvent,
 } from '@offline-protocol/mesh-sdk';
 
 type TransportKey = string;
@@ -218,6 +221,50 @@ export function deriveInsights(events: ProtocolEvent[]): DerivedInsights {
         switches.push(switchRecord);
         currentTransport = e.to;
         lastSwitch = switchRecord;
+        break;
+      }
+      case 'dors_transport_switched': {
+        const e = event as DorsTransportSwitchedEvent;
+        const reason = e.reason_detail ?? e.reason_code ?? 'DORS switch';
+        const switchRecord: DorsSwitch = {
+          at: seenAt,
+          from: e.from ?? null,
+          to: e.to,
+          reason,
+        };
+        switches.push(switchRecord);
+        currentTransport = e.to;
+        lastSwitch = switchRecord;
+        break;
+      }
+      case 'dors_transport_selected': {
+        const e = event as DorsTransportSelectedEvent;
+        currentTransport = e.transport;
+        if (!lastSwitch) {
+          lastSwitch = {
+            at: seenAt,
+            from: e.from ?? null,
+            to: e.transport,
+            reason: e.reason_code ?? 'selected',
+          };
+          switches.push(lastSwitch);
+        }
+        break;
+      }
+      case 'dors_escalation_triggered': {
+        const e = event as DorsEscalationTriggeredEvent;
+        if (e.phase === 'APPLIED') {
+          const reason = e.reason_detail ?? e.reason_code ?? 'escalation applied';
+          const switchRecord: DorsSwitch = {
+            at: seenAt,
+            from: e.from,
+            to: e.to,
+            reason,
+          };
+          switches.push(switchRecord);
+          currentTransport = e.to;
+          lastSwitch = switchRecord;
+        }
         break;
       }
       case 'neighbor_discovered': {

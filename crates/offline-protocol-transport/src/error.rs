@@ -12,6 +12,12 @@ pub enum Error {
     #[error("Transport not available: {0}")]
     TransportNotAvailable(String),
 
+    /// Recipient is not reachable via this transport.
+    /// Unlike `TransportNotAvailable`, the transport itself is healthy --
+    /// only this specific peer cannot be reached through it.
+    #[error("Peer not reachable: {0}")]
+    PeerNotReachable(String),
+
     /// Failed to send message.
     #[error("Send failed: {0}")]
     SendFailed(String),

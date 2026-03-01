@@ -96,9 +96,17 @@ export enum ProtocolErrorCode {
   INVALID_CONFIGURATION = 'InvalidConfiguration',
   SEND_FAILED = 'SendFailed',
   NO_KEY_PACKAGE = 'NoKeyPackage',
-  SESSION_PENDING = 'SessionPending',
+  SESSION_NOT_READY = 'SessionNotReady',
   ENCRYPT_FAILED = 'EncryptFailed',
   OTHER = 'Other',
+}
+
+/** Per-peer establishment state (for SessionNotReady and getEstablishmentState). */
+export enum EstablishmentState {
+  NO_KEY_PACKAGE = 'NoKeyPackage',
+  HAVE_KEY_PACKAGE = 'HaveKeyPackage',
+  SESSION_PENDING = 'SessionPending',
+  SESSION_CONFIRMED = 'SessionConfirmed',
 }
 
 /**

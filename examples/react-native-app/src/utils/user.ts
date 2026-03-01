@@ -1,9 +1,17 @@
 // import DeviceInfo from 'react-native-device-info';
 
+let cachedUserId: string | null = null;
+
 export function generateUserId(): string {
+  if (cachedUserId) {
+    console.log('[UserUtils] Returning cached User ID:', cachedUserId);
+    return cachedUserId;
+  }
   const timestamp = Date.now().toString(36);
   const random = Math.random().toString(36).substring(2, 8);
-  return `user_${timestamp}_${random}`;
+  cachedUserId = `user_${timestamp}_${random}`;
+  console.log('[UserUtils] Generated new User ID:', cachedUserId);
+  return cachedUserId;
 }
 
 export function generateUserName(): string {

@@ -8,6 +8,15 @@ DORS is the intelligent transport selection engine at the heart of the Offline P
 
 DORS operates as a continuous decision-making system that monitors network conditions and dynamically adapts routing decisions. Rather than relying on a single transport, DORS evaluates all available options and selects the best one for each message based on multiple weighted factors.
 
+### Transport availability
+
+DORS only chooses among transports whose status is **Available**. The platform must report connection state so the core can update status:
+
+- **Internet:** Call `internetStatusChanged(true)` only after the WebSocket is connected and authenticated; call `internetStatusChanged(false)` whenever the connection is closed or fails (including initial connection failure). If the platform does not call `internetStatusChanged(false)` when the relay is unreachable or the connection drops, Internet stays in the available set and DORS will keep selecting it instead of switching to BLE.
+- **BLE:** Call `bleStatusChanged(true)` when BLE is ready; call `bleStatusChanged(false)` when BLE becomes unavailable.
+
+When the current transport is no longer available (e.g. Internet disconnected), DORS switches immediately to the best remaining transport (e.g. BLE) without waiting for cooldown or hysteresis.
+
 ### The Decision Process
 
 When a message needs to be sent, DORS follows this process:

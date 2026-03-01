@@ -11,7 +11,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   userId: string,
   
   // Optional configurations
-  transport?: TransportConfig,
+  transports?: TransportsConfig,
   encryption?: EncryptionConfig,  // NEW: Auto-encryption settings
   dors?: DorsConfig,
   relay?: RelayConfig,
@@ -32,16 +32,16 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   appId: 'emergency-responder',
   userId: userId,
   
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: true,
-    internetEnabled: false,  // Offline only
+  transports: {
+    ble: { enabled: true },
+    wifiDirect: { enabled: true },
+    internet: { enabled: false },  // Offline only
   },
   
   dors: {
     preferOnline: false,
     switchHysteresis: 10,  // More aggressive switching
-    ble_to_wifi_retry_threshold: 1,  // Switch faster
+    bleToWifiRetryThreshold: 1,  // Switch faster
     congestionDurationSecs: 5,  // Require 5s sustained congestion before escalating
     ttlEscalationHoldSecs: 30,  // Keep TTL alarm active for 30s
   },
@@ -78,10 +78,10 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   appId: 'chat-app',
   userId: userId,
   
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: true,
-    internetEnabled: true,
+  transports: {
+    ble: { enabled: true },
+    wifiDirect: { enabled: true },
+    internet: { enabled: true },
   },
   
   // Auto-encryption enabled by default
@@ -120,15 +120,15 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   appId: 'file-share',
   userId: userId,
   
-  transport: {
-    bleEnabled: false,  // BLE too slow for large files
-    wifiDirectEnabled: true,  // Prefer high bandwidth
-    internetEnabled: true,
+  transports: {
+    ble: { enabled: false },  // BLE too slow for large files
+    wifiDirect: { enabled: true },  // Prefer high bandwidth
+    internet: { enabled: true },
   },
   
   dors: {
     preferOnline: true,
-    ble_to_wifi_retry_threshold: 1,  // Quick escalation to WiFi
+    bleToWifiRetryThreshold: 1,  // Quick escalation to WiFi
     queueRecoveryRatio: 0.4,  // De-escalate when queues recover to 40%
   },
   
@@ -153,10 +153,10 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   appId: 'battery-saver-app',
   userId: userId,
   
-  transport: {
-    bleEnabled: true,  // Low power
-    wifiDirectEnabled: false,  // Avoid high power WiFi
-    internetEnabled: true,
+  transports: {
+    ble: { enabled: true },  // Low power
+    wifiDirect: { enabled: false },  // Avoid high power WiFi
+    internet: { enabled: true },
   },
   
   dors: {
@@ -186,10 +186,10 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
   appId: 'event-app',
   userId: userId,
   
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: true,
-    internetEnabled: true,
+  transports: {
+    ble: { enabled: true },
+    wifiDirect: { enabled: true },
+    internet: { enabled: true },
   },
   
   dors: {
@@ -223,9 +223,9 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `bleEnabled` | boolean | true | Enable BLE mesh |
-| `wifiDirectEnabled` | boolean | true | Enable Wi-Fi Direct (Android only) |
-| `internetEnabled` | boolean | true | Enable Internet |
+| `transports.ble.enabled` | boolean | true | Enable BLE mesh |
+| `transports.wifiDirect.enabled` | boolean | true | Enable Wi-Fi Direct (Android only) |
+| `transports.internet.enabled` | boolean | true | Enable Internet |
 
 ### Encryption Configuration
 
@@ -251,7 +251,8 @@ Pending encrypted-message queue behavior (before MLS session readiness):
 - Every overflow/TTL drop emits structured warning logs with reason and triggered limit.
 
 When strict mode is enabled:
-- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`NoKeyPackage`, `SessionPending`, `EncryptFailed`) and do not send transport payloads on failure.
+- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`SessionNotReady`, `EncryptFailed`) and do not send transport payloads on failure.
+- `SessionNotReady` carries establishment progress (`NoKeyPackage`, `HaveKeyPackage`, `SessionPending`, `SessionConfirmed`) for retry/UI decisions.
 - plaintext connection-control APIs (`sendConnectionRequest`, `acceptConnectionRequest`, `rejectConnectionRequest`) are rejected to prevent accidental plaintext fallback.
 
 Rust migration note:
@@ -370,10 +371,10 @@ The SDK validates configuration on creation:
 **Recommended Config**:
 ```typescript
 {
-  transport: {
-    bleEnabled: true,
-    wifiDirectEnabled: false,  // Not available on iOS
-    internetEnabled: true,
+  transports: {
+    ble: { enabled: true },
+    wifiDirect: { enabled: false },  // Not available on iOS
+    internet: { enabled: true },
   }
 }
 ```
@@ -385,10 +386,10 @@ The SDK validates configuration on creation:
 **Recommended Config**:
 ```typescript
 {
-  transport: {
-    bleEnabled: false,        // Not available in browsers
-    wifiDirectEnabled: false, // Not available in browsers
-    internetEnabled: true,
+  transports: {
+    ble: { enabled: false },        // Not available in browsers
+    wifiDirect: { enabled: false }, // Not available in browsers
+    internet: { enabled: true },
   }
 }
 ```

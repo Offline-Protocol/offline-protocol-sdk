@@ -77,7 +77,9 @@ final class MeshConnectionRegistry: @unchecked Sendable {
 
     func peripheralIdentifier(for deviceId: String) -> UUID? {
         lock.lock()
-        let match = peripheralDeviceIds.first(where: { $0.value == deviceId })?.key
+        let match =
+            peripheralDeviceIds.first(where: { $0.value == deviceId })?.key
+            ?? centralDeviceIds.first(where: { $0.value == deviceId })?.key
         lock.unlock()
         return match
     }

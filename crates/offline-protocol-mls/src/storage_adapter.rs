@@ -258,6 +258,14 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         hash_ref: &HashReference,
         key_package: &KeyPackage,
     ) -> Result<(), Self::Error> {
+        let key_bytes =
+            serde_json::to_vec(hash_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let key_id = hex::encode(&key_bytes);
+        tracing::info!(
+            key_id = %key_id,
+            key_bytes_len = key_bytes.len(),
+            "write_key_package: storing key package"
+        );
         self.write_generic("openmls_key_package", hash_ref, key_package)
     }
 
@@ -451,7 +459,33 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<Option<KeyPackage>, Self::Error> {
-        self.read_generic("openmls_key_package", hash_ref)
+        let key_bytes =
+            serde_json::to_vec(hash_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let key_id = hex::encode(&key_bytes);
+        let result: Result<Option<KeyPackage>, _> =
+            self.read_generic("openmls_key_package", hash_ref);
+        match &result {
+            Ok(Some(_)) => tracing::info!(
+                key_id = %key_id,
+                "key_package: found key package"
+            ),
+            Ok(None) => {
+                let stored_keys = self.storage.list_keys("openmls_key_package")
+                    .unwrap_or_default();
+                tracing::warn!(
+                    key_id = %key_id,
+                    stored_count = stored_keys.len(),
+                    stored_keys = ?stored_keys,
+                    "key_package: NOT FOUND in storage"
+                );
+            }
+            Err(e) => tracing::error!(
+                key_id = %key_id,
+                error = %e,
+                "key_package: error reading from storage"
+            ),
+        }
+        result
     }
 
     fn psk<PskBundle: traits::PskBundle<VERSION>, PskId: traits::PskId<VERSION>>(
@@ -607,6 +641,13 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<(), Self::Error> {
+        let key_bytes =
+            serde_json::to_vec(hash_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let key_id = hex::encode(&key_bytes);
+        tracing::info!(
+            key_id = %key_id,
+            "delete_key_package: removing key package from storage"
+        );
         self.delete_generic("openmls_key_package", hash_ref)
     }
 

@@ -33,6 +33,7 @@ import type {
   MlsWelcome,
   MlsSessionInfo,
   MlsGroupInfo,
+  EstablishmentState,
 } from './types';
 import { MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
@@ -68,6 +69,11 @@ interface InitialRuntimeConfig {
     minBatteryForRelay?: number;
     relayThreshold?: number;
     relayPriority?: string;
+  };
+  reliability?: {
+    ack?: AckConfig;
+    retry?: RetryConfig;
+    dedup?: DedupConfig;
   };
 }
 
@@ -247,9 +253,21 @@ export class OfflineProtocol {
         })
       : undefined;
 
+    const reliabilityConfig = this.config.reliability
+      ? sanitize({
+          ack: sanitize(this.config.reliability.ack ?? {}),
+          retry: sanitize(this.config.reliability.retry ?? {}),
+          dedup: sanitize(this.config.reliability.dedup ?? {}),
+        })
+      : undefined;
+
     this.initialRuntimeConfig =
-      dorsConfig || relayConfig
-        ? { dors: dorsConfig, relay: relayConfig }
+      dorsConfig || relayConfig || reliabilityConfig
+        ? {
+            dors: dorsConfig,
+            relay: relayConfig,
+            reliability: reliabilityConfig,
+          }
         : null;
     this.initialRuntimeConfigApplied = false;
 
@@ -298,15 +316,8 @@ export class OfflineProtocol {
       }
     }
 
-    if (this.config.reliability) {
-      const reliabilityConfig = sanitize({
-        ack: sanitize(this.config.reliability.ack ?? {}),
-        retry: sanitize(this.config.reliability.retry ?? {}),
-        dedup: sanitize(this.config.reliability.dedup ?? {}),
-      });
-      if (reliabilityConfig) {
-        nativeConfig.reliability = reliabilityConfig;
-      }
+    if (reliabilityConfig) {
+      nativeConfig.reliability = reliabilityConfig;
     }
 
     if (this.config.path) {
@@ -359,7 +370,7 @@ export class OfflineProtocol {
       return;
     }
 
-    const { dors, relay } = this.initialRuntimeConfig;
+    const { dors, relay, reliability } = this.initialRuntimeConfig;
 
     if (dors) {
       try {
@@ -389,6 +400,45 @@ export class OfflineProtocol {
             error
           );
         }
+      }
+    }
+
+    if (reliability?.ack) {
+      try {
+        await OfflineProtocolNativeModule.updateAckConfig(
+          JSON.stringify(reliability.ack)
+        );
+      } catch (error) {
+        console.warn(
+          "[OfflineProtocol] Failed to apply ACK configuration",
+          error
+        );
+      }
+    }
+
+    if (reliability?.retry) {
+      try {
+        await OfflineProtocolNativeModule.updateRetryConfig(
+          JSON.stringify(reliability.retry)
+        );
+      } catch (error) {
+        console.warn(
+          "[OfflineProtocol] Failed to apply retry configuration",
+          error
+        );
+      }
+    }
+
+    if (reliability?.dedup) {
+      try {
+        await OfflineProtocolNativeModule.updateDedupConfig(
+          JSON.stringify(reliability.dedup)
+        );
+      } catch (error) {
+        console.warn(
+          "[OfflineProtocol] Failed to apply dedup configuration",
+          error
+        );
       }
     }
 
@@ -556,9 +606,9 @@ export class OfflineProtocol {
       await this.applyInitialRuntimeConfig();
     }
 
-    await OfflineProtocolNativeModule.start();
-
-    // Auto-initialize MLS if encryption is enabled (default: true)
+    // Initialize MLS before start() so key package exchange can run when peers are discovered.
+    // If we start transports first, neighbor_discovered may fire before MLS is ready and no
+    // key packages are sent, breaking the handshake.
     const encryptionEnabled = this.config.encryption?.enabled ?? true;
     if (encryptionEnabled) {
       try {
@@ -567,7 +617,21 @@ export class OfflineProtocol {
           "[OfflineProtocol] MLS auto-initialized with secure storage"
         );
       } catch (error) {
-        console.warn("[OfflineProtocol] Failed to auto-initialize MLS:", error);
+        console.warn(
+          "[OfflineProtocol] MLS initialization failed — secure sessions and handshake will not work:",
+          error
+        );
+      }
+    }
+
+    await OfflineProtocolNativeModule.start();
+
+    if (encryptionEnabled) {
+      const mlsReady = await OfflineProtocolNativeModule.isMlsInitialized();
+      if (!mlsReady) {
+        console.warn(
+          "[OfflineProtocol] Encryption enabled but MLS is not initialized — key exchange and secure sessions will not work"
+        );
       }
     }
 
@@ -1616,6 +1680,17 @@ export class OfflineProtocol {
   }
 
   /**
+   * Returns the current secure-session establishment state for a peer.
+   *
+   * Useful for retry/UI flows when operations fail with `SessionNotReady`.
+   *
+   * @param peerId - Peer's ID
+   */
+  async getEstablishmentState(peerId: string): Promise<EstablishmentState> {
+    return await OfflineProtocolNativeModule.getEstablishmentState(peerId);
+  }
+
+  /**
    * Establishes a secure MLS session with a peer (high-level API).
    *
    * This method handles the complete session establishment flow:
@@ -1640,6 +1715,28 @@ export class OfflineProtocol {
       welcomeData: result.welcomeData,
       inviterId: result.inviterId,
       timestampMs: result.timestampMs,
+    };
+  }
+
+  private normalizeMlsGroupInfo(raw: any): MlsGroupInfo {
+    return {
+      groupId: raw.groupId,
+      groupName: raw.groupName ?? raw.name ?? '',
+      memberIds: raw.memberIds ?? raw.members ?? [],
+      epoch: raw.epoch,
+      createdAt: raw.createdAt ?? raw.createdAtMs ?? 0,
+    };
+  }
+
+  private toMlsSessionInfo(raw: any): MlsSessionInfo {
+    const members: string[] = raw.memberIds ?? raw.members ?? [];
+    const otherUserId =
+      members.find(memberId => memberId !== this.config.userId) ?? '';
+    return {
+      otherUserId,
+      groupId: raw.groupId,
+      epoch: raw.epoch,
+      createdAt: raw.createdAt ?? raw.createdAtMs ?? 0,
     };
   }
 
@@ -1684,12 +1781,7 @@ export class OfflineProtocol {
     const result = await OfflineProtocolNativeModule.mlsJoinSession(
       welcomeJson
     );
-    return {
-      otherUserId: result.otherUserId,
-      groupId: result.groupId,
-      epoch: result.epoch,
-      createdAt: result.createdAt,
-    };
+    return this.toMlsSessionInfo(result);
   }
 
   /**
@@ -1792,7 +1884,11 @@ export class OfflineProtocol {
       inviterId: welcome.inviterId,
       timestampMs: welcome.timestampMs,
     });
-    return await OfflineProtocolNativeModule.mlsProcessWelcome(welcomeJson);
+    const result = await OfflineProtocolNativeModule.mlsProcessWelcome(welcomeJson);
+    if (result?.isSession) {
+      return this.toMlsSessionInfo(result);
+    }
+    return this.normalizeMlsGroupInfo(result);
   }
 
   // ============================================================================
@@ -1807,13 +1903,13 @@ export class OfflineProtocol {
    * @throws Error if creation fails
    */
   async mlsCreateGroup(groupName: string): Promise<MlsGroupInfo> {
-    const result = await OfflineProtocolNativeModule.mlsCreateGroup(groupName);
+    const result = await OfflineProtocolNativeModule.mlsCreateGroup(groupName, []);
     return {
       groupId: result.groupId,
-      groupName: result.groupName,
-      memberIds: result.memberIds,
+      groupName: result.groupName ?? result.name ?? '',
+      memberIds: result.memberIds ?? result.members ?? [],
       epoch: result.epoch,
-      createdAt: result.createdAt,
+      createdAt: result.createdAt ?? result.createdAtMs ?? 0,
     };
   }
 

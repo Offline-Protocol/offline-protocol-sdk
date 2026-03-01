@@ -1014,6 +1014,15 @@ export interface InternetMessage {
 // ============================================================================
 
 /**
+ * Per-peer secure-session establishment state.
+ */
+export type EstablishmentState =
+  | 'NoKeyPackage'
+  | 'HaveKeyPackage'
+  | 'SessionPending'
+  | 'SessionConfirmed';
+
+/**
  * MLS key package for session establishment.
  * Key packages are used to establish encrypted sessions with peers.
  */

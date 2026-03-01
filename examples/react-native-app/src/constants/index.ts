@@ -64,6 +64,12 @@ export const ENCRYPTED_MESSAGE_PREFIX = '__encrypted__::';
 export const PRESENCE_REBROADCAST_INTERVAL_MS = 60 * 1000; // 1 minute
 
 /**
+ * Maximum number of presence messages to send per broadcast tick.
+ * Caps BLE connection attempts to avoid flooding the transport layer.
+ */
+export const MAX_PRESENCE_SENDS_PER_TICK = 3;
+
+/**
  * Time in milliseconds to retain processed messages before cleanup.
  * This prevents memory growth from message history.
  */

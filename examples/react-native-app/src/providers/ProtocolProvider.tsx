@@ -25,10 +25,27 @@ import { generateUserId } from '../utils/user';
 import {
   DEFAULT_RELAY_SERVER_URL,
   HARDCODED_TOKEN,
+  MAX_PRESENCE_SENDS_PER_TICK,
   PRESENCE_MESSAGE_PREFIX,
   PRESENCE_REBROADCAST_INTERVAL_MS,
   PROCESSED_MESSAGE_RETENTION_MS,
 } from '../constants';
+
+const buildEventProcessingKey = (event: Record<string, unknown>): string => {
+  const eventType = String(event.type ?? '');
+  const messageId = String(event.message_id ?? '');
+  const seenAt = String(event.seenAt ?? '');
+  const timestamp = String(event.timestamp ?? '');
+  const peerHint = String(
+    event.sender ??
+      event.peer_id ??
+      event.accepted_by ??
+      event.rejected_by ??
+      event.recipient ??
+      '',
+  );
+  return `${eventType}|${messageId}|${seenAt}|${timestamp}|${peerHint}`;
+};
 
 // Relay (WebSocket) types – used for groups and online messaging
 export interface OnlineMessage {
@@ -94,7 +111,7 @@ export interface Contact {
   distance?: 'near' | 'medium' | 'far';
 }
 
-/** Incoming (they requested me) or sent (I requested them) connection request */
+/** Incoming (they invited me) or sent (I invited them) secure-session invite */
 export interface ConnectionRequest {
   id: string;
   name: string;
@@ -163,7 +180,7 @@ interface ProtocolContextType {
 
   // Actions
   initialize: () => Promise<boolean>;
-  start: () => Promise<void>;
+  start: () => Promise<boolean>;
   stop: () => Promise<void>;
   sendMessage: (
     recipientId: string,
@@ -248,7 +265,11 @@ interface ProtocolProviderProps {
 }
 
 export function ProtocolProvider({ children }: ProtocolProviderProps) {
-  const [currentUserId] = useState(() => generateUserId());
+  const [currentUserId] = useState(() => {
+    const id = generateUserId();
+    console.log('[ProtocolProvider] Initializing with User ID:', id);
+    return id;
+  });
   const [currentUserName, setCurrentUserName] = useState('Me');
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [connectionRequests, setConnectionRequests] = useState<ConnectionRequest[]>([]);
@@ -266,6 +287,9 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   // MLS encryption state
   const [isMlsInitialized, setIsMlsInitialized] = useState(false);
   const [encryptedPeers, setEncryptedPeers] = useState<Set<string>>(new Set());
+  const encryptedPeersRef = useRef<Set<string>>(new Set());
+  const contactsRef = useRef<Contact[]>([]);
+  const discoveredPeersRef = useRef<Set<string>>(new Set());
 
   // Relay (WebSocket) state – inlined from former WebSocketRelayProvider
   const [relayStatus, setRelayStatus] = useState<ConnectionStatus>('disconnected');
@@ -278,6 +302,11 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   const [relayError, setRelayError] = useState<string | null>(null);
   const [typingUsers, setTypingUsers] = useState<Map<string, Set<string>>>(new Map());
   const pendingSentMessagesRef = useRef<Map<string, PendingSentMessage>>(new Map());
+  const pendingSessionEstablishmentsRef = useRef<Set<string>>(new Set());
+  const outgoingConnectionRequestsRef = useRef<Set<string>>(new Set());
+  const incomingAcceptCooldownsRef = useRef<Map<string, number>>(new Map());
+  const processedConnectionAcceptedEventsRef = useRef<Set<string>>(new Set());
+  const lastProcessedEventsTopKeyRef = useRef<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const relayMessageIdCounter = useRef(0);
 
@@ -285,6 +314,14 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     relayMessageIdCounter.current += 1;
     return `msg_${Date.now()}_${relayMessageIdCounter.current}`;
   }, []);
+
+  useEffect(() => {
+    encryptedPeersRef.current = encryptedPeers;
+  }, [encryptedPeers]);
+
+  useEffect(() => {
+    contactsRef.current = contacts;
+  }, [contacts]);
 
   const applyGroupCreated = useCallback((payload: { group_id: string; name: string }) => {
     setGroups(prev => [
@@ -783,7 +820,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         enabled: true,
         serverAddress: DEFAULT_RELAY_SERVER_URL,
         autoReconnect: true,
-        authToken: undefined,
+        authToken: HARDCODED_TOKEN || undefined,
       },
       wifiDirect: {
         enabled: true,
@@ -796,6 +833,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       switchHysteresis: 15.0,
       switchCooldownSecs: 20,
       bleToWifiRetryThreshold: 2,
+      minSuccessRateBeforeEscalation: 0.3,
+      minBleSamplesBeforeSuccessRateEscalation: 5,
       rssiSwitchThreshold: -85,
       congestionQueueThreshold: 50,
       stabilityWindowSecs: 8,
@@ -814,7 +853,13 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       enabled: true,
       autoKeyExchange: true,
       storePending: true,
+      // Connection request/accept/reject control messages are plaintext bootstrap
+      // messages in the current SDK implementation.
       requireEncryption: false,
+    },
+    reliability: {
+      ack: { defaultTimeoutMs: 15000 },
+      retry: { maxRetries: 8 },
     },
   });
 
@@ -834,40 +879,79 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       if (!protocol) {
         return;
       }
-      const name = getPeerDisplayName(peerId);
-      await protocol.acceptConnectionRequest({
-        recipient: peerId,
-        accepterName: currentUserName,
-        keyPackage: undefined,
-      });
-      setContacts(prev => {
-        if (prev.some(c => c.id === peerId)) return prev;
-        return [
-          ...prev,
-          {
-            id: peerId,
-            name,
-            avatar: undefined,
-            isOnline: true,
-            lastSeen: Date.now(),
-          },
-        ];
-      });
+      const now = Date.now();
+      const previousAcceptAt = incomingAcceptCooldownsRef.current.get(peerId);
+      if (
+        typeof previousAcceptAt === 'number' &&
+        now - previousAcceptAt < 10_000
+      ) {
+        return;
+      }
+      incomingAcceptCooldownsRef.current.set(peerId, now);
       setConnectionRequests(prev =>
-        prev.filter(r => r.id !== peerId),
+        prev.filter(r => !(r.id === peerId && r.direction === 'incoming')),
       );
+      try {
+        const localKeyPackage = await protocol
+          .mlsGetOrCreateKeyPackage()
+          .catch(err => {
+            console.warn(
+              '[ProtocolProvider] Failed to get local key package for accept:',
+              err,
+            );
+            return null;
+          });
+        await protocol.acceptConnectionRequest({
+          recipient: peerId,
+          accepterName: currentUserName,
+          keyPackage: localKeyPackage?.keyPackageData,
+        });
+
+        // Retry briefly because key package import/propagation is asynchronous.
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          const state = await protocol.getEstablishmentState(peerId);
+          if (state === 'HaveKeyPackage') {
+            await protocol.establishSecureSession(peerId);
+            break;
+          }
+          if (state === 'SessionPending') {
+            break;
+          }
+          await new Promise<void>(resolve => setTimeout(() => resolve(), 750));
+        }
+
+        // Optimistically add contact on the accepter side.
+        // The MLS session creator stays in Pending until the remote peer
+        // confirms, so secure_session_established may fire much later.
+        // Dedup in setContacts and the secure_session_established handler
+        // ensures this is safe.
+        setEncryptedPeers(prev => new Set(prev).add(peerId));
+        setContacts(prev => {
+          if (prev.some(c => c.id === peerId)) return prev;
+          return [
+            ...prev,
+            {
+              id: peerId,
+              name: getPeerDisplayName(peerId),
+              avatar: undefined,
+              isOnline: true,
+              lastSeen: now,
+            },
+          ];
+        });
+      } catch (error) {
+        incomingAcceptCooldownsRef.current.delete(peerId);
+        throw error;
+      }
     },
     [protocol, currentUserName, getPeerDisplayName],
   );
 
   const rejectConnectionRequest = useCallback(
     async (peerId: string) => {
-      if (!protocol) {
-        return;
+      if (protocol) {
+        await protocol.rejectConnectionRequest({ recipient: peerId });
       }
-      await protocol.rejectConnectionRequest({
-        recipient: peerId,
-      });
       setConnectionRequests(prev =>
         prev.filter(r => r.id !== peerId),
       );
@@ -880,33 +964,54 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       if (!protocol) {
         return;
       }
+      if (pendingSessionEstablishmentsRef.current.has(peerId)) {
+        return;
+      }
+      pendingSessionEstablishmentsRef.current.add(peerId);
       const name = getPeerDisplayName(peerId);
-			console.log(
+      console.log(
         '[ProtocolProvider] sendConnectionRequest to',
         peerId,
         'name=',
         name,
       );
-      const s = await protocol.sendConnectionRequest({
-        recipient: peerId,
-        senderName: currentUserName,
-        keyPackage: undefined,
-      });
-			console.log('[ProtocolProvider] sendConnectionRequest result=', s);
-      setConnectionRequests(prev => {
-        if (prev.some(r => r.id === peerId && r.direction === 'sent')) return prev;
-        return [
-          ...prev.filter(r => !(r.id === peerId && r.direction === 'sent')),
-          {
-            id: peerId,
-            name,
-            direction: 'sent',
-            timestamp: Date.now(),
-          },
-        ];
-      });
+      try {
+        const localKeyPackage = await protocol
+          .mlsGetOrCreateKeyPackage()
+          .catch(err => {
+            console.warn(
+              '[ProtocolProvider] Failed to get local key package for request:',
+              err,
+            );
+            return null;
+          });
+        outgoingConnectionRequestsRef.current.add(peerId);
+        await protocol.sendConnectionRequest({
+          recipient: peerId,
+          senderName: currentUserName,
+          keyPackage: localKeyPackage?.keyPackageData,
+        });
+
+        setConnectionRequests(prev => {
+          if (prev.some(r => r.id === peerId && r.direction === 'sent')) return prev;
+          return [
+            ...prev.filter(r => !(r.id === peerId && r.direction === 'sent')),
+            {
+              id: peerId,
+              name,
+              direction: 'sent',
+              timestamp: Date.now(),
+            },
+          ];
+        });
+      } catch (error) {
+        outgoingConnectionRequestsRef.current.delete(peerId);
+        throw error;
+      } finally {
+        pendingSessionEstablishmentsRef.current.delete(peerId);
+      }
     },
-    [protocol, currentUserName, getPeerDisplayName],
+    [protocol, getPeerDisplayName, currentUserName],
   );
   const sendPresenceToPeer = useCallback(
     async (peerId: string) => {
@@ -922,25 +1027,24 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         timestamp,
       };
 
+      // Mark attempted broadcasts too, so repeated failures do not spam retries.
+      setPresenceSentPeers(prev => {
+        const lastAttempt = prev[peerId];
+        if (lastAttempt && timestamp - lastAttempt < 500) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [peerId]: timestamp,
+        };
+      });
+
       try {
-        const result = await protocolSendMessage(
+        await protocolSendMessage(
           peerId,
           `${PRESENCE_MESSAGE_PREFIX}${JSON.stringify(payload)}`,
           MessagePriority.Low,
         );
-
-        if (result) {
-          setPresenceSentPeers(prev => {
-            const lastSent = prev[peerId];
-            if (lastSent && timestamp - lastSent < 500) {
-              return prev;
-            }
-            return {
-              ...prev,
-              [peerId]: timestamp,
-            };
-          });
-        }
       } catch (err) {
         console.warn(
           '[ProtocolProvider] Failed to send presence message',
@@ -998,13 +1102,12 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
   }, [protocol, isOnline]);
 
   // Start protocol
-  const start = useCallback(async () => {
-    try {
-      await protocolStart();
-    } catch (err) {
-      console.error('Failed to start protocol:', err);
+  const start = useCallback(async (): Promise<boolean> => {
+    const started = await protocolStart();
+    if (!started) {
       Alert.alert('Connection Error', 'Failed to start the messaging service.');
     }
+    return started;
   }, [protocolStart]);
 
   // Stop protocol
@@ -1035,9 +1138,10 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           `[ProtocolProvider] Sending message to ${recipientId}: "${content}" (priority: ${priority})`,
         );
 
-        const isEncrypted = isMlsInitialized && encryptedPeers.has(recipientId);
-
-        // Send message - SDK returns the final message ID
+        // Send message - SDK handles encryption, session creation, and
+        // queuing internally via prepare_outbound_content. No need to
+        // pre-check establishment state from JS; doing so adds 2-3 extra
+        // native bridge round-trips (~100-600ms) on every send.
         const messageId = await protocolSendMessage(
           recipientId,
           content,
@@ -1047,6 +1151,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         if (!messageId) {
           throw new Error('Message ID not returned');
         }
+
+        const isEncrypted = isMlsInitialized && encryptedPeers.has(recipientId);
         console.log(
           `[ProtocolProvider] Message sent successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`,
         );
@@ -1108,7 +1214,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         });
 
         // Do not add recipient to contacts when sending a message.
-        // Contacts are only added via connection_accepted or acceptConnectionRequest.
+        // Contacts are only added via secure-session invite acceptance.
       } catch (err) {
         console.error('Failed to send message:', err);
         Alert.alert('Send Error', 'Failed to send message. Please try again.');
@@ -1154,9 +1260,38 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     }
 
     const processEventsAsync = async () => {
-      const chronologicalEvents = [...events].reverse();
-      const discoveredPeers = new Set<string>();
-      const newlyDiscoveredPeers = new Set<string>(); // Track peers discovered in this batch
+      const currentTopKey = buildEventProcessingKey(
+        events[0] as unknown as Record<string, unknown>,
+      );
+      const previousTopKey = lastProcessedEventsTopKeyRef.current;
+      let chronologicalEvents: ProtocolEvent[] = [];
+
+      if (!previousTopKey) {
+        chronologicalEvents = [...events].reverse();
+      } else {
+        const previousTopIndex = events.findIndex(event =>
+          buildEventProcessingKey(event as unknown as Record<string, unknown>) ===
+          previousTopKey,
+        );
+        if (previousTopIndex > 0) {
+          chronologicalEvents = events.slice(0, previousTopIndex).reverse();
+        } else if (previousTopIndex === -1) {
+          // Fallback if history rotated and the previous marker is gone.
+          chronologicalEvents = [...events].reverse();
+        }
+      }
+
+      if (chronologicalEvents.length === 0) {
+        pruneProcessedMessages();
+        lastProcessedEventsTopKeyRef.current = currentTopKey;
+        return;
+      }
+
+      const discoveredPeers = new Set<string>(discoveredPeersRef.current);
+      const establishedPeerIds = new Set<string>([
+        ...Array.from(encryptedPeersRef.current),
+        ...contactsRef.current.map(contact => contact.id),
+      ]);
       const receivedMessages: Message[] = [];
       const sentMessageIds = new Set<string>();
       const deliveredMessageIds = new Set<string>();
@@ -1176,8 +1311,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             const peerId = (event as any).peer_id;
             if (peerId && peerId !== currentUserId) {
               discoveredPeers.add(peerId);
-              //  Track newly discovered peers to send presence after event processing
-              newlyDiscoveredPeers.add(peerId);
             }
             break;
           }
@@ -1193,12 +1326,37 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               '[ProtocolProvider] connection_request_received',
               event,
             );
-            const e = event as { sender?: string; sender_name?: string; timestamp?: number };
+            const e = event as {
+              sender?: string;
+              sender_name?: string;
+              timestamp?: number;
+              key_package?: number[];
+            };
             const peerId = e.sender ?? (event as any).peer_id;
             const name =
               e.sender_name ??
               (peerId && peerId.length > 4 ? `User ${peerId.slice(-4)}` : peerId ?? '');
             if (peerId && peerId !== currentUserId) {
+              if (e.key_package && e.key_package.length > 0) {
+                await protocol?.mlsImportKeyPackage(peerId, e.key_package).catch(err => {
+                  console.warn(
+                    '[ProtocolProvider] Failed to import key package from connection request',
+                    { peerId, err },
+                  );
+                });
+              }
+              const acceptedAt = incomingAcceptCooldownsRef.current.get(peerId);
+              if (typeof acceptedAt === 'number') {
+                if (Date.now() - acceptedAt < 10_000) {
+                  break;
+                }
+                incomingAcceptCooldownsRef.current.delete(peerId);
+              }
+              if (
+                encryptedPeersRef.current.has(peerId)
+              ) {
+                break;
+              }
               setConnectionRequests(prev => {
                 if (prev.some(r => r.id === peerId && r.direction === 'incoming')) return prev;
                 return [
@@ -1215,28 +1373,76 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             break;
           }
           case 'connection_accepted': {
-            const e = event as { accepted_by?: string; accepted_by_name?: string };
+            const e = event as {
+              accepted_by?: string;
+              accepted_by_name?: string;
+              timestamp?: number;
+              key_package?: number[];
+            };
             const peerId = e.accepted_by;
-            const name =
-              e.accepted_by_name ??
-              (peerId && peerId.length > 4 ? `User ${peerId.slice(-4)}` : peerId ?? '');
             if (peerId && peerId !== currentUserId) {
+              const acceptedEventKey = `${peerId}:${String(
+                e.timestamp ?? (event as any).seenAt ?? '',
+              )}`;
+              if (
+                processedConnectionAcceptedEventsRef.current.has(acceptedEventKey)
+              ) {
+                break;
+              }
+              processedConnectionAcceptedEventsRef.current.add(acceptedEventKey);
+              const hasOutgoingRequest =
+                outgoingConnectionRequestsRef.current.has(peerId);
+              if (!hasOutgoingRequest && encryptedPeersRef.current.has(peerId)) {
+                break;
+              }
+              if (!hasOutgoingRequest && !encryptedPeersRef.current.has(peerId)) {
+                console.log(
+                  '[ProtocolProvider] Processing late connection_accepted for',
+                  peerId,
+                );
+              }
+              outgoingConnectionRequestsRef.current.delete(peerId);
+              setConnectionRequests(prev =>
+                prev.filter(r => r.id !== peerId),
+              );
+              if (e.key_package && e.key_package.length > 0) {
+                await protocol?.mlsImportKeyPackage(peerId, e.key_package).catch(err => {
+                  console.warn(
+                    '[ProtocolProvider] Failed to import key package from connection accepted',
+                    { peerId, err },
+                  );
+                });
+              }
+              for (let attempt = 0; attempt < 8; attempt += 1) {
+                const state = await protocol?.getEstablishmentState(peerId);
+                if (state === 'HaveKeyPackage') {
+                  await protocol?.establishSecureSession(peerId);
+                  break;
+                }
+                if (state === 'SessionPending') {
+                  break;
+                }
+                await new Promise<void>(resolve => setTimeout(() => resolve(), 750));
+              }
+
+              // Optimistically add contact on the sender side too.
+              // secure_session_established may take time if we need to
+              // process the peer's Welcome first.
+              establishedPeerIds.add(peerId);
+              setEncryptedPeers(prev => new Set(prev).add(peerId));
               setContacts(prev => {
                 if (prev.some(c => c.id === peerId)) return prev;
                 return [
                   ...prev,
                   {
                     id: peerId,
-                    name: name || getPeerDisplayName(peerId),
+                    name: getPeerDisplayName(peerId),
                     avatar: undefined,
-                    isOnline: true,
+                    isOnline: discoveredPeers.has(peerId),
                     lastSeen: now,
                   },
                 ];
               });
-              setConnectionRequests(prev =>
-                prev.filter(r => r.id !== peerId),
-              );
             }
             break;
           }
@@ -1244,6 +1450,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             const e = event as { rejected_by?: string };
             const peerId = e.rejected_by;
             if (peerId) {
+              incomingAcceptCooldownsRef.current.delete(peerId);
+              outgoingConnectionRequestsRef.current.delete(peerId);
               setConnectionRequests(prev =>
                 prev.filter(r => r.id !== peerId),
               );
@@ -1275,8 +1483,41 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           case 'secure_session_established': {
             const secureEvent = event as { peer_id?: string };
             if (secureEvent.peer_id) {
-              setEncryptedPeers(prev => new Set(prev).add(secureEvent.peer_id!));
+              const peerId = secureEvent.peer_id;
+              establishedPeerIds.add(peerId);
+              incomingAcceptCooldownsRef.current.delete(peerId);
+              outgoingConnectionRequestsRef.current.delete(peerId);
+              setEncryptedPeers(prev => new Set(prev).add(peerId));
+              setConnectionRequests(prev => prev.filter(r => r.id !== peerId));
+              setContacts(prev => {
+                if (prev.some(c => c.id === peerId)) return prev;
+                return [
+                  ...prev,
+                  {
+                    id: peerId,
+                    name: getPeerDisplayName(peerId),
+                    avatar: undefined,
+                    isOnline: discoveredPeers.has(peerId),
+                    lastSeen: now,
+                  },
+                ];
+              });
             }
+            break;
+          }
+          case 'secure_session_failed': {
+            const secureEvent = event as { peer_id?: string; reason?: string };
+            const peerId = secureEvent.peer_id;
+            if (peerId) {
+              incomingAcceptCooldownsRef.current.delete(peerId);
+              outgoingConnectionRequestsRef.current.delete(peerId);
+            }
+            console.warn('[ProtocolProvider] secure_session_failed', secureEvent);
+            break;
+          }
+          case 'welcome_send_failed':
+          case 'welcome_send_expired': {
+            console.warn('[ProtocolProvider] welcome delivery issue', event);
             break;
           }
           case 'message_received': {
@@ -1327,6 +1568,23 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               break;
             }
 
+            const senderId = String(msgEvent.sender ?? '');
+            if (!senderId) {
+              break;
+            }
+            const isEncryptedPayload = Boolean(msgEvent.encrypted);
+            if (!establishedPeerIds.has(senderId) && !isEncryptedPayload) {
+              console.log(
+                '[ProtocolProvider] Ignoring non-session message_received from',
+                senderId || 'unknown sender',
+              );
+              break;
+            }
+            if (!establishedPeerIds.has(senderId) && isEncryptedPayload) {
+              // Session events can occasionally lag behind message delivery events.
+              establishedPeerIds.add(senderId);
+            }
+
             const normalizePriority = (value: unknown): MessagePriority => {
               if (typeof value === 'number') {
                 switch (value) {
@@ -1364,7 +1622,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
             const receivedMessage: Message = {
               id: messageId,
-              senderId: msgEvent.sender,
+              senderId,
               recipientId: msgEvent.recipient ?? currentUserId,
               content: rawContent,
               timestamp: msgEvent.timestamp || Date.now(),
@@ -1525,7 +1783,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           : `User ${peerId}`;
       };
 
-      // Contacts are only added via connection_accepted or acceptConnectionRequest.
+      // Contacts are only added via secure-session invite acceptance.
       // Only update existing contacts (isOnline, name, lastSeen) from discovery/presence.
       setContacts(prevContacts => {
         const contactMap = new Map<string, Contact>(
@@ -1684,6 +1942,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       }
 
       pruneProcessedMessages();
+      lastProcessedEventsTopKeyRef.current = currentTopKey;
+      discoveredPeersRef.current = new Set(discoveredPeers);
 
       // Update neighbors list (currently discovered nearby peers)
       setNeighbors(
@@ -1697,33 +1957,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             lastSeen: now,
           })),
       );
-
-      //  Send presence to newly discovered peers after event processing
-      // This ensures usernames are synced immediately when peers are discovered
-      // BUT: Only send if we haven't sent recently to prevent infinite loops
-      // Use a ref to track in-flight presence sends to avoid duplicate sends
-      newlyDiscoveredPeers.forEach(peerId => {
-        const lastSent = presenceSentPeers[peerId];
-        const timeSinceLastSent = now - (lastSent || 0);
-        // Only send if we haven't sent in the last 5 seconds to prevent loops
-        if (!lastSent || timeSinceLastSent > 5000) {
-          // Update the timestamp immediately to prevent duplicate sends
-          setPresenceSentPeers(prev => ({
-            ...prev,
-            [peerId]: now,
-          }));
-          sendPresenceToPeer(peerId).catch(err => {
-            console.warn(
-              `[ProtocolProvider] Failed to send presence to newly discovered peer ${peerId}:`,
-              err,
-            );
-          });
-        } else {
-          console.log(
-            `[ProtocolProvider] Skipping presence send to ${peerId} (sent ${timeSinceLastSent}ms ago, min interval: 5000ms)`,
-          );
-        }
-      });
     };
 
     // Run the async event processing
@@ -1755,38 +1988,37 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     });
   }, [currentUserName]);
 
-  // Broadcast presence to online peers periodically
+  // Broadcast presence to established contacts that are currently nearby.
+  // Only targets peers in encryptedPeers ∩ neighbors to avoid flooding BLE
+  // with connection attempts to peers we merely discovered via advertisement.
   useEffect(() => {
     if (!isOnline) {
       return;
     }
     const now = Date.now();
+    const nearbyPeerIds = new Set(neighbors.map(n => n.id));
 
-    //  Send presence to all discovered peers, not just contacts
-    // This ensures newly discovered peers get presence even before they're in contacts
-    const allPeers = new Set<string>();
-
-    // Add all contacts
-    contacts.forEach(contact => {
-      if (contact.isOnline) {
-        allPeers.add(contact.id);
-      }
-    });
-
-    // Also send to any discovered peers that might not be in contacts yet
-    // (This will be populated from events in processEventsAsync)
-
-    allPeers.forEach(peerId => {
-      if (peerId === currentUserId) {
+    const candidatePeerIds: string[] = [];
+    encryptedPeers.forEach(peerId => {
+      if (peerId === currentUserId || !nearbyPeerIds.has(peerId)) {
         return;
       }
       const lastSent = presenceSentPeers[peerId];
       if (!lastSent || now - lastSent > PRESENCE_REBROADCAST_INTERVAL_MS) {
-        void sendPresenceToPeer(peerId);
+        candidatePeerIds.push(peerId);
       }
     });
+
+    for (
+      let i = 0;
+      i < Math.min(candidatePeerIds.length, MAX_PRESENCE_SENDS_PER_TICK);
+      i++
+    ) {
+      void sendPresenceToPeer(candidatePeerIds[i]);
+    }
   }, [
-    contacts,
+    neighbors,
+    encryptedPeers,
     presenceSentPeers,
     isOnline,
     sendPresenceToPeer,

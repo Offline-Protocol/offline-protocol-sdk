@@ -640,6 +640,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getDorsConfig()  -> DorsConfig
     
+    func getEstablishmentState(peerId: String) throws  -> EstablishmentState
+    
     func getFileProgress(fileId: String)  -> FileProgress?
     
     func getIdentityPublicKey() throws  -> [UInt8]
@@ -1101,6 +1103,15 @@ open func getDorsConfig() -> DorsConfig  {
     return try!  FfiConverterTypeDorsConfig_lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getEstablishmentState(peerId: String)throws  -> EstablishmentState  {
+    return try  FfiConverterTypeEstablishmentState_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establishment_state(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
     )
 })
 }
@@ -3874,6 +3885,85 @@ public func FfiConverterTypeWifiDirectMessage_lower(_ value: WifiDirectMessage) 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum EstablishmentState: Equatable, Hashable {
+    
+    case noKeyPackage
+    case haveKeyPackage
+    case sessionPending
+    case sessionConfirmed
+
+
+
+}
+
+#if compiler(>=6)
+extension EstablishmentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEstablishmentState: FfiConverterRustBuffer {
+    typealias SwiftType = EstablishmentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EstablishmentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .noKeyPackage
+        
+        case 2: return .haveKeyPackage
+        
+        case 3: return .sessionPending
+        
+        case 4: return .sessionConfirmed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EstablishmentState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .noKeyPackage:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .haveKeyPackage:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .sessionPending:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .sessionConfirmed:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEstablishmentState_lift(_ buf: RustBuffer) throws -> EstablishmentState {
+    return try FfiConverterTypeEstablishmentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEstablishmentState_lower(_ value: EstablishmentState) -> RustBuffer {
+    return FfiConverterTypeEstablishmentState.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum MessagePriority: Equatable, Hashable {
     
     case low
@@ -4134,7 +4224,7 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     
     case NoKeyPackage(message: String)
     
-    case SessionPending(message: String)
+    case SessionNotReady(message: String)
     
     case EncryptFailed(message: String)
     
@@ -4193,7 +4283,7 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .SessionPending(
+        case 6: return .SessionNotReady(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -4238,7 +4328,7 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
         case .NoKeyPackage(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .SessionPending(_ /* message is ignored*/):
+        case .SessionNotReady(_ /* message is ignored*/):
             writeInt(&buf, Int32(6))
         case .EncryptFailed(_ /* message is ignored*/):
             writeInt(&buf, Int32(7))
@@ -5661,6 +5751,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 28708) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() != 26411) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575) {

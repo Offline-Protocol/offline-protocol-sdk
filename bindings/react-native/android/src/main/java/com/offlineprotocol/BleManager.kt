@@ -1673,6 +1673,9 @@ class BleManager(
         try {
             flushPendingOutboundFragments()
 
+            var consecutiveSkips = 0
+            val maxConsecutiveSkips = 5
+
             while (true) {
                 val fragment = try {
                     protocol.bleGetNextFragment()
@@ -1684,9 +1687,19 @@ class BleManager(
                 val recipientId = fragment.recipientId
                 val data = fragment.data.map { it.toByte() }.toByteArray()
 
+                val hasConnection = resolveTargetAddress(recipientId)?.let { connections.getGatt(it) } != null
+                if (!hasConnection) {
+                    consecutiveSkips++
+                    if (consecutiveSkips >= maxConsecutiveSkips) {
+                        break
+                    }
+                    continue
+                }
+
+                consecutiveSkips = 0
+
                 if (!sendFragmentData(recipientId, data)) {
                     enqueuePendingOutboundFragment(recipientId, data)
-                    // Peer is flow-controlled; stop draining to avoid queuing everything
                     break
                 }
             }

@@ -29,6 +29,7 @@ interface RequestItemProps {
   onAccept: () => void;
   onDecline: () => void;
   onPress: () => void;
+  joining?: boolean;
 }
 
 function RequestItem({
@@ -36,6 +37,7 @@ function RequestItem({
   onAccept,
   onDecline,
   onPress,
+  joining = false,
 }: RequestItemProps) {
   const { theme } = useTheme();
   const avatarColor = generateAvatarColor(request.id);
@@ -69,7 +71,7 @@ function RequestItem({
             <Text
               style={[styles.status, { color: theme.colors.textSecondary }]}
             >
-              {isIncoming ? 'Wants to connect' : 'Request sent'}
+              {isIncoming ? 'Secure session invite' : 'Invite sent'}
             </Text>
           </View>
           <Text
@@ -81,31 +83,38 @@ function RequestItem({
         </TouchableOpacity>
         <View style={styles.actions}>
           {isIncoming ? (
-            <>
+            <View style={styles.requestActions}>
               <TouchableOpacity
                 style={[
-                  styles.messageButton,
-                  styles.declineButton,
+                  styles.requestButton,
+                  styles.requestDeclineButton,
                   { backgroundColor: theme.colors.surfaceVariant },
                 ]}
                 onPress={onDecline}
                 activeOpacity={0.7}
-                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
               >
                 <Icon name="close" size={18} color={theme.colors.text} />
+                <Text style={[styles.requestButtonLabel, { color: theme.colors.text }]}>
+                  Ignore
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
-                  styles.messageButton,
+                  styles.requestButton,
+                  styles.requestAcceptButton,
                   { backgroundColor: theme.colors.primary },
+                  joining && { opacity: 0.7 },
                 ]}
                 onPress={onAccept}
+                disabled={joining}
                 activeOpacity={0.7}
-                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
               >
                 <Icon name="checkmark" size={18} color={theme.colors.textInverse} />
+                <Text style={[styles.requestButtonLabel, { color: theme.colors.textInverse }]}>
+                  {joining ? 'Joining...' : 'Join'}
+                </Text>
               </TouchableOpacity>
-            </>
+            </View>
           ) : (
             <View
               style={[
@@ -370,6 +379,7 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
   const [filter, setFilter] = useState<'contacts' | 'requests' | 'neighbors'>(
     'contacts',
   );
+  const [joiningRequestIds, setJoiningRequestIds] = useState<Set<string>>(new Set());
 
   const filteredContacts = useMemo(() => {
     let filtered = contacts;
@@ -501,13 +511,27 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
     connectionRequests.some(r => r.id === id && r.direction === 'sent');
 
   const handleAcceptRequest = async (request: ConnectionRequest) => {
+    if (joiningRequestIds.has(request.id)) {
+      return;
+    }
+    setJoiningRequestIds(prev => new Set(prev).add(request.id));
     try {
       await acceptConnectionRequest(request.id);
+      Alert.alert(
+        'Join Requested',
+        'Secure session acceptance sent. Waiting for peer confirmation.',
+      );
     } catch (e) {
       Alert.alert(
-        'Accept Failed',
-        (e as Error)?.message ?? 'Failed to accept connection request.',
+        'Join Failed',
+        (e as Error)?.message ?? 'Failed to join secure session invite.',
       );
+    } finally {
+      setJoiningRequestIds(prev => {
+        const next = new Set(prev);
+        next.delete(request.id);
+        return next;
+      });
     }
   };
 
@@ -516,8 +540,8 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
       await rejectConnectionRequest(request.id);
     } catch (e) {
       Alert.alert(
-        'Decline Failed',
-        (e as Error)?.message ?? 'Failed to decline connection request.',
+        'Ignore Failed',
+        (e as Error)?.message ?? 'Failed to ignore secure session invite.',
       );
     }
   };
@@ -546,7 +570,7 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
               {filter === 'contacts'
                 ? `${filteredContacts.length} contacts`
                 : filter === 'requests'
-                  ? `${filteredRequests.length} requests`
+                  ? `${filteredRequests.length} invites`
                   : `${filteredNeighbors.length} nearby`}
             </Text>
             <View style={[
@@ -576,7 +600,7 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
           )}
         </View>
 
-        {/* Filter Tabs: Contacts | Requests | Neighbors */}
+        {/* Filter Tabs: Contacts | Invites | Neighbors */}
         <View style={styles.filterContainer}>
           {(['contacts', 'requests', 'neighbors'] as const).map(filterType => (
             <TouchableOpacity
@@ -603,7 +627,9 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
                   },
                 ]}
               >
-                {filterType.charAt(0).toUpperCase() + filterType.slice(1)}
+                {filterType === 'requests'
+                  ? 'Invites'
+                  : filterType.charAt(0).toUpperCase() + filterType.slice(1)}
               </Text>
               <Text
                 style={[
@@ -623,7 +649,7 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
         </View>
       </View>
 
-      {/* Contacts, Requests, or Neighbors List */}
+      {/* Contacts, Invites, or Neighbors List */}
       {filter === 'contacts' ? (
         <FlatList
           data={filteredContacts}
@@ -658,6 +684,7 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
               onPress={() => onNavigateToProfile(item.id)}
               onAccept={() => handleAcceptRequest(item)}
               onDecline={() => handleDeclineRequest(item)}
+              joining={joiningRequestIds.has(item.id)}
             />
           )}
           contentContainerStyle={styles.listContainer}
@@ -677,14 +704,14 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
                 />
               </View>
               <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>
-                {searchQuery.trim() ? 'No requests found' : 'No connection requests'}
+                {searchQuery.trim() ? 'No invites found' : 'No secure session invites'}
               </Text>
               <Text
                 style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}
               >
                 {searchQuery.trim()
                   ? 'Try adjusting your search.'
-                  : 'Incoming and sent requests will appear here.'}
+                  : 'Incoming and sent secure session invites will appear here.'}
               </Text>
             </View>
           )}
@@ -711,8 +738,8 @@ export function ContactsScreen({ onNavigateToProfile, onNavigateToChatDetail }: 
                   await sendConnectionRequest(item.id);
                 } catch (e) {
                   Alert.alert(
-                    'Request Failed',
-                    (e as Error)?.message ?? 'Failed to send connection request.',
+                    'Invite Failed',
+                    (e as Error)?.message ?? 'Failed to send secure session invite.',
                   );
                 }
               }}
@@ -949,6 +976,39 @@ const styles = StyleSheet.create({
   actions: {
     marginLeft: 10,
     justifyContent: 'center',
+  },
+  requestActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  requestButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    minHeight: 44,
+    minWidth: 100,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.08,
+        shadowRadius: 3,
+      },
+      android: {
+        elevation: 1,
+      },
+    }),
+  },
+  requestAcceptButton: {},
+  requestDeclineButton: {},
+  requestButtonLabel: {
+    fontSize: 15,
+    fontWeight: '600',
   },
   messageButton: {
     width: 40,

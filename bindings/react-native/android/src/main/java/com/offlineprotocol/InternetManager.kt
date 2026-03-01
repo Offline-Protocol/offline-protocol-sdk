@@ -381,19 +381,15 @@ class InternetManager(
             stopPingTimer()
         }
         
-        // Always notify protocol of disconnection
-        // This ensures the protocol knows the transport is unavailable
-        // even if we weren't fully authenticated
-        if (wasConnected || wasAuthenticated) {
-            // Notify protocol of disconnection - this keeps outbox messages pending
-            try {
-                protocol.internetStatusChanged(false)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error notifying protocol of disconnect", e)
-                emitDiagnostic("error", "Failed to notify protocol of disconnection", mapOf(
-                    "error" to (e.message ?: "unknown")
-                ))
-            }
+        // Always notify protocol of disconnection so DORS excludes Internet from
+        // available transports and can switch to BLE (or WiFi Direct).
+        try {
+            protocol.internetStatusChanged(false)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying protocol of disconnect", e)
+            emitDiagnostic("error", "Failed to notify protocol of disconnection", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
         }
         
         emitDiagnostic("warning", "WebSocket disconnected", mapOf(

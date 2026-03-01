@@ -49,7 +49,15 @@ export function SimpleOnboardingScreen({ onComplete }: SimpleOnboardingScreenPro
       }
 
       console.log('🔄 Starting protocol...');
-      await start();
+      const startSucceeded = await start();
+      if (!startSucceeded) {
+        console.log('❌ Protocol start failed');
+        Alert.alert(
+          'Setup Failed',
+          'Failed to start the messaging service. Check permissions and Bluetooth, then try again.',
+        );
+        return;
+      }
       console.log('✅ Protocol started successfully');
       onComplete();
     } catch (error) {
