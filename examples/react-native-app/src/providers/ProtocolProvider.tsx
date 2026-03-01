@@ -1138,49 +1138,10 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           `[ProtocolProvider] Sending message to ${recipientId}: "${content}" (priority: ${priority})`,
         );
 
-        let establishmentState:
-          | 'NoKeyPackage'
-          | 'HaveKeyPackage'
-          | 'SessionPending'
-          | 'SessionConfirmed'
-          | null = null;
-        if (protocol) {
-          establishmentState = await protocol
-            .getEstablishmentState(recipientId)
-            .catch(err => {
-              console.warn(
-                '[ProtocolProvider] Failed to query establishment state before send',
-                { recipientId, err },
-              );
-              return null;
-            });
-          if (establishmentState === 'HaveKeyPackage') {
-            await protocol.establishSecureSession(recipientId).catch(err => {
-              console.warn(
-                '[ProtocolProvider] Failed to establish secure session before send',
-                { recipientId, err },
-              );
-            });
-            establishmentState = await protocol
-              .getEstablishmentState(recipientId)
-              .catch(() => establishmentState);
-          }
-        }
-        const sessionReadyForChat = establishmentState === 'SessionConfirmed';
-        if (!sessionReadyForChat) {
-          console.warn(
-            '[ProtocolProvider] Blocking chat send until session is confirmed',
-            { recipientId, establishmentState },
-          );
-          Alert.alert(
-            'Session Not Ready',
-            'Secure session is still being established. Accept the invite on both devices, wait for session ready, then retry.',
-          );
-          return;
-        }
-        const isEncrypted = isMlsInitialized && sessionReadyForChat;
-
-        // Send message - SDK returns the final message ID
+        // Send message - SDK handles encryption, session creation, and
+        // queuing internally via prepare_outbound_content. No need to
+        // pre-check establishment state from JS; doing so adds 2-3 extra
+        // native bridge round-trips (~100-600ms) on every send.
         const messageId = await protocolSendMessage(
           recipientId,
           content,
@@ -1190,6 +1151,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
         if (!messageId) {
           throw new Error('Message ID not returned');
         }
+
+        const isEncrypted = isMlsInitialized && encryptedPeers.has(recipientId);
         console.log(
           `[ProtocolProvider] Message sent successfully to ${recipientId} with ID ${messageId} (encrypted: ${isEncrypted})`,
         );
@@ -1258,7 +1221,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       }
     },
     [
-      protocol,
       protocolSendMessage,
       currentUserId,
       getPeerDisplayName,
