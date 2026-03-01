@@ -251,7 +251,7 @@ Pending encrypted-message queue behavior (before MLS session readiness):
 - Every overflow/TTL drop emits structured warning logs with reason and triggered limit.
 
 When strict mode is enabled:
-- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`NoKeyPackage`, `SessionPending`, `EncryptFailed`) and do not send transport payloads on failure.
+- `sendMessage` / `sendMessageViaTransport` fail fast with typed errors (`NoKeyPackage`, `SessionNotReady`, `EncryptFailed`) and do not send transport payloads on failure.
 - plaintext connection-control APIs (`sendConnectionRequest`, `acceptConnectionRequest`, `rejectConnectionRequest`) are rejected to prevent accidental plaintext fallback.
 
 Rust migration note:
