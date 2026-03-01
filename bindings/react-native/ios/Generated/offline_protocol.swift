@@ -4224,8 +4224,6 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     
     case NoKeyPackage(message: String)
     
-    case SessionPending(message: String)
-    
     case SessionNotReady(message: String)
     
     case EncryptFailed(message: String)
@@ -4285,31 +4283,27 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .SessionPending(
+        case 6: return .SessionNotReady(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 7: return .SessionNotReady(
+        case 7: return .EncryptFailed(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 8: return .EncryptFailed(
+        case 8: return .InvalidState(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 9: return .InvalidState(
+        case 9: return .MlsNotInitialized(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 10: return .MlsNotInitialized(
+        case 10: return .MlsError(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 11: return .MlsError(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 12: return .Other(
+        case 11: return .Other(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -4334,20 +4328,18 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(4))
         case .NoKeyPackage(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .SessionPending(_ /* message is ignored*/):
-            writeInt(&buf, Int32(6))
         case .SessionNotReady(_ /* message is ignored*/):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(6))
         case .EncryptFailed(_ /* message is ignored*/):
-            writeInt(&buf, Int32(8))
+            writeInt(&buf, Int32(7))
         case .InvalidState(_ /* message is ignored*/):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(8))
         case .MlsNotInitialized(_ /* message is ignored*/):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(9))
         case .MlsError(_ /* message is ignored*/):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(10))
         case .Other(_ /* message is ignored*/):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(11))
 
         
         }

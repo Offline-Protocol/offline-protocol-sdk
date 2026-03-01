@@ -263,10 +263,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 code = "NoKeyPackage",
                 message = "No key package available for recipient"
             )
-            is ProtocolException.SessionPending -> BridgeProtocolError(
-                code = "SessionPending",
-                message = "Session establishment is pending"
-            )
             is ProtocolException.SessionNotReady -> BridgeProtocolError(
                 code = "SessionNotReady",
                 message = "Session not ready; establishment in progress"

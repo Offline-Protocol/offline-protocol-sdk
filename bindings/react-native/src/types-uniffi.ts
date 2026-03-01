@@ -96,7 +96,6 @@ export enum ProtocolErrorCode {
   INVALID_CONFIGURATION = 'InvalidConfiguration',
   SEND_FAILED = 'SendFailed',
   NO_KEY_PACKAGE = 'NoKeyPackage',
-  SESSION_PENDING = 'SessionPending',
   SESSION_NOT_READY = 'SessionNotReady',
   ENCRYPT_FAILED = 'EncryptFailed',
   OTHER = 'Other',

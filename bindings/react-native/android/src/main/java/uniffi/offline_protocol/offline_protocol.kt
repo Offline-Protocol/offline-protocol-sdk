@@ -5984,8 +5984,6 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
         class NoKeyPackage(message: String) : ProtocolException(message)
         
-        class SessionPending(message: String) : ProtocolException(message)
-        
         class SessionNotReady(message: String) : ProtocolException(message)
         
         class EncryptFailed(message: String) : ProtocolException(message)
@@ -6016,13 +6014,12 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             3 -> ProtocolException.InvalidConfiguration(FfiConverterString.read(buf))
             4 -> ProtocolException.SendFailed(FfiConverterString.read(buf))
             5 -> ProtocolException.NoKeyPackage(FfiConverterString.read(buf))
-            6 -> ProtocolException.SessionPending(FfiConverterString.read(buf))
-            7 -> ProtocolException.SessionNotReady(FfiConverterString.read(buf))
-            8 -> ProtocolException.EncryptFailed(FfiConverterString.read(buf))
-            9 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
-            10 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
-            11 -> ProtocolException.MlsException(FfiConverterString.read(buf))
-            12 -> ProtocolException.Other(FfiConverterString.read(buf))
+            6 -> ProtocolException.SessionNotReady(FfiConverterString.read(buf))
+            7 -> ProtocolException.EncryptFailed(FfiConverterString.read(buf))
+            8 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
+            9 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
+            10 -> ProtocolException.MlsException(FfiConverterString.read(buf))
+            11 -> ProtocolException.Other(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -6054,32 +6051,28 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
                 buf.putInt(5)
                 Unit
             }
-            is ProtocolException.SessionPending -> {
+            is ProtocolException.SessionNotReady -> {
                 buf.putInt(6)
                 Unit
             }
-            is ProtocolException.SessionNotReady -> {
+            is ProtocolException.EncryptFailed -> {
                 buf.putInt(7)
                 Unit
             }
-            is ProtocolException.EncryptFailed -> {
+            is ProtocolException.InvalidState -> {
                 buf.putInt(8)
                 Unit
             }
-            is ProtocolException.InvalidState -> {
+            is ProtocolException.MlsNotInitialized -> {
                 buf.putInt(9)
                 Unit
             }
-            is ProtocolException.MlsNotInitialized -> {
+            is ProtocolException.MlsException -> {
                 buf.putInt(10)
                 Unit
             }
-            is ProtocolException.MlsException -> {
-                buf.putInt(11)
-                Unit
-            }
             is ProtocolException.Other -> {
-                buf.putInt(12)
+                buf.putInt(11)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
