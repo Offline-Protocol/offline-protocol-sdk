@@ -76,10 +76,6 @@ pub enum ProtocolError {
     #[error("No key package available for recipient: {0}")]
     NoKeyPackage(String),
 
-    /// Session setup is pending
-    #[error("Session pending, message queued")]
-    SessionPending,
-
     /// Session not ready; establishment in progress (state included for UI/retry).
     #[error("Session not ready: {0:?}")]
     SessionNotReady(EstablishmentState),
@@ -270,7 +266,6 @@ impl From<offline_protocol::Error> for ProtocolError {
                 ProtocolError::InvalidConfiguration(msg)
             }
             offline_protocol::Error::NoKeyPackage(peer_id) => ProtocolError::NoKeyPackage(peer_id),
-            offline_protocol::Error::SessionPending => ProtocolError::SessionPending,
             offline_protocol::Error::SessionNotReady(state) => {
                 ProtocolError::SessionNotReady(state.into())
             }

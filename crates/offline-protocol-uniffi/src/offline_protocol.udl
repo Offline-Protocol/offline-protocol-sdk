@@ -90,7 +90,6 @@ enum ProtocolError {
     "InvalidConfiguration",
     "SendFailed",
     "NoKeyPackage",
-    "SessionPending",
     "SessionNotReady",
     "EncryptFailed",
     "InvalidState",

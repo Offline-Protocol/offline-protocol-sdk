@@ -69,7 +69,7 @@ impl SessionStateError {
     /// Classifies protocol-level errors for session state control flow.
     pub fn classify(error: &Error) -> Self {
         match error {
-            Error::SessionPending | Error::SessionNotReady(_) => Self::SessionNotReady,
+            Error::SessionNotReady(_) => Self::SessionNotReady,
             Error::MlsNotInitialized => Self::NotInitialized,
             Error::Transport(_) => Self::TransportFailure,
             Error::EncryptFailed(_) => Self::CryptoFailure,
@@ -155,10 +155,6 @@ pub enum Error {
     /// No key package available for recipient.
     #[error("No key package available for recipient: {0}")]
     NoKeyPackage(String),
-
-    /// Session pending - message queued for later.
-    #[error("Session pending, message queued")]
-    SessionPending,
 
     /// Session not ready; establishment in progress. Caller can retry or show "Establishing…".
     #[error("Session not ready: {0:?}")]
