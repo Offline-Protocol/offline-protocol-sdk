@@ -81,31 +81,36 @@ function RequestItem({
         </TouchableOpacity>
         <View style={styles.actions}>
           {isIncoming ? (
-            <>
+            <View style={styles.requestActions}>
               <TouchableOpacity
                 style={[
-                  styles.messageButton,
-                  styles.declineButton,
+                  styles.requestButton,
+                  styles.requestDeclineButton,
                   { backgroundColor: theme.colors.surfaceVariant },
                 ]}
                 onPress={onDecline}
                 activeOpacity={0.7}
-                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
               >
                 <Icon name="close" size={18} color={theme.colors.text} />
+                <Text style={[styles.requestButtonLabel, { color: theme.colors.text }]}>
+                  Decline
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[
-                  styles.messageButton,
+                  styles.requestButton,
+                  styles.requestAcceptButton,
                   { backgroundColor: theme.colors.primary },
                 ]}
                 onPress={onAccept}
                 activeOpacity={0.7}
-                hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
               >
                 <Icon name="checkmark" size={18} color={theme.colors.textInverse} />
+                <Text style={[styles.requestButtonLabel, { color: theme.colors.textInverse }]}>
+                  Accept
+                </Text>
               </TouchableOpacity>
-            </>
+            </View>
           ) : (
             <View
               style={[
@@ -949,6 +954,39 @@ const styles = StyleSheet.create({
   actions: {
     marginLeft: 10,
     justifyContent: 'center',
+  },
+  requestActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  requestButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    minHeight: 44,
+    minWidth: 100,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.08,
+        shadowRadius: 3,
+      },
+      android: {
+        elevation: 1,
+      },
+    }),
+  },
+  requestAcceptButton: {},
+  requestDeclineButton: {},
+  requestButtonLabel: {
+    fontSize: 15,
+    fontWeight: '600',
   },
   messageButton: {
     width: 40,

@@ -556,9 +556,9 @@ export class OfflineProtocol {
       await this.applyInitialRuntimeConfig();
     }
 
-    await OfflineProtocolNativeModule.start();
-
-    // Auto-initialize MLS if encryption is enabled (default: true)
+    // Initialize MLS before start() so key package exchange can run when peers are discovered.
+    // If we start transports first, neighbor_discovered may fire before MLS is ready and no
+    // key packages are sent, breaking the handshake.
     const encryptionEnabled = this.config.encryption?.enabled ?? true;
     if (encryptionEnabled) {
       try {
@@ -567,7 +567,21 @@ export class OfflineProtocol {
           "[OfflineProtocol] MLS auto-initialized with secure storage"
         );
       } catch (error) {
-        console.warn("[OfflineProtocol] Failed to auto-initialize MLS:", error);
+        console.warn(
+          "[OfflineProtocol] MLS initialization failed — secure sessions and handshake will not work:",
+          error
+        );
+      }
+    }
+
+    await OfflineProtocolNativeModule.start();
+
+    if (encryptionEnabled) {
+      const mlsReady = await OfflineProtocolNativeModule.isMlsInitialized();
+      if (!mlsReady) {
+        console.warn(
+          "[OfflineProtocol] Encryption enabled but MLS is not initialized — key exchange and secure sessions will not work"
+        );
       }
     }
 
@@ -1807,13 +1821,13 @@ export class OfflineProtocol {
    * @throws Error if creation fails
    */
   async mlsCreateGroup(groupName: string): Promise<MlsGroupInfo> {
-    const result = await OfflineProtocolNativeModule.mlsCreateGroup(groupName);
+    const result = await OfflineProtocolNativeModule.mlsCreateGroup(groupName, []);
     return {
       groupId: result.groupId,
-      groupName: result.groupName,
-      memberIds: result.memberIds,
+      groupName: result.groupName ?? result.name ?? '',
+      memberIds: result.memberIds ?? result.members ?? [],
       epoch: result.epoch,
-      createdAt: result.createdAt,
+      createdAt: result.createdAt ?? result.createdAtMs ?? 0,
     };
   }
 

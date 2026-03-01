@@ -313,18 +313,15 @@ public class InternetManager: NSObject, TransportManager {
         stopMessagePolling()
         stopPingTimer()
         
-        // Always notify protocol of disconnection
-        // This ensures the protocol knows the transport is unavailable
-        // even if we weren't fully authenticated
-        if wasConnected || wasAuthenticated {
-            // Notify protocol of disconnection - this keeps outbox messages pending
-            do {
-                try protocolInstance.internetStatusChanged(isConnected: false)
-            } catch {
-                emitDiagnostic("error", "Failed to notify protocol of disconnection", context: [
-                    "error": error.localizedDescription
-                ])
-            }
+        // Always notify protocol of disconnection so DORS excludes Internet from
+        // available transports and can switch to BLE (or WiFi Direct). Without this,
+        // the core would keep Internet in the available set and keep selecting it.
+        do {
+            try protocolInstance.internetStatusChanged(isConnected: false)
+        } catch {
+            emitDiagnostic("error", "Failed to notify protocol of disconnection", context: [
+                "error": error.localizedDescription
+            ])
         }
         
         emitDiagnostic("warning", "WebSocket disconnected", context: [

@@ -2394,8 +2394,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(proto.mlsListSessions())
     }
 
-    /// Create a new group
+    /// Create a new group (memberIds ignored; kept for bridge signature compatibility)
     @objc func mlsCreateGroup(_ groupName: String,
+                              memberIds: [NSNumber]?,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
@@ -2419,9 +2420,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    /// Add a member to a group
+    /// Add a member to a group (bridge names second param memberId; it is key package bytes)
     @objc func mlsAddGroupMember(_ groupId: String,
-                                 memberKeyPackage: [NSNumber],
+                                 memberId memberKeyPackage: [NSNumber],
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
@@ -3056,7 +3057,15 @@ class EventCallbackImpl: EventCallback, @unchecked Sendable {
     }
     
     func onEvent(eventJson: String) {
-        emitter?.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: ["eventJson": eventJson])
+        guard let emitter = emitter else { return }
+        let body: [String: Any] = ["eventJson": eventJson]
+        if Thread.isMainThread {
+            emitter.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: body)
+        } else {
+            DispatchQueue.main.async {
+                emitter.sendEventToJS(OfflineProtocolModule.Events.onEvent, body: body)
+            }
+        }
     }
 }
 

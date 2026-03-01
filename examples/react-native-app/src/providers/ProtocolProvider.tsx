@@ -816,7 +816,11 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       enabled: true,
       autoKeyExchange: true,
       storePending: true,
-      requireEncryption: false,
+      requireEncryption: true,
+    },
+    reliability: {
+      ack: { defaultTimeoutMs: 15000 },
+      retry: { maxRetries: 8 },
     },
   });
 

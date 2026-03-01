@@ -362,7 +362,7 @@ RCT_EXTERN_METHOD(mlsCreateGroup:(NSString *)groupName
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(mlsAddGroupMember:(NSString *)groupId
-                  memberId:(NSString *)memberId
+                  memberId:(NSArray *)memberId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

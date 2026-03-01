@@ -40,18 +40,29 @@ done
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$GENERATED_DIR"
 
+# Cargo may put the staticlib in release/ or release/deps/ depending on version
+static_lib_for() {
+  local arch=$1
+  local root="$PROJECT_ROOT/target/$arch/release"
+  if [[ -f "$root/liboffline_protocol_uniffi.a" ]]; then
+    echo "$root/liboffline_protocol_uniffi.a"
+  else
+    echo "$root/deps/liboffline_protocol_uniffi.a"
+  fi
+}
+
 echo "Creating universal libraries..."
 
 # Create universal library for devices
 echo "Creating device library..."
-cp "$PROJECT_ROOT/target/aarch64-apple-ios/release/liboffline_protocol_uniffi.a" \
+cp "$(static_lib_for aarch64-apple-ios)" \
    "$OUTPUT_DIR/liboffline_protocol_uniffi_device.a"
 
 # Create universal library for simulators (both Intel and Apple Silicon)
 echo "Creating simulator library..."
 lipo -create \
-  "$PROJECT_ROOT/target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a" \
-  "$PROJECT_ROOT/target/x86_64-apple-ios/release/liboffline_protocol_uniffi.a" \
+  "$(static_lib_for aarch64-apple-ios-sim)" \
+  "$(static_lib_for x86_64-apple-ios)" \
   -output "$OUTPUT_DIR/liboffline_protocol_uniffi_sim.a"
 
 echo "iOS libraries created:"

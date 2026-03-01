@@ -144,10 +144,17 @@ for i in "${!ABIS[@]}"; do
   # Create output directory for this ABI
   mkdir -p "$OUTPUT_DIR/$abi"
   
+  # Cargo may put the cdylib in release/ or release/deps/
+  so_root="$PROJECT_ROOT/target/$target/release"
+  if [ -f "$so_root/liboffline_protocol_uniffi.so" ]; then
+    so_path="$so_root/liboffline_protocol_uniffi.so"
+  else
+    so_path="$so_root/deps/liboffline_protocol_uniffi.so"
+  fi
+  
   # Copy library to jniLibs
   # UniFFI generates code that looks for "uniffi_offline_protocol" which JNA converts to "libuniffi_offline_protocol.so"
-  cp "$PROJECT_ROOT/target/$target/release/liboffline_protocol_uniffi.so" \
-     "$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
+  cp "$so_path" "$OUTPUT_DIR/$abi/libuniffi_offline_protocol.so"
   
   echo "✅ Built and copied library for $abi"
 done
