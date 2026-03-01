@@ -74,6 +74,14 @@ dictionary MlsGroupInfo {
     u64 last_activity_ms;
 };
 
+// Establishment state for a peer (for SessionNotReady and get_establishment_state)
+enum EstablishmentState {
+    "NoKeyPackage",
+    "HaveKeyPackage",
+    "SessionPending",
+    "SessionConfirmed",
+};
+
 // Error types
 [Error]
 enum ProtocolError {
@@ -83,6 +91,7 @@ enum ProtocolError {
     "SendFailed",
     "NoKeyPackage",
     "SessionPending",
+    "SessionNotReady",
     "EncryptFailed",
     "InvalidState",
     "MlsNotInitialized",
@@ -590,6 +599,10 @@ interface OfflineProtocol {
     
     // Check if a pending key package is available for a peer
     boolean has_pending_key_package(string peer_id);
+    
+    // Return the current establishment state for a peer (for UI/retry when SessionNotReady)
+    [Throws=ProtocolError]
+    EstablishmentState get_establishment_state(string peer_id);
     
     // Establish a secure session with a peer (high-level API)
     // Returns the Welcome message if session was created, null if session already exists

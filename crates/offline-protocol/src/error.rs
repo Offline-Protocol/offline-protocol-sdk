@@ -5,6 +5,34 @@ use thiserror::Error;
 /// Result type alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Per-peer establishment state: where we are in getting to "can send" with a peer.
+///
+/// Used both as the value returned from `get_establishment_state` and as the payload
+/// of `Error::SessionNotReady`, so callers can show "Establishing…" and retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EstablishmentState {
+    /// No key package for this peer (memory nor storage).
+    NoKeyPackage,
+    /// Key package stored; no MLS session yet.
+    HaveKeyPackage,
+    /// Session created, welcome sent/queued; not confirmed.
+    SessionPending,
+    /// Can send/receive encrypted messages.
+    SessionConfirmed,
+}
+
+impl EstablishmentState {
+    /// Stable string for logging and FFI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoKeyPackage => "NoKeyPackage",
+            Self::HaveKeyPackage => "HaveKeyPackage",
+            Self::SessionPending => "SessionPending",
+            Self::SessionConfirmed => "SessionConfirmed",
+        }
+    }
+}
+
 /// Stable, machine-readable error classes used for session readiness decisions.
 ///
 /// This enum is the single SDK boundary that maps heterogeneous upstream error
@@ -41,7 +69,7 @@ impl SessionStateError {
     /// Classifies protocol-level errors for session state control flow.
     pub fn classify(error: &Error) -> Self {
         match error {
-            Error::SessionPending => Self::SessionNotReady,
+            Error::SessionPending | Error::SessionNotReady(_) => Self::SessionNotReady,
             Error::MlsNotInitialized => Self::NotInitialized,
             Error::Transport(_) => Self::TransportFailure,
             Error::EncryptFailed(_) => Self::CryptoFailure,
@@ -131,6 +159,10 @@ pub enum Error {
     /// Session pending - message queued for later.
     #[error("Session pending, message queued")]
     SessionPending,
+
+    /// Session not ready; establishment in progress. Caller can retry or show "Establishing…".
+    #[error("Session not ready: {0:?}")]
+    SessionNotReady(EstablishmentState),
 
     /// Outbound message encryption failed.
     #[error("Failed to encrypt message: {0}")]

@@ -20,7 +20,7 @@ pub mod transport_manager;
 pub mod visualization;
 
 pub use config::{EncryptionConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig};
-pub use error::{Error, Result, SessionStateError};
+pub use error::{EstablishmentState, Error, Result, SessionStateError};
 pub use events::{
     DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
     EventCallback, GroupInfoMember, UserGroupSummary,

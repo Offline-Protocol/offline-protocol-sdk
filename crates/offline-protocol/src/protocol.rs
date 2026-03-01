@@ -8,7 +8,7 @@ use crate::mls_observability::{
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
 use crate::events::DecryptionFailureCode;
-use crate::{Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
+use crate::{EstablishmentState, Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
     AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL,
@@ -187,7 +187,7 @@ struct GroupErrorPayload {
 }
 
 /// A received key package awaiting use for session creation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReceivedKeyPackage {
     /// Raw MLS key package bytes.
     key_package_data: Vec<u8>,
@@ -347,6 +347,8 @@ mod storage_keys {
     pub const PENDING_MESSAGES: &str = "pending_messages";
     /// Key type for persisted per-peer MLS session confirmation state.
     pub const SESSION_STATES: &str = "session_states";
+    /// Key type for persisted per-peer received key packages (survives restart).
+    pub const PEER_KEY_PACKAGES: &str = "peer_key_packages";
     /// Key type for persisted per-peer outbound welcome lifecycle state.
     pub const WELCOME_LIFECYCLES: &str = "welcome_lifecycles";
     /// Key type for the Lamport clock value.
@@ -609,6 +611,7 @@ impl OfflineProtocol {
             self.restore_pending_messages()?;
             self.restore_lamport_clock();
             self.restore_session_states_from_manager(manager.clone())?;
+            self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
             Ok(())
         })();
@@ -1266,18 +1269,20 @@ impl OfflineProtocol {
         };
 
         if !has_session {
+            self.try_load_key_package_from_storage_into_memory(recipient);
             let now_ms = Utc::now().timestamp_millis() as u64;
             let has_valid_key_package = match self.pending_key_packages.get(recipient) {
                 Some(pkg) if now_ms < pkg.local_expires_at_ms => true,
                 Some(_) => {
                     self.pending_key_packages.remove(recipient);
+                    self.delete_peer_key_package_from_storage(recipient);
                     false
                 }
                 None => false,
             };
 
             if has_valid_key_package {
-                return Err(Error::SessionPending);
+                return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
             }
 
             self.emit_mls_session_missing(
@@ -1286,11 +1291,11 @@ impl OfflineProtocol {
                 MlsOperationContext::SessionLookup,
                 MlsErrorCategory::SessionStateMissing,
             );
-            return Err(Error::NoKeyPackage(recipient.to_string()));
+            return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
         }
 
         if !self.is_session_confirmed(recipient)? {
-            return Err(Error::SessionPending);
+            return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
         }
 
         let encrypted = {
@@ -1334,6 +1339,8 @@ impl OfflineProtocol {
         };
 
         if !has_session {
+            // Try loading key package from storage (e.g. after restart) then create session from memory
+            self.try_load_key_package_from_storage_into_memory(recipient);
             // Try to create session from stored key package
             // Clone first, only remove after all operations succeed to avoid losing the key package on failure
             if let Some(received_pkg) = self.pending_key_packages.get(recipient).cloned() {
@@ -1342,6 +1349,7 @@ impl OfflineProtocol {
                 if now_ms >= received_pkg.local_expires_at_ms {
                     warn!(recipient = %recipient, "Received key package has expired, discarding");
                     self.pending_key_packages.remove(recipient);
+                    self.delete_peer_key_package_from_storage(recipient);
                 } else {
                     {
                         let manager = mls
@@ -1360,6 +1368,7 @@ impl OfflineProtocol {
 
                     // All operations succeeded, now safe to remove the key package
                     self.pending_key_packages.remove(recipient);
+                    self.delete_peer_key_package_from_storage(recipient);
 
                     let group_id = welcome.group_id.as_str().to_string();
                     let is_session = group_id.starts_with("session:");
@@ -1392,18 +1401,18 @@ impl OfflineProtocol {
                     // and we successfully decrypt their first message, or we receive their Welcome).
                     // This avoids race conditions where both peers create sessions.
                     if self.config.encryption.store_pending {
-                        return Err(Error::SessionPending);
+                        return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
                     }
                 }
             } else {
-                // No key package available
+                // No key package available (memory nor storage)
                 self.emit_mls_session_missing(
                     Some(recipient),
                     None,
                     MlsOperationContext::SessionLookup,
                     MlsErrorCategory::SessionStateMissing,
                 );
-                return Err(Error::NoKeyPackage(recipient.to_string()));
+                return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
             }
         }
 
@@ -1411,11 +1420,7 @@ impl OfflineProtocol {
         // Confirmation truth comes from persisted session state.
         if !self.is_session_confirmed(recipient)? {
             debug!(recipient = %recipient, "Session exists but not confirmed, queuing message");
-            if self.config.encryption.store_pending {
-                return Err(Error::SessionPending);
-            }
-            // If not storing pending, we still need to wait for confirmation
-            return Err(Error::SessionPending);
+            return Err(Error::SessionNotReady(self.establishment_state(recipient)?));
         }
 
         // Encrypt the message
@@ -1493,27 +1498,11 @@ impl OfflineProtocol {
 
             match self.encrypt_content_for_recipient(recipient, content, priority) {
                 Ok(encrypted) => Ok(OutboundSendPreparation::Ready(encrypted)),
-                Err(Error::NoKeyPackage(recipient_id)) => {
+                Err(Error::SessionNotReady(state)) => {
                     if self.config.encryption.require_encryption
                         || !self.config.encryption.store_pending
                     {
-                        return Err(Error::NoKeyPackage(recipient_id));
-                    }
-
-                    let queued_id = self.queue_message_for_session_establishment(
-                        recipient,
-                        content,
-                        priority,
-                        reply_to_msg_id,
-                        reconciliation_reason,
-                    )?;
-                    Ok(OutboundSendPreparation::Queued(queued_id))
-                }
-                Err(Error::SessionPending) => {
-                    if self.config.encryption.require_encryption
-                        || !self.config.encryption.store_pending
-                    {
-                        return Err(Error::SessionPending);
+                        return Err(Error::SessionNotReady(state));
                     }
 
                     let queued_id = self.queue_message_for_session_establishment(
@@ -2708,6 +2697,88 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// Persists a received key package for a peer so it survives restart.
+    fn persist_peer_key_package(&self, peer_id: &str, pkg: &ReceivedKeyPackage) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        match serde_json::to_vec(pkg) {
+            Ok(data) => {
+                if let Err(e) = storage.store(storage_keys::PEER_KEY_PACKAGES, peer_id, &data) {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist peer key package");
+                }
+            }
+            Err(e) => {
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize peer key package");
+            }
+        }
+    }
+
+    /// Loads a persisted key package for a peer (if present and not expired).
+    fn load_peer_key_package_from_storage(&self, peer_id: &str) -> Option<ReceivedKeyPackage> {
+        let storage = self.message_storage.as_ref()?;
+        let data = storage
+            .load(storage_keys::PEER_KEY_PACKAGES, peer_id)
+            .ok()??;
+        let pkg: ReceivedKeyPackage = serde_json::from_slice(&data).ok()?;
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        if now_ms >= pkg.local_expires_at_ms {
+            let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
+            return None;
+        }
+        Some(pkg)
+    }
+
+    /// Removes persisted key package for a peer (e.g. after session created).
+    fn delete_peer_key_package_from_storage(&self, peer_id: &str) {
+        if let Some(storage) = &self.message_storage {
+            let _ = storage.delete(storage_keys::PEER_KEY_PACKAGES, peer_id);
+        }
+    }
+
+    /// Loads key package from storage into memory if not already present. Returns true if we now have one in memory.
+    fn try_load_key_package_from_storage_into_memory(&mut self, peer_id: &str) -> bool {
+        if self.pending_key_packages.contains_key(peer_id) {
+            return true;
+        }
+        if let Some(pkg) = self.load_peer_key_package_from_storage(peer_id) {
+            self.pending_key_packages.insert(peer_id.to_string(), pkg);
+            return true;
+        }
+        false
+    }
+
+    /// Restores peer key packages from storage for peers that have no MLS session.
+    fn restore_peer_key_packages(&mut self, mls: &Arc<RwLock<MlsManager>>) -> Result<()> {
+        let Some(storage) = &self.message_storage else {
+            return Ok(());
+        };
+
+        let peer_ids = storage
+            .list_keys(storage_keys::PEER_KEY_PACKAGES)
+            .map_err(|e| Error::Other(format!("Failed to list peer key packages: {}", e)))?;
+
+        let sessions = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.list_sessions().map_err(|e| Error::Mls(e.into()))?
+        };
+        let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
+
+        for peer_id in peer_ids {
+            if session_set.contains(&peer_id) {
+                continue;
+            }
+            if let Some(pkg) = self.load_peer_key_package_from_storage(&peer_id) {
+                info!(peer_id = %peer_id, "Restored peer key package from storage");
+                self.pending_key_packages.insert(peer_id, pkg);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Loads a persisted session state entry (if present).
     fn load_session_state_entry(&self, peer_id: &str) -> Result<Option<SessionState>> {
         let Some(storage) = &self.message_storage else {
@@ -3182,6 +3253,39 @@ impl OfflineProtocol {
         manager.has_session(peer_id).map_err(Error::Mls)
     }
 
+    /// Returns the current establishment state for a peer (for API and error reporting).
+    fn establishment_state(&self, peer_id: &str) -> Result<EstablishmentState> {
+        if let Some(mls) = &self.mls_manager {
+            let has_session = {
+                let manager = mls
+                    .read()
+                    .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+                manager.has_session(peer_id).map_err(Error::Mls)?
+            };
+            if has_session {
+                let state = self
+                    .load_session_state_entry(peer_id)?
+                    .unwrap_or(SessionState::Pending);
+                return Ok(if matches!(state, SessionState::Confirmed) {
+                    EstablishmentState::SessionConfirmed
+                } else {
+                    EstablishmentState::SessionPending
+                });
+            }
+        }
+
+        let now_ms = Utc::now().timestamp_millis() as u64;
+        if let Some(pkg) = self.pending_key_packages.get(peer_id) {
+            if now_ms < pkg.local_expires_at_ms {
+                return Ok(EstablishmentState::HaveKeyPackage);
+            }
+        }
+        if self.load_peer_key_package_from_storage(peer_id).is_some() {
+            return Ok(EstablishmentState::HaveKeyPackage);
+        }
+        Ok(EstablishmentState::NoKeyPackage)
+    }
+
     fn schedule_confirmation_retry(&mut self, peer_id: &str, source_event: &str) {
         self.confirmation_retry_due_at
             .insert(peer_id.to_string(), Utc::now());
@@ -3602,7 +3706,7 @@ impl OfflineProtocol {
     ///
     /// * `Ok(Some(WelcomeMessage))` - Session created, Welcome message returned (and sent to peer)
     /// * `Ok(None)` - Session already exists
-    /// * `Err(NoKeyPackage)` - No key package available for the peer yet
+    /// * `Err(SessionNotReady(state))` - Establishment in progress; caller can retry or show "Establishing…"
     pub fn establish_secure_session(&mut self, peer_id: &str) -> Result<Option<WelcomeMessage>> {
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
 
@@ -3619,7 +3723,10 @@ impl OfflineProtocol {
             return Ok(None);
         }
 
-        // Check for pending key package
+        // Try loading key package from storage (e.g. after restart) before giving up
+        self.try_load_key_package_from_storage_into_memory(peer_id);
+
+        // Check for pending key package (memory, possibly just restored from storage)
         // Clone first, only remove after all operations succeed to avoid losing the key package on failure
         if let Some(received_pkg) = self.pending_key_packages.get(peer_id).cloned() {
             // Check if key package has expired (using local clock)
@@ -3627,6 +3734,7 @@ impl OfflineProtocol {
             if now_ms >= received_pkg.local_expires_at_ms {
                 warn!(peer_id = %peer_id, "Received key package has expired, discarding");
                 self.pending_key_packages.remove(peer_id);
+                self.delete_peer_key_package_from_storage(peer_id);
             } else {
                 {
                     let manager = mls
@@ -3648,6 +3756,7 @@ impl OfflineProtocol {
 
                 // All operations succeeded, now safe to remove the key package
                 self.pending_key_packages.remove(peer_id);
+                self.delete_peer_key_package_from_storage(peer_id);
 
                 let group_id = welcome.group_id.as_str().to_string();
                 let is_session = group_id.starts_with("session:");
@@ -3670,9 +3779,8 @@ impl OfflineProtocol {
             }
         }
 
-        // No key package available - peer hasn't sent one yet
-        debug!(peer_id = %peer_id, "No key package available for peer");
-        Err(Error::NoKeyPackage(peer_id.to_string()))
+        // No key package available (memory nor storage) — return non-terminal state so caller can retry
+        Err(Error::SessionNotReady(self.establishment_state(peer_id)?))
     }
 
     /// Checks if a pending key package is available for a peer.
@@ -3689,6 +3797,13 @@ impl OfflineProtocol {
     /// `true` if a key package is available, `false` otherwise
     pub fn has_pending_key_package(&self, peer_id: &str) -> bool {
         self.pending_key_packages.contains_key(peer_id)
+    }
+
+    /// Returns the current establishment state for a peer.
+    ///
+    /// Use this to show "Establishing…" or drive retries without calling send/establish.
+    pub fn get_establishment_state(&self, peer_id: &str) -> Result<EstablishmentState> {
+        self.establishment_state(peer_id)
     }
 
     /// Creates a session using manually imported key material.
@@ -4183,13 +4298,12 @@ impl OfflineProtocol {
                     // assume 30-day default lifetime.
                     now_ms.saturating_add(30 * 24 * 60 * 60 * 1000)
                 };
-                self.pending_key_packages.insert(
-                    sender.to_string(),
-                    ReceivedKeyPackage {
-                        key_package_data: payload.key_package_data,
-                        local_expires_at_ms,
-                    },
-                );
+                let pkg = ReceivedKeyPackage {
+                    key_package_data: payload.key_package_data,
+                    local_expires_at_ms,
+                };
+                self.pending_key_packages.insert(sender.to_string(), pkg.clone());
+                self.persist_peer_key_package(sender, &pkg);
 
                 // Send our key package back if auto_key_exchange is enabled
                 if self.config.encryption.auto_key_exchange && self.config.encryption.enabled {
@@ -5847,7 +5961,10 @@ mod tests {
         );
 
         let result = protocol.encrypt_content_for_recipient_strict("bob", "blocked");
-        assert!(matches!(result, Err(Error::SessionPending)));
+        assert!(matches!(
+            result,
+            Err(Error::SessionNotReady(EstablishmentState::HaveKeyPackage))
+        ));
 
         let events = emitter.take();
         assert!(
@@ -6399,7 +6516,10 @@ mod tests {
             .unwrap();
         let no_key_result =
             no_key_protocol.send_message("bob", "nkp", None::<MessagePriority>, None::<String>);
-        assert!(matches!(no_key_result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+        assert!(matches!(
+            no_key_result,
+            Err(Error::SessionNotReady(EstablishmentState::NoKeyPackage))
+        ));
 
         // SessionPending
         let mut pending_config = create_test_config();
@@ -6436,7 +6556,10 @@ mod tests {
             None::<MessagePriority>,
             None::<String>,
         );
-        assert!(matches!(pending_result, Err(Error::SessionPending)));
+        assert!(matches!(
+            pending_result,
+            Err(Error::SessionNotReady(EstablishmentState::SessionPending))
+        ));
 
         // EncryptFailed
         let mut encrypt_fail_config = create_test_config();
@@ -6479,7 +6602,10 @@ mod tests {
 
         let result =
             protocol.send_message("bob", "blocked", None::<MessagePriority>, None::<String>);
-        assert!(matches!(result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+        assert!(matches!(
+            result,
+            Err(Error::SessionNotReady(EstablishmentState::NoKeyPackage))
+        ));
         assert_eq!(transport_handle.sent_messages().len(), 0);
     }
 
@@ -6544,7 +6670,11 @@ mod tests {
             None::<String>,
         );
 
-        assert!(matches!(result, Err(Error::SessionPending)));
+        // Strict path does not create session; we have key package but no session -> HaveKeyPackage
+        assert!(matches!(
+            result,
+            Err(Error::SessionNotReady(EstablishmentState::HaveKeyPackage))
+        ));
         assert_eq!(transport_handle.sent_messages().len(), 0);
         assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
         assert!(!protocol.welcome_lifecycles.contains_key("bob"));
@@ -6578,7 +6708,10 @@ mod tests {
             None::<String>,
         );
 
-        assert!(matches!(result, Err(Error::NoKeyPackage(peer)) if peer == "bob"));
+        assert!(matches!(
+            result,
+            Err(Error::SessionNotReady(EstablishmentState::NoKeyPackage))
+        ));
         assert_eq!(transport_handle.sent_messages().len(), 0);
     }
 
@@ -10127,5 +10260,150 @@ mod tests {
         let result = protocol.establish_secure_session("expired_peer");
         assert!(result.is_err());
         assert!(!protocol.pending_key_packages.contains_key("expired_peer"));
+    }
+
+    #[test]
+    fn test_peer_key_package_persisted_and_restored_after_restart() {
+        let storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+
+        // First session: receive key package (persisted via process_internal_message)
+        {
+            let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+            protocol.initialize_mls(storage.clone()).unwrap();
+            let key_pkg_payload = KeyPackagePayload {
+                user_id: "bob".to_string(),
+                key_package_data: bob_key_package.key_package_data.clone(),
+                remaining_lifetime_ms: 60 * 60 * 1000,
+                timestamp_ms: 0,
+            };
+            let content = format!(
+                "{}{}",
+                internal_prefixes::KEY_PACKAGE,
+                serde_json::to_string(&key_pkg_payload).unwrap()
+            );
+            let message = Message::new(
+                UserId::new("bob").unwrap(),
+                UserId::new("alice").unwrap(),
+                AppId::new("test-app").unwrap(),
+                &content,
+            );
+            let _ = protocol.process_internal_message(&message);
+            assert!(protocol.pending_key_packages.contains_key("bob"));
+        }
+
+        // Second session: new protocol, same storage; restore should repopulate pending_key_packages
+        {
+            let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+            protocol.initialize_mls(storage.clone()).unwrap();
+            assert!(
+                protocol.pending_key_packages.contains_key("bob"),
+                "Key package should be restored from storage"
+            );
+            let welcome = protocol.establish_secure_session("bob").unwrap();
+            assert!(welcome.is_some(), "Session should be created from restored key package");
+        }
+    }
+
+    #[test]
+    fn test_establishment_state_returns_correct_states() {
+        let storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        // No key package, no session
+        assert_eq!(
+            protocol.get_establishment_state("bob").unwrap(),
+            EstablishmentState::NoKeyPackage
+        );
+
+        // Add key package -> HaveKeyPackage
+        protocol.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: bob_key_package.key_package_data.clone(),
+                local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+            },
+        );
+        assert_eq!(
+            protocol.get_establishment_state("bob").unwrap(),
+            EstablishmentState::HaveKeyPackage
+        );
+
+        // Create session (via MLS manager directly) -> SessionPending
+        {
+            let mls = protocol.mls_manager.as_ref().unwrap().clone();
+            let manager = mls.read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            manager.create_session("bob").unwrap();
+        }
+        protocol.ensure_session_state_entry("bob", "test").unwrap();
+        assert_eq!(
+            protocol.get_establishment_state("bob").unwrap(),
+            EstablishmentState::SessionPending
+        );
+
+        // Confirm -> SessionConfirmed
+        protocol.confirm_session_state("bob", "test").unwrap();
+        assert_eq!(
+            protocol.get_establishment_state("bob").unwrap(),
+            EstablishmentState::SessionConfirmed
+        );
+    }
+
+    #[test]
+    fn test_establish_secure_session_loads_from_storage_after_restart() {
+        let storage = Arc::new(InMemoryStorage::new());
+        let bob_storage = Arc::new(InMemoryStorage::new());
+        let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+
+        // Persist key package (simulate receive then restart: in-memory cleared)
+        {
+            let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+            protocol.initialize_mls(storage.clone()).unwrap();
+            let key_pkg_payload = KeyPackagePayload {
+                user_id: "bob".to_string(),
+                key_package_data: bob_key_package.key_package_data.clone(),
+                remaining_lifetime_ms: 60 * 60 * 1000,
+                timestamp_ms: 0,
+            };
+            let content = format!(
+                "{}{}",
+                internal_prefixes::KEY_PACKAGE,
+                serde_json::to_string(&key_pkg_payload).unwrap()
+            );
+            let message = Message::new(
+                UserId::new("bob").unwrap(),
+                UserId::new("alice").unwrap(),
+                AppId::new("test-app").unwrap(),
+                &content,
+            );
+            let _ = protocol.process_internal_message(&message);
+            assert!(protocol.pending_key_packages.contains_key("bob"));
+        }
+
+        // New protocol instance: restore runs and loads key package from storage
+        {
+            let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+            protocol.initialize_mls(storage.clone()).unwrap();
+            // establish_secure_session should try load from storage and create session (no terminal error)
+            let result = protocol.establish_secure_session("bob");
+            assert!(
+                result.is_ok(),
+                "establish_secure_session should load from storage and create session, got {:?}",
+                result
+            );
+            let welcome = result.unwrap();
+            assert!(welcome.is_some());
+        }
     }
 }

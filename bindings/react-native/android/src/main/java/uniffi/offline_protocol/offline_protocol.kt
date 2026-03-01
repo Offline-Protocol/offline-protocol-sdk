@@ -792,6 +792,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key(
@@ -1079,6 +1081,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dedup_
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_delivery_success_rate(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Float
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establishment_state(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1475,6 +1479,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 28708.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() != 26411.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575.toShort()) {
@@ -2346,6 +2353,8 @@ public interface OfflineProtocolInterface {
     
     fun `getDorsConfig`(): DorsConfig
     
+    fun `getEstablishmentState`(`peerId`: kotlin.String): EstablishmentState
+    
     fun `getFileProgress`(`fileId`: kotlin.String): FileProgress?
     
     fun `getIdentityPublicKey`(): List<kotlin.UByte>
@@ -2978,6 +2987,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `getEstablishmentState`(`peerId`: kotlin.String): EstablishmentState {
+            return FfiConverterTypeEstablishmentState.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establishment_state(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
 }
     }
     )
@@ -5784,6 +5807,38 @@ public object FfiConverterTypeWifiDirectMessage: FfiConverterRustBuffer<WifiDire
 
 
 
+enum class EstablishmentState {
+    
+    NO_KEY_PACKAGE,
+    HAVE_KEY_PACKAGE,
+    SESSION_PENDING,
+    SESSION_CONFIRMED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEstablishmentState: FfiConverterRustBuffer<EstablishmentState> {
+    override fun read(buf: ByteBuffer) = try {
+        EstablishmentState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: EstablishmentState) = 4UL
+
+    override fun write(value: EstablishmentState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class MessagePriority {
     
     LOW,
@@ -5931,6 +5986,8 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
         class SessionPending(message: String) : ProtocolException(message)
         
+        class SessionNotReady(message: String) : ProtocolException(message)
+        
         class EncryptFailed(message: String) : ProtocolException(message)
         
         class InvalidState(message: String) : ProtocolException(message)
@@ -5960,11 +6017,12 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             4 -> ProtocolException.SendFailed(FfiConverterString.read(buf))
             5 -> ProtocolException.NoKeyPackage(FfiConverterString.read(buf))
             6 -> ProtocolException.SessionPending(FfiConverterString.read(buf))
-            7 -> ProtocolException.EncryptFailed(FfiConverterString.read(buf))
-            8 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
-            9 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
-            10 -> ProtocolException.MlsException(FfiConverterString.read(buf))
-            11 -> ProtocolException.Other(FfiConverterString.read(buf))
+            7 -> ProtocolException.SessionNotReady(FfiConverterString.read(buf))
+            8 -> ProtocolException.EncryptFailed(FfiConverterString.read(buf))
+            9 -> ProtocolException.InvalidState(FfiConverterString.read(buf))
+            10 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
+            11 -> ProtocolException.MlsException(FfiConverterString.read(buf))
+            12 -> ProtocolException.Other(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -6000,24 +6058,28 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
                 buf.putInt(6)
                 Unit
             }
-            is ProtocolException.EncryptFailed -> {
+            is ProtocolException.SessionNotReady -> {
                 buf.putInt(7)
                 Unit
             }
-            is ProtocolException.InvalidState -> {
+            is ProtocolException.EncryptFailed -> {
                 buf.putInt(8)
                 Unit
             }
-            is ProtocolException.MlsNotInitialized -> {
+            is ProtocolException.InvalidState -> {
                 buf.putInt(9)
                 Unit
             }
-            is ProtocolException.MlsException -> {
+            is ProtocolException.MlsNotInitialized -> {
                 buf.putInt(10)
                 Unit
             }
-            is ProtocolException.Other -> {
+            is ProtocolException.MlsException -> {
                 buf.putInt(11)
+                Unit
+            }
+            is ProtocolException.Other -> {
+                buf.putInt(12)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

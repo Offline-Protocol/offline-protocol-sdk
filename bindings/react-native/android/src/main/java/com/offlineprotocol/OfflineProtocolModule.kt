@@ -267,6 +267,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 code = "SessionPending",
                 message = "Session establishment is pending"
             )
+            is ProtocolException.SessionNotReady -> BridgeProtocolError(
+                code = "SessionNotReady",
+                message = "Session not ready; establishment in progress"
+            )
             is ProtocolException.EncryptFailed -> BridgeProtocolError(
                 code = "EncryptFailed",
                 message = "Message encryption failed"

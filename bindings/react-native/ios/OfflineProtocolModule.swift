@@ -220,6 +220,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             return ("NoKeyPackage", "No key package available for recipient")
         case .SessionPending:
             return ("SessionPending", "Session establishment is pending")
+        case .SessionNotReady:
+            return ("SessionNotReady", "Session not ready; establishment in progress")
         case .EncryptFailed:
             return ("EncryptFailed", "Message encryption failed")
         default:
