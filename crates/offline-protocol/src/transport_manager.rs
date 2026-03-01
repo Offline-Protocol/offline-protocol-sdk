@@ -300,12 +300,21 @@ impl TransportManager {
                 return Ok(());
             }
             Err(e) => {
-                warn!(
-                    transport = ?primary,
-                    error = %e,
-                    "Primary transport send failed, trying fallback"
-                );
-                self.selector.record_retry_failure(primary);
+                let is_peer_routing = matches!(e, TransportError::PeerNotReachable(_));
+                if is_peer_routing {
+                    debug!(
+                        transport = ?primary,
+                        error = %e,
+                        "Peer not reachable via primary transport, trying fallback"
+                    );
+                } else {
+                    warn!(
+                        transport = ?primary,
+                        error = %e,
+                        "Primary transport send failed, trying fallback"
+                    );
+                    self.selector.record_retry_failure(primary);
+                }
             }
         }
 
@@ -382,12 +391,14 @@ impl TransportManager {
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!(
-                        transport = ?transport_type,
-                        error = %e,
-                        "Fallback transport send failed, trying next"
-                    );
-                    self.selector.record_retry_failure(*transport_type);
+                    if !matches!(e, TransportError::PeerNotReachable(_)) {
+                        warn!(
+                            transport = ?transport_type,
+                            error = %e,
+                            "Fallback transport send failed, trying next"
+                        );
+                        self.selector.record_retry_failure(*transport_type);
+                    }
                     last_error = Some(e);
                 }
             }

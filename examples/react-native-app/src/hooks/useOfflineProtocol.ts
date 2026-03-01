@@ -29,7 +29,7 @@ interface UseOfflineProtocolReturn {
   events: ProtocolEvent[];
   insights: DerivedInsights;
   permissionsGranted: boolean;
-  start: () => Promise<void>;
+  start: () => Promise<boolean>;
   stop: () => Promise<void>;
   sendMessage: (
     recipient: string,
@@ -163,10 +163,7 @@ export function useOfflineProtocol(
             annotatedEvent.type === 'message_delivered' ||
             annotatedEvent.type === 'message_failed' ||
             annotatedEvent.type === 'secure_session_established' ||
-            annotatedEvent.type === 'secure_session_failed' ||
-            annotatedEvent.type === 'connection_request_received' ||
-            annotatedEvent.type === 'connection_accepted' ||
-            annotatedEvent.type === 'connection_rejected'
+            annotatedEvent.type === 'secure_session_failed'
           ) {
             console.log('Protocol event:', annotatedEvent.type, annotatedEvent);
           }
@@ -258,7 +255,7 @@ export function useOfflineProtocol(
     return true;
   }, [permissionsGranted]);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (): Promise<boolean> => {
     console.log('start() called');
 
     try {
@@ -268,7 +265,7 @@ export function useOfflineProtocol(
         const granted = await requestPermissions();
         if (!granted) {
           console.error('Cannot start protocol without permissions');
-          return;
+          return false;
         }
       }
 
@@ -279,7 +276,7 @@ export function useOfflineProtocol(
         const msg = 'Bluetooth must be enabled to use offline messaging';
         console.error(msg);
         setError(msg);
-        return;
+        return false;
       }
 
       // Step 3: Initialize protocol if not already done
@@ -292,7 +289,7 @@ export function useOfflineProtocol(
         const msg = 'Failed to initialize protocol';
         console.error(msg);
         setError(msg);
-        return;
+        return false;
       }
 
       // Step 4: Start the protocol
@@ -306,12 +303,14 @@ export function useOfflineProtocol(
       console.log('Protocol started successfully');
       setIsStarted(true);
       setError(null);
+      return true;
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : 'Failed to start protocol';
       console.error('Failed to start protocol:', err);
       setError(errorMessage);
       setIsStarted(false);
+      return false;
     }
   }, [
     permissionsGranted,
@@ -367,6 +366,14 @@ export function useOfflineProtocol(
       } catch (err) {
         const errorMessage =
           err instanceof Error ? err.message : 'Failed to send message';
+        const deferredMatch = errorMessage.match(
+          /send failed \(message ([^)]+) deferred for retry\)/i,
+        );
+        if (deferredMatch?.[1]) {
+          // Message was accepted into retry/outbox pipeline; treat as pending send.
+          setError(null);
+          return deferredMatch[1];
+        }
         setError(errorMessage);
         return null;
       }

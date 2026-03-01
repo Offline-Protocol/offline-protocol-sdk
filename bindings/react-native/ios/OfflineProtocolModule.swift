@@ -2294,6 +2294,33 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         resolver(proto.hasPendingKeyPackage(peerId: peerId))
     }
+
+    /// Returns the current session establishment state for a peer.
+    @objc func getEstablishmentState(_ peerId: String,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            resolver("NoKeyPackage")
+            return
+        }
+        do {
+            let state = try proto.getEstablishmentState(peerId: peerId)
+            let stateString: String
+            switch state {
+            case .noKeyPackage:
+                stateString = "NoKeyPackage"
+            case .haveKeyPackage:
+                stateString = "HaveKeyPackage"
+            case .sessionPending:
+                stateString = "SessionPending"
+            case .sessionConfirmed:
+                stateString = "SessionConfirmed"
+            }
+            resolver(stateString)
+        } catch {
+            rejecter("ERROR_MLS", "Failed to get establishment state: \(error.localizedDescription)", error)
+        }
+    }
     
     /// Establish a secure session with a peer (high-level API)
     @objc func establishSecureSession(_ peerId: String,
@@ -2985,6 +3012,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
     
     // MARK: - Process Timer
+    private static let maxMessagesPerProcessTick = 100
     
     private func startProcessTimer() {
         stopProcessTimer()
@@ -3008,9 +3036,24 @@ class OfflineProtocolModule: RCTEventEmitter {
         guard let instance = protocolInstance else { return }
         do {
             try instance.process()
-            while instance.receiveMessage() != nil {}
+            drainIncomingMessages(instance)
         } catch {
             print("Process error: \(error)")
+        }
+    }
+
+    private func drainIncomingMessages(_ instance: OfflineProtocol) {
+        var drained = 0
+        while drained < Self.maxMessagesPerProcessTick {
+            guard instance.receiveMessage() != nil else { break }
+            drained += 1
+        }
+        if drained == Self.maxMessagesPerProcessTick {
+            emitDiagnostic(
+                level: "warning",
+                message: "Capped receiveMessage drain for this process tick",
+                context: ["maxBatch": Self.maxMessagesPerProcessTick]
+            )
         }
     }
 }

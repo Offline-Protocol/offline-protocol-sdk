@@ -292,15 +292,16 @@ Called when a neighbor is lost. Cleans up tracking state.
 3. Queues the message if `store_pending` is `true` and no session/key package exists
 
 With default settings, encryption is best-effort. Set `encryption.require_encryption = true`
-to guarantee encrypted delivery or fail with a typed error (`NoKeyPackage`,
-`SessionNotReady`, or `EncryptFailed`).
+to guarantee encrypted delivery or fail with a typed error (`SessionNotReady`
+or `EncryptFailed`).
 
 In strict mode, send failures are fail-fast and do not transmit transport payloads.
 Connection-control APIs that require plaintext bootstrap messages are rejected while
 `encryption.require_encryption = true`.
 
 Rust migration note:
-- `offline_protocol::Error` includes strict-mode variants (`NoKeyPackage`, `SessionNotReady`, `EncryptFailed`).
+- `offline_protocol::Error` includes strict-mode variants (`SessionNotReady`, `EncryptFailed`).
+- `SessionNotReady` includes establishment progress (`NoKeyPackage`, `HaveKeyPackage`, `SessionPending`, `SessionConfirmed`).
 - exhaustive `match` blocks over `Error` should add these variants before upgrading.
 
 Similarly, `receive_message` automatically:

@@ -686,6 +686,10 @@ impl MlsManager {
 
 impl MlsManager {
     /// Loads a stored key package bundle, handling legacy raw storage and expiration.
+    ///
+    /// Also validates that the key package's private key still exists in the
+    /// OpenMLS provider storage. Key packages whose private keys have been
+    /// consumed (e.g. by a previous Welcome processing) are pruned.
     fn load_stored_key_package(&self, package_id: &str) -> Result<Option<KeyPackageBundle>> {
         let key_type = StorageKeyType::KeyPackage.as_str();
         let data = match self.storage.load(key_type, package_id)? {
@@ -714,11 +718,42 @@ impl MlsManager {
             return Ok(None);
         }
 
+        if !self.is_key_package_usable(&bundle.key_package_data) {
+            warn!(
+                package_id = %package_id,
+                "Key package private key no longer in provider storage, pruning stale entry"
+            );
+            self.storage.delete(key_type, package_id)?;
+            return Ok(None);
+        }
+
         let serialized =
             serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
         self.storage.store(key_type, package_id, &serialized)?;
 
         Ok(Some(bundle))
+    }
+
+    /// Checks whether a key package's private init key is still present in
+    /// the OpenMLS provider storage. Returns `false` when the key material
+    /// has been consumed (e.g. by processing a Welcome) or was never stored.
+    fn is_key_package_usable(&self, key_package_data: &[u8]) -> bool {
+        let kp_in = match KeyPackageIn::tls_deserialize_exact(key_package_data) {
+            Ok(kp) => kp,
+            Err(_) => return false,
+        };
+        let kp: KeyPackage = match kp_in.validate(self.provider.crypto(), ProtocolVersion::Mls10) {
+            Ok(kp) => kp,
+            Err(_) => return false,
+        };
+        let hash_ref = match kp.hash_ref(self.provider.crypto()) {
+            Ok(hr) => hr,
+            Err(_) => return false,
+        };
+        use openmls_traits::storage::StorageProvider;
+        let found: std::result::Result<Option<openmls::key_packages::KeyPackageBundle>, _> =
+            self.provider.storage().key_package(&hash_ref);
+        matches!(found, Ok(Some(_)))
     }
 
     /// Loads group metadata from storage.

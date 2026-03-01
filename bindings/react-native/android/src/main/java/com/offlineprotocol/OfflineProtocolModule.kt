@@ -44,6 +44,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // Reduced from 100ms; latency-sensitive work is now event-driven.
         // This tick handles retries, ACK timeouts, and DORS only.
         const val PROCESS_INTERVAL_MS = 500L
+        const val MAX_RECEIVE_DRAIN_PER_TICK = 100
         const val LOG_INTERVAL_MS = 5000L
         const val LOG_INTERVAL_THRESHOLD_MS = 100L
         const val DEFAULT_RSSI_THRESHOLD: Short = -85
@@ -2110,6 +2111,26 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Returns the current session establishment state for a peer.
+     */
+    @ReactMethod
+    fun getEstablishmentState(peerId: String, promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.resolve("NoKeyPackage")
+            return
+        }
+        val state = proto.getEstablishmentState(peerId)
+        val stateString = when (state) {
+            EstablishmentState.NO_KEY_PACKAGE -> "NoKeyPackage"
+            EstablishmentState.HAVE_KEY_PACKAGE -> "HaveKeyPackage"
+            EstablishmentState.SESSION_PENDING -> "SessionPending"
+            EstablishmentState.SESSION_CONFIRMED -> "SessionConfirmed"
+        }
+        promise.resolve(stateString)
+    }
+
+    /**
      * Establish a secure session with a peer (high-level API)
      */
     @ReactMethod
@@ -2220,7 +2241,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * Create a new group
      */
     @ReactMethod
-    fun mlsCreateGroup(groupName: String, promise: Promise) {
+    fun mlsCreateGroup(groupName: String, _memberIds: ReadableArray?, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             val info = proto.mlsCreateGroup(groupName)
@@ -2733,22 +2754,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             instance.process()
-            
-            var messageCount = 0
-            while (true) {
+            var drained = 0
+            while (drained < Constants.MAX_RECEIVE_DRAIN_PER_TICK) {
                 val message = instance.receiveMessage() ?: break
-                messageCount++
-                android.util.Log.i(NAME, "🎉 PROTOCOL RECEIVED MESSAGE #$messageCount: $message")
-                emitDiagnostic("info", "Protocol received message", mapOf(
-                    "messageNumber" to messageCount,
-                    "messageJson" to (message ?: "null")
-                ))
-                // Message events are dispatched via the event callback; no further action required here.
+                drained++
+                if (System.currentTimeMillis() % Constants.LOG_INTERVAL_MS < Constants.LOG_INTERVAL_THRESHOLD_MS) {
+                    android.util.Log.d(NAME, "📬 Drained protocol message #$drained: $message")
+                }
             }
-            
-            // Only log when messages are found to avoid spam
-            if (messageCount > 0) {
-                android.util.Log.i(NAME, "📬 Processed $messageCount received messages")
+            if (drained >= Constants.MAX_RECEIVE_DRAIN_PER_TICK) {
+                emitDiagnostic("warning", "Capped receiveMessage drain for this process tick", mapOf(
+                    "maxBatch" to Constants.MAX_RECEIVE_DRAIN_PER_TICK
+                ))
             }
         } catch (e: Exception) {
             android.util.Log.e(NAME, "Process error: ${e.message}", e)

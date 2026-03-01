@@ -1070,15 +1070,27 @@ public class BleManager: NSObject, TransportManager {
             guard let self = self else { return }
             _ = self.flushPendingOutboundFragments()
             
+            var consecutiveSkips = 0
+            let maxConsecutiveSkips = 5
+            
             while let fragment = self.protocolInstance.bleGetNextFragment() {
                 let recipientId = fragment.recipientId
                 let data = Data(fragment.data)
                 
-                let sent = self.sendFragmentData(recipientId: recipientId, data: data)
-                if sent {
+                let hasPeripheral = self.findPeripheral(for: recipientId) != nil
+                if !hasPeripheral {
+                    consecutiveSkips += 1
+                    if consecutiveSkips >= maxConsecutiveSkips {
+                        break
+                    }
+                    continue
+                }
+                
+                consecutiveSkips = 0
+                
+                if self.sendFragmentData(recipientId: recipientId, data: data) {
                     self.emitDiagnostic("debug", "Fragment sent successfully", context: ["recipientId": recipientId])
                 } else {
-                    // Peer flow-controlled or disconnected — queue for retry
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
                     break
                 }

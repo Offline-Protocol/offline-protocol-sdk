@@ -1201,6 +1201,28 @@ impl OfflineProtocol {
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
 
+        // Register peer with the BLE transport so send() can route to them
+        {
+            let protocol = self.inner.lock().unwrap();
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                let transport = transport_arc.lock().unwrap();
+                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble_transport.on_peer_discovered(
+                        offline_protocol_transport::ble::PeerDevice {
+                            device_id: peer_id.clone(),
+                            address: String::new(),
+                            rssi,
+                            last_seen: SystemTime::now(),
+                            connected: true,
+                        },
+                    );
+                }
+            }
+        }
+
         // Notify the core protocol of neighbor discovery for auto key exchange
         {
             let mut protocol = self.inner.lock().unwrap();
@@ -1224,6 +1246,20 @@ impl OfflineProtocol {
         ble_state.peers.remove(&peer_id);
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
+
+        // Unregister peer from the BLE transport
+        {
+            let protocol = self.inner.lock().unwrap();
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                let transport = transport_arc.lock().unwrap();
+                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble_transport.on_peer_lost(&peer_id);
+                }
+            }
+        }
 
         // Notify the core protocol of neighbor loss
         {

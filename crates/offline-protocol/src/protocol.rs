@@ -3631,14 +3631,22 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::KEY_PACKAGE, serialized);
 
-        // Send as low priority internal message
         let message = self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
-        let _ = self.transport_manager.send(&message);
 
-        self.key_package_sent_to.insert(peer_id.to_string());
-        debug!(peer_id = %peer_id, "Sent key package");
-
-        Ok(())
+        match self.transport_manager.send(&message) {
+            Ok(()) => {
+                self.key_package_sent_to.insert(peer_id.to_string());
+                debug!(peer_id = %peer_id, message_id = %message.id, "Sent key package");
+                Ok(())
+            }
+            Err(err) => {
+                // Don't mark as sent and don't enqueue for retry -- if the peer is
+                // unreachable now, on_neighbor_discovered will fire again when they
+                // reconnect, generating a fresh exchange.
+                debug!(peer_id = %peer_id, error = %err, "Key package send deferred");
+                Err(err)
+            }
+        }
     }
 
     /// Called when a new neighbor is discovered.
@@ -4209,6 +4217,17 @@ impl OfflineProtocol {
                     }
 
                     if self.deduplicator.is_duplicate(&message.id) {
+                        // Re-ACK duplicate packets so the sender can stop retrying
+                        // if our previous ACK was dropped.
+                        if message.requires_ack {
+                            if let Err(err) = self.send_delivery_ack(&message, transport_used) {
+                                error!(
+                                    message_id = %message.id,
+                                    error = %err,
+                                    "Failed to send delivery ACK for duplicate message"
+                                );
+                            }
+                        }
                         continue;
                     }
 
@@ -4218,6 +4237,18 @@ impl OfflineProtocol {
                     if let Some(result) = self.process_internal_message(&message) {
                         match result {
                             InternalMessageResult::Consumed => {
+                                // Internal control messages are still delivery-sensitive for
+                                // the sender (invites/accept/welcome). ACK before consume.
+                                if message.requires_ack {
+                                    if let Err(err) = self.send_delivery_ack(&message, transport_used)
+                                    {
+                                        error!(
+                                            message_id = %message.id,
+                                            error = %err,
+                                            "Failed to send delivery ACK for internal message"
+                                        );
+                                    }
+                                }
                                 // Internal message handled, don't surface to app
                                 continue;
                             }
@@ -4429,25 +4460,50 @@ impl OfflineProtocol {
 
                 if let Some(mls) = self.mls_manager.clone() {
                     if let Ok(manager) = mls.read() {
-                        // Check if we already have a session (race condition)
                         let has_existing = manager.has_session(sender).unwrap_or(false);
 
-                        let result = if has_existing {
-                            // Welcome-wins: replace our session with theirs
-                            info!(sender = %sender, "Welcome-wins: replacing our session with incoming Welcome");
-                            manager.replace_session_with_welcome(&welcome)
-                        } else {
-                            manager.join_session(&welcome)
-                        };
-
-                        match result {
-                            Ok(_) => {
-                                info!(sender = %sender, "Joined MLS session via Welcome");
+                        if has_existing {
+                            // Both sides created a session and exchanged Welcomes.
+                            // Deterministic tiebreaker: the device whose user_id is
+                            // lexicographically *greater* adopts the remote Welcome;
+                            // the other keeps its own session.  This guarantees both
+                            // devices converge on the same MLS group.
+                            let local_id: &str = &self.config.user_id;
+                            let remote_id: &str = sender;
+                            if local_id > remote_id {
+                                info!(
+                                    sender = %sender,
+                                    local_id = %local_id,
+                                    "Welcome-wins tiebreaker: adopting remote Welcome (local > remote)"
+                                );
+                                match manager.replace_session_with_welcome(&welcome) {
+                                    Ok(_) => {
+                                        info!(sender = %sender, "Replaced session with remote Welcome");
+                                        should_flush = true;
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, sender = %sender, "Failed to replace session");
+                                        error_reason = Some(e.to_string());
+                                    }
+                                }
+                            } else {
+                                info!(
+                                    sender = %sender,
+                                    local_id = %local_id,
+                                    "Welcome-wins tiebreaker: keeping local session (local < remote)"
+                                );
                                 should_flush = true;
                             }
-                            Err(e) => {
-                                warn!(error = %e, sender = %sender, "Failed to join MLS session");
-                                error_reason = Some(e.to_string());
+                        } else {
+                            match manager.join_session(&welcome) {
+                                Ok(_) => {
+                                    info!(sender = %sender, "Joined MLS session via Welcome");
+                                    should_flush = true;
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, sender = %sender, "Failed to join MLS session");
+                                    error_reason = Some(e.to_string());
+                                }
                             }
                         }
                     }
@@ -10138,6 +10194,95 @@ mod tests {
         let received2 = protocol.receive_message();
         assert!(received2.is_none());
         assert_eq!(protocol.lamport_clock.value(), 44);
+    }
+
+    #[test]
+    fn test_receive_internal_connection_request_sends_delivery_ack() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        let payload = ConnectionRequestPayload {
+            sender_name: "Alice".to_string(),
+            timestamp_ms: 12345,
+            key_package: None,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::CONN_REQUEST,
+            serde_json::to_string(&payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+        mock_transport.queue_message(message.clone());
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
+        protocol.start().unwrap();
+
+        let received = protocol.receive_message();
+        assert!(received.is_none(), "internal message should be consumed");
+
+        let expected_ack = message.id.as_str();
+        let ack_count = mock_transport
+            .sent_messages()
+            .iter()
+            .filter(|sent| {
+                sent.metadata
+                    .get(ACK_FOR_KEY)
+                    .is_some_and(|ack_for| ack_for == &expected_ack)
+            })
+            .count();
+        assert_eq!(ack_count, 1, "expected ACK for internal control message");
+    }
+
+    #[test]
+    fn test_receive_duplicate_message_reacks_when_requires_ack() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "Hello",
+        );
+        let message_dup = message.clone();
+        mock_transport.queue_message(message);
+        mock_transport.queue_message(message_dup.clone());
+
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
+        protocol.start().unwrap();
+
+        let first = protocol.receive_message();
+        assert!(first.is_some());
+        let second = protocol.receive_message();
+        assert!(second.is_none(), "duplicate should not be surfaced");
+
+        let expected_ack = message_dup.id.as_str();
+        let ack_count = mock_transport
+            .sent_messages()
+            .iter()
+            .filter(|sent| {
+                sent.metadata
+                    .get(ACK_FOR_KEY)
+                    .is_some_and(|ack_for| ack_for == &expected_ack)
+            })
+            .count();
+        assert_eq!(
+            ack_count, 2,
+            "expected initial ACK and duplicate re-ACK for same message id"
+        );
     }
 
     #[test]
