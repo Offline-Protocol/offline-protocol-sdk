@@ -184,12 +184,8 @@ export interface FileTransferConfig {
 export interface FileProgress {
   /** File identifier */
   file_id: string;
-  /** File name */
-  file_name: string;
-  /** Total file size in bytes */
-  file_size: number;
-  /** Number of chunks completed */
-  chunks_completed: number;
+  /** Number of chunks acknowledged/processed */
+  chunks_sent: number;
   /** Total number of chunks */
   total_chunks: number;
   /** Progress percentage (0-100) */
@@ -570,7 +566,7 @@ export interface FileReceivedEvent extends BaseEvent {
 }
 
 /**
- * Media sent event - all chunks enqueued for sending
+ * Media sent event - all chunks ACK-delivered
  */
 export interface MediaSentEvent extends BaseEvent {
   type: 'media_sent';

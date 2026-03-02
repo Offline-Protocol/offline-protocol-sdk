@@ -4,6 +4,7 @@ use crate::constants::DEFAULT_CHUNK_SIZE;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 mod base64_bytes {
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -121,6 +122,7 @@ struct FileAssembly {
     total_chunks: u32,
     file_checksum: String,
     received_chunks: HashMap<u32, Vec<u8>>,
+    last_updated_at: Instant,
 }
 
 impl FileAssembly {
@@ -131,15 +133,21 @@ impl FileAssembly {
             total_chunks: chunk.total_chunks,
             file_checksum: chunk.file_checksum.clone(),
             received_chunks: HashMap::new(),
+            last_updated_at: Instant::now(),
         }
     }
 
     fn add_chunk(&mut self, chunk_index: u32, data: Vec<u8>) {
         self.received_chunks.insert(chunk_index, data);
+        self.last_updated_at = Instant::now();
     }
 
     fn is_complete(&self) -> bool {
-        self.received_chunks.len() == self.total_chunks as usize
+        if self.total_chunks == 0 || self.received_chunks.len() != self.total_chunks as usize {
+            return false;
+        }
+
+        (0..self.total_chunks).all(|chunk_index| self.received_chunks.contains_key(&chunk_index))
     }
 
     fn progress(&self) -> FileProgress {
@@ -264,6 +272,10 @@ impl FileTransferManager {
     ///
     /// Returns `Some(FileProgress)` with current progress, or `None` if chunk is invalid.
     pub fn process_chunk(&mut self, chunk: FileChunk) -> Option<FileProgress> {
+        if chunk.total_chunks == 0 || chunk.chunk_index >= chunk.total_chunks {
+            return None;
+        }
+
         let file_id = chunk.file_id.clone();
 
         // Get or create assembly for this file
@@ -308,11 +320,35 @@ impl FileTransferManager {
     ///
     /// Returns `Some(Vec<u8>)` if file is complete, `None` otherwise.
     pub fn finalize_file(&mut self, file_id: &str) -> Option<Vec<u8>> {
-        if let Some(assembly) = self.active_assemblies.remove(file_id) {
-            assembly.reassemble()
-        } else {
-            None
+        let file_data = self
+            .active_assemblies
+            .get(file_id)
+            .and_then(FileAssembly::reassemble)?;
+
+        self.active_assemblies.remove(file_id);
+        Some(file_data)
+    }
+
+    /// Removes stale/incomplete transfers that have not received any chunk
+    /// updates within `max_age`.
+    pub fn cleanup_stale_transfers(&mut self, max_age: Duration) -> Vec<String> {
+        let now = Instant::now();
+        let stale_file_ids: Vec<String> = self
+            .active_assemblies
+            .iter()
+            .filter_map(|(file_id, assembly)| {
+                if now.duration_since(assembly.last_updated_at) > max_age {
+                    return Some(file_id.clone());
+                }
+                None
+            })
+            .collect();
+
+        for file_id in &stale_file_ids {
+            self.active_assemblies.remove(file_id);
         }
+
+        stale_file_ids
     }
 
     /// Gets the progress of an active file transfer.
@@ -595,5 +631,42 @@ mod tests {
         assert_eq!(FileProgress::calculate_percentage(5, 10), 50);
         assert_eq!(FileProgress::calculate_percentage(10, 10), 100);
         assert_eq!(FileProgress::calculate_percentage(1, 3), 33);
+    }
+
+    #[test]
+    fn test_invalid_chunk_index_rejected() {
+        let mut manager = FileTransferManager::new();
+        let chunks = manager
+            .chunk_file(
+                "file1".to_string(),
+                "test.txt".to_string(),
+                b"hello world".to_vec(),
+            )
+            .unwrap();
+
+        let mut invalid_chunk = chunks[0].clone();
+        invalid_chunk.chunk_index = invalid_chunk.total_chunks;
+
+        assert!(manager.process_chunk(invalid_chunk).is_none());
+        assert!(manager.get_progress("file1").is_none());
+    }
+
+    #[test]
+    fn test_cleanup_stale_transfers() {
+        let mut manager = FileTransferManager::new();
+        let chunks = manager
+            .chunk_file(
+                "file1".to_string(),
+                "test.txt".to_string(),
+                vec![1u8; 64 * 1024],
+            )
+            .unwrap();
+
+        manager.process_chunk(chunks[0].clone());
+        std::thread::sleep(Duration::from_millis(3));
+
+        let removed = manager.cleanup_stale_transfers(Duration::from_millis(1));
+        assert_eq!(removed, vec!["file1".to_string()]);
+        assert!(manager.get_progress("file1").is_none());
     }
 }

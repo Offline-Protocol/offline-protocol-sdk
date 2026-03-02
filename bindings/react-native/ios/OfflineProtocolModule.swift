@@ -1149,9 +1149,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         if let progress = proto.getFileProgress(fileId: fileId) {
             let result: [String: Any] = [
                 "file_id": progress.fileId,
-                "file_name": progress.fileId,
-                "file_size": 0,
-                "chunks_completed": Int(progress.chunksSent),
+                "chunks_sent": Int(progress.chunksSent),
                 "total_chunks": Int(progress.totalChunks),
                 "percentage": Int(progress.percentage)
             ]
@@ -1172,7 +1170,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.cancelFileTransfer(fileId: fileId)
             resolver(true)
         } catch {
-            rejecter("ERROR_FILE_CANCEL", "Failed to cancel file transfer: \(error.localizedDescription)", error)
+            if error.localizedDescription.localizedCaseInsensitiveContains("not found") {
+                resolver(false)
+            } else {
+                rejecter("ERROR_FILE_CANCEL", "Failed to cancel file transfer: \(error.localizedDescription)", error)
+            }
         }
     }
     

@@ -1069,9 +1069,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             if (progress != null) {
                 val map = Arguments.createMap().apply {
                     putString("file_id", progress.fileId)
-                    putString("file_name", progress.fileId)
-                    putDouble("file_size", 0.0)
-                    putInt("chunks_completed", progress.chunksSent.toInt())
+                    putInt("chunks_sent", progress.chunksSent.toInt())
                     putInt("total_chunks", progress.totalChunks.toInt())
                     putInt("percentage", progress.percentage.toInt())
                 }
@@ -1091,7 +1089,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             proto.cancelFileTransfer(fileId)
             promise.resolve(true)
         } catch (e: ProtocolException) {
-            promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
+            if (e.message?.contains("not found", ignoreCase = true) == true) {
+                promise.resolve(false)
+            } else {
+                promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
+            }
         } catch (e: Exception) {
             promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
         }

@@ -315,7 +315,7 @@ pub enum Event {
         file_data: String,
     },
 
-    /// All chunks of a media attachment were enqueued for sending.
+    /// All chunks of a media attachment were ACK-delivered.
     MediaSent {
         /// File identifier for tracking.
         file_id: String,

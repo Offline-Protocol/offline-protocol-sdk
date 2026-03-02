@@ -8,7 +8,7 @@
 
 use offline_protocol::{
     EstablishmentState as CoreEstablishmentState,
-    file_transfer::FileTransferManager, Event as CoreEvent, NetworkVisualizer,
+    Event as CoreEvent, NetworkVisualizer,
     OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
     PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
 };
@@ -877,7 +877,6 @@ pub struct OfflineProtocol {
     ble_state: Mutex<BleState>,
     internet_state: Mutex<InternetState>,
     wifi_direct_state: Mutex<WifiDirectState>,
-    file_manager: Mutex<FileTransferManager>,
     visualizer: Mutex<NetworkVisualizer>,
     path_selector: Mutex<PathSelector>,
     battery_level: RwLock<Option<u8>>,
@@ -965,7 +964,6 @@ impl OfflineProtocol {
                 is_connected: false,
                 connected_peer: None,
             }),
-            file_manager: Mutex::new(FileTransferManager::new()),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
             path_selector: Mutex::new(PathSelector::new()),
             battery_level: RwLock::new(None),
@@ -1986,7 +1984,7 @@ impl OfflineProtocol {
         file_checksum: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let mut file_manager = self.file_manager.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
 
         use offline_protocol::file_transfer::FileChunk;
         let chunk = FileChunk {
@@ -1999,14 +1997,14 @@ impl OfflineProtocol {
             file_checksum,
         };
 
-        file_manager.process_chunk(chunk);
+        protocol.file_transfer_manager_mut().process_chunk(chunk);
         Ok(())
     }
 
     /// Gets file transfer progress.
     pub fn get_file_progress(&self, file_id: String) -> Option<FileProgress> {
-        let file_manager = self.file_manager.lock().unwrap();
-        let core_progress = file_manager.get_progress(&file_id)?;
+        let protocol = self.inner.lock().unwrap();
+        let core_progress = protocol.file_transfer_manager().get_progress(&file_id)?;
 
         Some(FileProgress {
             file_id: core_progress.file_id,
@@ -2018,8 +2016,9 @@ impl OfflineProtocol {
 
     /// Finalizes a file transfer, returning the reassembled bytes.
     pub fn finalize_file(&self, file_id: String) -> Result<(), ProtocolError> {
-        let mut file_manager = self.file_manager.lock().unwrap();
-        file_manager
+        let mut protocol = self.inner.lock().unwrap();
+        protocol
+            .file_transfer_manager_mut()
             .finalize_file(&file_id)
             .ok_or_else(|| ProtocolError::Other("File not found or incomplete".to_string()))?;
         Ok(())
@@ -2027,9 +2026,12 @@ impl OfflineProtocol {
 
     /// Cancels an active file transfer.
     pub fn cancel_file_transfer(&self, file_id: String) -> Result<(), ProtocolError> {
-        let mut file_manager = self.file_manager.lock().unwrap();
-        file_manager.cancel_transfer(&file_id);
-        Ok(())
+        let mut protocol = self.inner.lock().unwrap();
+        if protocol.file_transfer_manager_mut().cancel_transfer(&file_id) {
+            Ok(())
+        } else {
+            Err(ProtocolError::Other("File transfer not found".to_string()))
+        }
     }
 
     // ========================================================================
@@ -3443,22 +3445,17 @@ mod tests {
 
         assert!(protocol.get_file_progress(file_id.clone()).is_none());
 
-        use offline_protocol::file_transfer::FileChunk;
-        let checksum = "abc123".to_string();
-        let chunk = FileChunk {
-            file_id: file_id.clone(),
-            file_name: "test.txt".to_string(),
-            file_size: 100,
-            total_chunks: 2,
-            chunk_index: 0,
-            chunk_data: vec![0u8; 50],
-            file_checksum: checksum,
-        };
-
-        {
-            let mut file_manager = protocol.file_manager.lock().unwrap();
-            file_manager.process_chunk(chunk);
-        }
+        protocol
+            .process_file_chunk(
+                file_id.clone(),
+                0,
+                2,
+                100,
+                "test.txt".to_string(),
+                "abc123".to_string(),
+                vec![0u8; 50],
+            )
+            .unwrap();
 
         let progress = protocol.get_file_progress(file_id.clone());
         assert!(progress.is_some());

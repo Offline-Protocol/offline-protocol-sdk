@@ -79,6 +79,7 @@ const PENDING_TTL_SPIKE_WARN_THRESHOLD: usize = 25;
 const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
 const PENDING_DROP_WARN_EVERY: u64 = 100;
 const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
+const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,6 +417,22 @@ struct OutboxEntry {
     last_transport: Option<TransportType>,
 }
 
+#[derive(Clone)]
+struct PendingMediaMetadataEntry {
+    content_type: ContentType,
+    media_metadata: Option<MediaMetadata>,
+    last_updated_at: Instant,
+}
+
+#[derive(Clone)]
+struct OutboundMediaTransfer {
+    content_type: ContentType,
+    recipient: String,
+    total_chunks: u32,
+    delivered_chunks: HashSet<u32>,
+    last_updated_at: Instant,
+}
+
 enum OutboundSendPreparation {
     Ready(String),
     Queued(MessageId),
@@ -523,7 +540,11 @@ pub struct OfflineProtocol {
 
     /// Stashed (content_type, media_metadata) from chunk-0 of incoming file transfers,
     /// used to populate the FileReceived event once all chunks arrive.
-    pending_media_metadata: HashMap<String, (ContentType, Option<MediaMetadata>)>,
+    pending_media_metadata: HashMap<String, PendingMediaMetadataEntry>,
+    /// Tracks outbound media transfer delivery progress keyed by file_id.
+    outbound_media_transfers: HashMap<String, OutboundMediaTransfer>,
+    /// Maps each outbound media chunk message ID to (file_id, chunk_index).
+    outbound_media_chunks: HashMap<MessageId, (String, u32)>,
 }
 
 impl OfflineProtocol {
@@ -580,6 +601,8 @@ impl OfflineProtocol {
             mls_observability_secret: *uuid::Uuid::new_v4().as_bytes(),
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
+            outbound_media_transfers: HashMap::new(),
+            outbound_media_chunks: HashMap::new(),
             config,
         })
     }
@@ -938,6 +961,7 @@ impl OfflineProtocol {
                         latency.min(u32::MAX as u64) as u32,
                         hop_count,
                     );
+                    self.handle_outbound_media_chunk_delivered(&message_id);
                     self.remove_outbox_entry(&message_id);
                 }
             }
@@ -1043,14 +1067,24 @@ impl OfflineProtocol {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
 
-        // Schedule retry - if this fails (max retries exceeded), the message
-        // will still be in the outbox and can be recovered
+        // Schedule retry. If queuing fails, treat this as a terminal failure.
         if let Err(e) = self.retry_queue.enqueue(message.clone(), 0) {
             warn!(
                 message_id = %message.id,
                 error = %e,
-                "Failed to enqueue message for retry, message remains in outbox"
+                "Failed to enqueue message for retry"
             );
+            if message.content_type == ContentType::FileChunk {
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::message_failed(
+                        message.id.clone(),
+                        "Retry queue unavailable".to_string(),
+                        0,
+                    ));
+                }
+                self.handle_outbound_media_chunk_failed(&message.id, "retry queue unavailable");
+                self.remove_outbox_entry(&message.id);
+            }
         }
 
         warn!(
@@ -1256,8 +1290,9 @@ impl OfflineProtocol {
     /// The file data is chunked and each chunk is sent as an individual message
     /// with `content_type: FileChunk`. The first chunk carries the full
     /// `MediaMetadata` so the receiver can display a preview before all chunks
-    /// arrive. Individual chunk messages do NOT request ACKs; only the
-    /// reassembled file triggers a `FileReceived` event on the receiver.
+    /// arrive. Individual chunk messages require ACKs and participate in retry
+    /// logic so delivery is tracked and recoverable per chunk. `MediaSent` is
+    /// emitted only after all chunks are ACKed.
     ///
     /// Returns a `file_id` that can be used to track progress or cancel.
     pub fn send_media(
@@ -1278,20 +1313,26 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let file_name_str: String = file_name.into();
 
-        let file_id = format!(
-            "file_{}_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0),
-            &file_name_str,
-        );
+        let file_id = format!("file_{}", MessageId::new().as_str());
 
         let chunks = self
             .file_transfer_manager
             .chunk_file(file_id.clone(), file_name_str, file_data)?;
 
         let total_chunks = chunks.len() as u32;
+        self.outbound_media_transfers.insert(
+            file_id.clone(),
+            OutboundMediaTransfer {
+                content_type,
+                recipient: recipient_str.clone(),
+                total_chunks,
+                delivered_chunks: HashSet::new(),
+                last_updated_at: Instant::now(),
+            },
+        );
+        let state = lock_shared_state(&self.shared_state)?;
+        state.emit_event(Event::file_progress(file_id.clone(), 0, total_chunks));
+        drop(state);
 
         for (index, chunk) in chunks.into_iter().enumerate() {
             let chunk_json = chunk
@@ -1318,6 +1359,8 @@ impl OfflineProtocol {
                     content_type.to_string(),
                 );
             }
+            self.outbound_media_chunks
+                .insert(message.id.clone(), (file_id.clone(), chunk.chunk_index));
 
             let previous_transport = self.transport_manager.current_transport();
             let send_result = self.transport_manager.send(&message);
@@ -1341,26 +1384,13 @@ impl OfflineProtocol {
                     );
                 }
             }
-
-            // Emit progress after each chunk
-            let chunks_sent = (index as u32) + 1;
-            let state = lock_shared_state(&self.shared_state)?;
-            state.emit_event(Event::file_progress(
-                file_id.clone(),
-                chunks_sent,
-                total_chunks,
-            ));
-            drop(state);
+            if !self.outbound_media_transfers.contains_key(&file_id) {
+                return Err(Error::Other(format!(
+                    "Media transfer {} could not be scheduled for reliable delivery",
+                    file_id
+                )));
+            }
         }
-
-        // Emit a MediaSent event so the app knows the file was enqueued
-        let state = lock_shared_state(&self.shared_state)?;
-        state.emit_event(Event::media_sent(
-            file_id.clone(),
-            content_type,
-            recipient_str,
-        ));
-        drop(state);
 
         Ok(file_id)
     }
@@ -1368,7 +1398,7 @@ impl OfflineProtocol {
     /// Creates a message carrying media content (file chunks, etc.).
     ///
     /// Like `create_message` but sets `content_type`, `media_metadata`, marks
-    /// the message as internet-preferred via metadata, and disables per-chunk ACKs.
+    /// the message as internet-preferred via metadata, and requires per-chunk ACKs.
     fn create_media_message(
         &mut self,
         recipient: &str,
@@ -1392,7 +1422,7 @@ impl OfflineProtocol {
             .ttl(TTL::new(self.config.initial_ttl)?)
             .lamport_clock(clock_value)
             .metadata(TRANSPORT_PREFERENCE_KEY, TRANSPORT_PREFERENCE_INTERNET)
-            .requires_ack(false);
+            .requires_ack(true);
 
         if let Some(meta) = media_metadata {
             builder = builder.media_metadata(meta);
@@ -1439,10 +1469,20 @@ impl OfflineProtocol {
                 .map(|s| ContentType::parse(s))
                 .unwrap_or(ContentType::File);
             self.pending_media_metadata
-                .insert(file_id.clone(), (original_ct, message.media_metadata.clone()));
+                .insert(
+                    file_id.clone(),
+                    PendingMediaMetadataEntry {
+                        content_type: original_ct,
+                        media_metadata: message.media_metadata.clone(),
+                        last_updated_at: Instant::now(),
+                    },
+                );
         }
 
         if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {
+            if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
+                entry.last_updated_at = Instant::now();
+            }
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::file_progress(
                     file_id.clone(),
@@ -1453,14 +1493,16 @@ impl OfflineProtocol {
         }
 
         if self.file_transfer_manager.is_complete(&file_id) {
-            let file_data = self
-                .file_transfer_manager
-                .finalize_file(&file_id)
-                .unwrap_or_default();
-
-            let (content_type, media_metadata) = self
-                .pending_media_metadata
-                .remove(&file_id)
+            let Some(file_data) = self.file_transfer_manager.finalize_file(&file_id) else {
+                warn!(
+                    file_id = %file_id,
+                    "File transfer marked complete but reassembly failed"
+                );
+                return;
+            };
+            let metadata_entry = self.pending_media_metadata.remove(&file_id);
+            let (content_type, media_metadata) = metadata_entry
+                .map(|entry| (entry.content_type, entry.media_metadata))
                 .unwrap_or((ContentType::File, None));
 
             if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -5397,6 +5439,7 @@ impl OfflineProtocol {
         ));
         drop(state);
 
+        self.handle_outbound_media_chunk_failed(message_id, "max retries exceeded");
         self.ack_manager.remove_ack(message_id);
         if let Some(entry) = self.remove_outbox_entry(message_id) {
             if let Some(transport) = entry.last_transport {
@@ -5448,6 +5491,7 @@ impl OfflineProtocol {
         ));
         drop(state);
 
+        self.handle_outbound_media_chunk_failed(message_id, "retry queue unavailable");
         self.ack_manager.remove_ack(message_id);
         if let Some(entry) = self.remove_outbox_entry(message_id) {
             if let Some(transport) = entry.last_transport {
@@ -5477,6 +5521,7 @@ impl OfflineProtocol {
         ));
         drop(state);
 
+        self.handle_outbound_media_chunk_failed(message_id, "missing outbox entry");
         self.ack_manager.remove_ack(message_id);
         Ok(())
     }
@@ -5486,6 +5531,13 @@ impl OfflineProtocol {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
+        let stale_file_ids = self
+            .file_transfer_manager
+            .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
+        for file_id in stale_file_ids {
+            self.pending_media_metadata.remove(&file_id);
+        }
+        self.cleanup_stale_media_state(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
         // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
         self.ack_manager
             .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes
@@ -5568,6 +5620,84 @@ impl OfflineProtocol {
         self.retry_queue.len()
     }
 
+    fn handle_outbound_media_chunk_delivered(&mut self, message_id: &MessageId) {
+        let Some((file_id, chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
+            return;
+        };
+
+        let Some(transfer) = self.outbound_media_transfers.get_mut(&file_id) else {
+            return;
+        };
+
+        transfer.delivered_chunks.insert(chunk_index);
+        transfer.last_updated_at = Instant::now();
+
+        let delivered_chunks = transfer.delivered_chunks.len() as u32;
+        let total_chunks = transfer.total_chunks;
+        let content_type = transfer.content_type;
+        let recipient = transfer.recipient.clone();
+        let completed = delivered_chunks == total_chunks;
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::file_progress(
+                file_id.clone(),
+                delivered_chunks,
+                total_chunks,
+            ));
+            if completed {
+                state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
+            }
+        }
+
+        if completed {
+            self.outbound_media_transfers.remove(&file_id);
+        }
+    }
+
+    fn handle_outbound_media_chunk_failed(&mut self, message_id: &MessageId, reason: &str) {
+        let Some((file_id, _chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
+            return;
+        };
+
+        if self.outbound_media_transfers.remove(&file_id).is_some() {
+            self.outbound_media_chunks
+                .retain(|_, (candidate_file_id, _)| candidate_file_id != &file_id);
+            warn!(
+                file_id = %file_id,
+                message_id = %message_id,
+                reason = %reason,
+                "Aborting outbound media transfer after terminal chunk failure"
+            );
+        }
+    }
+
+    fn cleanup_stale_media_state(&mut self, max_age: StdDuration) {
+        let now = Instant::now();
+
+        self.pending_media_metadata
+            .retain(|_, metadata| now.duration_since(metadata.last_updated_at) <= max_age);
+
+        let stale_outbound_file_ids: HashSet<String> = self
+            .outbound_media_transfers
+            .iter()
+            .filter_map(|(file_id, transfer)| {
+                if now.duration_since(transfer.last_updated_at) > max_age {
+                    return Some(file_id.clone());
+                }
+                None
+            })
+            .collect();
+
+        if stale_outbound_file_ids.is_empty() {
+            return;
+        }
+
+        self.outbound_media_transfers
+            .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
+        self.outbound_media_chunks
+            .retain(|_, (file_id, _)| !stale_outbound_file_ids.contains(file_id));
+    }
+
     fn ensure_outbox_entry(&mut self, message: &Message) {
         if !message.requires_ack {
             return;
@@ -5584,6 +5714,7 @@ impl OfflineProtocol {
                     self.transport_manager.record_delivery_failure(transport);
                 }
                 self.outbox.remove(&oldest_id);
+                self.handle_outbound_media_chunk_failed(&oldest_id, "outbox eviction");
             }
         }
 
@@ -5662,6 +5793,7 @@ impl OfflineProtocol {
                 self.transport_manager.record_delivery_failure(transport);
             }
             self.outbox.remove(&message_id);
+            self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
     }
 
