@@ -2204,23 +2204,23 @@ impl OfflineProtocol {
             return config;
         }
 
-        // Return default config
+        let core = CoreDorsConfig::default();
         DorsConfig {
-            prefer_online: false,
-            switch_hysteresis: 15.0,
-            switch_cooldown_secs: 20,
-            ble_to_wifi_retry_threshold: 2,
-            min_success_rate_before_escalation: 0.30,
-            min_ble_samples_before_success_rate_escalation: 5,
-            rssi_switch_threshold: -85,
-            congestion_queue_threshold: 50,
-            stability_window_secs: 8,
-            poor_signal_duration_secs: 10,
-            ttl_escalation_threshold: 2,
-            congestion_duration_secs: 10,
-            ttl_escalation_hold_secs: 20,
-            history_window_size: 10,
-            queue_recovery_ratio: 0.5,
+            prefer_online: core.prefer_online,
+            switch_hysteresis: core.switch_hysteresis,
+            switch_cooldown_secs: core.switch_cooldown_secs,
+            ble_to_wifi_retry_threshold: core.ble_to_wifi_retry_threshold,
+            min_success_rate_before_escalation: core.min_success_rate_before_escalation,
+            min_ble_samples_before_success_rate_escalation: core.min_ble_samples_before_success_rate_escalation as u64,
+            rssi_switch_threshold: core.rssi_switch_threshold,
+            congestion_queue_threshold: core.congestion_queue_threshold as u64,
+            stability_window_secs: core.stability_window_secs,
+            poor_signal_duration_secs: core.poor_signal_duration_secs,
+            ttl_escalation_threshold: core.ttl_escalation_threshold,
+            congestion_duration_secs: core.congestion_duration_secs,
+            ttl_escalation_hold_secs: core.ttl_escalation_hold_secs,
+            history_window_size: core.history_window_size as u64,
+            queue_recovery_ratio: core.queue_recovery_ratio,
         }
     }
 

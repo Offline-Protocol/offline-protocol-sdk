@@ -123,6 +123,14 @@ pub enum EscalationTriggerReason {
     LowSuccessRate,
 }
 
+/// Result of evaluating all BLE→WiFi escalation conditions.
+struct EscalationEvaluation {
+    /// The first triggered reason in priority order, or `None` if no condition is active.
+    trigger: Option<EscalationTriggerReason>,
+    /// Whether battery level is too low to permit escalation to a high-power transport.
+    battery_too_low: bool,
+}
+
 /// Score breakdown for transport selection.
 #[derive(Debug, Clone)]
 pub struct TransportScore {
@@ -156,46 +164,27 @@ struct TransportHistory {
 impl TransportHistory {
     fn push_queue_depth(&mut self, depth: usize, limit: usize) {
         self.queue_depths.push_back(depth);
-        self.truncate(limit);
+        truncate_deque(&mut self.queue_depths, limit);
     }
 
     fn push_congestion(&mut self, level: f32, limit: usize) {
         self.congestion_levels.push_back(level);
-        self.truncate(limit);
+        truncate_deque(&mut self.congestion_levels, limit);
     }
 
     fn push_rssi(&mut self, rssi: i16, limit: usize) {
         self.rssi_samples.push_back(rssi);
-        self.truncate(limit);
+        truncate_deque(&mut self.rssi_samples, limit);
     }
 
     fn push_success_ratio(&mut self, ratio: f32, limit: usize) {
         self.success_ratios.push_back(ratio.clamp(0.0, 1.0));
-        self.truncate(limit);
+        truncate_deque(&mut self.success_ratios, limit);
     }
 
     fn push_latency(&mut self, latency: u32, limit: usize) {
         self.latency_samples.push_back(latency);
-        self.truncate(limit);
-    }
-
-    fn truncate(&mut self, limit: usize) {
-        let limit = limit.max(1);
-        while self.queue_depths.len() > limit {
-            self.queue_depths.pop_front();
-        }
-        while self.congestion_levels.len() > limit {
-            self.congestion_levels.pop_front();
-        }
-        while self.rssi_samples.len() > limit {
-            self.rssi_samples.pop_front();
-        }
-        while self.success_ratios.len() > limit {
-            self.success_ratios.pop_front();
-        }
-        while self.latency_samples.len() > limit {
-            self.latency_samples.pop_front();
-        }
+        truncate_deque(&mut self.latency_samples, limit);
     }
 
     fn average_queue_depth(&self) -> Option<f32> {
@@ -227,6 +216,13 @@ impl TransportHistory {
     }
 }
 
+fn truncate_deque<T>(deque: &mut VecDeque<T>, limit: usize) {
+    let limit = limit.max(1);
+    while deque.len() > limit {
+        deque.pop_front();
+    }
+}
+
 fn average_usize(samples: &VecDeque<usize>) -> Option<f32> {
     if samples.is_empty() {
         return None;
@@ -249,7 +245,7 @@ pub struct TransportSelector {
     config: DorsConfig,
     current_transport: Option<TransportType>,
     last_switch_time: Option<DateTime<Utc>>,
-    transport_scores_history: HashMap<TransportType, Vec<(DateTime<Utc>, f32)>>,
+    transport_scores_history: HashMap<TransportType, VecDeque<(DateTime<Utc>, f32)>>,
     transport_history: HashMap<TransportType, TransportHistory>,
     retry_counts: HashMap<TransportType, u32>,
     last_metrics: HashMap<TransportType, (TransportMetrics, DateTime<Utc>)>,
@@ -596,11 +592,11 @@ impl TransportSelector {
             }
         }
 
-        // Check for prolonged poor signal (for wireless transports)
-        if matches!(transport, TransportType::BLE | TransportType::WiFiDirect) {
+        // Check for prolonged poor signal (BLE only — ble_poor_signal_since
+        // is only tracked for BLE in update_ble_conditions).
+        if transport == TransportType::BLE {
             if let Some((metrics, _)) = self.last_metrics.get(&transport) {
                 if let Some(rssi) = metrics.rssi {
-                    // Very poor signal for extended period
                     if rssi < -90 {
                         let poor_duration = self
                             .ble_poor_signal_since
@@ -1020,11 +1016,10 @@ impl TransportSelector {
             .entry(transport_type)
             .or_default();
 
-        history.push((now, score));
+        history.push_back((now, score));
 
-        // Keep history bounded based on configured window
         while history.len() > limit {
-            history.remove(0);
+            history.pop_front();
         }
     }
 
@@ -1040,8 +1035,11 @@ impl TransportSelector {
         self.retry_counts.insert(transport_type, 0);
     }
 
-    /// Returns which condition triggered escalation, if any. Call when considering
-    /// BLE→WiFi fallback to emit typed dors_escalation_triggered at the trigger boundary.
+    /// Evaluates all BLE→WiFi escalation conditions in a single pass.
+    ///
+    /// Returns the first triggered reason (priority order: retry > signal >
+    /// congestion > TTL > success-rate) plus whether the battery is too low
+    /// to permit escalation. All public escalation methods delegate here.
     ///
     /// **Degradation-based escalation rules** (all config-driven, deterministic):
     /// - **Retry threshold**: BLE send failures ≥ `ble_to_wifi_retry_threshold`
@@ -1050,14 +1048,14 @@ impl TransportSelector {
     /// - **Low TTL**: Message TTL ≤ `ttl_escalation_threshold` (held for `ttl_escalation_hold_secs`)
     /// - **Low success rate**: BLE success-ratio samples ≥ `min_ble_samples_before_success_rate_escalation`
     ///   AND average success ratio < `min_success_rate_before_escalation`
-    pub fn escalation_trigger_reason(&self) -> Option<EscalationTriggerReason> {
+    fn evaluate_escalation_conditions(&self) -> EscalationEvaluation {
+        let now = Utc::now();
+
         let retry_failure = self
             .retry_counts
             .get(&TransportType::BLE)
             .map(|count| *count >= self.config.ble_to_wifi_retry_threshold)
             .unwrap_or(false);
-
-        let now = Utc::now();
 
         let poor_signal = self
             .ble_poor_signal_since
@@ -1095,6 +1093,16 @@ impl TransportSelector {
             })
             .unwrap_or(false);
 
+        let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
+        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
+        let low_success_rate = self
+            .transport_history
+            .get(&TransportType::BLE)
+            .filter(|h| h.success_ratio_sample_count() >= min_samples)
+            .and_then(|h| h.average_success_ratio())
+            .map(|rate| rate < min_success_rate)
+            .unwrap_or(false);
+
         let battery_too_low = self
             .last_metrics
             .get(&TransportType::BLE)
@@ -1106,209 +1114,80 @@ impl TransportSelector {
             .map(|(level, charging)| level < self.config.relay_min_battery_level && !charging)
             .unwrap_or(false);
 
-        if battery_too_low {
+        let trigger = if retry_failure {
+            Some(EscalationTriggerReason::RetryThreshold)
+        } else if poor_signal {
+            Some(EscalationTriggerReason::PoorSignal)
+        } else if high_congestion {
+            Some(EscalationTriggerReason::Congestion)
+        } else if low_ttl_recent {
+            Some(EscalationTriggerReason::LowTtl)
+        } else if low_success_rate {
+            Some(EscalationTriggerReason::LowSuccessRate)
+        } else {
+            None
+        };
+
+        EscalationEvaluation {
+            trigger,
+            battery_too_low,
+        }
+    }
+
+    /// Returns which condition triggered escalation, if any.
+    ///
+    /// Returns `None` when battery is too low (escalation suppressed) or
+    /// when no escalation condition is active.
+    pub fn escalation_trigger_reason(&self) -> Option<EscalationTriggerReason> {
+        let eval = self.evaluate_escalation_conditions();
+        if eval.battery_too_low {
             return None;
         }
-
-        let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
-        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
-        let low_success_rate = self
-            .transport_history
-            .get(&TransportType::BLE)
-            .filter(|h| h.success_ratio_sample_count() >= min_samples)
-            .and_then(|h| h.average_success_ratio())
-            .map(|rate| rate < min_success_rate)
-            .unwrap_or(false);
-
-        if retry_failure {
-            return Some(EscalationTriggerReason::RetryThreshold);
-        }
-        if poor_signal {
-            return Some(EscalationTriggerReason::PoorSignal);
-        }
-        if high_congestion {
-            return Some(EscalationTriggerReason::Congestion);
-        }
-        if low_ttl_recent {
-            return Some(EscalationTriggerReason::LowTtl);
-        }
-        if low_success_rate {
-            return Some(EscalationTriggerReason::LowSuccessRate);
-        }
-        None
+        eval.trigger
     }
 
     /// Checks if escalation from BLE to Wi-Fi Direct is needed.
     pub fn should_escalate_to_wifi(&self) -> bool {
-        let retry_failure = self
-            .retry_counts
-            .get(&TransportType::BLE)
-            .map(|count| *count >= self.config.ble_to_wifi_retry_threshold)
-            .unwrap_or(false);
-
-        let now = Utc::now();
-
-        let poor_signal = self
-            .ble_poor_signal_since
-            .map(|since| {
-                now.signed_duration_since(since)
-                    >= Duration::seconds(self.config.poor_signal_duration_secs as i64)
-            })
-            .unwrap_or(false);
-
-        let high_congestion_active = self
-            .ble_high_congestion_since
-            .map(|since| {
-                now.signed_duration_since(since)
-                    >= Duration::seconds(self.config.congestion_duration_secs as i64)
-            })
-            .unwrap_or(false);
-
-        let load_exceeded = self
-            .transport_history
-            .get(&TransportType::BLE)
-            .and_then(|history| history.average_queue_depth())
-            .map(|avg| {
-                let threshold = self.config.congestion_queue_threshold.max(1) as f32;
-                avg >= threshold
-            })
-            .unwrap_or(false);
-
-        let high_congestion = high_congestion_active && load_exceeded;
-
-        let low_ttl_recent = self
-            .low_ttl_detected_at
-            .map(|since| {
-                now.signed_duration_since(since)
-                    <= Duration::seconds(self.config.ttl_escalation_hold_secs as i64)
-            })
-            .unwrap_or(false);
-
-        let battery_too_low = self
-            .last_metrics
-            .get(&TransportType::BLE)
-            .and_then(|(metrics, _)| {
-                metrics
-                    .battery_level
-                    .map(|level| (level, metrics.is_charging))
-            })
-            .map(|(level, charging)| level < self.config.relay_min_battery_level && !charging)
-            .unwrap_or(false);
-
-        let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
-        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
-        let low_success_rate = self
-            .transport_history
-            .get(&TransportType::BLE)
-            .filter(|h| h.success_ratio_sample_count() >= min_samples)
-            .and_then(|h| h.average_success_ratio())
-            .map(|rate| rate < min_success_rate)
-            .unwrap_or(false);
-
-        if battery_too_low {
+        let eval = self.evaluate_escalation_conditions();
+        if eval.battery_too_low {
             return false;
         }
-
-        retry_failure || poor_signal || high_congestion || low_ttl_recent || low_success_rate
+        eval.trigger.is_some()
     }
 
     /// Checks if WiFi escalation is appropriate for a message with given priority.
     ///
     /// For Critical priority messages, battery constraints are bypassed since
     /// message delivery is more important than battery preservation.
-    ///
-    /// # Arguments
-    ///
-    /// * `priority` - The message priority
-    ///
-    /// # Returns
-    ///
-    /// `true` if WiFi escalation is appropriate for this priority level
     pub fn should_escalate_to_wifi_for_priority(
         &self,
         priority: offline_protocol_core::MessagePriority,
     ) -> bool {
         use offline_protocol_core::MessagePriority;
 
-        // For critical priority, bypass battery check
-        if matches!(priority, MessagePriority::Critical) {
-            return self.should_escalate_to_wifi_ignoring_battery();
+        let eval = self.evaluate_escalation_conditions();
+
+        match priority {
+            MessagePriority::Critical => eval.trigger.is_some(),
+            MessagePriority::High => !eval.battery_too_low && eval.trigger.is_some(),
+            MessagePriority::Medium | MessagePriority::Low => {
+                if eval.battery_too_low {
+                    return false;
+                }
+                let severe_retry = self
+                    .retry_counts
+                    .get(&TransportType::BLE)
+                    .map(|count| *count >= self.config.ble_to_wifi_retry_threshold * 2)
+                    .unwrap_or(false);
+                severe_retry && eval.trigger.is_some()
+            }
         }
-
-        // For high priority, still escalate but respect battery constraints
-        if matches!(priority, MessagePriority::High) {
-            return self.should_escalate_to_wifi();
-        }
-
-        // For normal/low priority, only escalate under severe conditions
-        let retry_failure = self
-            .retry_counts
-            .get(&TransportType::BLE)
-            .map(|count| *count >= self.config.ble_to_wifi_retry_threshold * 2)
-            .unwrap_or(false);
-
-        retry_failure && self.should_escalate_to_wifi()
     }
 
-    /// Internal: checks escalation conditions without battery constraint.
-    fn should_escalate_to_wifi_ignoring_battery(&self) -> bool {
-        let retry_failure = self
-            .retry_counts
-            .get(&TransportType::BLE)
-            .map(|count| *count >= self.config.ble_to_wifi_retry_threshold)
-            .unwrap_or(false);
-
-        let now = Utc::now();
-
-        let poor_signal = self
-            .ble_poor_signal_since
-            .map(|since| {
-                now.signed_duration_since(since)
-                    >= Duration::seconds(self.config.poor_signal_duration_secs as i64)
-            })
-            .unwrap_or(false);
-
-        let high_congestion_active = self
-            .ble_high_congestion_since
-            .map(|since| {
-                now.signed_duration_since(since)
-                    >= Duration::seconds(self.config.congestion_duration_secs as i64)
-            })
-            .unwrap_or(false);
-
-        let load_exceeded = self
-            .transport_history
-            .get(&TransportType::BLE)
-            .and_then(|history| history.average_queue_depth())
-            .map(|avg| {
-                let threshold = self.config.congestion_queue_threshold.max(1) as f32;
-                avg >= threshold
-            })
-            .unwrap_or(false);
-
-        let high_congestion = high_congestion_active && load_exceeded;
-
-        let low_ttl_recent = self
-            .low_ttl_detected_at
-            .map(|since| {
-                now.signed_duration_since(since)
-                    <= Duration::seconds(self.config.ttl_escalation_hold_secs as i64)
-            })
-            .unwrap_or(false);
-
-        let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
-        let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
-        let low_success_rate = self
-            .transport_history
-            .get(&TransportType::BLE)
-            .filter(|h| h.success_ratio_sample_count() >= min_samples)
-            .and_then(|h| h.average_success_ratio())
-            .map(|rate| rate < min_success_rate)
-            .unwrap_or(false);
-
-        // For critical messages, we escalate if any single condition is met
-        // (not requiring battery check)
-        retry_failure || poor_signal || high_congestion || low_ttl_recent || low_success_rate
+    /// Replaces the configuration while preserving accumulated state (history,
+    /// retry counts, signal tracking, score history).
+    pub fn update_config(&mut self, config: DorsConfig) {
+        self.config = config;
     }
 
     /// Gets the current transport.

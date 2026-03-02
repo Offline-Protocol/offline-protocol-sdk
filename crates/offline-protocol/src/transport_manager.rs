@@ -247,6 +247,7 @@ impl TransportManager {
             })?;
 
         // Emit DORS observability: scores and selection (before send attempt).
+        // Compute once and reuse for both observability and fallback ordering.
         let scored = self.selector.score_and_rank(message, &available);
         let scores: Vec<(String, f32)> = scored
             .iter()
@@ -285,7 +286,6 @@ impl TransportManager {
         match primary_result {
             Ok(()) => {
                 self.current_transport = Some(primary);
-                // Emit switch only when active transport actually changed (after successful send).
                 if previous != Some(primary) {
                     let reason_code = previous.is_some_and(|p| !available.contains_key(&p))
                         .then_some(DorsReasonCode::CurrentUnavailable)
@@ -319,9 +319,8 @@ impl TransportManager {
         }
 
         // Primary failed — try remaining transports in score order.
-        // score_and_rank re-evaluates without hysteresis so every candidate
-        // is considered. The re-scoring on the failure path is harmless.
-        let scored = self.selector.score_and_rank(message, &available);
+        // Reuse the scored ranking computed above; record_retry_failure only
+        // mutates retry_counts which score_and_rank does not read.
         let mut last_error = None;
         let mut attempted: Vec<TransportType> = vec![primary];
 
@@ -637,11 +636,10 @@ impl TransportManager {
         stats.record_failure();
     }
 
-    /// Updates the DORS selector configuration at runtime.
-    ///
-    /// This replaces the current selector with a new one using the provided config.
+    /// Updates the DORS selector configuration at runtime, preserving
+    /// accumulated state (transport history, retry counts, signal tracking).
     pub fn update_selector_config(&mut self, config: DorsConfig) {
-        self.selector = TransportSelector::with_config(config);
+        self.selector.update_config(config);
     }
 }
 
