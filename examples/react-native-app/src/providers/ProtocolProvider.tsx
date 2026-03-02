@@ -13,6 +13,8 @@ import {
   type OfflineProtocol,
   type TransportType,
   type SendFileParams,
+  type SendMediaParams,
+  type MediaMetadata,
   type InternetTransportConfig,
   type WifiDirectTransportConfig,
 } from '@offline-protocol/mesh-sdk';
@@ -129,7 +131,17 @@ export interface Message {
   status: 'sending' | 'sent' | 'delivered' | 'failed';
   isFromMe: boolean;
   isEncrypted?: boolean;
-  replyToMsg?: string; // Message ID this message is replying to
+  replyToMsg?: string;
+  contentType?: string;
+  mediaMetadata?: {
+    mimeType: string;
+    fileName: string;
+    fileSize: number;
+    durationMs?: number;
+    width?: number;
+    height?: number;
+    thumbnailBase64?: string;
+  };
 }
 
 export interface Chat {
@@ -207,7 +219,12 @@ interface ProtocolContextType {
     type: TransportType,
   ) => Promise<TransportMetricsSnapshot | null>;
   sendFile: (params: SendFileParams) => Promise<string | null>;
+  sendMedia: (params: SendMediaParams) => Promise<string | null>;
+  sendImage: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
+  sendVoiceNote: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
+  sendVideo: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
   cancelFileTransfer: (fileId: string) => Promise<boolean>;
+  addOptimisticMessage: (recipientId: string, message: Message) => void;
   rejectConnectionRequest: (peerId: string) => Promise<void>;
   acceptConnectionRequest: (peerId: string) => Promise<void>;
   sendConnectionRequest: (peerId: string) => Promise<void>;
@@ -808,6 +825,10 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     updateDorsConfig: updateDorsConfigRuntime,
     getTransportMetrics,
     sendFile: protocolSendFile,
+    sendMedia: protocolSendMedia,
+    sendImage: protocolSendImage,
+    sendVoiceNote: protocolSendVoiceNote,
+    sendVideo: protocolSendVideo,
     cancelFileTransfer: protocolCancelFile,
   } = useOfflineProtocol({
     appId: 'offline-messenger',
@@ -1229,6 +1250,38 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     ],
   );
 
+  const addOptimisticMessage = useCallback(
+    (recipientId: string, message: Message) => {
+      setChats(prevChats => {
+        const idx = prevChats.findIndex(chat => chat.peerId === recipientId);
+        if (idx >= 0) {
+          const chat = prevChats[idx];
+          if (chat.messages.some(m => m.id === message.id)) return prevChats;
+          const updated = [...prevChats];
+          updated[idx] = {
+            ...chat,
+            lastMessage: message,
+            messages: [...chat.messages, message],
+          };
+          return updated;
+        }
+        return [
+          ...prevChats,
+          {
+            id: recipientId,
+            peerId: recipientId,
+            peerName: getPeerDisplayName(recipientId),
+            lastMessage: message,
+            unreadCount: 0,
+            isOnline: false,
+            messages: [message],
+          },
+        ];
+      });
+    },
+    [getPeerDisplayName],
+  );
+
   // Mark chat as read
   const markAsRead = useCallback((chatId: string) => {
     setChats(prevChats =>
@@ -1631,6 +1684,16 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
               isFromMe: false,
               isEncrypted,
               replyToMsg: msgEvent.reply_to_msg || msgEvent.replyToMsg,
+              contentType: msgEvent.content_type,
+              mediaMetadata: msgEvent.media_metadata ? {
+                mimeType: msgEvent.media_metadata.mime_type ?? '',
+                fileName: msgEvent.media_metadata.file_name ?? '',
+                fileSize: msgEvent.media_metadata.file_size ?? 0,
+                durationMs: msgEvent.media_metadata.duration_ms,
+                width: msgEvent.media_metadata.width,
+                height: msgEvent.media_metadata.height,
+                thumbnailBase64: msgEvent.media_metadata.thumbnail_base64,
+              } : undefined,
             };
             receivedMessages.push(receivedMessage);
             break;
@@ -1745,6 +1808,37 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           case 'group_error': {
             const e = event as unknown as { reason: string };
             setGroupError(e.reason ?? 'Unknown group error');
+            break;
+          }
+          case 'file_received': {
+            const fe = event as any;
+            if (!fe.file_id || !fe.sender) break;
+            const senderId = fe.sender;
+            const receivedFileMessage: Message = {
+              id: fe.file_id,
+              senderId,
+              recipientId: currentUserId,
+              content: fe.file_data ?? '',
+              timestamp: Date.now(),
+              priority: MessagePriority.Medium,
+              status: 'delivered',
+              isFromMe: false,
+              contentType: fe.content_type || 'file',
+              mediaMetadata: fe.media_metadata ? {
+                mimeType: fe.media_metadata.mime_type ?? '',
+                fileName: fe.media_metadata.file_name ?? fe.file_name ?? '',
+                fileSize: fe.media_metadata.file_size ?? fe.file_size ?? 0,
+                durationMs: fe.media_metadata.duration_ms,
+                width: fe.media_metadata.width,
+                height: fe.media_metadata.height,
+                thumbnailBase64: fe.media_metadata.thumbnail_base64,
+              } : {
+                mimeType: '',
+                fileName: fe.file_name ?? '',
+                fileSize: fe.file_size ?? 0,
+              },
+            };
+            receivedMessages.push(receivedFileMessage);
             break;
           }
           default:
@@ -2258,7 +2352,12 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     updateDorsConfig: updateDorsConfigRuntime,
     getTransportMetrics,
     sendFile: protocolSendFile,
+    sendMedia: protocolSendMedia,
+    sendImage: protocolSendImage,
+    sendVoiceNote: protocolSendVoiceNote,
+    sendVideo: protocolSendVideo,
     cancelFileTransfer: protocolCancelFile,
+    addOptimisticMessage,
     getAnalytics,
     rejectConnectionRequest,
     acceptConnectionRequest,

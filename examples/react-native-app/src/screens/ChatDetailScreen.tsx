@@ -11,23 +11,122 @@ import {
   Alert,
   Keyboard,
   PanResponder,
+  ActionSheetIOS,
+  Image,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
+import { pick, types as docTypes } from 'react-native-document-picker';
+import RNFS from 'react-native-fs';
 import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
 import { useProtocol } from '../hooks/useProtocol';
 import { Message } from '../providers/ProtocolProvider';
-import { MessagePriority } from '@offline-protocol/mesh-sdk';
+import { MessagePriority, ContentType } from '@offline-protocol/mesh-sdk';
 import { getUserInitials, generateAvatarColor } from '../utils/user';
+
+const MEDIA_CONTENT_TYPES = new Set(['image', 'video', 'audio', 'voice_note', 'video_note', 'file']);
+
+function getMediaIcon(contentType: string): string {
+  switch (contentType) {
+    case 'image': return 'image';
+    case 'video':
+    case 'video_note': return 'film';
+    case 'audio': return 'musical-note';
+    case 'voice_note': return 'mic';
+    case 'file': return 'document';
+    default: return 'document';
+  }
+}
+
+function getMediaLabel(contentType: string): string {
+  switch (contentType) {
+    case 'image': return 'Photo';
+    case 'video': return 'Video';
+    case 'video_note': return 'Video Note';
+    case 'audio': return 'Audio';
+    case 'voice_note': return 'Voice Note';
+    case 'file': return 'File';
+    default: return 'Attachment';
+  }
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderMessageContent(message: Message, isFromMe: boolean, theme: any) {
+  const ct = message.contentType;
+  const isMedia = ct && MEDIA_CONTENT_TYPES.has(ct);
+  const textColor = isFromMe ? theme.colors.textInverse : theme.colors.text;
+  const secondaryColor = isFromMe ? theme.colors.textInverse : theme.colors.textSecondary;
+
+  if (!isMedia) {
+    return (
+      <Text style={[styles.messageText, { color: textColor }]}>
+        {message.content}
+      </Text>
+    );
+  }
+
+  const meta = message.mediaMetadata;
+
+  if (ct === 'image' && meta?.thumbnailBase64) {
+    return (
+      <View>
+        <Image
+          source={{ uri: `data:${meta.mimeType || 'image/jpeg'};base64,${meta.thumbnailBase64}` }}
+          style={styles.mediaThumbnail}
+          resizeMode="cover"
+        />
+        {meta.fileSize > 0 && (
+          <Text style={[styles.mediaCaption, { color: secondaryColor }]}>
+            {formatFileSize(meta.fileSize)}
+          </Text>
+        )}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.mediaIndicator}>
+      <View style={[styles.mediaIconCircle, { backgroundColor: isFromMe ? 'rgba(255,255,255,0.2)' : theme.colors.primary + '15' }]}>
+        <Icon name={getMediaIcon(ct!)} size={20} color={isFromMe ? theme.colors.textInverse : theme.colors.primary} />
+      </View>
+      <View style={styles.mediaInfo}>
+        <Text style={[styles.mediaLabel, { color: textColor }]}>
+          {getMediaLabel(ct!)}
+        </Text>
+        {meta?.fileName ? (
+          <Text style={[styles.mediaFileName, { color: secondaryColor }]} numberOfLines={1}>
+            {meta.fileName}{meta.fileSize > 0 ? ` · ${formatFileSize(meta.fileSize)}` : ''}
+          </Text>
+        ) : message.content && message.content !== ct ? (
+          <Text style={[styles.mediaFileName, { color: secondaryColor }]} numberOfLines={1}>
+            {message.content}
+          </Text>
+        ) : null}
+        {meta?.durationMs != null && (
+          <Text style={[styles.mediaDuration, { color: secondaryColor }]}>
+            {Math.floor(meta.durationMs / 60000)}:{String(Math.floor((meta.durationMs % 60000) / 1000)).padStart(2, '0')}
+          </Text>
+        )}
+      </View>
+    </View>
+  );
+}
 
 interface MessageBubbleProps {
   message: Message;
   isLastInGroup: boolean;
   isFirstInGroup: boolean;
   onSwipeRight?: (message: Message) => void;
-  allMessages?: Message[]; // For finding replied-to message in current chat
-  allChatsMessages?: Message[]; // For finding replied-to message across all chats
-  peerName?: string; // For displaying sender name in replies
+  allMessages?: Message[];
+  allChatsMessages?: Message[];
+  peerName?: string;
 }
 
 function MessageBubble({
@@ -222,16 +321,7 @@ function MessageBubble({
           </View>
         )}
 
-        <Text
-          style={[
-            styles.messageText,
-            {
-              color: isFromMe ? theme.colors.textInverse : theme.colors.text,
-            },
-          ]}
-        >
-          {message.content}
-        </Text>
+        {renderMessageContent(message, isFromMe, theme)}
 
         <View style={styles.messageFooter}>
           {isEncrypted && (
@@ -300,9 +390,15 @@ export function ChatDetailScreen({
     chats,
     contacts,
     sendMessage,
+    sendImage,
+    sendVoiceNote,
+    sendVideo,
+    sendFile,
     isOnline,
     connectedPeersCount,
     encryptedPeers,
+    addOptimisticMessage,
+    currentUserId,
   } = useProtocol();
   const insets = useSafeAreaInsets();
   const [inputText, setInputText] = useState('');
@@ -313,6 +409,7 @@ export function ChatDetailScreen({
   const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(
     null,
   );
+  const [sendingMedia, setSendingMedia] = useState(false);
 
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
@@ -468,6 +565,176 @@ export function ChatDetailScreen({
   const togglePriorityPicker = useCallback(() => {
     setShowPriorityPicker(prev => !prev);
   }, []);
+
+  const handlePickImage = useCallback(async () => {
+    try {
+      const result = await launchImageLibrary({
+        mediaType: 'mixed',
+        selectionLimit: 1,
+        includeBase64: true,
+        quality: 0.8,
+        maxWidth: 1280,
+        maxHeight: 1280,
+      });
+      if (result.didCancel || !result.assets?.length) return;
+      const asset = result.assets[0];
+      if (!asset.base64) return;
+      setSendingMedia(true);
+      const fileName = asset.fileName || `media_${Date.now()}`;
+      const isVideo = asset.type?.startsWith('video');
+      if (isVideo) {
+        await sendVideo(peerId, asset.base64, fileName, {
+          mimeType: asset.type || 'video/mp4',
+          fileName,
+          fileSize: asset.fileSize || 0,
+          width: asset.width,
+          height: asset.height,
+          durationMs: asset.duration ? asset.duration * 1000 : undefined,
+        });
+      } else {
+        await sendImage(peerId, asset.base64, fileName, {
+          mimeType: asset.type || 'image/jpeg',
+          fileName,
+          fileSize: asset.fileSize || 0,
+          width: asset.width,
+          height: asset.height,
+        });
+      }
+      const mediaMsg: Message = {
+        id: `media_${Date.now()}`,
+        senderId: currentUserId,
+        recipientId: peerId,
+        content: fileName,
+        timestamp: Date.now(),
+        priority: MessagePriority.Medium,
+        status: 'sending',
+        isFromMe: true,
+        contentType: isVideo ? 'video' : 'image',
+        mediaMetadata: {
+          mimeType: asset.type || (isVideo ? 'video/mp4' : 'image/jpeg'),
+          fileName,
+          fileSize: asset.fileSize || 0,
+          width: asset.width,
+          height: asset.height,
+          thumbnailBase64: isVideo ? undefined : asset.base64.slice(0, 2000),
+        },
+      };
+      addOptimisticMediaMessage(mediaMsg);
+    } catch (err) {
+      Alert.alert('Failed', 'Could not send media.');
+    } finally {
+      setSendingMedia(false);
+    }
+  }, [peerId, sendImage, sendVideo, currentUserId, addOptimisticMediaMessage]);
+
+  const handleTakePhoto = useCallback(async () => {
+    try {
+      const result = await launchCamera({
+        mediaType: 'photo',
+        includeBase64: true,
+        quality: 0.8,
+        maxWidth: 1280,
+        maxHeight: 1280,
+      });
+      if (result.didCancel || !result.assets?.length) return;
+      const asset = result.assets[0];
+      if (!asset.base64) return;
+      setSendingMedia(true);
+      const fileName = asset.fileName || `photo_${Date.now()}.jpg`;
+      await sendImage(peerId, asset.base64, fileName, {
+        mimeType: asset.type || 'image/jpeg',
+        fileName,
+        fileSize: asset.fileSize || 0,
+        width: asset.width,
+        height: asset.height,
+      });
+      addOptimisticMediaMessage({
+        id: `media_${Date.now()}`,
+        senderId: currentUserId,
+        recipientId: peerId,
+        content: fileName,
+        timestamp: Date.now(),
+        priority: MessagePriority.Medium,
+        status: 'sending',
+        isFromMe: true,
+        contentType: 'image',
+        mediaMetadata: {
+          mimeType: asset.type || 'image/jpeg',
+          fileName,
+          fileSize: asset.fileSize || 0,
+          width: asset.width,
+          height: asset.height,
+        },
+      });
+    } catch (err) {
+      Alert.alert('Failed', 'Could not take photo.');
+    } finally {
+      setSendingMedia(false);
+    }
+  }, [peerId, sendImage, currentUserId, addOptimisticMediaMessage]);
+
+  const handlePickFile = useCallback(async () => {
+    try {
+      const [result] = await pick({ type: [docTypes.allFiles] });
+      if (!result?.uri) return;
+      setSendingMedia(true);
+      const base64 = await RNFS.readFile(result.uri, 'base64');
+      const fileName = result.name || `file_${Date.now()}`;
+      await sendFile({ recipient: peerId, fileData: base64, fileName });
+      addOptimisticMediaMessage({
+        id: `media_${Date.now()}`,
+        senderId: currentUserId,
+        recipientId: peerId,
+        content: fileName,
+        timestamp: Date.now(),
+        priority: MessagePriority.Medium,
+        status: 'sending',
+        isFromMe: true,
+        contentType: 'file',
+        mediaMetadata: {
+          mimeType: result.type || 'application/octet-stream',
+          fileName,
+          fileSize: result.size || 0,
+        },
+      });
+    } catch (err: any) {
+      if (err?.code !== 'DOCUMENT_PICKER_CANCELED') {
+        Alert.alert('Failed', 'Could not send file.');
+      }
+    } finally {
+      setSendingMedia(false);
+    }
+  }, [peerId, sendFile, currentUserId, addOptimisticMediaMessage]);
+
+  const addOptimisticMediaMessage = useCallback((msg: Message) => {
+    addOptimisticMessage(msg.recipientId, msg);
+    setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  }, [addOptimisticMessage]);
+
+  const showAttachmentOptions = useCallback(() => {
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Cancel', 'Photo Library', 'Take Photo', 'Send File'],
+          cancelButtonIndex: 0,
+        },
+        buttonIndex => {
+          if (buttonIndex === 1) handlePickImage();
+          else if (buttonIndex === 2) handleTakePhoto();
+          else if (buttonIndex === 3) handlePickFile();
+        },
+      );
+    } else {
+      Alert.alert('Send Attachment', 'Choose an option', [
+        { text: 'Photo Library', onPress: handlePickImage },
+        { text: 'Take Photo', onPress: handleTakePhoto },
+        { text: 'Send File', onPress: handlePickFile },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    }
+  }, [handlePickImage, handleTakePhoto, handlePickFile]);
 
   const selectPriority = useCallback((p: MessagePriority) => {
     setPriority(p);
@@ -823,6 +1090,28 @@ export function ChatDetailScreen({
                 : getPriorityColor(priority)
             }
           />
+        </TouchableOpacity>
+
+        {/* Attachment Button */}
+        <TouchableOpacity
+          style={[
+            styles.attachButton,
+            { backgroundColor: theme.colors.background },
+          ]}
+          onPress={showAttachmentOptions}
+          disabled={!isOnline || sendingMedia}
+          activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          {sendingMedia ? (
+            <ActivityIndicator size="small" color={theme.colors.primary} />
+          ) : (
+            <Icon
+              name="attach"
+              size={18}
+              color={isOnline ? theme.colors.primary : theme.colors.textSecondary}
+            />
+          )}
         </TouchableOpacity>
 
         {/* Text Input */}
@@ -1277,5 +1566,52 @@ const styles = StyleSheet.create({
   },
   replyPreviewMessage: {
     fontSize: 13,
+  },
+  attachButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  mediaThumbnail: {
+    width: 200,
+    height: 150,
+    borderRadius: 12,
+    marginBottom: 4,
+  },
+  mediaCaption: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  mediaIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 4,
+    marginBottom: 4,
+  },
+  mediaIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  mediaInfo: {
+    flex: 1,
+  },
+  mediaLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  mediaFileName: {
+    fontSize: 12,
+    marginTop: 1,
+  },
+  mediaDuration: {
+    fontSize: 11,
+    marginTop: 2,
   },
 });

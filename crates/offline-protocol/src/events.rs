@@ -1,6 +1,6 @@
 //! Event types and callbacks.
 
-use offline_protocol_core::{Message, MessageId};
+use offline_protocol_core::{ContentType, MediaMetadata, Message, MessageId};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -190,6 +190,12 @@ pub enum Event {
         /// ID of the message this is replying to (optional).
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to_msg: Option<String>,
+        /// The type of content (text, image, video, etc.).
+        #[serde(default)]
+        content_type: String,
+        /// Media metadata (present for non-text content).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_metadata: Option<MediaMetadata>,
     },
 
     /// A message was successfully delivered (ACK received).
@@ -300,6 +306,23 @@ pub enum Event {
         file_size: u64,
         /// Sender's user ID.
         sender: String,
+        /// The content type of the media (image, video, file, etc.).
+        content_type: String,
+        /// Media metadata from the first chunk (present for typed media).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_metadata: Option<MediaMetadata>,
+        /// Base64-encoded reassembled file data.
+        file_data: String,
+    },
+
+    /// All chunks of a media attachment were enqueued for sending.
+    MediaSent {
+        /// File identifier for tracking.
+        file_id: String,
+        /// The content type of the media.
+        content_type: String,
+        /// Recipient's user ID.
+        recipient: String,
     },
 
     /// A message was deferred due to network conditions.
@@ -703,12 +726,28 @@ impl Event {
         file_name: String,
         file_size: u64,
         sender: String,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
+        file_data: Vec<u8>,
     ) -> Self {
+        use base64::{Engine, engine::general_purpose::STANDARD};
         Self::FileReceived {
             file_id,
             file_name,
             file_size,
             sender,
+            content_type: content_type.to_string(),
+            media_metadata,
+            file_data: STANDARD.encode(&file_data),
+        }
+    }
+
+    /// Creates a MediaSent event.
+    pub fn media_sent(file_id: String, content_type: ContentType, recipient: String) -> Self {
+        Self::MediaSent {
+            file_id,
+            content_type: content_type.to_string(),
+            recipient,
         }
     }
 
@@ -1049,6 +1088,8 @@ impl fmt::Debug for Event {
                 timestamp,
                 lamport_clock,
                 reply_to_msg: _,
+                content_type,
+                media_metadata: _,
             } => f
                 .debug_struct("MessageReceived")
                 .field("message_id", message_id)
@@ -1060,6 +1101,7 @@ impl fmt::Debug for Event {
                 .field("timestamp", timestamp)
                 .field("lamport_clock", lamport_clock)
                 .field("reply_to_msg", &"[REDACTED]")
+                .field("content_type", content_type)
                 .finish(),
             Self::MessageDelivered {
                 message_id,
@@ -1156,12 +1198,27 @@ impl fmt::Debug for Event {
                 file_name,
                 file_size,
                 sender: _,
+                content_type,
+                media_metadata: _,
+                file_data,
             } => f
                 .debug_struct("FileReceived")
                 .field("file_id", file_id)
                 .field("file_name", file_name)
                 .field("file_size", file_size)
                 .field("sender", &"[REDACTED]")
+                .field("content_type", content_type)
+                .field("file_data", &format!("[{} bytes base64]", file_data.len()))
+                .finish(),
+            Self::MediaSent {
+                file_id,
+                content_type,
+                recipient: _,
+            } => f
+                .debug_struct("MediaSent")
+                .field("file_id", file_id)
+                .field("content_type", content_type)
+                .field("recipient", &"[REDACTED]")
                 .finish(),
             Self::MessageDeferred {
                 message_id,
@@ -1570,6 +1627,9 @@ mod tests {
             "photo.jpg".to_string(),
             1024000,
             "alice".to_string(),
+            ContentType::Image,
+            None,
+            vec![1, 2, 3, 4],
         );
 
         match event {
@@ -1578,11 +1638,16 @@ mod tests {
                 file_name,
                 file_size,
                 sender,
+                content_type,
+                file_data,
+                ..
             } => {
                 assert_eq!(file_id, "file123");
                 assert_eq!(file_name, "photo.jpg");
                 assert_eq!(file_size, 1024000);
                 assert_eq!(sender, "alice");
+                assert_eq!(content_type, "image");
+                assert!(!file_data.is_empty());
             }
             _ => panic!("Wrong event type"),
         }

@@ -8,6 +8,7 @@ import {
   DiagnosticEvent,
   FileProgressEvent,
   FileReceivedEvent,
+  MediaSentEvent,
   MAX_EVENT_HISTORY,
   PROTOCOL_START_DELAY_MS,
 } from '@offline-protocol/mesh-sdk';
@@ -68,6 +69,10 @@ interface UseOfflineProtocolReturn {
   // Re-export from useFileTransfer
   fileTransfers: ReturnType<typeof useFileTransfer>['fileTransfers'];
   sendFile: ReturnType<typeof useFileTransfer>['sendFile'];
+  sendMedia: ReturnType<typeof useFileTransfer>['sendMedia'];
+  sendImage: ReturnType<typeof useFileTransfer>['sendImage'];
+  sendVoiceNote: ReturnType<typeof useFileTransfer>['sendVoiceNote'];
+  sendVideo: ReturnType<typeof useFileTransfer>['sendVideo'];
   cancelFileTransfer: ReturnType<typeof useFileTransfer>['cancelFileTransfer'];
 }
 
@@ -173,6 +178,8 @@ export function useOfflineProtocol(
           fileTransfer.handleFileProgress(annotatedEvent as FileProgressEvent);
         } else if (annotatedEvent.type === 'file_received') {
           fileTransfer.handleFileReceived(annotatedEvent as FileReceivedEvent);
+        } else if (annotatedEvent.type === 'media_sent') {
+          fileTransfer.handleMediaSent(annotatedEvent as MediaSentEvent);
         }
 
         setEvents(prev => {
@@ -415,6 +422,10 @@ export function useOfflineProtocol(
     refreshRuntimeState,
     fileTransfers: fileTransfer.fileTransfers,
     sendFile: fileTransfer.sendFile,
+    sendMedia: fileTransfer.sendMedia,
+    sendImage: fileTransfer.sendImage,
+    sendVoiceNote: fileTransfer.sendVoiceNote,
+    sendVideo: fileTransfer.sendVideo,
     cancelFileTransfer: fileTransfer.cancelFileTransfer,
   };
 }

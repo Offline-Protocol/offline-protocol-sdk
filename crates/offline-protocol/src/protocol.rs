@@ -1,6 +1,7 @@
 //! Main protocol engine.
 
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
+use crate::file_transfer::{FileChunk, FileTransferManager};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsEventRateLimiter, MlsOperationContext,
     NoopMlsEventEmitter,
@@ -11,7 +12,8 @@ use crate::events::DecryptionFailureCode;
 use crate::{EstablishmentState, Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
-    AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL,
+    AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority, UserId,
+    TTL,
 };
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{
@@ -515,6 +517,13 @@ pub struct OfflineProtocol {
     /// Per-instance secret used to derive non-reversible opaque telemetry IDs.
     #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     mls_observability_secret: [u8; 16],
+
+    /// File transfer manager for chunking outbound and reassembling inbound media.
+    file_transfer_manager: FileTransferManager,
+
+    /// Stashed (content_type, media_metadata) from chunk-0 of incoming file transfers,
+    /// used to populate the FileReceived event once all chunks arrive.
+    pending_media_metadata: HashMap<String, (ContentType, Option<MediaMetadata>)>,
 }
 
 impl OfflineProtocol {
@@ -569,6 +578,8 @@ impl OfflineProtocol {
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
             mls_observability_secret: *uuid::Uuid::new_v4().as_bytes(),
+            file_transfer_manager: FileTransferManager::new(),
+            pending_media_metadata: HashMap::new(),
             config,
         })
     }
@@ -1236,6 +1247,220 @@ impl OfflineProtocol {
                     "Send failed (message {} deferred for retry): {}",
                     message.id, err
                 )))
+            }
+        }
+    }
+
+    /// Sends a media attachment (image, video, audio, file, etc.) to a recipient.
+    ///
+    /// The file data is chunked and each chunk is sent as an individual message
+    /// with `content_type: FileChunk`. The first chunk carries the full
+    /// `MediaMetadata` so the receiver can display a preview before all chunks
+    /// arrive. Individual chunk messages do NOT request ACKs; only the
+    /// reassembled file triggers a `FileReceived` event on the receiver.
+    ///
+    /// Returns a `file_id` that can be used to track progress or cancel.
+    pub fn send_media(
+        &mut self,
+        recipient: impl Into<String>,
+        file_data: Vec<u8>,
+        file_name: impl Into<String>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
+    ) -> Result<String> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let recipient_str: String = recipient.into();
+        let file_name_str: String = file_name.into();
+
+        let file_id = format!(
+            "file_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            &file_name_str,
+        );
+
+        let chunks = self
+            .file_transfer_manager
+            .chunk_file(file_id.clone(), file_name_str, file_data)?;
+
+        let total_chunks = chunks.len() as u32;
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let chunk_json = chunk
+                .to_json()
+                .map_err(|e| Error::Other(format!("Failed to serialize file chunk: {}", e)))?;
+
+            let meta_for_chunk = if index == 0 {
+                media_metadata.clone()
+            } else {
+                None
+            };
+
+            let message = self.create_media_message(
+                &recipient_str,
+                chunk_json,
+                ContentType::FileChunk,
+                meta_for_chunk,
+            )?;
+
+            let previous_transport = self.transport_manager.current_transport();
+            let send_result = self.transport_manager.send(&message);
+            let current_transport = self.transport_manager.current_transport();
+
+            match send_result {
+                Ok(()) => {
+                    self.handle_send_success(&message, current_transport)?;
+                    self.emit_transport_switch_event(previous_transport, current_transport)?;
+                }
+                Err(err) => {
+                    self.handle_send_failure(
+                        &message,
+                        current_transport.or(previous_transport),
+                    )?;
+                    warn!(
+                        file_id = %file_id,
+                        chunk_index = index,
+                        error = %err,
+                        "File chunk send failed, message deferred"
+                    );
+                }
+            }
+
+            // Emit progress after each chunk
+            let chunks_sent = (index as u32) + 1;
+            let state = lock_shared_state(&self.shared_state)?;
+            state.emit_event(Event::file_progress(
+                file_id.clone(),
+                chunks_sent,
+                total_chunks,
+            ));
+            drop(state);
+        }
+
+        // Emit a MediaSent event so the app knows the file was enqueued
+        let state = lock_shared_state(&self.shared_state)?;
+        state.emit_event(Event::media_sent(
+            file_id.clone(),
+            content_type,
+            recipient_str,
+        ));
+        drop(state);
+
+        Ok(file_id)
+    }
+
+    /// Creates a message carrying media content (file chunks, etc.).
+    ///
+    /// Like `create_message` but sets `content_type`, `media_metadata`, marks
+    /// the message as internet-preferred via metadata, and disables per-chunk ACKs.
+    fn create_media_message(
+        &mut self,
+        recipient: &str,
+        content: impl Into<String>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
+    ) -> Result<Message> {
+        use crate::constants::{TRANSPORT_PREFERENCE_INTERNET, TRANSPORT_PREFERENCE_KEY};
+
+        let sender = UserId::new(&self.config.user_id)?;
+        let recipient = UserId::new(recipient)?;
+        let app_id = AppId::new(&self.config.app_id)?;
+
+        let clock_value = self.lamport_clock.tick();
+        self.persist_lamport_clock();
+
+        let mut builder = Message::builder(sender, recipient, app_id)
+            .content(content)
+            .content_type(content_type)
+            .priority(MessagePriority::Medium)
+            .ttl(TTL::new(self.config.initial_ttl)?)
+            .lamport_clock(clock_value)
+            .metadata(TRANSPORT_PREFERENCE_KEY, TRANSPORT_PREFERENCE_INTERNET)
+            .requires_ack(false);
+
+        if let Some(meta) = media_metadata {
+            builder = builder.media_metadata(meta);
+        }
+
+        Ok(builder.build())
+    }
+
+    /// Returns a mutable reference to the file transfer manager.
+    pub fn file_transfer_manager_mut(&mut self) -> &mut FileTransferManager {
+        &mut self.file_transfer_manager
+    }
+
+    /// Returns a reference to the file transfer manager.
+    pub fn file_transfer_manager(&self) -> &FileTransferManager {
+        &self.file_transfer_manager
+    }
+
+    /// Processes an incoming file-chunk message: feeds it to the transfer
+    /// manager, emits progress events, and emits `FileReceived` when complete.
+    fn handle_incoming_file_chunk(&mut self, message: &Message) {
+        let chunk = match FileChunk::from_json(&message.content) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    message_id = %message.id,
+                    error = %e,
+                    "Failed to deserialize file chunk, dropping"
+                );
+                return;
+            }
+        };
+
+        let file_id = chunk.file_id.clone();
+        let file_name = chunk.file_name.clone();
+        let file_size = chunk.file_size;
+        let sender = message.sender.as_str().to_string();
+
+        // Chunk 0 carries the media metadata and the original content type;
+        // stash them so we can include them in the FileReceived event.
+        if chunk.chunk_index == 0 {
+            self.pending_media_metadata
+                .insert(file_id.clone(), (message.content_type, message.media_metadata.clone()));
+        }
+
+        if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_progress(
+                    file_id.clone(),
+                    progress.chunks_completed,
+                    progress.total_chunks,
+                ));
+            }
+        }
+
+        if self.file_transfer_manager.is_complete(&file_id) {
+            let file_data = self
+                .file_transfer_manager
+                .finalize_file(&file_id)
+                .unwrap_or_default();
+
+            let (content_type, media_metadata) = self
+                .pending_media_metadata
+                .remove(&file_id)
+                .unwrap_or((ContentType::File, None));
+
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_received(
+                    file_id,
+                    file_name,
+                    file_size,
+                    sender,
+                    content_type,
+                    media_metadata,
+                    file_data,
+                ));
             }
         }
     }
@@ -2595,6 +2820,8 @@ impl OfflineProtocol {
                                     .reply_to_msg
                                     .as_ref()
                                     .map(|id| id.as_str().to_string()),
+                                content_type: decrypted_msg.content_type.to_string(),
+                                media_metadata: decrypted_msg.media_metadata.clone(),
                             };
                             state.emit_event(event);
                         }
@@ -4272,6 +4499,13 @@ impl OfflineProtocol {
                         }
                     }
 
+                    // Route file-chunk messages to the transfer manager instead
+                    // of surfacing them to the app as regular messages.
+                    if message.content_type == ContentType::FileChunk {
+                        self.handle_incoming_file_chunk(&message);
+                        continue;
+                    }
+
                     let event = Event::MessageReceived {
                         message_id: message.id.as_str(),
                         sender: message.sender.as_str().to_string(),
@@ -4285,6 +4519,8 @@ impl OfflineProtocol {
                             .reply_to_msg
                             .as_ref()
                             .map(|id| id.as_str().to_string()),
+                        content_type: message.content_type.to_string(),
+                        media_metadata: message.media_metadata.clone(),
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {

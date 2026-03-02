@@ -1008,15 +1008,56 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun sendFile(filePath: String, recipient: String, fileName: String, promise: Promise) {
+    fun sendFile(recipient: String, fileData: String, fileName: String, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val id = proto.sendFile(recipient, filePath, fileName)
+            val bytes = android.util.Base64.decode(fileData, android.util.Base64.DEFAULT)
+            val id = proto.sendFile(recipient, bytes.map { it.toUByte() }, fileName)
             promise.resolve(id)
         } catch (e: ProtocolException) {
             promise.reject("ERROR_SEND_FILE", "Failed to send file: ${e.message}", e)
         } catch (e: Exception) {
             promise.reject("ERROR_SEND_FILE", "Failed to send file: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun sendMedia(recipient: String, fileData: String, fileName: String, contentType: String, mediaMetadata: ReadableMap?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val bytes = android.util.Base64.decode(fileData, android.util.Base64.DEFAULT)
+            val ct = parseContentType(contentType)
+            val meta = mediaMetadata?.let { map ->
+                MediaMetadata(
+                    mimeType = map.getString("mime_type") ?: "",
+                    fileName = map.getString("file_name") ?: fileName,
+                    fileSize = map.getDouble("file_size").toULong(),
+                    durationMs = if (map.hasKey("duration_ms")) map.getDouble("duration_ms").toULong() else null,
+                    width = if (map.hasKey("width")) map.getInt("width").toUInt() else null,
+                    height = if (map.hasKey("height")) map.getInt("height").toUInt() else null,
+                    thumbnailBase64 = map.getString("thumbnail_base64")
+                )
+            }
+            val id = proto.sendMedia(recipient, bytes.map { it.toUByte() }, fileName, ct, meta)
+            promise.resolve(id)
+        } catch (e: ProtocolException) {
+            promise.reject("ERROR_SEND_MEDIA", "Failed to send media: ${e.message}", e)
+        } catch (e: Exception) {
+            promise.reject("ERROR_SEND_MEDIA", "Failed to send media: ${e.message}", e)
+        }
+    }
+
+    private fun parseContentType(value: String): ContentType {
+        return when (value.lowercase()) {
+            "text" -> ContentType.TEXT
+            "image" -> ContentType.IMAGE
+            "video" -> ContentType.VIDEO
+            "audio" -> ContentType.AUDIO
+            "voice_note" -> ContentType.VOICE_NOTE
+            "video_note" -> ContentType.VIDEO_NOTE
+            "file" -> ContentType.FILE
+            "file_chunk" -> ContentType.FILE_CHUNK
+            else -> ContentType.FILE
         }
     }
 
@@ -1572,14 +1613,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     // ========================================================================
 
     @ReactMethod
-    fun processFileChunk(fileId: String, chunkIndex: Int, data: ReadableArray, promise: Promise) {
+    fun processFileChunk(fileId: String, chunkIndex: Int, totalChunks: Int, fileSize: Double, fileName: String, fileChecksum: String, data: ReadableArray, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             val bytes = mutableListOf<UByte>()
             for (i in 0 until data.size()) {
                 bytes.add(data.getInt(i).toUByte())
             }
-            proto.processFileChunk(fileId, chunkIndex.toUInt(), bytes)
+            proto.processFileChunk(fileId, chunkIndex.toUInt(), totalChunks.toUInt(), fileSize.toULong(), fileName, fileChecksum, bytes)
             promise.resolve(null)
         } catch (e: ProtocolException) {
             promise.reject("ERROR_FILE", "Failed to process file chunk: ${e.message}", e)

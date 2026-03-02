@@ -135,6 +135,40 @@ export interface WifiDirectTransportConfig {
 }
 
 /**
+ * Content type for messages
+ */
+export enum ContentType {
+  Text = 'text',
+  Image = 'image',
+  Video = 'video',
+  Audio = 'audio',
+  VoiceNote = 'voice_note',
+  VideoNote = 'video_note',
+  File = 'file',
+  FileChunk = 'file_chunk',
+}
+
+/**
+ * Media metadata for attachments
+ */
+export interface MediaMetadata {
+  /** MIME type (e.g. "image/jpeg", "video/mp4") */
+  mimeType: string;
+  /** Original file name */
+  fileName: string;
+  /** File size in bytes */
+  fileSize: number;
+  /** Duration in milliseconds (audio/video) */
+  durationMs?: number;
+  /** Width in pixels (images/video) */
+  width?: number;
+  /** Height in pixels (images/video) */
+  height?: number;
+  /** Small base64-encoded thumbnail for preview (< 2 KB) */
+  thumbnailBase64?: string;
+}
+
+/**
  * File transfer configuration
  */
 export interface FileTransferConfig {
@@ -336,15 +370,31 @@ export interface RejectConnectionRequestParams {
 }
 
 /**
- * Parameters for sending a file
+ * Parameters for sending a media attachment
  */
-export interface SendFileParams {
-  /** File path or URI */
-  filePath: string;
+export interface SendMediaParams {
   /** Recipient's user ID */
   recipient: string;
-  /** Optional custom file name */
-  fileName?: string;
+  /** Raw file data as a base64 string (platform reads the file) */
+  fileData: string;
+  /** File name */
+  fileName: string;
+  /** Content type of the media */
+  contentType: ContentType;
+  /** Optional media metadata (dimensions, duration, thumbnail, etc.) */
+  mediaMetadata?: MediaMetadata;
+}
+
+/**
+ * Parameters for sending a file (convenience wrapper around SendMediaParams)
+ */
+export interface SendFileParams {
+  /** Recipient's user ID */
+  recipient: string;
+  /** Raw file data as a base64 string (platform reads the file) */
+  fileData: string;
+  /** File name */
+  fileName: string;
 }
 
 /**
@@ -392,6 +442,18 @@ export interface MessageReceivedEvent extends BaseEvent {
   lamport_clock: number;
   /** Whether the message was encrypted (auto-decrypted) */
   encrypted?: boolean;
+  /** The type of content (text, image, video, voice_note, etc.). */
+  content_type?: string;
+  /** Media metadata (present for non-text content). */
+  media_metadata?: {
+    mime_type?: string;
+    file_name?: string;
+    file_size?: number;
+    duration_ms?: number;
+    width?: number;
+    height?: number;
+    thumbnail_base64?: string;
+  };
 }
 
 /**
@@ -491,6 +553,30 @@ export interface FileReceivedEvent extends BaseEvent {
   file_name: string;
   file_size: number;
   sender: string;
+  /** The content type of the media (image, video, file, etc.). */
+  content_type: string;
+  /** Media metadata from the sender. */
+  media_metadata?: {
+    mime_type?: string;
+    file_name?: string;
+    file_size?: number;
+    duration_ms?: number;
+    width?: number;
+    height?: number;
+    thumbnail_base64?: string;
+  };
+  /** Base64-encoded reassembled file data. */
+  file_data: string;
+}
+
+/**
+ * Media sent event - all chunks enqueued for sending
+ */
+export interface MediaSentEvent extends BaseEvent {
+  type: 'media_sent';
+  file_id: string;
+  content_type: string;
+  recipient: string;
 }
 
 /**
@@ -790,6 +876,7 @@ export type ProtocolEvent =
   | NetworkMetricsEvent
   | FileProgressEvent
   | FileReceivedEvent
+  | MediaSentEvent
   | DiagnosticEvent
   | SecureSessionEstablishedEvent
   | SecureSessionFailedEvent

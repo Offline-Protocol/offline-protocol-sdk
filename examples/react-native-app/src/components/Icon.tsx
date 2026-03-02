@@ -74,6 +74,16 @@ const ICON_MAP: Record<string, string> = {
   'location': '📍',
   'time': '⏱️',
   
+  // Media & Attachments
+  'attach': '📎',
+  'image': '🖼️',
+  'mic': '🎙️',
+  'document': '📄',
+  'film': '🎬',
+  'musical-note': '🎵',
+  'camera': '📷',
+  'close': '✕',
+
   // Default fallback
   'default': '•',
 };

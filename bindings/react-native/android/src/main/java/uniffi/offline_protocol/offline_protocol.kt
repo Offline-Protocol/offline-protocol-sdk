@@ -938,6 +938,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
@@ -1208,7 +1210,7 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(`ptr`: Long,`fileId`: RustBuffer.ByValue,`chunkIndex`: Int,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(`ptr`: Long,`fileId`: RustBuffer.ByValue,`chunkIndex`: Int,`totalChunks`: Int,`fileSize`: Long,`fileName`: RustBuffer.ByValue,`fileChecksum`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1226,7 +1228,9 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`pt
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`mediaMetadata`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1670,7 +1674,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 16160.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 54114.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 46065.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217.toShort()) {
@@ -1697,7 +1701,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 33006.toShort()) {
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 11824.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 42952.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559.toShort()) {
@@ -2479,7 +2486,7 @@ public interface OfflineProtocolInterface {
     
     fun `process`()
     
-    fun `processFileChunk`(`fileId`: kotlin.String, `chunkIndex`: kotlin.UInt, `data`: List<kotlin.UByte>)
+    fun `processFileChunk`(`fileId`: kotlin.String, `chunkIndex`: kotlin.UInt, `totalChunks`: kotlin.UInt, `fileSize`: kotlin.ULong, `fileName`: kotlin.String, `fileChecksum`: kotlin.String, `data`: List<kotlin.UByte>)
     
     fun `receiveMessage`(): kotlin.String?
     
@@ -2497,7 +2504,9 @@ public interface OfflineProtocolInterface {
     
     fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
     
-    fun `sendFile`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String
+    fun `sendFile`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String): kotlin.String
+    
+    fun `sendMedia`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `mediaMetadata`: MediaMetadata?): kotlin.String
     
     fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String
     
@@ -3836,13 +3845,13 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `processFileChunk`(`fileId`: kotlin.String, `chunkIndex`: kotlin.UInt, `data`: List<kotlin.UByte>)
+    @Throws(ProtocolException::class)override fun `processFileChunk`(`fileId`: kotlin.String, `chunkIndex`: kotlin.UInt, `totalChunks`: kotlin.UInt, `fileSize`: kotlin.ULong, `fileName`: kotlin.String, `fileChecksum`: kotlin.String, `data`: List<kotlin.UByte>)
         = 
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(
         it,
-        FfiConverterString.lower(`fileId`),FfiConverterUInt.lower(`chunkIndex`),FfiConverterSequenceUByte.lower(`data`),_status)
+        FfiConverterString.lower(`fileId`),FfiConverterUInt.lower(`chunkIndex`),FfiConverterUInt.lower(`totalChunks`),FfiConverterULong.lower(`fileSize`),FfiConverterString.lower(`fileName`),FfiConverterString.lower(`fileChecksum`),FfiConverterSequenceUByte.lower(`data`),_status)
 }
     }
     
@@ -3954,13 +3963,27 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `sendFile`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String {
+    @Throws(ProtocolException::class)override fun `sendFile`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`filePath`),FfiConverterString.lower(`fileName`),_status)
+        FfiConverterString.lower(`recipient`),FfiConverterSequenceUByte.lower(`fileData`),FfiConverterString.lower(`fileName`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `sendMedia`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `mediaMetadata`: MediaMetadata?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(
+        it,
+        FfiConverterString.lower(`recipient`),FfiConverterSequenceUByte.lower(`fileData`),FfiConverterString.lower(`fileName`),FfiConverterTypeContentType.lower(`contentType`),FfiConverterOptionalTypeMediaMetadata.lower(`mediaMetadata`),_status)
 }
     }
     )
@@ -4750,6 +4773,67 @@ public object FfiConverterTypeInternetMessage: FfiConverterRustBuffer<InternetMe
             FfiConverterString.write(value.`recipientId`, buf)
             FfiConverterSequenceUByte.write(value.`data`, buf)
             FfiConverterOptionalString.write(value.`replyToMsg`, buf)
+    }
+}
+
+
+
+data class MediaMetadata (
+    var `mimeType`: kotlin.String
+    , 
+    var `fileName`: kotlin.String
+    , 
+    var `fileSize`: kotlin.ULong
+    , 
+    var `durationMs`: kotlin.ULong?
+    , 
+    var `width`: kotlin.UInt?
+    , 
+    var `height`: kotlin.UInt?
+    , 
+    var `thumbnailBase64`: kotlin.String?
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMediaMetadata: FfiConverterRustBuffer<MediaMetadata> {
+    override fun read(buf: ByteBuffer): MediaMetadata {
+        return MediaMetadata(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MediaMetadata) = (
+            FfiConverterString.allocationSize(value.`mimeType`) +
+            FfiConverterString.allocationSize(value.`fileName`) +
+            FfiConverterULong.allocationSize(value.`fileSize`) +
+            FfiConverterOptionalULong.allocationSize(value.`durationMs`) +
+            FfiConverterOptionalUInt.allocationSize(value.`width`) +
+            FfiConverterOptionalUInt.allocationSize(value.`height`) +
+            FfiConverterOptionalString.allocationSize(value.`thumbnailBase64`)
+    )
+
+    override fun write(value: MediaMetadata, buf: ByteBuffer) {
+            FfiConverterString.write(value.`mimeType`, buf)
+            FfiConverterString.write(value.`fileName`, buf)
+            FfiConverterULong.write(value.`fileSize`, buf)
+            FfiConverterOptionalULong.write(value.`durationMs`, buf)
+            FfiConverterOptionalUInt.write(value.`width`, buf)
+            FfiConverterOptionalUInt.write(value.`height`, buf)
+            FfiConverterOptionalString.write(value.`thumbnailBase64`, buf)
     }
 }
 
@@ -5807,6 +5891,42 @@ public object FfiConverterTypeWifiDirectMessage: FfiConverterRustBuffer<WifiDire
 
 
 
+enum class ContentType {
+    
+    TEXT,
+    IMAGE,
+    VIDEO,
+    AUDIO,
+    VOICE_NOTE,
+    VIDEO_NOTE,
+    FILE,
+    FILE_CHUNK;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeContentType: FfiConverterRustBuffer<ContentType> {
+    override fun read(buf: ByteBuffer) = try {
+        ContentType.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ContentType) = 4UL
+
+    override fun write(value: ContentType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class EstablishmentState {
     
     NO_KEY_PACKAGE,
@@ -6552,6 +6672,38 @@ public object FfiConverterOptionalShort: FfiConverterRustBuffer<kotlin.Short?> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
     override fun read(buf: ByteBuffer): kotlin.ULong? {
         if (buf.get().toInt() == 0) {
@@ -6702,6 +6854,38 @@ public object FfiConverterOptionalTypeInternetMessage: FfiConverterRustBuffer<In
         } else {
             buf.put(1)
             FfiConverterTypeInternetMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMediaMetadata: FfiConverterRustBuffer<MediaMetadata?> {
+    override fun read(buf: ByteBuffer): MediaMetadata? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMediaMetadata.read(buf)
+    }
+
+    override fun allocationSize(value: MediaMetadata?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMediaMetadata.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MediaMetadata?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMediaMetadata.write(value, buf)
         }
     }
 }

@@ -12,7 +12,10 @@ use offline_protocol::{
     OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
     PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
 };
-use offline_protocol_core::MessagePriority as CorePriority;
+use offline_protocol_core::{
+    ContentType as CoreContentType, MediaMetadata as CoreMediaMetadata,
+    MessagePriority as CorePriority,
+};
 use offline_protocol_mls::{
     EncryptedMessage as CoreEncryptedMessage, GroupId as CoreGroupId, GroupInfo as CoreGroupInfo,
     KeyPackageBundle as CoreKeyPackageBundle, MlsManager as CoreMlsManager,
@@ -340,6 +343,60 @@ pub struct TransportMetrics {
     pub bytes_received: u32,
     pub error_rate: f32,
     pub avg_latency_ms: u32,
+}
+
+/// Content type for messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentType {
+    Text,
+    Image,
+    Video,
+    Audio,
+    VoiceNote,
+    VideoNote,
+    File,
+    FileChunk,
+}
+
+impl From<ContentType> for CoreContentType {
+    fn from(ct: ContentType) -> Self {
+        match ct {
+            ContentType::Text => CoreContentType::Text,
+            ContentType::Image => CoreContentType::Image,
+            ContentType::Video => CoreContentType::Video,
+            ContentType::Audio => CoreContentType::Audio,
+            ContentType::VoiceNote => CoreContentType::VoiceNote,
+            ContentType::VideoNote => CoreContentType::VideoNote,
+            ContentType::File => CoreContentType::File,
+            ContentType::FileChunk => CoreContentType::FileChunk,
+        }
+    }
+}
+
+/// Media metadata for attachments.
+#[derive(Debug, Clone)]
+pub struct MediaMetadata {
+    pub mime_type: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub duration_ms: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub thumbnail_base64: Option<String>,
+}
+
+impl From<MediaMetadata> for CoreMediaMetadata {
+    fn from(m: MediaMetadata) -> Self {
+        CoreMediaMetadata {
+            mime_type: m.mime_type,
+            file_name: m.file_name,
+            file_size: m.file_size,
+            duration_ms: m.duration_ms,
+            width: m.width,
+            height: m.height,
+            thumbnail_base64: m.thumbnail_base64,
+        }
+    }
 }
 
 /// File transfer progress
@@ -1910,60 +1967,69 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // FILE TRANSFER
+    // MEDIA AND FILE TRANSFER
     // ========================================================================
 
-    /// Sends a file
-    pub fn send_file(
+    /// Sends a media attachment through the protocol.
+    ///
+    /// The platform reads the file and passes the raw bytes. The SDK chunks
+    /// the data, sends each chunk as a message (internet-preferred), and
+    /// emits progress events.
+    pub fn send_media(
         &self,
-        _recipient: String,
-        _file_path: String,
+        recipient: String,
+        file_data: Vec<u8>,
         file_name: String,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
     ) -> Result<String, ProtocolError> {
-        // Generate file ID
-        let file_id = format!(
-            "file_{}_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0),
-            file_name
-        );
-
-        // Note: Actual file reading and chunking needs to be done by the platform
-        // because file I/O is platform-specific. This method just generates the ID
-        // and prepares tracking. Use FileTransferManager.chunk_file() on platform side.
-
-        Ok(file_id)
+        let mut protocol = self.inner.lock().unwrap();
+        let core_meta = media_metadata.map(CoreMediaMetadata::from);
+        protocol
+            .send_media(recipient, file_data, file_name, content_type.into(), core_meta)
+            .map_err(|e| e.into())
     }
 
-    /// Processes a file chunk
+    /// Convenience: sends a generic file (delegates to send_media with ContentType::File).
+    pub fn send_file(
+        &self,
+        recipient: String,
+        file_data: Vec<u8>,
+        file_name: String,
+    ) -> Result<String, ProtocolError> {
+        self.send_media(recipient, file_data, file_name, ContentType::File, None)
+    }
+
+    /// Processes a received file chunk (manual path, for platforms handling
+    /// their own chunk routing outside the protocol receive loop).
     pub fn process_file_chunk(
         &self,
         file_id: String,
         chunk_index: u32,
+        total_chunks: u32,
+        file_size: u64,
+        file_name: String,
+        file_checksum: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
         let mut file_manager = self.file_manager.lock().unwrap();
 
-        // Create a minimal FileChunk for processing
         use offline_protocol::file_transfer::FileChunk;
         let chunk = FileChunk {
-            file_id: file_id.clone(),
-            file_name: "unknown".to_string(), // Will be updated by first chunk
-            file_size: 0,                     // Will be updated by first chunk
-            total_chunks: 1,                  // Will be updated by first chunk
+            file_id,
+            file_name,
+            file_size,
+            total_chunks,
             chunk_index,
             chunk_data: data,
-            file_checksum: String::new(),
+            file_checksum,
         };
 
         file_manager.process_chunk(chunk);
-
         Ok(())
     }
 
-    /// Gets file transfer progress
+    /// Gets file transfer progress.
     pub fn get_file_progress(&self, file_id: String) -> Option<FileProgress> {
         let file_manager = self.file_manager.lock().unwrap();
         let core_progress = file_manager.get_progress(&file_id)?;
@@ -1976,7 +2042,7 @@ impl OfflineProtocol {
         })
     }
 
-    /// Finalizes a file transfer
+    /// Finalizes a file transfer, returning the reassembled bytes.
     pub fn finalize_file(&self, file_id: String) -> Result<(), ProtocolError> {
         let mut file_manager = self.file_manager.lock().unwrap();
         file_manager
@@ -1985,7 +2051,7 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// Cancels a file transfer
+    /// Cancels an active file transfer.
     pub fn cancel_file_transfer(&self, file_id: String) -> Result<(), ProtocolError> {
         let mut file_manager = self.file_manager.lock().unwrap();
         file_manager.cancel_transfer(&file_id);

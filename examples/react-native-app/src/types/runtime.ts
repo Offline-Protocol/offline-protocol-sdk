@@ -8,6 +8,7 @@ export type NativeRelayPriority = 'low' | 'medium' | 'high';
 export interface FileTransferState {
   fileId: string;
   fileName: string;
+  contentType?: string;
   direction: 'outbound' | 'inbound';
   percentage: number;
   chunksCompleted: number;

@@ -471,6 +471,15 @@ impl TransportSelector {
         let reliability_score = self.calculate_reliability_score(transport_type, metrics);
         let load_score = self.calculate_load_score(transport_type, metrics);
 
+        // Per-message transport preference: when the message metadata contains
+        // `transport_preference = "internet"`, strongly boost Internet and
+        // penalise BLE (too slow for large media payloads).
+        let prefers_internet = message
+            .metadata
+            .get("transport_preference")
+            .map(|v| v == "internet")
+            .unwrap_or(false);
+
         // Weighted combination based on DORS specification.
         //
         // Score ranges (each sub-score is 0–100):
@@ -484,6 +493,14 @@ impl TransportSelector {
         // switch hysteresis (10). Increasing hysteresis beyond ~20 may
         // prevent DORS from switching *to* Internet even when prefer_online
         // is set.
+        //
+        // When the message requests internet preference (media/file chunks),
+        // the Internet baseline is raised by MEDIA_INTERNET_BONUS (50) and
+        // BLE is penalised by MEDIA_BLE_PENALTY (40) to make Internet the
+        // overwhelming favourite while still allowing WiFi Direct as fallback.
+        const MEDIA_INTERNET_BONUS: f32 = 50.0;
+        const MEDIA_BLE_PENALTY: f32 = 40.0;
+
         let total = match transport_type {
             TransportType::Internet => {
                 let baseline = if self.config.prefer_online {
@@ -491,7 +508,13 @@ impl TransportSelector {
                 } else {
                     10.0
                 };
+                let media_bonus = if prefers_internet {
+                    MEDIA_INTERNET_BONUS
+                } else {
+                    0.0
+                };
                 baseline
+                    + media_bonus
                     + (bandwidth_score * 0.35)
                     + (reliability_score * 0.3)
                     + (congestion_score * 0.15)
@@ -499,12 +522,18 @@ impl TransportSelector {
                     + (load_score * 0.1)
             }
             TransportType::BLE => {
-                (signal_score * 0.3)
+                let media_penalty = if prefers_internet {
+                    MEDIA_BLE_PENALTY
+                } else {
+                    0.0
+                };
+                ((signal_score * 0.3)
                     + (energy_score * 0.3)
                     + (congestion_score * 0.15)
                     + (proximity_score * 0.15)
                     + (reliability_score * 0.05)
-                    + (load_score * 0.05)
+                    + (load_score * 0.05))
+                    - media_penalty
             }
             TransportType::WiFiDirect => {
                 (bandwidth_score * 0.35)

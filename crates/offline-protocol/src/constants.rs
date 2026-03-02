@@ -36,3 +36,9 @@ pub const HOP_COUNT_EMA_ALPHA: f32 = 0.2;
 
 /// Default chunk size for file transfers (32 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 32 * 1024;
+
+/// Metadata key indicating preferred transport for a message.
+pub const TRANSPORT_PREFERENCE_KEY: &str = "transport_preference";
+
+/// Transport preference value: prefer internet transport.
+pub const TRANSPORT_PREFERENCE_INTERNET: &str = "internet";
