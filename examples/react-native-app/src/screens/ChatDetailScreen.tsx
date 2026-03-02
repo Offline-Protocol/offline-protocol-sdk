@@ -17,7 +17,12 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
-import { pick, types as docTypes } from 'react-native-document-picker';
+import {
+  pick,
+  types as docTypes,
+  errorCodes,
+  isErrorWithCode,
+} from '@react-native-documents/picker';
 import RNFS from 'react-native-fs';
 import { Icon } from '../components/Icon';
 import { useTheme } from '../hooks/useTheme';
@@ -679,7 +684,7 @@ export function ChatDetailScreen({
       if (!result?.uri) return;
       setSendingMedia(true);
       const base64 = await RNFS.readFile(result.uri, 'base64');
-      const fileName = result.name || `file_${Date.now()}`;
+      const fileName = result.name ?? `file_${Date.now()}`;
       await sendFile({ recipient: peerId, fileData: base64, fileName });
       addOptimisticMediaMessage({
         id: `media_${Date.now()}`,
@@ -692,13 +697,13 @@ export function ChatDetailScreen({
         isFromMe: true,
         contentType: 'file',
         mediaMetadata: {
-          mimeType: result.type || 'application/octet-stream',
+          mimeType: result.type ?? 'application/octet-stream',
           fileName,
-          fileSize: result.size || 0,
+          fileSize: result.size ?? 0,
         },
       });
-    } catch (err: any) {
-      if (err?.code !== 'DOCUMENT_PICKER_CANCELED') {
+    } catch (err: unknown) {
+      if (!(isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED)) {
         Alert.alert('Failed', 'Could not send file.');
       }
     } finally {

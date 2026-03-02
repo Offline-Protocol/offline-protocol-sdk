@@ -10,7 +10,12 @@ import {
   Alert,
   Platform,
 } from 'react-native';
-import { pick, types as docTypes } from 'react-native-document-picker';
+import {
+  pick,
+  types as docTypes,
+  errorCodes,
+  isErrorWithCode,
+} from '@react-native-documents/picker';
 import RNFS from 'react-native-fs';
 import type {
   SendFileParams,
@@ -200,12 +205,13 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
         ...prev,
         fileData: base64,
         fileUri: result.uri,
-        fileName: result.name || prev.fileName,
+        fileName: result.name ?? prev.fileName,
       }));
-    } catch (err: any) {
-      if (err?.code !== 'DOCUMENT_PICKER_CANCELED') {
-        Alert.alert('Error', 'Failed to read file');
+    } catch (err: unknown) {
+      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
+        return;
       }
+      Alert.alert('Error', 'Failed to read file');
     }
   }, []);
 
