@@ -47,6 +47,102 @@ impl fmt::Display for MessageId {
     }
 }
 
+/// The type of content carried in a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentType {
+    /// Plain text message.
+    Text,
+    /// Image attachment (JPEG, PNG, etc.).
+    Image,
+    /// Video attachment.
+    Video,
+    /// Audio attachment.
+    Audio,
+    /// Short voice recording.
+    VoiceNote,
+    /// Short video recording.
+    VideoNote,
+    /// Generic file attachment.
+    File,
+    /// Internal: a chunk belonging to a multi-part file transfer.
+    FileChunk,
+}
+
+impl Default for ContentType {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+impl ContentType {
+    /// Returns `true` for types that carry binary media data.
+    pub fn is_media(&self) -> bool {
+        !matches!(self, Self::Text)
+    }
+
+    /// Parses a content type from its string representation.
+    ///
+    /// Falls back to `File` for unrecognised strings.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "text" => Self::Text,
+            "image" => Self::Image,
+            "video" => Self::Video,
+            "audio" => Self::Audio,
+            "voice_note" => Self::VoiceNote,
+            "video_note" => Self::VideoNote,
+            "file" => Self::File,
+            "file_chunk" => Self::FileChunk,
+            _ => Self::File,
+        }
+    }
+}
+
+impl fmt::Display for ContentType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text => write!(f, "text"),
+            Self::Image => write!(f, "image"),
+            Self::Video => write!(f, "video"),
+            Self::Audio => write!(f, "audio"),
+            Self::VoiceNote => write!(f, "voice_note"),
+            Self::VideoNote => write!(f, "video_note"),
+            Self::File => write!(f, "file"),
+            Self::FileChunk => write!(f, "file_chunk"),
+        }
+    }
+}
+
+/// Metadata describing a media attachment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaMetadata {
+    /// MIME type (e.g. "image/jpeg", "video/mp4").
+    pub mime_type: String,
+
+    /// Original file name.
+    pub file_name: String,
+
+    /// File size in bytes.
+    pub file_size: u64,
+
+    /// Duration in milliseconds (audio/video/voice-note/video-note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+
+    /// Width in pixels (images and video).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+
+    /// Height in pixels (images and video).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+
+    /// Small base64-encoded thumbnail (< 2 KB) for preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_base64: Option<String>,
+}
+
 /// Message priority levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -110,8 +206,16 @@ pub struct Message {
     #[serde(default)]
     pub lamport_clock: LamportClock,
 
-    /// Message content (text, JSON, etc.).
+    /// The type of content this message carries.
+    #[serde(default)]
+    pub content_type: ContentType,
+
+    /// Message content (text, JSON-serialized file chunk, etc.).
     pub content: String,
+
+    /// Media metadata (present for non-text content types).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_metadata: Option<MediaMetadata>,
 
     /// Optional metadata for application-specific use.
     #[serde(default)]
@@ -155,7 +259,9 @@ impl Message {
             hop_count: HopCount::new(),
             timestamp: Timestamp::now(),
             lamport_clock: LamportClock::default(),
+            content_type: ContentType::default(),
             content: content.into(),
+            media_metadata: None,
             metadata: HashMap::new(),
             requires_ack: true,
             reply_to_msg: None,
@@ -221,7 +327,9 @@ pub struct MessageBuilder {
     sender: UserId,
     recipient: UserId,
     app_id: AppId,
+    content_type: ContentType,
     content: String,
+    media_metadata: Option<MediaMetadata>,
     priority: MessagePriority,
     ttl: TTL,
     lamport_clock: LamportClock,
@@ -237,7 +345,9 @@ impl MessageBuilder {
             sender,
             recipient,
             app_id,
+            content_type: ContentType::default(),
             content: String::new(),
+            media_metadata: None,
             priority: MessagePriority::default(),
             ttl: TTL::default(),
             lamport_clock: LamportClock::default(),
@@ -247,9 +357,21 @@ impl MessageBuilder {
         }
     }
 
+    /// Sets the content type.
+    pub fn content_type(mut self, content_type: ContentType) -> Self {
+        self.content_type = content_type;
+        self
+    }
+
     /// Sets the message content.
     pub fn content(mut self, content: impl Into<String>) -> Self {
         self.content = content.into();
+        self
+    }
+
+    /// Sets the media metadata.
+    pub fn media_metadata(mut self, meta: MediaMetadata) -> Self {
+        self.media_metadata = Some(meta);
         self
     }
 
@@ -301,7 +423,9 @@ impl MessageBuilder {
             hop_count: HopCount::new(),
             timestamp: Timestamp::now(),
             lamport_clock: self.lamport_clock,
+            content_type: self.content_type,
             content: self.content,
+            media_metadata: self.media_metadata,
             metadata: self.metadata,
             requires_ack: self.requires_ack,
             reply_to_msg: self.reply_to_msg,

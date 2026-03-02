@@ -8,11 +8,14 @@
 
 use offline_protocol::{
     EstablishmentState as CoreEstablishmentState,
-    file_transfer::FileTransferManager, Event as CoreEvent, NetworkVisualizer,
+    Event as CoreEvent, NetworkVisualizer,
     OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
     PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
 };
-use offline_protocol_core::MessagePriority as CorePriority;
+use offline_protocol_core::{
+    ContentType as CoreContentType, MediaMetadata as CoreMediaMetadata,
+    MessagePriority as CorePriority,
+};
 use offline_protocol_mls::{
     EncryptedMessage as CoreEncryptedMessage, GroupId as CoreGroupId, GroupInfo as CoreGroupInfo,
     KeyPackageBundle as CoreKeyPackageBundle, MlsManager as CoreMlsManager,
@@ -340,6 +343,60 @@ pub struct TransportMetrics {
     pub bytes_received: u32,
     pub error_rate: f32,
     pub avg_latency_ms: u32,
+}
+
+/// Content type for messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentType {
+    Text,
+    Image,
+    Video,
+    Audio,
+    VoiceNote,
+    VideoNote,
+    File,
+    FileChunk,
+}
+
+impl From<ContentType> for CoreContentType {
+    fn from(ct: ContentType) -> Self {
+        match ct {
+            ContentType::Text => CoreContentType::Text,
+            ContentType::Image => CoreContentType::Image,
+            ContentType::Video => CoreContentType::Video,
+            ContentType::Audio => CoreContentType::Audio,
+            ContentType::VoiceNote => CoreContentType::VoiceNote,
+            ContentType::VideoNote => CoreContentType::VideoNote,
+            ContentType::File => CoreContentType::File,
+            ContentType::FileChunk => CoreContentType::FileChunk,
+        }
+    }
+}
+
+/// Media metadata for attachments.
+#[derive(Debug, Clone)]
+pub struct MediaMetadata {
+    pub mime_type: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub duration_ms: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub thumbnail_base64: Option<String>,
+}
+
+impl From<MediaMetadata> for CoreMediaMetadata {
+    fn from(m: MediaMetadata) -> Self {
+        CoreMediaMetadata {
+            mime_type: m.mime_type,
+            file_name: m.file_name,
+            file_size: m.file_size,
+            duration_ms: m.duration_ms,
+            width: m.width,
+            height: m.height,
+            thumbnail_base64: m.thumbnail_base64,
+        }
+    }
 }
 
 /// File transfer progress
@@ -820,7 +877,6 @@ pub struct OfflineProtocol {
     ble_state: Mutex<BleState>,
     internet_state: Mutex<InternetState>,
     wifi_direct_state: Mutex<WifiDirectState>,
-    file_manager: Mutex<FileTransferManager>,
     visualizer: Mutex<NetworkVisualizer>,
     path_selector: Mutex<PathSelector>,
     battery_level: RwLock<Option<u8>>,
@@ -908,7 +964,6 @@ impl OfflineProtocol {
                 is_connected: false,
                 connected_peer: None,
             }),
-            file_manager: Mutex::new(FileTransferManager::new()),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
             path_selector: Mutex::new(PathSelector::new()),
             battery_level: RwLock::new(None),
@@ -1301,36 +1356,24 @@ impl OfflineProtocol {
         _sender_id: String,
         fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // Process the fragment first
+        let mut protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
         {
-            let protocol = self.inner.lock().unwrap();
-            if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
-            {
-                let transport = transport_arc.lock().unwrap();
-
-                // Safe downcast to BleTransport using Any trait
-                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                    // Process the fragment
-                    ble_transport.on_fragment_received(fragment).map_err(|e| {
-                        ProtocolError::Other(format!("Fragment processing failed: {}", e))
-                    })?;
-                } else {
-                    return Err(ProtocolError::Other(
-                        "BLE transport not available or wrong type".to_string(),
-                    ));
-                }
+            let transport = transport_arc.lock().unwrap();
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble_transport.on_fragment_received(fragment).map_err(|e| {
+                    ProtocolError::Other(format!("Fragment processing failed: {}", e))
+                })?;
+            } else {
+                return Err(ProtocolError::Other(
+                    "BLE transport not available or wrong type".to_string(),
+                ));
             }
         }
 
-        //  Immediately process any completed messages and emit events
-        // This prevents the lag waiting for the 100ms polling cycle
-        let mut protocol = self.inner.lock().unwrap();
-        while let Some(_message) = protocol.receive_message() {
-            // Message will emit MessageReceived event automatically
-            // Just ensure the receive_message() loop runs to trigger events
-        }
+        while protocol.receive_message().is_some() {}
 
         Ok(())
     }
@@ -1470,8 +1513,7 @@ impl OfflineProtocol {
         sender_id: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // Try to deserialize and process the message through the transport
-        let protocol = self.inner.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
@@ -1482,8 +1524,7 @@ impl OfflineProtocol {
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
-                // Pass raw data to the transport for processing
-                if let Err(e) = internet_transport.on_data_received(data.clone()) {
+                if let Err(e) = internet_transport.on_data_received(data) {
                     return Err(ProtocolError::Other(format!(
                         "Failed to process internet message: {}",
                         e
@@ -1491,21 +1532,16 @@ impl OfflineProtocol {
                 }
             }
         }
+
+        while protocol.receive_message().is_some() {}
         drop(protocol);
 
-        // Emit message received event
         let event = CoreEvent::NeighborDiscovered {
             peer_id: sender_id.clone(),
             transport: "Internet".to_string(),
             rssi: None,
         };
         self.emit_event(event);
-
-        // Process any completed messages
-        let mut protocol = self.inner.lock().unwrap();
-        while protocol.receive_message().is_some() {
-            // Messages are processed and events emitted automatically
-        }
 
         Ok(())
     }
@@ -1726,16 +1762,14 @@ impl OfflineProtocol {
         sender_id: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // Try to deserialize and process the message through the transport
-        let protocol = self.inner.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
-                // Pass raw data to the transport for processing
-                if let Err(e) = wifi_transport.on_data_received(data.clone()) {
+                if let Err(e) = wifi_transport.on_data_received(data) {
                     return Err(ProtocolError::Other(format!(
                         "Failed to process WiFi Direct message: {}",
                         e
@@ -1743,21 +1777,16 @@ impl OfflineProtocol {
                 }
             }
         }
+
+        while protocol.receive_message().is_some() {}
         drop(protocol);
 
-        // Emit peer discovery event
         let event = CoreEvent::NeighborDiscovered {
             peer_id: sender_id.clone(),
             transport: "WiFiDirect".to_string(),
             rssi: None,
         };
         self.emit_event(event);
-
-        // Process any completed messages
-        let mut protocol = self.inner.lock().unwrap();
-        while protocol.receive_message().is_some() {
-            // Messages are processed and events emitted automatically
-        }
 
         Ok(())
     }
@@ -1910,63 +1939,72 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // FILE TRANSFER
+    // MEDIA AND FILE TRANSFER
     // ========================================================================
 
-    /// Sends a file
-    pub fn send_file(
+    /// Sends a media attachment through the protocol.
+    ///
+    /// The platform reads the file and passes the raw bytes. The SDK chunks
+    /// the data, sends each chunk as a message (internet-preferred), and
+    /// emits progress events.
+    pub fn send_media(
         &self,
-        _recipient: String,
-        _file_path: String,
+        recipient: String,
+        file_data: Vec<u8>,
         file_name: String,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
     ) -> Result<String, ProtocolError> {
-        // Generate file ID
-        let file_id = format!(
-            "file_{}_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0),
-            file_name
-        );
-
-        // Note: Actual file reading and chunking needs to be done by the platform
-        // because file I/O is platform-specific. This method just generates the ID
-        // and prepares tracking. Use FileTransferManager.chunk_file() on platform side.
-
-        Ok(file_id)
+        let mut protocol = self.inner.lock().unwrap();
+        let core_meta = media_metadata.map(CoreMediaMetadata::from);
+        protocol
+            .send_media(recipient, file_data, file_name, content_type.into(), core_meta)
+            .map_err(|e| e.into())
     }
 
-    /// Processes a file chunk
+    /// Convenience: sends a generic file (delegates to send_media with ContentType::File).
+    pub fn send_file(
+        &self,
+        recipient: String,
+        file_data: Vec<u8>,
+        file_name: String,
+    ) -> Result<String, ProtocolError> {
+        self.send_media(recipient, file_data, file_name, ContentType::File, None)
+    }
+
+    /// Processes a received file chunk (manual path, for platforms handling
+    /// their own chunk routing outside the protocol receive loop).
     pub fn process_file_chunk(
         &self,
         file_id: String,
         chunk_index: u32,
+        total_chunks: u32,
+        file_size: u64,
+        file_name: String,
+        file_checksum: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let mut file_manager = self.file_manager.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
 
-        // Create a minimal FileChunk for processing
         use offline_protocol::file_transfer::FileChunk;
         let chunk = FileChunk {
-            file_id: file_id.clone(),
-            file_name: "unknown".to_string(), // Will be updated by first chunk
-            file_size: 0,                     // Will be updated by first chunk
-            total_chunks: 1,                  // Will be updated by first chunk
+            file_id,
+            file_name,
+            file_size,
+            total_chunks,
             chunk_index,
             chunk_data: data,
-            file_checksum: String::new(),
+            file_checksum,
         };
 
-        file_manager.process_chunk(chunk);
-
+        protocol.file_transfer_manager_mut().process_chunk(chunk);
         Ok(())
     }
 
-    /// Gets file transfer progress
+    /// Gets file transfer progress.
     pub fn get_file_progress(&self, file_id: String) -> Option<FileProgress> {
-        let file_manager = self.file_manager.lock().unwrap();
-        let core_progress = file_manager.get_progress(&file_id)?;
+        let protocol = self.inner.lock().unwrap();
+        let core_progress = protocol.file_transfer_manager().get_progress(&file_id)?;
 
         Some(FileProgress {
             file_id: core_progress.file_id,
@@ -1976,20 +2014,24 @@ impl OfflineProtocol {
         })
     }
 
-    /// Finalizes a file transfer
+    /// Finalizes a file transfer, returning the reassembled bytes.
     pub fn finalize_file(&self, file_id: String) -> Result<(), ProtocolError> {
-        let mut file_manager = self.file_manager.lock().unwrap();
-        file_manager
+        let mut protocol = self.inner.lock().unwrap();
+        protocol
+            .file_transfer_manager_mut()
             .finalize_file(&file_id)
             .ok_or_else(|| ProtocolError::Other("File not found or incomplete".to_string()))?;
         Ok(())
     }
 
-    /// Cancels a file transfer
+    /// Cancels an active file transfer.
     pub fn cancel_file_transfer(&self, file_id: String) -> Result<(), ProtocolError> {
-        let mut file_manager = self.file_manager.lock().unwrap();
-        file_manager.cancel_transfer(&file_id);
-        Ok(())
+        let mut protocol = self.inner.lock().unwrap();
+        if protocol.file_transfer_manager_mut().cancel_transfer(&file_id) {
+            Ok(())
+        } else {
+            Err(ProtocolError::Other("File transfer not found".to_string()))
+        }
     }
 
     // ========================================================================
@@ -3397,39 +3439,24 @@ mod tests {
     #[test]
     fn test_file_transfer_tracking() {
         let config = create_test_config();
-
         let protocol = OfflineProtocol::new(config).unwrap();
 
-        // Generate a file ID
-        let file_id = protocol
-            .send_file(
-                "recipient".to_string(),
-                "/path/to/file".to_string(),
+        let file_id = "file_test_001".to_string();
+
+        assert!(protocol.get_file_progress(file_id.clone()).is_none());
+
+        protocol
+            .process_file_chunk(
+                file_id.clone(),
+                0,
+                2,
+                100,
                 "test.txt".to_string(),
+                "abc123".to_string(),
+                vec![0u8; 50],
             )
             .unwrap();
 
-        // File is not tracked until chunks are processed
-        assert!(protocol.get_file_progress(file_id.clone()).is_none());
-
-        // Process a file chunk
-        use offline_protocol::file_transfer::FileChunk;
-        let chunk = FileChunk {
-            file_id: file_id.clone(),
-            file_name: "test.txt".to_string(),
-            file_size: 100,
-            total_chunks: 2,
-            chunk_index: 0,
-            chunk_data: vec![0u8; 50],
-            file_checksum: "test".to_string(),
-        };
-
-        {
-            let mut file_manager = protocol.file_manager.lock().unwrap();
-            file_manager.process_chunk(chunk);
-        }
-
-        // Now we should have progress
         let progress = protocol.get_file_progress(file_id.clone());
         assert!(progress.is_some());
         let progress = progress.unwrap();

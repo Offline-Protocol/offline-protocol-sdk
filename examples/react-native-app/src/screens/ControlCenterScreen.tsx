@@ -7,7 +7,16 @@ import {
   TouchableOpacity,
   TextInput,
   ActivityIndicator,
+  Alert,
+  Platform,
 } from 'react-native';
+import {
+  pick,
+  types as docTypes,
+  errorCodes,
+  isErrorWithCode,
+} from '@react-native-documents/picker';
+import RNFS from 'react-native-fs';
 import type {
   SendFileParams,
   TransportType,
@@ -63,10 +72,18 @@ const DORS_STEP_CONFIG = {
   queueRatio: 0.05,
 };
 
-const DEFAULT_FILE_PAYLOAD: SendFileParams = {
-  filePath: '',
+interface FileDraft {
+  recipient: string;
+  fileName: string;
+  fileData: string;
+  fileUri: string;
+}
+
+const DEFAULT_FILE_DRAFT: FileDraft = {
   recipient: '',
   fileName: '',
+  fileData: '',
+  fileUri: '',
 };
 
 export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
@@ -90,7 +107,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
 }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [batteryDraft, setBatteryDraft] = useState<number>(batteryLevel ?? 72);
-  const [fileDraft, setFileDraft] = useState<SendFileParams>(DEFAULT_FILE_PAYLOAD);
+  const [fileDraft, setFileDraft] = useState<FileDraft>(DEFAULT_FILE_DRAFT);
   const [isSendingFile, setIsSendingFile] = useState(false);
 
   useEffect(() => {
@@ -179,19 +196,35 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
     await onUpdateDors({ preferOnline: !dorsConfig.preferOnline });
   }, [dorsConfig.preferOnline, isStarted, onUpdateDors]);
 
-  const submitFileTransfer = useCallback(async () => {
-    if (!fileDraft.filePath.trim() || !fileDraft.recipient.trim()) {
-      return;
+  const handleBrowseFile = useCallback(async () => {
+    try {
+      const [result] = await pick({ type: [docTypes.allFiles] });
+      if (!result?.uri) return;
+      const base64 = await RNFS.readFile(result.uri, 'base64');
+      setFileDraft(prev => ({
+        ...prev,
+        fileData: base64,
+        fileUri: result.uri,
+        fileName: result.name ?? prev.fileName,
+      }));
+    } catch (err: unknown) {
+      if (isErrorWithCode(err) && err.code === errorCodes.OPERATION_CANCELED) {
+        return;
+      }
+      Alert.alert('Error', 'Failed to read file');
     }
+  }, []);
+
+  const submitFileTransfer = useCallback(async () => {
+    if (!fileDraft.fileData || !fileDraft.recipient.trim()) return;
     setIsSendingFile(true);
     try {
       await onSendFile({
-        ...fileDraft,
-        filePath: fileDraft.filePath.trim(),
         recipient: fileDraft.recipient.trim(),
-        fileName: fileDraft.fileName?.trim() || undefined,
+        fileData: fileDraft.fileData,
+        fileName: fileDraft.fileName.trim() || `file_${Date.now()}`,
       });
-      setFileDraft(DEFAULT_FILE_PAYLOAD);
+      setFileDraft(DEFAULT_FILE_DRAFT);
     } finally {
       setIsSendingFile(false);
     }
@@ -440,7 +473,7 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
         <SectionHeader title="File Transfer" subtitle="Send and monitor file deliveries" />
         <View style={styles.card}>
           <Text style={styles.fileHint}>
-            Provide a valid local path or URI. Transfers queue automatically when peers are in range.
+            Pick a file and enter a recipient to send. Transfers queue automatically when peers are in range.
           </Text>
           <View style={styles.inputGroup}>
             <Text style={styles.cardLabel}>Recipient User ID</Text>
@@ -453,27 +486,31 @@ export const ControlCenterScreen: React.FC<ControlCenterScreenProps> = ({
             />
           </View>
           <View style={styles.inputGroup}>
-            <Text style={styles.cardLabel}>File path or URI</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="/path/to/file.txt"
-              value={fileDraft.filePath}
-              onChangeText={(text) => setFileDraft((prev) => ({ ...prev, filePath: text }))}
-            />
+            <Text style={styles.cardLabel}>File</Text>
+            <TouchableOpacity style={styles.browseButton} onPress={handleBrowseFile}>
+              <Text style={styles.browseButtonText}>
+                {fileDraft.fileUri ? fileDraft.fileName || 'File selected' : 'Browse...'}
+              </Text>
+            </TouchableOpacity>
+            {fileDraft.fileData ? (
+              <Text style={styles.fileSizeHint}>
+                {(fileDraft.fileData.length * 0.75 / 1024).toFixed(1)} KB loaded
+              </Text>
+            ) : null}
           </View>
           <View style={styles.inputGroup}>
-            <Text style={styles.cardLabel}>Optional file name</Text>
+            <Text style={styles.cardLabel}>File name (optional)</Text>
             <TextInput
               style={styles.input}
               placeholder="file.txt"
-              value={fileDraft.fileName ?? ''}
+              value={fileDraft.fileName}
               onChangeText={(text) => setFileDraft((prev) => ({ ...prev, fileName: text }))}
             />
           </View>
           <TouchableOpacity
-            style={[styles.submitButton, (!fileDraft.recipient || !fileDraft.filePath) && styles.submitButtonDisabled]}
+            style={[styles.submitButton, (!fileDraft.recipient || !fileDraft.fileData) && styles.submitButtonDisabled]}
             onPress={submitFileTransfer}
-            disabled={!fileDraft.recipient || !fileDraft.filePath || isSendingFile || !isStarted}
+            disabled={!fileDraft.recipient || !fileDraft.fileData || isSendingFile || !isStarted}
           >
             {isSendingFile ? (
               <ActivityIndicator color="#fff" />
@@ -870,6 +907,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#64748b',
     marginBottom: 12,
+  },
+  browseButton: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#f8fafc',
+  },
+  browseButtonText: {
+    fontSize: 13,
+    color: '#2563eb',
+  },
+  fileSizeHint: {
+    fontSize: 11,
+    color: '#94a3b8',
+    marginTop: 4,
   },
   submitButton: {
     marginTop: 8,

@@ -12,6 +12,8 @@ import type {
   AcceptConnectionRequestParams,
   RejectConnectionRequestParams,
   SendFileParams,
+  SendMediaParams,
+  MediaMetadata,
   ProtocolEvent,
   EventListener,
   EventType,
@@ -35,7 +37,7 @@ import type {
   MlsGroupInfo,
   EstablishmentState,
 } from './types';
-import { MessagePriority } from './types';
+import { ContentType, MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
 
 export * from './types';
@@ -867,21 +869,145 @@ export class OfflineProtocol {
   }
 
   /**
-   * Sends a file to a recipient
+   * Sends a media attachment (image, video, audio, file, etc.) to a recipient.
+   *
+   * The platform reads the file and passes the raw bytes as a base64 string.
+   * The SDK chunks the data and sends each chunk via internet-preferred transport.
+   *
+   * @param params - Media sending parameters
+   * @returns File ID for tracking progress
+   */
+  async sendMedia(params: SendMediaParams): Promise<string> {
+    const nativeMeta = params.mediaMetadata
+      ? {
+          mime_type: params.mediaMetadata.mimeType,
+          file_name: params.mediaMetadata.fileName,
+          file_size: params.mediaMetadata.fileSize,
+          duration_ms: params.mediaMetadata.durationMs,
+          width: params.mediaMetadata.width,
+          height: params.mediaMetadata.height,
+          thumbnail_base64: params.mediaMetadata.thumbnailBase64,
+        }
+      : null;
+
+    return await OfflineProtocolNativeModule.sendMedia(
+      params.recipient,
+      params.fileData,
+      params.fileName,
+      params.contentType,
+      nativeMeta,
+    );
+  }
+
+  /**
+   * Sends a generic file to a recipient (convenience for sendMedia with ContentType.File).
    *
    * @param params - File sending parameters
    * @returns File ID for tracking progress
-   * @throws Error if file fails to send
    */
   async sendFile(params: SendFileParams): Promise<string> {
-    const fileName =
-      params.fileName || params.filePath.split("/").pop() || "file";
-    const fileId = await OfflineProtocolNativeModule.sendFile(
-      params.filePath,
-      params.recipient,
-      fileName
-    );
-    return fileId;
+    return this.sendMedia({
+      recipient: params.recipient,
+      fileData: params.fileData,
+      fileName: params.fileName,
+      contentType: ContentType.File,
+    });
+  }
+
+  /**
+   * Sends an image to a recipient.
+   *
+   * @param recipient - Recipient's user ID
+   * @param fileData - Image data as base64
+   * @param fileName - File name
+   * @param metadata - Optional media metadata (dimensions, thumbnail)
+   * @returns File ID for tracking progress
+   */
+  async sendImage(
+    recipient: string,
+    fileData: string,
+    fileName: string,
+    metadata?: MediaMetadata,
+  ): Promise<string> {
+    return this.sendMedia({
+      recipient,
+      fileData,
+      fileName,
+      contentType: ContentType.Image,
+      mediaMetadata: metadata,
+    });
+  }
+
+  /**
+   * Sends a voice note to a recipient.
+   *
+   * @param recipient - Recipient's user ID
+   * @param fileData - Audio data as base64
+   * @param fileName - File name
+   * @param metadata - Optional media metadata (duration)
+   * @returns File ID for tracking progress
+   */
+  async sendVoiceNote(
+    recipient: string,
+    fileData: string,
+    fileName: string,
+    metadata?: MediaMetadata,
+  ): Promise<string> {
+    return this.sendMedia({
+      recipient,
+      fileData,
+      fileName,
+      contentType: ContentType.VoiceNote,
+      mediaMetadata: metadata,
+    });
+  }
+
+  /**
+   * Sends a video note to a recipient.
+   *
+   * @param recipient - Recipient's user ID
+   * @param fileData - Video data as base64
+   * @param fileName - File name
+   * @param metadata - Optional media metadata (duration, dimensions, thumbnail)
+   * @returns File ID for tracking progress
+   */
+  async sendVideoNote(
+    recipient: string,
+    fileData: string,
+    fileName: string,
+    metadata?: MediaMetadata,
+  ): Promise<string> {
+    return this.sendMedia({
+      recipient,
+      fileData,
+      fileName,
+      contentType: ContentType.VideoNote,
+      mediaMetadata: metadata,
+    });
+  }
+
+  /**
+   * Sends a video to a recipient.
+   *
+   * @param recipient - Recipient's user ID
+   * @param fileData - Video data as base64
+   * @param fileName - File name
+   * @param metadata - Optional media metadata (duration, dimensions, thumbnail)
+   * @returns File ID for tracking progress
+   */
+  async sendVideo(
+    recipient: string,
+    fileData: string,
+    fileName: string,
+    metadata?: MediaMetadata,
+  ): Promise<string> {
+    return this.sendMedia({
+      recipient,
+      fileData,
+      fileName,
+      contentType: ContentType.Video,
+      mediaMetadata: metadata,
+    });
   }
 
   /**
@@ -889,7 +1015,6 @@ export class OfflineProtocol {
    *
    * @param fileId - File identifier
    * @returns File progress information, or null if not found
-   * @throws Error if retrieval fails
    */
   async getFileProgress(fileId: string): Promise<FileProgress | null> {
     return await OfflineProtocolNativeModule.getFileProgress(fileId);
@@ -900,7 +1025,6 @@ export class OfflineProtocol {
    *
    * @param fileId - File identifier
    * @returns True if cancelled, false if not found
-   * @throws Error if cancellation fails
    */
   async cancelFileTransfer(fileId: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.cancelFileTransfer(fileId);
@@ -1329,17 +1453,29 @@ export class OfflineProtocol {
    *
    * @param fileId - File identifier
    * @param chunkIndex - Zero-based chunk index
+   * @param totalChunks - Total number of chunks in the file
+   * @param fileSize - Total file size in bytes
+   * @param fileName - File name
+   * @param fileChecksum - File checksum
    * @param data - Chunk data as array of bytes
    */
   async processFileChunk(
     fileId: string,
     chunkIndex: number,
-    data: number[]
+    totalChunks: number,
+    fileSize: number,
+    fileName: string,
+    fileChecksum: string,
+    data: number[],
   ): Promise<void> {
     return await OfflineProtocolNativeModule.processFileChunk(
       fileId,
       chunkIndex,
-      data
+      totalChunks,
+      fileSize,
+      fileName,
+      fileChecksum,
+      data,
     );
   }
 

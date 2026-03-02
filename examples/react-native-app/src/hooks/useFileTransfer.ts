@@ -2,35 +2,41 @@ import { useCallback, useState, useMemo } from 'react';
 import {
   OfflineProtocol,
   SendFileParams,
+  SendMediaParams,
   FileProgressEvent,
   FileReceivedEvent,
+  MediaSentEvent,
+  ContentType,
+  MediaMetadata,
 } from '@offline-protocol/mesh-sdk';
 import { FileTransferState } from '../types/runtime';
 
 interface UseFileTransferReturn {
   fileTransfers: FileTransferState[];
   sendFile: (params: SendFileParams) => Promise<string | null>;
+  sendMedia: (params: SendMediaParams) => Promise<string | null>;
+  sendImage: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
+  sendVoiceNote: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
+  sendVideo: (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata) => Promise<string | null>;
   cancelFileTransfer: (fileId: string) => Promise<boolean>;
   handleFileProgress: (event: FileProgressEvent) => void;
   handleFileReceived: (event: FileReceivedEvent) => void;
+  handleMediaSent: (event: MediaSentEvent) => void;
 }
 
-/**
- * Hook for managing file transfer operations.
- * Extracted from useOfflineProtocol to follow single responsibility principle.
- */
 export function useFileTransfer(
   protocol: OfflineProtocol | null,
-  isStarted: boolean
+  isStarted: boolean,
 ): UseFileTransferReturn {
   const [fileTransfers, setFileTransfers] = useState<Record<string, FileTransferState>>({});
 
   const handleFileProgress = useCallback((event: FileProgressEvent) => {
-    setFileTransfers((prev) => {
+    setFileTransfers(prev => {
       const existing = prev[event.file_id];
       const nextState: FileTransferState = {
         fileId: event.file_id,
         fileName: existing?.fileName ?? event.file_id,
+        contentType: existing?.contentType,
         direction: existing?.direction ?? 'outbound',
         percentage: event.percentage,
         chunksCompleted: event.chunks_sent,
@@ -40,15 +46,12 @@ export function useFileTransfer(
         sender: existing?.sender,
         lastUpdated: Date.now(),
       };
-      return {
-        ...prev,
-        [event.file_id]: nextState,
-      };
+      return { ...prev, [event.file_id]: nextState };
     });
   }, []);
 
   const handleFileReceived = useCallback((event: FileReceivedEvent) => {
-    setFileTransfers((prev) => ({
+    setFileTransfers(prev => ({
       ...prev,
       [event.file_id]: {
         fileId: event.file_id,
@@ -64,23 +67,32 @@ export function useFileTransfer(
     }));
   }, []);
 
-  const sendFile = useCallback(
-    async (params: SendFileParams): Promise<string | null> => {
-      if (!protocol) {
-        return null;
-      }
-      if (!isStarted) {
-        return null;
-      }
+  const handleMediaSent = useCallback((event: MediaSentEvent) => {
+    setFileTransfers(prev => {
+      const existing = prev[event.file_id];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [event.file_id]: {
+          ...existing,
+          contentType: event.content_type,
+          lastUpdated: Date.now(),
+        },
+      };
+    });
+  }, []);
+
+  const sendMedia = useCallback(
+    async (params: SendMediaParams): Promise<string | null> => {
+      if (!protocol || !isStarted) return null;
       try {
-        const fileId = await protocol.sendFile(params);
-        const fileName =
-          params.fileName ?? params.filePath.split(/[\\/]/).pop() ?? params.filePath;
-        setFileTransfers((prev) => ({
+        const fileId = await protocol.sendMedia(params);
+        setFileTransfers(prev => ({
           ...prev,
           [fileId]: {
             fileId,
-            fileName,
+            fileName: params.fileName,
+            contentType: params.contentType,
             direction: 'outbound',
             percentage: 0,
             chunksCompleted: 0,
@@ -92,33 +104,58 @@ export function useFileTransfer(
         }));
         return fileId;
       } catch (err) {
-        console.error('Failed to send file', err);
+        console.error('Failed to send media', err);
         return null;
       }
     },
-    [protocol, isStarted]
+    [protocol, isStarted],
+  );
+
+  const sendFile = useCallback(
+    async (params: SendFileParams): Promise<string | null> => {
+      return sendMedia({
+        recipient: params.recipient,
+        fileData: params.fileData,
+        fileName: params.fileName,
+        contentType: ContentType.File,
+      });
+    },
+    [sendMedia],
+  );
+
+  const sendImage = useCallback(
+    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata): Promise<string | null> => {
+      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.Image, mediaMetadata: metadata });
+    },
+    [sendMedia],
+  );
+
+  const sendVoiceNote = useCallback(
+    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata): Promise<string | null> => {
+      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.VoiceNote, mediaMetadata: metadata });
+    },
+    [sendMedia],
+  );
+
+  const sendVideo = useCallback(
+    async (recipient: string, fileData: string, fileName: string, metadata?: MediaMetadata): Promise<string | null> => {
+      return sendMedia({ recipient, fileData, fileName, contentType: ContentType.Video, mediaMetadata: metadata });
+    },
+    [sendMedia],
   );
 
   const cancelFileTransfer = useCallback(
     async (fileId: string): Promise<boolean> => {
-      if (!protocol) {
-        return false;
-      }
+      if (!protocol) return false;
       try {
         const result = await protocol.cancelFileTransfer(fileId);
         if (result) {
-          setFileTransfers((prev) => {
+          setFileTransfers(prev => {
             const existing = prev[fileId];
-            if (!existing) {
-              return prev;
-            }
+            if (!existing) return prev;
             return {
               ...prev,
-              [fileId]: {
-                ...existing,
-                status: 'cancelled',
-                lastUpdated: Date.now(),
-              },
+              [fileId]: { ...existing, status: 'cancelled', lastUpdated: Date.now() },
             };
           });
         }
@@ -128,19 +165,25 @@ export function useFileTransfer(
         return false;
       }
     },
-    [protocol]
+    [protocol],
   );
 
-  const fileTransferList = useMemo(() => {
-    return Object.values(fileTransfers).sort((a, b) => b.lastUpdated - a.lastUpdated);
-  }, [fileTransfers]);
+  const fileTransferList = useMemo(
+    () => Object.values(fileTransfers).sort((a, b) => b.lastUpdated - a.lastUpdated),
+    [fileTransfers],
+  );
 
   return {
     fileTransfers: fileTransferList,
     sendFile,
+    sendMedia,
+    sendImage,
+    sendVoiceNote,
+    sendVideo,
     cancelFileTransfer,
     handleFileProgress,
     handleFileReceived,
+    handleMediaSent,
   };
 }
 

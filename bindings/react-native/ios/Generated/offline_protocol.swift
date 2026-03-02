@@ -766,7 +766,7 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func process() throws 
     
-    func processFileChunk(fileId: String, chunkIndex: UInt32, data: [UInt8]) throws 
+    func processFileChunk(fileId: String, chunkIndex: UInt32, totalChunks: UInt32, fileSize: UInt64, fileName: String, fileChecksum: String, data: [UInt8]) throws 
     
     func receiveMessage()  -> String?
     
@@ -784,7 +784,9 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?) throws  -> String
     
-    func sendFile(recipient: String, filePath: String, fileName: String) throws  -> String
+    func sendFile(recipient: String, fileData: [UInt8], fileName: String) throws  -> String
+    
+    func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?) throws  -> String
     
     func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
     
@@ -1655,11 +1657,15 @@ open func process()throws   {try rustCallWithError(FfiConverterTypeProtocolError
 }
 }
     
-open func processFileChunk(fileId: String, chunkIndex: UInt32, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+open func processFileChunk(fileId: String, chunkIndex: UInt32, totalChunks: UInt32, fileSize: UInt64, fileName: String, fileChecksum: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(fileId),
         FfiConverterUInt32.lower(chunkIndex),
+        FfiConverterUInt32.lower(totalChunks),
+        FfiConverterUInt64.lower(fileSize),
+        FfiConverterString.lower(fileName),
+        FfiConverterString.lower(fileChecksum),
         FfiConverterSequenceUInt8.lower(data),$0
     )
 }
@@ -1732,13 +1738,26 @@ open func sendConnectionRequest(recipient: String, senderName: String, keyPackag
 })
 }
     
-open func sendFile(recipient: String, filePath: String, fileName: String)throws  -> String  {
+open func sendFile(recipient: String, fileData: [UInt8], fileName: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
-        FfiConverterString.lower(filePath),
+        FfiConverterSequenceUInt8.lower(fileData),
         FfiConverterString.lower(fileName),$0
+    )
+})
+}
+    
+open func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterSequenceUInt8.lower(fileData),
+        FfiConverterString.lower(fileName),
+        FfiConverterTypeContentType_lower(contentType),
+        FfiConverterOptionTypeMediaMetadata.lower(mediaMetadata),$0
     )
 })
 }
@@ -2552,6 +2571,78 @@ public func FfiConverterTypeInternetMessage_lift(_ buf: RustBuffer) throws -> In
 #endif
 public func FfiConverterTypeInternetMessage_lower(_ value: InternetMessage) -> RustBuffer {
     return FfiConverterTypeInternetMessage.lower(value)
+}
+
+
+public struct MediaMetadata: Equatable, Hashable {
+    public var mimeType: String
+    public var fileName: String
+    public var fileSize: UInt64
+    public var durationMs: UInt64?
+    public var width: UInt32?
+    public var height: UInt32?
+    public var thumbnailBase64: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(mimeType: String, fileName: String, fileSize: UInt64, durationMs: UInt64?, width: UInt32?, height: UInt32?, thumbnailBase64: String?) {
+        self.mimeType = mimeType
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.durationMs = durationMs
+        self.width = width
+        self.height = height
+        self.thumbnailBase64 = thumbnailBase64
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MediaMetadata: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMediaMetadata: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MediaMetadata {
+        return
+            try MediaMetadata(
+                mimeType: FfiConverterString.read(from: &buf), 
+                fileName: FfiConverterString.read(from: &buf), 
+                fileSize: FfiConverterUInt64.read(from: &buf), 
+                durationMs: FfiConverterOptionUInt64.read(from: &buf), 
+                width: FfiConverterOptionUInt32.read(from: &buf), 
+                height: FfiConverterOptionUInt32.read(from: &buf), 
+                thumbnailBase64: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MediaMetadata, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.mimeType, into: &buf)
+        FfiConverterString.write(value.fileName, into: &buf)
+        FfiConverterUInt64.write(value.fileSize, into: &buf)
+        FfiConverterOptionUInt64.write(value.durationMs, into: &buf)
+        FfiConverterOptionUInt32.write(value.width, into: &buf)
+        FfiConverterOptionUInt32.write(value.height, into: &buf)
+        FfiConverterOptionString.write(value.thumbnailBase64, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMediaMetadata_lift(_ buf: RustBuffer) throws -> MediaMetadata {
+    return try FfiConverterTypeMediaMetadata.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMediaMetadata_lower(_ value: MediaMetadata) -> RustBuffer {
+    return FfiConverterTypeMediaMetadata.lower(value)
 }
 
 
@@ -3881,6 +3972,113 @@ public func FfiConverterTypeWifiDirectMessage_lift(_ buf: RustBuffer) throws -> 
 public func FfiConverterTypeWifiDirectMessage_lower(_ value: WifiDirectMessage) -> RustBuffer {
     return FfiConverterTypeWifiDirectMessage.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum ContentType: Equatable, Hashable {
+    
+    case text
+    case image
+    case video
+    case audio
+    case voiceNote
+    case videoNote
+    case file
+    case fileChunk
+
+
+
+}
+
+#if compiler(>=6)
+extension ContentType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeContentType: FfiConverterRustBuffer {
+    typealias SwiftType = ContentType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ContentType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .text
+        
+        case 2: return .image
+        
+        case 3: return .video
+        
+        case 4: return .audio
+        
+        case 5: return .voiceNote
+        
+        case 6: return .videoNote
+        
+        case 7: return .file
+        
+        case 8: return .fileChunk
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ContentType, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .text:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .image:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .video:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .audio:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .voiceNote:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .videoNote:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .file:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .fileChunk:
+            writeInt(&buf, Int32(8))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeContentType_lift(_ buf: RustBuffer) throws -> ContentType {
+    return try FfiConverterTypeContentType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeContentType_lower(_ value: ContentType) -> RustBuffer {
+    return FfiConverterTypeContentType.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -5224,6 +5422,30 @@ fileprivate struct FfiConverterOptionInt16: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
@@ -5336,6 +5558,30 @@ fileprivate struct FfiConverterOptionTypeInternetMessage: FfiConverterRustBuffer
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeInternetMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMediaMetadata: FfiConverterRustBuffer {
+    typealias SwiftType = MediaMetadata?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMediaMetadata.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMediaMetadata.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -5942,7 +6188,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 16160) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 54114) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 46065) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217) {
@@ -5969,7 +6215,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 33006) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 11824) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 42952) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {

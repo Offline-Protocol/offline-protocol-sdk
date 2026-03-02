@@ -1,6 +1,7 @@
 //! Main protocol engine.
 
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
+use crate::file_transfer::{FileChunk, FileTransferManager};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsEventRateLimiter, MlsOperationContext,
     NoopMlsEventEmitter,
@@ -11,7 +12,8 @@ use crate::events::DecryptionFailureCode;
 use crate::{EstablishmentState, Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
-    AppId, LamportClock, Message, MessageId, MessagePriority, UserId, TTL,
+    AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority, UserId,
+    TTL,
 };
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{
@@ -77,6 +79,7 @@ const PENDING_TTL_SPIKE_WARN_THRESHOLD: usize = 25;
 const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
 const PENDING_DROP_WARN_EVERY: u64 = 100;
 const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
+const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +417,22 @@ struct OutboxEntry {
     last_transport: Option<TransportType>,
 }
 
+#[derive(Clone)]
+struct PendingMediaMetadataEntry {
+    content_type: ContentType,
+    media_metadata: Option<MediaMetadata>,
+    last_updated_at: Instant,
+}
+
+#[derive(Clone)]
+struct OutboundMediaTransfer {
+    content_type: ContentType,
+    recipient: String,
+    total_chunks: u32,
+    delivered_chunks: HashSet<u32>,
+    last_updated_at: Instant,
+}
+
 enum OutboundSendPreparation {
     Ready(String),
     Queued(MessageId),
@@ -515,6 +534,17 @@ pub struct OfflineProtocol {
     /// Per-instance secret used to derive non-reversible opaque telemetry IDs.
     #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     mls_observability_secret: [u8; 16],
+
+    /// File transfer manager for chunking outbound and reassembling inbound media.
+    file_transfer_manager: FileTransferManager,
+
+    /// Stashed (content_type, media_metadata) from chunk-0 of incoming file transfers,
+    /// used to populate the FileReceived event once all chunks arrive.
+    pending_media_metadata: HashMap<String, PendingMediaMetadataEntry>,
+    /// Tracks outbound media transfer delivery progress keyed by file_id.
+    outbound_media_transfers: HashMap<String, OutboundMediaTransfer>,
+    /// Maps each outbound media chunk message ID to (file_id, chunk_index).
+    outbound_media_chunks: HashMap<MessageId, (String, u32)>,
 }
 
 impl OfflineProtocol {
@@ -569,6 +599,10 @@ impl OfflineProtocol {
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
             mls_observability_secret: *uuid::Uuid::new_v4().as_bytes(),
+            file_transfer_manager: FileTransferManager::new(),
+            pending_media_metadata: HashMap::new(),
+            outbound_media_transfers: HashMap::new(),
+            outbound_media_chunks: HashMap::new(),
             config,
         })
     }
@@ -927,6 +961,7 @@ impl OfflineProtocol {
                         latency.min(u32::MAX as u64) as u32,
                         hop_count,
                     );
+                    self.handle_outbound_media_chunk_delivered(&message_id);
                     self.remove_outbox_entry(&message_id);
                 }
             }
@@ -1032,14 +1067,24 @@ impl OfflineProtocol {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
 
-        // Schedule retry - if this fails (max retries exceeded), the message
-        // will still be in the outbox and can be recovered
+        // Schedule retry. If queuing fails, treat this as a terminal failure.
         if let Err(e) = self.retry_queue.enqueue(message.clone(), 0) {
             warn!(
                 message_id = %message.id,
                 error = %e,
-                "Failed to enqueue message for retry, message remains in outbox"
+                "Failed to enqueue message for retry"
             );
+            if message.content_type == ContentType::FileChunk {
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::message_failed(
+                        message.id.clone(),
+                        "Retry queue unavailable".to_string(),
+                        0,
+                    ));
+                }
+                self.handle_outbound_media_chunk_failed(&message.id, "retry queue unavailable");
+                self.remove_outbox_entry(&message.id);
+            }
         }
 
         warn!(
@@ -1236,6 +1281,240 @@ impl OfflineProtocol {
                     "Send failed (message {} deferred for retry): {}",
                     message.id, err
                 )))
+            }
+        }
+    }
+
+    /// Sends a media attachment (image, video, audio, file, etc.) to a recipient.
+    ///
+    /// The file data is chunked and each chunk is sent as an individual message
+    /// with `content_type: FileChunk`. The first chunk carries the full
+    /// `MediaMetadata` so the receiver can display a preview before all chunks
+    /// arrive. Individual chunk messages require ACKs and participate in retry
+    /// logic so delivery is tracked and recoverable per chunk. `MediaSent` is
+    /// emitted only after all chunks are ACKed.
+    ///
+    /// Returns a `file_id` that can be used to track progress or cancel.
+    pub fn send_media(
+        &mut self,
+        recipient: impl Into<String>,
+        file_data: Vec<u8>,
+        file_name: impl Into<String>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
+    ) -> Result<String> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let recipient_str: String = recipient.into();
+        let file_name_str: String = file_name.into();
+
+        let file_id = format!("file_{}", MessageId::new().as_str());
+
+        let chunks = self
+            .file_transfer_manager
+            .chunk_file(file_id.clone(), file_name_str, file_data)?;
+
+        let total_chunks = chunks.len() as u32;
+        self.outbound_media_transfers.insert(
+            file_id.clone(),
+            OutboundMediaTransfer {
+                content_type,
+                recipient: recipient_str.clone(),
+                total_chunks,
+                delivered_chunks: HashSet::new(),
+                last_updated_at: Instant::now(),
+            },
+        );
+        let state = lock_shared_state(&self.shared_state)?;
+        state.emit_event(Event::file_progress(file_id.clone(), 0, total_chunks));
+        drop(state);
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let chunk_json = chunk
+                .to_json()
+                .map_err(|e| Error::Other(format!("Failed to serialize file chunk: {}", e)))?;
+
+            let meta_for_chunk = if index == 0 {
+                media_metadata.clone()
+            } else {
+                None
+            };
+
+            let mut message = self.create_media_message(
+                &recipient_str,
+                chunk_json,
+                ContentType::FileChunk,
+                meta_for_chunk,
+            )?;
+
+            if index == 0 {
+                use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
+                message.metadata.insert(
+                    ORIGINAL_CONTENT_TYPE_KEY.to_string(),
+                    content_type.to_string(),
+                );
+            }
+            self.outbound_media_chunks
+                .insert(message.id.clone(), (file_id.clone(), chunk.chunk_index));
+
+            let previous_transport = self.transport_manager.current_transport();
+            let send_result = self.transport_manager.send(&message);
+            let current_transport = self.transport_manager.current_transport();
+
+            match send_result {
+                Ok(()) => {
+                    self.handle_send_success(&message, current_transport)?;
+                    self.emit_transport_switch_event(previous_transport, current_transport)?;
+                }
+                Err(err) => {
+                    self.handle_send_failure(
+                        &message,
+                        current_transport.or(previous_transport),
+                    )?;
+                    warn!(
+                        file_id = %file_id,
+                        chunk_index = index,
+                        error = %err,
+                        "File chunk send failed, message deferred"
+                    );
+                }
+            }
+            if !self.outbound_media_transfers.contains_key(&file_id) {
+                return Err(Error::Other(format!(
+                    "Media transfer {} could not be scheduled for reliable delivery",
+                    file_id
+                )));
+            }
+        }
+
+        Ok(file_id)
+    }
+
+    /// Creates a message carrying media content (file chunks, etc.).
+    ///
+    /// Like `create_message` but sets `content_type`, `media_metadata`, marks
+    /// the message as internet-preferred via metadata, and requires per-chunk ACKs.
+    fn create_media_message(
+        &mut self,
+        recipient: &str,
+        content: impl Into<String>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
+    ) -> Result<Message> {
+        use crate::constants::{TRANSPORT_PREFERENCE_INTERNET, TRANSPORT_PREFERENCE_KEY};
+
+        let sender = UserId::new(&self.config.user_id)?;
+        let recipient = UserId::new(recipient)?;
+        let app_id = AppId::new(&self.config.app_id)?;
+
+        let clock_value = self.lamport_clock.tick();
+        self.persist_lamport_clock();
+
+        let mut builder = Message::builder(sender, recipient, app_id)
+            .content(content)
+            .content_type(content_type)
+            .priority(MessagePriority::Medium)
+            .ttl(TTL::new(self.config.initial_ttl)?)
+            .lamport_clock(clock_value)
+            .metadata(TRANSPORT_PREFERENCE_KEY, TRANSPORT_PREFERENCE_INTERNET)
+            .requires_ack(true);
+
+        if let Some(meta) = media_metadata {
+            builder = builder.media_metadata(meta);
+        }
+
+        Ok(builder.build())
+    }
+
+    /// Returns a mutable reference to the file transfer manager.
+    pub fn file_transfer_manager_mut(&mut self) -> &mut FileTransferManager {
+        &mut self.file_transfer_manager
+    }
+
+    /// Returns a reference to the file transfer manager.
+    pub fn file_transfer_manager(&self) -> &FileTransferManager {
+        &self.file_transfer_manager
+    }
+
+    /// Processes an incoming file-chunk message: feeds it to the transfer
+    /// manager, emits progress events, and emits `FileReceived` when complete.
+    fn handle_incoming_file_chunk(&mut self, message: &Message) {
+        let chunk = match FileChunk::from_json(&message.content) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    message_id = %message.id,
+                    error = %e,
+                    "Failed to deserialize file chunk, dropping"
+                );
+                return;
+            }
+        };
+
+        let file_id = chunk.file_id.clone();
+        let file_name = chunk.file_name.clone();
+        let file_size = chunk.file_size;
+        let sender = message.sender.as_str().to_string();
+
+        if chunk.chunk_index == 0 {
+            use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
+            let original_ct = message
+                .metadata
+                .get(ORIGINAL_CONTENT_TYPE_KEY)
+                .map(|s| ContentType::parse(s))
+                .unwrap_or(ContentType::File);
+            self.pending_media_metadata
+                .insert(
+                    file_id.clone(),
+                    PendingMediaMetadataEntry {
+                        content_type: original_ct,
+                        media_metadata: message.media_metadata.clone(),
+                        last_updated_at: Instant::now(),
+                    },
+                );
+        }
+
+        if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {
+            if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
+                entry.last_updated_at = Instant::now();
+            }
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_progress(
+                    file_id.clone(),
+                    progress.chunks_completed,
+                    progress.total_chunks,
+                ));
+            }
+        }
+
+        if self.file_transfer_manager.is_complete(&file_id) {
+            let Some(file_data) = self.file_transfer_manager.finalize_file(&file_id) else {
+                warn!(
+                    file_id = %file_id,
+                    "File transfer marked complete but reassembly failed"
+                );
+                return;
+            };
+            let metadata_entry = self.pending_media_metadata.remove(&file_id);
+            let (content_type, media_metadata) = metadata_entry
+                .map(|entry| (entry.content_type, entry.media_metadata))
+                .unwrap_or((ContentType::File, None));
+
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_received(
+                    file_id,
+                    file_name,
+                    file_size,
+                    sender,
+                    content_type,
+                    media_metadata,
+                    file_data,
+                ));
             }
         }
     }
@@ -2595,6 +2874,8 @@ impl OfflineProtocol {
                                     .reply_to_msg
                                     .as_ref()
                                     .map(|id| id.as_str().to_string()),
+                                content_type: decrypted_msg.content_type.to_string(),
+                                media_metadata: decrypted_msg.media_metadata.clone(),
                             };
                             state.emit_event(event);
                         }
@@ -4272,6 +4553,13 @@ impl OfflineProtocol {
                         }
                     }
 
+                    // Route file-chunk messages to the transfer manager instead
+                    // of surfacing them to the app as regular messages.
+                    if message.content_type == ContentType::FileChunk {
+                        self.handle_incoming_file_chunk(&message);
+                        continue;
+                    }
+
                     let event = Event::MessageReceived {
                         message_id: message.id.as_str(),
                         sender: message.sender.as_str().to_string(),
@@ -4285,6 +4573,8 @@ impl OfflineProtocol {
                             .reply_to_msg
                             .as_ref()
                             .map(|id| id.as_str().to_string()),
+                        content_type: message.content_type.to_string(),
+                        media_metadata: message.media_metadata.clone(),
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {
@@ -5149,6 +5439,7 @@ impl OfflineProtocol {
         ));
         drop(state);
 
+        self.handle_outbound_media_chunk_failed(message_id, "max retries exceeded");
         self.ack_manager.remove_ack(message_id);
         if let Some(entry) = self.remove_outbox_entry(message_id) {
             if let Some(transport) = entry.last_transport {
@@ -5200,6 +5491,7 @@ impl OfflineProtocol {
         ));
         drop(state);
 
+        self.handle_outbound_media_chunk_failed(message_id, "retry queue unavailable");
         self.ack_manager.remove_ack(message_id);
         if let Some(entry) = self.remove_outbox_entry(message_id) {
             if let Some(transport) = entry.last_transport {
@@ -5229,6 +5521,7 @@ impl OfflineProtocol {
         ));
         drop(state);
 
+        self.handle_outbound_media_chunk_failed(message_id, "missing outbox entry");
         self.ack_manager.remove_ack(message_id);
         Ok(())
     }
@@ -5238,6 +5531,13 @@ impl OfflineProtocol {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
+        let stale_file_ids = self
+            .file_transfer_manager
+            .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
+        for file_id in stale_file_ids {
+            self.pending_media_metadata.remove(&file_id);
+        }
+        self.cleanup_stale_media_state(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
         // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
         self.ack_manager
             .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes
@@ -5320,6 +5620,84 @@ impl OfflineProtocol {
         self.retry_queue.len()
     }
 
+    fn handle_outbound_media_chunk_delivered(&mut self, message_id: &MessageId) {
+        let Some((file_id, chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
+            return;
+        };
+
+        let Some(transfer) = self.outbound_media_transfers.get_mut(&file_id) else {
+            return;
+        };
+
+        transfer.delivered_chunks.insert(chunk_index);
+        transfer.last_updated_at = Instant::now();
+
+        let delivered_chunks = transfer.delivered_chunks.len() as u32;
+        let total_chunks = transfer.total_chunks;
+        let content_type = transfer.content_type;
+        let recipient = transfer.recipient.clone();
+        let completed = delivered_chunks == total_chunks;
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::file_progress(
+                file_id.clone(),
+                delivered_chunks,
+                total_chunks,
+            ));
+            if completed {
+                state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
+            }
+        }
+
+        if completed {
+            self.outbound_media_transfers.remove(&file_id);
+        }
+    }
+
+    fn handle_outbound_media_chunk_failed(&mut self, message_id: &MessageId, reason: &str) {
+        let Some((file_id, _chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
+            return;
+        };
+
+        if self.outbound_media_transfers.remove(&file_id).is_some() {
+            self.outbound_media_chunks
+                .retain(|_, (candidate_file_id, _)| candidate_file_id != &file_id);
+            warn!(
+                file_id = %file_id,
+                message_id = %message_id,
+                reason = %reason,
+                "Aborting outbound media transfer after terminal chunk failure"
+            );
+        }
+    }
+
+    fn cleanup_stale_media_state(&mut self, max_age: StdDuration) {
+        let now = Instant::now();
+
+        self.pending_media_metadata
+            .retain(|_, metadata| now.duration_since(metadata.last_updated_at) <= max_age);
+
+        let stale_outbound_file_ids: HashSet<String> = self
+            .outbound_media_transfers
+            .iter()
+            .filter_map(|(file_id, transfer)| {
+                if now.duration_since(transfer.last_updated_at) > max_age {
+                    return Some(file_id.clone());
+                }
+                None
+            })
+            .collect();
+
+        if stale_outbound_file_ids.is_empty() {
+            return;
+        }
+
+        self.outbound_media_transfers
+            .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
+        self.outbound_media_chunks
+            .retain(|_, (file_id, _)| !stale_outbound_file_ids.contains(file_id));
+    }
+
     fn ensure_outbox_entry(&mut self, message: &Message) {
         if !message.requires_ack {
             return;
@@ -5336,6 +5714,7 @@ impl OfflineProtocol {
                     self.transport_manager.record_delivery_failure(transport);
                 }
                 self.outbox.remove(&oldest_id);
+                self.handle_outbound_media_chunk_failed(&oldest_id, "outbox eviction");
             }
         }
 
@@ -5414,6 +5793,7 @@ impl OfflineProtocol {
                 self.transport_manager.record_delivery_failure(transport);
             }
             self.outbox.remove(&message_id);
+            self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
     }
 

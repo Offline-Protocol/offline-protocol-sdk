@@ -1068,8 +1068,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
-    @objc func sendFile(_ filePath: String,
-                        recipient: String,
+    @objc func sendFile(_ recipient: String,
+                        fileData: String,
                         fileName: String,
                         resolver: @escaping RCTPromiseResolveBlock,
                         rejecter: @escaping RCTPromiseRejectBlock) {
@@ -1078,10 +1078,64 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let fileId = try proto.sendFile(recipient: recipient, filePath: filePath, fileName: fileName)
+            guard let data = Data(base64Encoded: fileData) else {
+                rejecter("ERROR_SEND_FILE", "Invalid base64 file data", nil)
+                return
+            }
+            let fileId = try proto.sendFile(recipient: recipient, fileData: Array(data), fileName: fileName)
             resolver(fileId)
         } catch {
             rejecter("ERROR_SEND_FILE", "Failed to send file: \(error.localizedDescription)", error)
+        }
+    }
+    
+    @objc func sendMedia(_ recipient: String,
+                         fileData: String,
+                         fileName: String,
+                         contentType: String,
+                         mediaMetadata: NSDictionary?,
+                         resolver: @escaping RCTPromiseResolveBlock,
+                         rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_SEND_MEDIA", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            guard let data = Data(base64Encoded: fileData) else {
+                rejecter("ERROR_SEND_MEDIA", "Invalid base64 file data", nil)
+                return
+            }
+            let ct = parseContentType(contentType)
+            var meta: MediaMetadata? = nil
+            if let dict = mediaMetadata as? [String: Any] {
+                meta = MediaMetadata(
+                    mimeType: dict["mime_type"] as? String ?? "",
+                    fileName: dict["file_name"] as? String ?? fileName,
+                    fileSize: (dict["file_size"] as? NSNumber)?.uint64Value ?? 0,
+                    durationMs: (dict["duration_ms"] as? NSNumber)?.uint64Value,
+                    width: (dict["width"] as? NSNumber)?.uint32Value,
+                    height: (dict["height"] as? NSNumber)?.uint32Value,
+                    thumbnailBase64: dict["thumbnail_base64"] as? String
+                )
+            }
+            let fileId = try proto.sendMedia(recipient: recipient, fileData: Array(data), fileName: fileName, contentType: ct, mediaMetadata: meta)
+            resolver(fileId)
+        } catch {
+            rejecter("ERROR_SEND_MEDIA", "Failed to send media: \(error.localizedDescription)", error)
+        }
+    }
+    
+    private func parseContentType(_ value: String) -> ContentType {
+        switch value.lowercased() {
+        case "text": return .text
+        case "image": return .image
+        case "video": return .video
+        case "audio": return .audio
+        case "voice_note": return .voiceNote
+        case "video_note": return .videoNote
+        case "file": return .file
+        case "file_chunk": return .fileChunk
+        default: return .file
         }
     }
     
@@ -1095,9 +1149,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         if let progress = proto.getFileProgress(fileId: fileId) {
             let result: [String: Any] = [
                 "file_id": progress.fileId,
-                "file_name": progress.fileId,
-                "file_size": 0,
-                "chunks_completed": Int(progress.chunksSent),
+                "chunks_sent": Int(progress.chunksSent),
                 "total_chunks": Int(progress.totalChunks),
                 "percentage": Int(progress.percentage)
             ]
@@ -1118,7 +1170,11 @@ class OfflineProtocolModule: RCTEventEmitter {
             try proto.cancelFileTransfer(fileId: fileId)
             resolver(true)
         } catch {
-            rejecter("ERROR_FILE_CANCEL", "Failed to cancel file transfer: \(error.localizedDescription)", error)
+            if error.localizedDescription.localizedCaseInsensitiveContains("not found") {
+                resolver(false)
+            } else {
+                rejecter("ERROR_FILE_CANCEL", "Failed to cancel file transfer: \(error.localizedDescription)", error)
+            }
         }
     }
     
@@ -1768,6 +1824,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     @objc func processFileChunk(_ fileId: String,
                                 chunkIndex: Int,
+                                totalChunks: Int,
+                                fileSize: Double,
+                                fileName: String,
+                                fileChecksum: String,
                                 data: [NSNumber],
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
@@ -1777,7 +1837,15 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         do {
             let bytes = data.map { UInt8($0.intValue) }
-            try proto.processFileChunk(fileId: fileId, chunkIndex: UInt32(chunkIndex), data: bytes)
+            try proto.processFileChunk(
+                fileId: fileId,
+                chunkIndex: UInt32(chunkIndex),
+                totalChunks: UInt32(totalChunks),
+                fileSize: UInt64(fileSize),
+                fileName: fileName,
+                fileChecksum: fileChecksum,
+                data: bytes
+            )
             resolver(nil)
         } catch {
             rejecter("ERROR_FILE", "Failed to process file chunk: \(error.localizedDescription)", error)

@@ -65,9 +65,17 @@ RCT_EXTERN_METHOD(getMedianLatency:(RCTPromiseResolveBlock)resolve
 RCT_EXTERN_METHOD(getMedianHops:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(sendFile:(NSString *)filePath
-                  recipient:(NSString *)recipient
+RCT_EXTERN_METHOD(sendFile:(NSString *)recipient
+                  fileData:(NSString *)fileData
                   fileName:(NSString *)fileName
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendMedia:(NSString *)recipient
+                  fileData:(NSString *)fileData
+                  fileName:(NSString *)fileName
+                  contentType:(NSString *)contentType
+                  mediaMetadata:(NSDictionary *)mediaMetadata
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
@@ -241,6 +249,10 @@ RCT_EXTERN_METHOD(shouldEscalateToWifi:(RCTPromiseResolveBlock)resolve
 // File Transfer Operations
 RCT_EXTERN_METHOD(processFileChunk:(NSString *)fileId
                   chunkIndex:(nonnull NSNumber *)chunkIndex
+                  totalChunks:(nonnull NSNumber *)totalChunks
+                  fileSize:(nonnull NSNumber *)fileSize
+                  fileName:(NSString *)fileName
+                  fileChecksum:(NSString *)fileChecksum
                   data:(NSArray *)data
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

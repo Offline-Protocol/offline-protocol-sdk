@@ -146,6 +146,29 @@ dictionary TransportMetrics {
     u32 avg_latency_ms;
 };
 
+// Content type for messages
+enum ContentType {
+    "Text",
+    "Image",
+    "Video",
+    "Audio",
+    "VoiceNote",
+    "VideoNote",
+    "File",
+    "FileChunk",
+};
+
+// Media metadata for attachments
+dictionary MediaMetadata {
+    string mime_type;
+    string file_name;
+    u64 file_size;
+    u64? duration_ms;
+    u32? width;
+    u32? height;
+    string? thumbnail_base64;
+};
+
 // File transfer progress information
 dictionary FileProgress {
     string file_id;
@@ -472,12 +495,15 @@ interface OfflineProtocol {
     // DORS decision support
     boolean should_escalate_to_wifi();
     
-    // File transfer
+    // Media and file transfer
     [Throws=ProtocolError]
-    string send_file(string recipient, string file_path, string file_name);
+    string send_media(string recipient, sequence<u8> file_data, string file_name, ContentType content_type, MediaMetadata? media_metadata);
     
     [Throws=ProtocolError]
-    void process_file_chunk(string file_id, u32 chunk_index, sequence<u8> data);
+    string send_file(string recipient, sequence<u8> file_data, string file_name);
+    
+    [Throws=ProtocolError]
+    void process_file_chunk(string file_id, u32 chunk_index, u32 total_chunks, u64 file_size, string file_name, string file_checksum, sequence<u8> data);
     
     FileProgress? get_file_progress(string file_id);
     
