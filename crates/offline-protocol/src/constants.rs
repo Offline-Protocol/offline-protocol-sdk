@@ -42,3 +42,6 @@ pub const TRANSPORT_PREFERENCE_KEY: &str = "transport_preference";
 
 /// Transport preference value: prefer internet transport.
 pub const TRANSPORT_PREFERENCE_INTERNET: &str = "internet";
+
+/// Metadata key carrying the original content type on file-chunk messages.
+pub const ORIGINAL_CONTENT_TYPE_KEY: &str = "original_content_type";

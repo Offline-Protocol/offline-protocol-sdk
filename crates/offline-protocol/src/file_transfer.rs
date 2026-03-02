@@ -2,7 +2,28 @@
 
 use crate::constants::DEFAULT_CHUNK_SIZE;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        STANDARD.decode(&s).map_err(serde::de::Error::custom)
+    }
+}
 
 /// File transfer configuration.
 #[derive(Debug, Clone)]
@@ -41,7 +62,8 @@ pub struct FileChunk {
     /// Index of this chunk (0-based).
     pub chunk_index: u32,
 
-    /// Chunk data.
+    /// Chunk data (base64-encoded in JSON).
+    #[serde(with = "base64_bytes")]
     pub chunk_data: Vec<u8>,
 
     /// Checksum of the complete file (SHA256 hex string).
@@ -204,8 +226,7 @@ impl FileTransferManager {
             return Err(crate::Error::Other("File is empty".to_string()));
         }
 
-        // Calculate checksum (simple hash for now, could use SHA256 in production)
-        let file_checksum = format!("{:x}", file_size); // Simplified checksum
+        let file_checksum = format!("{:x}", Sha256::digest(&file_data));
 
         // Calculate number of chunks
         let total_chunks = ((file_size + self.config.chunk_size as u64 - 1)

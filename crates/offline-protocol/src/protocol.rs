@@ -1304,12 +1304,20 @@ impl OfflineProtocol {
                 None
             };
 
-            let message = self.create_media_message(
+            let mut message = self.create_media_message(
                 &recipient_str,
                 chunk_json,
                 ContentType::FileChunk,
                 meta_for_chunk,
             )?;
+
+            if index == 0 {
+                use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
+                message.metadata.insert(
+                    ORIGINAL_CONTENT_TYPE_KEY.to_string(),
+                    content_type.to_string(),
+                );
+            }
 
             let previous_transport = self.transport_manager.current_transport();
             let send_result = self.transport_manager.send(&message);
@@ -1423,11 +1431,15 @@ impl OfflineProtocol {
         let file_size = chunk.file_size;
         let sender = message.sender.as_str().to_string();
 
-        // Chunk 0 carries the media metadata and the original content type;
-        // stash them so we can include them in the FileReceived event.
         if chunk.chunk_index == 0 {
+            use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
+            let original_ct = message
+                .metadata
+                .get(ORIGINAL_CONTENT_TYPE_KEY)
+                .map(|s| ContentType::parse(s))
+                .unwrap_or(ContentType::File);
             self.pending_media_metadata
-                .insert(file_id.clone(), (message.content_type, message.media_metadata.clone()));
+                .insert(file_id.clone(), (original_ct, message.media_metadata.clone()));
         }
 
         if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {

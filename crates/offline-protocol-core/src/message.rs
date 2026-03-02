@@ -80,6 +80,23 @@ impl ContentType {
     pub fn is_media(&self) -> bool {
         !matches!(self, Self::Text)
     }
+
+    /// Parses a content type from its string representation.
+    ///
+    /// Falls back to `File` for unrecognised strings.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "text" => Self::Text,
+            "image" => Self::Image,
+            "video" => Self::Video,
+            "audio" => Self::Audio,
+            "voice_note" => Self::VoiceNote,
+            "video_note" => Self::VideoNote,
+            "file" => Self::File,
+            "file_chunk" => Self::FileChunk,
+            _ => Self::File,
+        }
+    }
 }
 
 impl fmt::Display for ContentType {

@@ -1564,13 +1564,46 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
             if (peerId) {
               incomingAcceptCooldownsRef.current.delete(peerId);
               outgoingConnectionRequestsRef.current.delete(peerId);
+              setEncryptedPeers(prev => {
+                if (!prev.has(peerId)) return prev;
+                const next = new Set(prev);
+                next.delete(peerId);
+                return next;
+              });
             }
             console.warn('[ProtocolProvider] secure_session_failed', secureEvent);
             break;
           }
-          case 'welcome_send_failed':
+          case 'welcome_send_failed': {
+            const welcomeFailed = event as { peer_id?: string; retryable?: boolean };
+            console.warn('[ProtocolProvider] welcome_send_failed', welcomeFailed);
+            if (welcomeFailed.peer_id && welcomeFailed.retryable === false) {
+              const pid = welcomeFailed.peer_id;
+              incomingAcceptCooldownsRef.current.delete(pid);
+              outgoingConnectionRequestsRef.current.delete(pid);
+              setEncryptedPeers(prev => {
+                if (!prev.has(pid)) return prev;
+                const next = new Set(prev);
+                next.delete(pid);
+                return next;
+              });
+            }
+            break;
+          }
           case 'welcome_send_expired': {
-            console.warn('[ProtocolProvider] welcome delivery issue', event);
+            const welcomeExpired = event as { peer_id?: string };
+            console.warn('[ProtocolProvider] welcome_send_expired', welcomeExpired);
+            if (welcomeExpired.peer_id) {
+              const pid = welcomeExpired.peer_id;
+              incomingAcceptCooldownsRef.current.delete(pid);
+              outgoingConnectionRequestsRef.current.delete(pid);
+              setEncryptedPeers(prev => {
+                if (!prev.has(pid)) return prev;
+                const next = new Set(prev);
+                next.delete(pid);
+                return next;
+              });
+            }
             break;
           }
           case 'message_received': {

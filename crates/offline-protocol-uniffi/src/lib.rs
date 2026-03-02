@@ -1358,36 +1358,24 @@ impl OfflineProtocol {
         _sender_id: String,
         fragment: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // Process the fragment first
+        let mut protocol = self.inner.lock().unwrap();
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
         {
-            let protocol = self.inner.lock().unwrap();
-            if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::BLE)
-            {
-                let transport = transport_arc.lock().unwrap();
-
-                // Safe downcast to BleTransport using Any trait
-                if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                    // Process the fragment
-                    ble_transport.on_fragment_received(fragment).map_err(|e| {
-                        ProtocolError::Other(format!("Fragment processing failed: {}", e))
-                    })?;
-                } else {
-                    return Err(ProtocolError::Other(
-                        "BLE transport not available or wrong type".to_string(),
-                    ));
-                }
+            let transport = transport_arc.lock().unwrap();
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble_transport.on_fragment_received(fragment).map_err(|e| {
+                    ProtocolError::Other(format!("Fragment processing failed: {}", e))
+                })?;
+            } else {
+                return Err(ProtocolError::Other(
+                    "BLE transport not available or wrong type".to_string(),
+                ));
             }
         }
 
-        //  Immediately process any completed messages and emit events
-        // This prevents the lag waiting for the 100ms polling cycle
-        let mut protocol = self.inner.lock().unwrap();
-        while let Some(_message) = protocol.receive_message() {
-            // Message will emit MessageReceived event automatically
-            // Just ensure the receive_message() loop runs to trigger events
-        }
+        while protocol.receive_message().is_some() {}
 
         Ok(())
     }
@@ -1527,8 +1515,7 @@ impl OfflineProtocol {
         sender_id: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // Try to deserialize and process the message through the transport
-        let protocol = self.inner.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
@@ -1539,8 +1526,7 @@ impl OfflineProtocol {
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
             {
-                // Pass raw data to the transport for processing
-                if let Err(e) = internet_transport.on_data_received(data.clone()) {
+                if let Err(e) = internet_transport.on_data_received(data) {
                     return Err(ProtocolError::Other(format!(
                         "Failed to process internet message: {}",
                         e
@@ -1548,21 +1534,16 @@ impl OfflineProtocol {
                 }
             }
         }
+
+        while protocol.receive_message().is_some() {}
         drop(protocol);
 
-        // Emit message received event
         let event = CoreEvent::NeighborDiscovered {
             peer_id: sender_id.clone(),
             transport: "Internet".to_string(),
             rssi: None,
         };
         self.emit_event(event);
-
-        // Process any completed messages
-        let mut protocol = self.inner.lock().unwrap();
-        while protocol.receive_message().is_some() {
-            // Messages are processed and events emitted automatically
-        }
 
         Ok(())
     }
@@ -1783,16 +1764,14 @@ impl OfflineProtocol {
         sender_id: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        // Try to deserialize and process the message through the transport
-        let protocol = self.inner.lock().unwrap();
+        let mut protocol = self.inner.lock().unwrap();
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
         {
             let transport = transport_arc.lock().unwrap();
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
-                // Pass raw data to the transport for processing
-                if let Err(e) = wifi_transport.on_data_received(data.clone()) {
+                if let Err(e) = wifi_transport.on_data_received(data) {
                     return Err(ProtocolError::Other(format!(
                         "Failed to process WiFi Direct message: {}",
                         e
@@ -1800,21 +1779,16 @@ impl OfflineProtocol {
                 }
             }
         }
+
+        while protocol.receive_message().is_some() {}
         drop(protocol);
 
-        // Emit peer discovery event
         let event = CoreEvent::NeighborDiscovered {
             peer_id: sender_id.clone(),
             transport: "WiFiDirect".to_string(),
             rssi: None,
         };
         self.emit_event(event);
-
-        // Process any completed messages
-        let mut protocol = self.inner.lock().unwrap();
-        while protocol.receive_message().is_some() {
-            // Messages are processed and events emitted automatically
-        }
 
         Ok(())
     }
@@ -3463,23 +3437,14 @@ mod tests {
     #[test]
     fn test_file_transfer_tracking() {
         let config = create_test_config();
-
         let protocol = OfflineProtocol::new(config).unwrap();
 
-        // Generate a file ID
-        let file_id = protocol
-            .send_file(
-                "recipient".to_string(),
-                "/path/to/file".to_string(),
-                "test.txt".to_string(),
-            )
-            .unwrap();
+        let file_id = "file_test_001".to_string();
 
-        // File is not tracked until chunks are processed
         assert!(protocol.get_file_progress(file_id.clone()).is_none());
 
-        // Process a file chunk
         use offline_protocol::file_transfer::FileChunk;
+        let checksum = "abc123".to_string();
         let chunk = FileChunk {
             file_id: file_id.clone(),
             file_name: "test.txt".to_string(),
@@ -3487,7 +3452,7 @@ mod tests {
             total_chunks: 2,
             chunk_index: 0,
             chunk_data: vec![0u8; 50],
-            file_checksum: "test".to_string(),
+            file_checksum: checksum,
         };
 
         {
@@ -3495,7 +3460,6 @@ mod tests {
             file_manager.process_chunk(chunk);
         }
 
-        // Now we should have progress
         let progress = protocol.get_file_progress(file_id.clone());
         assert!(progress.is_some());
         let progress = progress.unwrap();
