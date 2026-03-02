@@ -82,7 +82,11 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
     ) -> Result<(), Self::Error> {
         let label = "own_leaf_nodes";
         let mut nodes: Vec<LeafNode> = self.read_generic(label, group_id)?.unwrap_or_default();
-        nodes.push(serde_json::from_slice(&serde_json::to_vec(leaf_node).unwrap()).unwrap());
+        let serialized =
+            serde_json::to_vec(leaf_node).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let cloned =
+            serde_json::from_slice(&serialized).map_err(|e| MlsError::Deserialization(e.to_string()))?;
+        nodes.push(cloned);
         self.write_generic(label, group_id, &nodes)
     }
 
@@ -100,8 +104,14 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         let mut list: Vec<(ProposalRef, QueuedProposal)> =
             self.read_generic(label, group_id)?.unwrap_or_default();
 
-        let ref_clone = serde_json::from_slice(&serde_json::to_vec(proposal_ref).unwrap()).unwrap();
-        let prop_clone = serde_json::from_slice(&serde_json::to_vec(proposal).unwrap()).unwrap();
+        let ref_bytes =
+            serde_json::to_vec(proposal_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let ref_clone =
+            serde_json::from_slice(&ref_bytes).map_err(|e| MlsError::Deserialization(e.to_string()))?;
+        let prop_bytes =
+            serde_json::to_vec(proposal).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let prop_clone =
+            serde_json::from_slice(&prop_bytes).map_err(|e| MlsError::Deserialization(e.to_string()))?;
 
         list.push((ref_clone, prop_clone));
         self.write_generic(label, group_id, &list)
@@ -258,14 +268,6 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         hash_ref: &HashReference,
         key_package: &KeyPackage,
     ) -> Result<(), Self::Error> {
-        let key_bytes =
-            serde_json::to_vec(hash_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let key_id = hex::encode(&key_bytes);
-        tracing::info!(
-            key_id = %key_id,
-            key_bytes_len = key_bytes.len(),
-            "write_key_package: storing key package"
-        );
         self.write_generic("openmls_key_package", hash_ref, key_package)
     }
 
@@ -459,33 +461,7 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<Option<KeyPackage>, Self::Error> {
-        let key_bytes =
-            serde_json::to_vec(hash_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let key_id = hex::encode(&key_bytes);
-        let result: Result<Option<KeyPackage>, _> =
-            self.read_generic("openmls_key_package", hash_ref);
-        match &result {
-            Ok(Some(_)) => tracing::info!(
-                key_id = %key_id,
-                "key_package: found key package"
-            ),
-            Ok(None) => {
-                let stored_keys = self.storage.list_keys("openmls_key_package")
-                    .unwrap_or_default();
-                tracing::warn!(
-                    key_id = %key_id,
-                    stored_count = stored_keys.len(),
-                    stored_keys = ?stored_keys,
-                    "key_package: NOT FOUND in storage"
-                );
-            }
-            Err(e) => tracing::error!(
-                key_id = %key_id,
-                error = %e,
-                "key_package: error reading from storage"
-            ),
-        }
-        result
+        self.read_generic("openmls_key_package", hash_ref)
     }
 
     fn psk<PskBundle: traits::PskBundle<VERSION>, PskId: traits::PskId<VERSION>>(
@@ -506,9 +482,14 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         let label = "queued_proposals";
         let mut list: Vec<(ProposalRef, serde_json::Value)> =
             self.read_generic(label, group_id)?.unwrap_or_default();
-        let ref_bytes = serde_json::to_vec(proposal_ref).unwrap();
+        let ref_bytes = serde_json::to_vec(proposal_ref)
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
 
-        list.retain(|(r, _)| serde_json::to_vec(r).unwrap() != ref_bytes);
+        list.retain(|(r, _)| {
+            serde_json::to_vec(r)
+                .map(|b| b != ref_bytes)
+                .unwrap_or(true)
+        });
 
         self.write_generic(label, group_id, &list)
     }
@@ -641,13 +622,6 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<(), Self::Error> {
-        let key_bytes =
-            serde_json::to_vec(hash_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let key_id = hex::encode(&key_bytes);
-        tracing::info!(
-            key_id = %key_id,
-            "delete_key_package: removing key package from storage"
-        );
         self.delete_generic("openmls_key_package", hash_ref)
     }
 

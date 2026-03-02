@@ -168,6 +168,35 @@ pub enum MlsMessageType {
     Proposal,
 }
 
+impl MlsMessageType {
+    /// Returns a stable string representation for serialization/FFI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Application => "Application",
+            Self::Welcome => "Welcome",
+            Self::Commit => "Commit",
+            Self::Proposal => "Proposal",
+        }
+    }
+
+    /// Parses a string into an MlsMessageType, returning None for unknown values.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "Application" => Some(Self::Application),
+            "Welcome" => Some(Self::Welcome),
+            "Commit" => Some(Self::Commit),
+            "Proposal" => Some(Self::Proposal),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for MlsMessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// An encrypted MLS message ready for transport.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedMessage {
@@ -305,6 +334,9 @@ pub enum StorageKeyType {
 
     /// Group metadata (name, timestamps).
     GroupMetadata,
+
+    /// Pending welcome messages awaiting delivery.
+    PendingWelcome,
 }
 
 impl StorageKeyType {
@@ -318,6 +350,7 @@ impl StorageKeyType {
             Self::Credential => "credential",
             Self::ContactKeyPackage => "contact_key_package",
             Self::GroupMetadata => "group_metadata",
+            Self::PendingWelcome => "pending_welcome",
         }
     }
 }

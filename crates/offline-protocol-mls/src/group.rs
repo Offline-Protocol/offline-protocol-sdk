@@ -103,34 +103,33 @@ impl GroupManager {
         }
     }
 
-    /// Saves a group to storage.
+    /// Saves a group marker to storage.
+    ///
+    /// OpenMLS persists group state through the provider during mutations.
+    /// This marker is kept in our storage layer for listing/enumeration.
     pub fn save_group(&self, group_id: &GroupId, group: &MlsGroup) -> Result<()> {
-        // We also keep a marker in our storage for listing purposes
         let key_type = StorageKeyType::GroupState.as_str();
-
-        // Serialize the group epoch as a marker
         let marker = group.epoch().as_u64().to_le_bytes();
         self.storage.store(key_type, group_id.as_str(), &marker)?;
-
-        // Verify that the OpenMLS storage backend has a persisted copy of the group.
-        let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
-        if MlsGroup::load(self.provider.storage(), &mls_group_id)?.is_none() {
-            return Err(MlsError::Storage(StorageError::StoreFailed(
-                "Failed to persist MLS group state".to_string(),
-            )));
-        }
         Ok(())
     }
 
-    /// Deletes a group from storage.
+    /// Deletes a group from storage, including all OpenMLS provider state.
     pub fn delete_group(&self, group_id: &GroupId) -> Result<()> {
+        let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
+
+        if let Ok(Some(mut group)) = MlsGroup::load(self.provider.storage(), &mls_group_id) {
+            group
+                .delete(self.provider.storage())
+                .map_err(|e| MlsError::Storage(StorageError::DeleteFailed(format!(
+                    "Failed to delete group from provider storage: {:?}",
+                    e
+                ))))?;
+        }
+
         let key_type = StorageKeyType::GroupState.as_str();
         self.storage.delete(key_type, group_id.as_str())?;
 
-        // Also delete from provider storage
-        // Note: MlsGroup doesn't expose a delete method directly on the struct (static),
-        // usually we just delete the underlying key.
-        // We can ignore this for now as load_group checks for the marker first.
         Ok(())
     }
 

@@ -36,6 +36,9 @@ pub struct MlsManager {
     /// Cached credential.
     credential: RwLock<Option<CredentialWithKey>>,
 
+    /// Cached signature key pair (avoids re-reading storage on every crypto op).
+    cached_signer: RwLock<Option<SignatureKeyPair>>,
+
     /// Session manager for 1:1 messaging.
     session_manager: SessionManager,
 
@@ -60,6 +63,7 @@ impl MlsManager {
             storage,
             provider,
             credential: RwLock::new(None),
+            cached_signer: RwLock::new(None),
             session_manager,
             group_manager,
         };
@@ -87,7 +91,6 @@ impl MlsManager {
     /// Loads the identity from storage.
     fn load_identity(&self) -> Result<bool> {
         let key_type = StorageKeyType::Identity.as_str();
-        // Load the key pair directly
         let keys_data = self.storage.load(key_type, "key_pair")?;
 
         match keys_data {
@@ -102,7 +105,6 @@ impl MlsManager {
 
                 let public_key = signature_keys.public();
 
-                // Recreate credential
                 let credential =
                     Credential::new(CredentialType::Basic, self.user_id.as_bytes().to_vec());
 
@@ -111,13 +113,19 @@ impl MlsManager {
                     signature_key: public_key.into(),
                 };
 
-                // Safely update the credential cache
                 {
                     let mut guard = self
                         .credential
                         .write()
                         .map_err(|_| MlsError::NotInitialized)?;
                     *guard = Some(credential_with_key);
+                }
+                {
+                    let mut guard = self
+                        .cached_signer
+                        .write()
+                        .map_err(|_| MlsError::NotInitialized)?;
+                    *guard = Some(signature_keys);
                 }
 
                 debug!(user_id = %self.user_id, "Loaded existing MLS identity");
@@ -132,7 +140,6 @@ impl MlsManager {
         let signature_keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
             .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
 
-        // Store the key pair directly in our storage
         let keys_json = serde_json::to_vec(&signature_keys)
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
 
@@ -155,6 +162,13 @@ impl MlsManager {
                 .map_err(|_| MlsError::NotInitialized)?;
             *guard = Some(credential_with_key);
         }
+        {
+            let mut guard = self
+                .cached_signer
+                .write()
+                .map_err(|_| MlsError::NotInitialized)?;
+            *guard = Some(signature_keys);
+        }
 
         Ok(())
     }
@@ -168,19 +182,21 @@ impl MlsManager {
         guard.clone().ok_or_else(|| MlsError::NotInitialized)
     }
 
-    /// Gets a signer for MLS operations.
+    /// Gets a signer for MLS operations, using the in-memory cache.
+    ///
+    /// `SignatureKeyPair` doesn't implement `Clone`, so we serialize from
+    /// the cached copy to avoid hitting storage on every crypto operation.
     fn get_signer(&self) -> Result<SignatureKeyPair> {
-        let key_type = StorageKeyType::Identity.as_str();
-        let keys_data = self
-            .storage
-            .load(key_type, "key_pair")?
-            .ok_or_else(|| MlsError::NotInitialized)?;
+        let guard = self
+            .cached_signer
+            .read()
+            .map_err(|_| MlsError::NotInitialized)?;
 
-        let signature_keys: SignatureKeyPair = serde_json::from_slice(&keys_data).map_err(|e| {
-            MlsError::Deserialization(format!("Failed to deserialize signature keys: {}", e))
-        })?;
-
-        Ok(signature_keys)
+        let cached = guard.as_ref().ok_or(MlsError::NotInitialized)?;
+        let bytes =
+            serde_json::to_vec(cached).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| MlsError::Deserialization(e.to_string()))
     }
 
     // ========================================================================
@@ -356,7 +372,7 @@ impl MlsManager {
                 other_user_id = %other_user_id,
                 "Created new session - Welcome message needs to be sent"
             );
-            let key_type = "pending_welcome";
+            let key_type = StorageKeyType::PendingWelcome.as_str();
             let welcome_data =
                 serde_json::to_vec(&welcome).map_err(|e| MlsError::Serialization(e.to_string()))?;
             self.storage.store(key_type, other_user_id, &welcome_data)?;
@@ -369,7 +385,7 @@ impl MlsManager {
 
     /// Gets a pending Welcome message.
     pub fn get_pending_welcome(&self, other_user_id: &str) -> Result<Option<WelcomeMessage>> {
-        let key_type = "pending_welcome";
+        let key_type = StorageKeyType::PendingWelcome.as_str();
         match self.storage.load(key_type, other_user_id)? {
             Some(data) => {
                 let welcome: WelcomeMessage = serde_json::from_slice(&data)
@@ -382,7 +398,7 @@ impl MlsManager {
 
     /// Clears a pending Welcome message.
     pub fn clear_pending_welcome(&self, other_user_id: &str) -> Result<()> {
-        let key_type = "pending_welcome";
+        let key_type = StorageKeyType::PendingWelcome.as_str();
         self.storage.delete(key_type, other_user_id)?;
         Ok(())
     }
@@ -525,15 +541,6 @@ impl MlsManager {
         group_id: &GroupId,
         plaintext: &[u8],
     ) -> Result<EncryptedMessage> {
-        self.group_manager
-            .load_group(group_id)?
-            .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
-
-        // Re-load group to satisfy borrow checker if needed, or just proceed
-        // Actually, encrypt_for_group in MlsManager delegates to GroupManager
-        // But here I'm reimplementing parts of it?
-        // Ah, `manager.rs` implemented `encrypt_for_group` by calling `self.group_manager.load_group`, then `self.group_manager.encrypt_message`, then `save`.
-
         let mut group = self
             .group_manager
             .load_group(group_id)?

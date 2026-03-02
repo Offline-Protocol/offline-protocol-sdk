@@ -464,7 +464,7 @@ impl From<CoreEncryptedMessage> for MlsEncryptedMessage {
     fn from(msg: CoreEncryptedMessage) -> Self {
         Self {
             group_id: msg.group_id.as_str().to_string(),
-            message_type: format!("{:?}", msg.message_type),
+            message_type: msg.message_type.as_str().to_string(),
             epoch: msg.epoch,
             ciphertext: msg.ciphertext,
             sender_id: msg.sender_id,
@@ -476,12 +476,8 @@ impl From<CoreEncryptedMessage> for MlsEncryptedMessage {
 impl From<MlsEncryptedMessage> for CoreEncryptedMessage {
     fn from(msg: MlsEncryptedMessage) -> Self {
         use offline_protocol_mls::MlsMessageType;
-        let message_type = match msg.message_type.as_str() {
-            "Welcome" => MlsMessageType::Welcome,
-            "Commit" => MlsMessageType::Commit,
-            "Proposal" => MlsMessageType::Proposal,
-            _ => MlsMessageType::Application,
-        };
+        let message_type = MlsMessageType::from_str_opt(&msg.message_type)
+            .unwrap_or(MlsMessageType::Application);
         Self {
             group_id: CoreGroupId::new(msg.group_id),
             message_type,
