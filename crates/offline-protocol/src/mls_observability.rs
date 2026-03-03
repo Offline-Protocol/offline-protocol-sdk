@@ -68,9 +68,9 @@ impl DecryptionFailureKind {
         match error {
             MlsError::SessionNotFound(_) | MlsError::GroupNotFound(_) => Self::SessionNotFound,
             MlsError::NotInitialized => Self::NotInitialized,
-            MlsError::InvalidMessage(_) | MlsError::Deserialization(_) | MlsError::Decryption(_) => {
-                Self::InvalidCiphertext
-            }
+            MlsError::InvalidMessage(_)
+            | MlsError::Deserialization(_)
+            | MlsError::Decryption(_) => Self::InvalidCiphertext,
             MlsError::VerificationFailed(_) | MlsError::InvalidPublicKey(_) => {
                 Self::IdentityMismatch
             }

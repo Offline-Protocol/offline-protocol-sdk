@@ -3,7 +3,7 @@
 use crate::constants::DEFAULT_CHUNK_SIZE;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 mod base64_bytes {
@@ -72,14 +72,117 @@ pub struct FileChunk {
 }
 
 impl FileChunk {
-    /// Serializes to JSON.
+    /// Serializes to JSON (kept for backward compatibility).
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
-    /// Deserializes from JSON.
+    /// Deserializes from JSON (kept for backward compatibility).
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+
+    /// Serializes to a compact binary format, avoiding base64/JSON overhead.
+    ///
+    /// Wire format (all multi-byte integers are little-endian):
+    /// ```text
+    /// [file_id_len:4][file_id][file_name_len:4][file_name]
+    /// [file_size:8][total_chunks:4][chunk_index:4]
+    /// [chunk_data_len:4][chunk_data]
+    /// [checksum_len:4][checksum]
+    /// ```
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let file_id = self.file_id.as_bytes();
+        let file_name = self.file_name.as_bytes();
+        let checksum = self.file_checksum.as_bytes();
+
+        let capacity = 4
+            + file_id.len()
+            + 4
+            + file_name.len()
+            + 8
+            + 4
+            + 4
+            + 4
+            + self.chunk_data.len()
+            + 4
+            + checksum.len();
+        let mut buf = Vec::with_capacity(capacity);
+
+        buf.extend_from_slice(&(file_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(file_id);
+        buf.extend_from_slice(&(file_name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(file_name);
+        buf.extend_from_slice(&self.file_size.to_le_bytes());
+        buf.extend_from_slice(&self.total_chunks.to_le_bytes());
+        buf.extend_from_slice(&self.chunk_index.to_le_bytes());
+        buf.extend_from_slice(&(self.chunk_data.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&self.chunk_data);
+        buf.extend_from_slice(&(checksum.len() as u32).to_le_bytes());
+        buf.extend_from_slice(checksum);
+
+        buf
+    }
+
+    /// Deserializes from the compact binary format produced by `to_bytes`.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        let mut pos = 0;
+
+        let read_u32 = |pos: &mut usize| -> Result<u32, String> {
+            if *pos + 4 > data.len() {
+                return Err("unexpected end of data reading u32".to_string());
+            }
+            let val = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            *pos += 4;
+            Ok(val)
+        };
+
+        let read_u64 = |pos: &mut usize| -> Result<u64, String> {
+            if *pos + 8 > data.len() {
+                return Err("unexpected end of data reading u64".to_string());
+            }
+            let val = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            *pos += 8;
+            Ok(val)
+        };
+
+        let read_bytes = |pos: &mut usize, len: usize| -> Result<Vec<u8>, String> {
+            if *pos + len > data.len() {
+                return Err("unexpected end of data reading bytes".to_string());
+            }
+            let val = data[*pos..*pos + len].to_vec();
+            *pos += len;
+            Ok(val)
+        };
+
+        let file_id_len = read_u32(&mut pos)? as usize;
+        let file_id = String::from_utf8(read_bytes(&mut pos, file_id_len)?)
+            .map_err(|e| format!("invalid file_id UTF-8: {}", e))?;
+
+        let file_name_len = read_u32(&mut pos)? as usize;
+        let file_name = String::from_utf8(read_bytes(&mut pos, file_name_len)?)
+            .map_err(|e| format!("invalid file_name UTF-8: {}", e))?;
+
+        let file_size = read_u64(&mut pos)?;
+        let total_chunks = read_u32(&mut pos)?;
+        let chunk_index = read_u32(&mut pos)?;
+
+        let chunk_data_len = read_u32(&mut pos)? as usize;
+        let chunk_data = read_bytes(&mut pos, chunk_data_len)?;
+
+        let checksum_len = read_u32(&mut pos)? as usize;
+        let file_checksum = String::from_utf8(read_bytes(&mut pos, checksum_len)?)
+            .map_err(|e| format!("invalid checksum UTF-8: {}", e))?;
+
+        Ok(Self {
+            file_id,
+            file_name,
+            file_size,
+            total_chunks,
+            chunk_index,
+            chunk_data,
+            file_checksum,
+        })
     }
 }
 
@@ -211,6 +314,8 @@ impl FileTransferManager {
     /// * `file_id` - Unique identifier for this file transfer
     /// * `file_name` - Name of the file
     /// * `file_data` - Complete file data
+    /// * `chunk_size_override` - If `Some`, uses this chunk size instead of the configured default.
+    ///   Allows callers to select a transport-appropriate chunk size.
     ///
     /// # Returns
     ///
@@ -220,6 +325,7 @@ impl FileTransferManager {
         file_id: String,
         file_name: String,
         file_data: Vec<u8>,
+        chunk_size_override: Option<usize>,
     ) -> crate::Result<Vec<FileChunk>> {
         let file_size = file_data.len() as u64;
 
@@ -234,17 +340,21 @@ impl FileTransferManager {
             return Err(crate::Error::Other("File is empty".to_string()));
         }
 
+        let chunk_size = chunk_size_override.unwrap_or(self.config.chunk_size);
+        if chunk_size == 0 {
+            return Err(crate::Error::Other(
+                "Chunk size must be greater than zero".to_string(),
+            ));
+        }
         let file_checksum = format!("{:x}", Sha256::digest(&file_data));
 
-        // Calculate number of chunks
-        let total_chunks = ((file_size + self.config.chunk_size as u64 - 1)
-            / self.config.chunk_size as u64) as u32;
+        let total_chunks = ((file_size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
 
         let mut chunks = Vec::new();
 
         for chunk_index in 0..total_chunks {
-            let start = (chunk_index as usize) * self.config.chunk_size;
-            let end = ((chunk_index as usize + 1) * self.config.chunk_size).min(file_data.len());
+            let start = (chunk_index as usize) * chunk_size;
+            let end = ((chunk_index as usize + 1) * chunk_size).min(file_data.len());
 
             let chunk = FileChunk {
                 file_id: file_id.clone(),
@@ -377,6 +487,80 @@ impl Default for FileTransferManager {
     }
 }
 
+/// Tracks the sliding-window state for a single outbound file transfer.
+///
+/// Instead of sending all chunks at once, this limits the number of in-flight
+/// (unACKed) chunks to `max_in_flight`, reducing outbox pressure and providing
+/// backpressure that adapts to the transport's throughput.
+pub struct OutboundTransferState {
+    chunks: Vec<FileChunk>,
+    next_unsent: usize,
+    in_flight: HashSet<u32>,
+    acked: HashSet<u32>,
+    max_in_flight: usize,
+}
+
+impl OutboundTransferState {
+    pub fn new(chunks: Vec<FileChunk>, max_in_flight: usize) -> Self {
+        Self {
+            chunks,
+            next_unsent: 0,
+            in_flight: HashSet::new(),
+            acked: HashSet::new(),
+            max_in_flight,
+        }
+    }
+
+    /// Returns the next batch of chunks that can be sent without exceeding the
+    /// in-flight window. Returned chunks are marked as in-flight.
+    pub fn next_chunks_to_send(&mut self) -> Vec<FileChunk> {
+        let mut batch = Vec::new();
+        while self.in_flight.len() < self.max_in_flight && self.next_unsent < self.chunks.len() {
+            let chunk = self.chunks[self.next_unsent].clone();
+            self.in_flight.insert(chunk.chunk_index);
+            self.next_unsent += 1;
+            batch.push(chunk);
+        }
+        batch
+    }
+
+    /// Records that a chunk was ACKed. Returns `true` if this was an in-flight
+    /// chunk (i.e. the window has room for more).
+    pub fn on_chunk_ack(&mut self, chunk_index: u32) -> bool {
+        self.acked.insert(chunk_index);
+        self.in_flight.remove(&chunk_index)
+    }
+
+    /// Records that a chunk failed terminally and should not be retried
+    /// at the window level (the transfer will be aborted by the caller).
+    pub fn on_chunk_failed(&mut self, chunk_index: u32) {
+        self.in_flight.remove(&chunk_index);
+    }
+
+    pub fn total_chunks(&self) -> u32 {
+        self.chunks.len() as u32
+    }
+
+    pub fn acked_count(&self) -> u32 {
+        self.acked.len() as u32
+    }
+
+    pub fn is_fully_acked(&self) -> bool {
+        self.acked.len() == self.chunks.len()
+    }
+
+    /// Returns `true` when all chunks have been sent at least once
+    /// (they may still be in flight awaiting ACK).
+    pub fn all_sent(&self) -> bool {
+        self.next_unsent >= self.chunks.len()
+    }
+
+    /// Returns `true` when the window has capacity for more chunks.
+    pub fn has_capacity(&self) -> bool {
+        self.in_flight.len() < self.max_in_flight && self.next_unsent < self.chunks.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +575,7 @@ mod tests {
                 "file1".to_string(),
                 "test.txt".to_string(),
                 file_data.clone(),
+                None,
             )
             .unwrap();
 
@@ -412,7 +597,7 @@ mod tests {
         let file_data = vec![0u8; 350]; // 350 bytes
 
         let chunks = manager
-            .chunk_file("file1".to_string(), "test.bin".to_string(), file_data)
+            .chunk_file("file1".to_string(), "test.bin".to_string(), file_data, None)
             .unwrap();
 
         assert_eq!(chunks.len(), 4); // 350 bytes / 100 = 4 chunks
@@ -432,14 +617,31 @@ mod tests {
 
         let file_data = vec![0u8; 2000]; // Exceeds max
 
-        let result = manager.chunk_file("file1".to_string(), "large.bin".to_string(), file_data);
+        let result = manager.chunk_file(
+            "file1".to_string(),
+            "large.bin".to_string(),
+            file_data,
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_empty_file() {
         let manager = FileTransferManager::new();
-        let result = manager.chunk_file("file1".to_string(), "empty.txt".to_string(), vec![]);
+        let result = manager.chunk_file("file1".to_string(), "empty.txt".to_string(), vec![], None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_zero_chunk_size_override_rejected() {
+        let manager = FileTransferManager::new();
+        let result = manager.chunk_file(
+            "file1".to_string(),
+            "test.txt".to_string(),
+            b"hello".to_vec(),
+            Some(0),
+        );
         assert!(result.is_err());
     }
 
@@ -457,6 +659,7 @@ mod tests {
                 "file1".to_string(),
                 "test.txt".to_string(),
                 original_data.clone(),
+                None,
             )
             .unwrap();
 
@@ -485,6 +688,7 @@ mod tests {
                 "file1".to_string(),
                 "alphabet.txt".to_string(),
                 original_data.clone(),
+                None,
             )
             .unwrap();
 
@@ -512,7 +716,7 @@ mod tests {
 
         let file_data = vec![0u8; 250]; // 3 chunks
         let chunks = manager
-            .chunk_file("file1".to_string(), "test.bin".to_string(), file_data)
+            .chunk_file("file1".to_string(), "test.bin".to_string(), file_data, None)
             .unwrap();
 
         assert_eq!(chunks.len(), 3);
@@ -542,7 +746,7 @@ mod tests {
 
         let file_data = b"Test data".to_vec();
         let chunks = manager
-            .chunk_file("file1".to_string(), "test.txt".to_string(), file_data)
+            .chunk_file("file1".to_string(), "test.txt".to_string(), file_data, None)
             .unwrap();
 
         // Process same chunk twice
@@ -566,10 +770,20 @@ mod tests {
         let data2 = b"File 2 data".to_vec();
 
         let chunks1 = manager
-            .chunk_file("file1".to_string(), "file1.txt".to_string(), data1.clone())
+            .chunk_file(
+                "file1".to_string(),
+                "file1.txt".to_string(),
+                data1.clone(),
+                None,
+            )
             .unwrap();
         let chunks2 = manager
-            .chunk_file("file2".to_string(), "file2.txt".to_string(), data2.clone())
+            .chunk_file(
+                "file2".to_string(),
+                "file2.txt".to_string(),
+                data2.clone(),
+                None,
+            )
             .unwrap();
 
         // Process both files
@@ -591,7 +805,7 @@ mod tests {
 
         let file_data = b"Test data".to_vec();
         let chunks = manager
-            .chunk_file("file1".to_string(), "test.txt".to_string(), file_data)
+            .chunk_file("file1".to_string(), "test.txt".to_string(), file_data, None)
             .unwrap();
 
         manager.process_chunk(chunks[0].clone());
@@ -608,7 +822,7 @@ mod tests {
 
         let file_data = b"Test data".to_vec();
         let chunks = manager
-            .chunk_file("file1".to_string(), "test.txt".to_string(), file_data)
+            .chunk_file("file1".to_string(), "test.txt".to_string(), file_data, None)
             .unwrap();
 
         manager.process_chunk(chunks[0].clone());
@@ -641,6 +855,7 @@ mod tests {
                 "file1".to_string(),
                 "test.txt".to_string(),
                 b"hello world".to_vec(),
+                None,
             )
             .unwrap();
 
@@ -659,6 +874,7 @@ mod tests {
                 "file1".to_string(),
                 "test.txt".to_string(),
                 vec![1u8; 64 * 1024],
+                None,
             )
             .unwrap();
 

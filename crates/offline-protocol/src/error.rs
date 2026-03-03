@@ -181,10 +181,16 @@ mod tests {
 
     #[test]
     fn session_state_code_values_are_stable() {
-        assert_eq!(SessionStateError::SessionNotReady.code(), "SESSION_NOT_READY");
+        assert_eq!(
+            SessionStateError::SessionNotReady.code(),
+            "SESSION_NOT_READY"
+        );
         assert_eq!(SessionStateError::GroupNotFound.code(), "GROUP_NOT_FOUND");
         assert_eq!(SessionStateError::NotInitialized.code(), "NOT_INITIALIZED");
-        assert_eq!(SessionStateError::TransportFailure.code(), "TRANSPORT_FAILURE");
+        assert_eq!(
+            SessionStateError::TransportFailure.code(),
+            "TRANSPORT_FAILURE"
+        );
         assert_eq!(SessionStateError::CryptoFailure.code(), "CRYPTO_FAILURE");
         assert_eq!(SessionStateError::Unknown.code(), "UNKNOWN");
     }
@@ -215,10 +221,9 @@ mod tests {
 
     #[test]
     fn welcome_reason_mapping_uses_typed_transport_failure() {
-        let classified =
-            SessionStateError::classify(&Error::Transport(TransportError::SendFailed(
-                "send failed".to_string(),
-            )));
+        let classified = SessionStateError::classify(&Error::Transport(
+            TransportError::SendFailed("send failed".to_string()),
+        ));
         assert_eq!(
             classified.to_welcome_reason_code(),
             crate::events::WelcomeReasonCode::TransportUnavailable

@@ -84,8 +84,8 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         let mut nodes: Vec<LeafNode> = self.read_generic(label, group_id)?.unwrap_or_default();
         let serialized =
             serde_json::to_vec(leaf_node).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let cloned =
-            serde_json::from_slice(&serialized).map_err(|e| MlsError::Deserialization(e.to_string()))?;
+        let cloned = serde_json::from_slice(&serialized)
+            .map_err(|e| MlsError::Deserialization(e.to_string()))?;
         nodes.push(cloned);
         self.write_generic(label, group_id, &nodes)
     }
@@ -106,12 +106,12 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
 
         let ref_bytes =
             serde_json::to_vec(proposal_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let ref_clone =
-            serde_json::from_slice(&ref_bytes).map_err(|e| MlsError::Deserialization(e.to_string()))?;
+        let ref_clone = serde_json::from_slice(&ref_bytes)
+            .map_err(|e| MlsError::Deserialization(e.to_string()))?;
         let prop_bytes =
             serde_json::to_vec(proposal).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        let prop_clone =
-            serde_json::from_slice(&prop_bytes).map_err(|e| MlsError::Deserialization(e.to_string()))?;
+        let prop_clone = serde_json::from_slice(&prop_bytes)
+            .map_err(|e| MlsError::Deserialization(e.to_string()))?;
 
         list.push((ref_clone, prop_clone));
         self.write_generic(label, group_id, &list)
@@ -482,8 +482,8 @@ impl<const VERSION: u16> StorageProvider<VERSION> for MlsStorageAdapter {
         let label = "queued_proposals";
         let mut list: Vec<(ProposalRef, serde_json::Value)> =
             self.read_generic(label, group_id)?.unwrap_or_default();
-        let ref_bytes = serde_json::to_vec(proposal_ref)
-            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+        let ref_bytes =
+            serde_json::to_vec(proposal_ref).map_err(|e| MlsError::Serialization(e.to_string()))?;
 
         list.retain(|(r, _)| {
             serde_json::to_vec(r)

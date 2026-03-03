@@ -786,7 +786,10 @@ mod tests {
         let msg = small_message();
         let result = transport.send(&msg);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::Error::TransportNotAvailable(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::TransportNotAvailable(_)
+        ));
     }
 
     #[test]
@@ -893,7 +896,10 @@ mod tests {
         let transport = BleTransport::new("test-device");
         let result = transport.deserialize_message(b"not json");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::Error::SerializationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::SerializationError(_)
+        ));
     }
 
     #[test]
@@ -902,7 +908,11 @@ mod tests {
         transport.set_mtu(512);
         let msg = small_message();
         let fragments = transport.fragment_message(&msg).unwrap();
-        assert_eq!(fragments.len(), 1, "small message with large MTU should fit in one fragment");
+        assert_eq!(
+            fragments.len(),
+            1,
+            "small message with large MTU should fit in one fragment"
+        );
         let reconstructed = transport.process_fragment(&fragments[0]).unwrap();
         assert!(reconstructed.is_some());
         assert_eq!(reconstructed.unwrap().content, msg.content);
@@ -954,17 +964,16 @@ mod tests {
         let transport = BleTransport::new("test-device");
         let result = transport.process_fragment(&[0x4f, 0x50]); // "OP" only
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::Error::Other(s) if s.contains("short") || s.contains("truncat")));
+        assert!(
+            matches!(result.unwrap_err(), crate::Error::Other(s) if s.contains("short") || s.contains("truncat"))
+        );
     }
 
     #[test]
     fn test_ble_process_fragment_wrong_version() {
         let transport = BleTransport::new("test-device");
         // Minimal header with wrong version: magic(2) + version(1)=99 + id_len(1)=0 + index(2) + total(2) + data_len(2)
-        let bad = [
-            b'O', b'P', 99u8, 0u8,
-            0u8, 0u8, 1u8, 0u8, 0u8, 0u8,
-        ];
+        let bad = [b'O', b'P', 99u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8];
         let result = transport.process_fragment(&bad);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), crate::Error::Other(s) if s.contains("version")));
@@ -1030,7 +1039,10 @@ mod tests {
         let msg = small_message();
         let result = transport.send(&msg);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::Error::PeerNotReachable(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::PeerNotReachable(_)
+        ));
     }
 
     #[test]
@@ -1050,7 +1062,10 @@ mod tests {
         assert!(transport.send(&small_message()).is_ok());
         transport.on_peer_lost("bob");
         let result = transport.send(&small_message());
-        assert!(matches!(result.unwrap_err(), crate::Error::PeerNotReachable(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::PeerNotReachable(_)
+        ));
     }
 
     #[test]

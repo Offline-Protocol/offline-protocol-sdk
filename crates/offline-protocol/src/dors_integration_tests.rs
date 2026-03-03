@@ -11,7 +11,9 @@
 
 use offline_protocol_core::{AppId, Message, UserId};
 use offline_protocol_router::{DorsConfig, TransportSelector};
-use offline_protocol_transport::{mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType};
+use offline_protocol_transport::{
+    mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
+};
 use std::sync::{Arc, Mutex};
 
 fn test_message() -> Message {
@@ -121,7 +123,9 @@ fn dors_integration_happy_path_best_transport_selected_on_startup() {
 
     // With default config (prefer_online = false), BLE with strong RSSI and good
     // delivery ratio should outscore WiFi with weak bandwidth and poor delivery.
-    let current = manager.current_transport().expect("a transport was selected");
+    let current = manager
+        .current_transport()
+        .expect("a transport was selected");
     assert_eq!(
         current,
         TransportType::BLE,

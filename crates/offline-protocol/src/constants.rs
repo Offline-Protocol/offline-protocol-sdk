@@ -37,6 +37,28 @@ pub const HOP_COUNT_EMA_ALPHA: f32 = 0.2;
 /// Default chunk size for file transfers (32 KB).
 pub const DEFAULT_CHUNK_SIZE: usize = 32 * 1024;
 
+/// Chunk size for BLE file transfers (4 KB).
+/// Reduces BLE double-fragmentation: ~22 BLE fragments per chunk instead of ~240.
+pub const CHUNK_SIZE_BLE: usize = 4 * 1024;
+
+/// Chunk size for Internet file transfers (256 KB).
+/// Fewer round-trips over WebSocket where bandwidth is plentiful.
+pub const CHUNK_SIZE_INTERNET: usize = 256 * 1024;
+
+/// Maximum chunks in flight for BLE media transfers.
+/// BLE's low bandwidth means fewer concurrent chunks to avoid congestion.
+pub const MEDIA_WINDOW_SIZE_BLE: usize = 2;
+
+/// Maximum chunks in flight for Internet media transfers.
+pub const MEDIA_WINDOW_SIZE_INTERNET: usize = 8;
+
+/// Default maximum chunks in flight for media transfers.
+pub const DEFAULT_MEDIA_WINDOW_SIZE: usize = 4;
+
+/// Maximum entries in the dedicated media outbox.
+/// Smaller than the main outbox since the sliding window limits in-flight chunks.
+pub const MAX_MEDIA_OUTBOX_ENTRIES: usize = 100;
+
 /// Metadata key indicating preferred transport for a message.
 pub const TRANSPORT_PREFERENCE_KEY: &str = "transport_preference";
 

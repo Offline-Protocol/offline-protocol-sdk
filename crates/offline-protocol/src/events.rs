@@ -730,7 +730,7 @@ impl Event {
         media_metadata: Option<MediaMetadata>,
         file_data: Vec<u8>,
     ) -> Self {
-        use base64::{Engine, engine::general_purpose::STANDARD};
+        use base64::{engine::general_purpose::STANDARD, Engine};
         Self::FileReceived {
             file_id,
             file_name,

@@ -119,12 +119,12 @@ impl GroupManager {
         let mls_group_id = openmls::group::GroupId::from_slice(group_id.as_str().as_bytes());
 
         if let Ok(Some(mut group)) = MlsGroup::load(self.provider.storage(), &mls_group_id) {
-            group
-                .delete(self.provider.storage())
-                .map_err(|e| MlsError::Storage(StorageError::DeleteFailed(format!(
+            group.delete(self.provider.storage()).map_err(|e| {
+                MlsError::Storage(StorageError::DeleteFailed(format!(
                     "Failed to delete group from provider storage: {:?}",
                     e
-                ))))?;
+                )))
+            })?;
         }
 
         let key_type = StorageKeyType::GroupState.as_str();

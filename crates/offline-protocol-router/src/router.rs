@@ -1123,6 +1123,9 @@ mod tests {
         assert_eq!(routes.len(), 2);
         assert!(routes.iter().any(|r| r.next_hop == "hop1"));
         assert!(routes.iter().any(|r| r.next_hop == "hop3"));
-        assert!(!routes.iter().any(|r| r.next_hop == "hop2"), "hop2 (worst of original two) should be evicted");
+        assert!(
+            !routes.iter().any(|r| r.next_hop == "hop2"),
+            "hop2 (worst of original two) should be evicted"
+        );
     }
 }

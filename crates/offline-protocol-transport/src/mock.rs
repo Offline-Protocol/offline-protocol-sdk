@@ -92,8 +92,10 @@ impl Transport for MockTransport {
                 metrics.failure_count += 1;
                 let total = metrics.success_count + metrics.failure_count;
                 if total > 0 {
-                    metrics.delivery_ratio = Some((metrics.success_count as f32 / total as f32).clamp(0.0, 1.0));
-                    metrics.drop_rate = Some((1.0 - metrics.delivery_ratio.unwrap()).clamp(0.0, 1.0));
+                    metrics.delivery_ratio =
+                        Some((metrics.success_count as f32 / total as f32).clamp(0.0, 1.0));
+                    metrics.drop_rate =
+                        Some((1.0 - metrics.delivery_ratio.unwrap()).clamp(0.0, 1.0));
                 }
                 return Err(crate::Error::SendFailed("mock fail_next_sends".to_string()));
             }

@@ -204,14 +204,32 @@ mod tests {
 
     #[test]
     fn test_transport_type_from_label() {
-        assert_eq!(TransportType::from_label("internet"), TransportType::Internet);
-        assert_eq!(TransportType::from_label("INTERNET"), TransportType::Internet);
+        assert_eq!(
+            TransportType::from_label("internet"),
+            TransportType::Internet
+        );
+        assert_eq!(
+            TransportType::from_label("INTERNET"),
+            TransportType::Internet
+        );
         assert_eq!(TransportType::from_label("ble"), TransportType::BLE);
         assert_eq!(TransportType::from_label("BLE"), TransportType::BLE);
-        assert_eq!(TransportType::from_label("wifiDirect"), TransportType::WiFiDirect);
-        assert_eq!(TransportType::from_label("wifi_direct"), TransportType::WiFiDirect);
-        assert_eq!(TransportType::from_label("wifi-direct"), TransportType::WiFiDirect);
-        assert_eq!(TransportType::from_label("wifidirect"), TransportType::WiFiDirect);
+        assert_eq!(
+            TransportType::from_label("wifiDirect"),
+            TransportType::WiFiDirect
+        );
+        assert_eq!(
+            TransportType::from_label("wifi_direct"),
+            TransportType::WiFiDirect
+        );
+        assert_eq!(
+            TransportType::from_label("wifi-direct"),
+            TransportType::WiFiDirect
+        );
+        assert_eq!(
+            TransportType::from_label("wifidirect"),
+            TransportType::WiFiDirect
+        );
         assert_eq!(TransportType::from_label("unknown"), TransportType::BLE);
         assert_eq!(TransportType::from_label(""), TransportType::BLE);
     }
@@ -330,7 +348,9 @@ mod tests {
     fn test_link_quality_from_rssi_boundaries() {
         assert_eq!(LinkQuality::from_rssi(-50).value(), 100);
         assert!(LinkQuality::from_rssi(-70).value() >= 70);
-        assert!(LinkQuality::from_rssi(-85).value() >= 40 && LinkQuality::from_rssi(-85).value() <= 70);
+        assert!(
+            LinkQuality::from_rssi(-85).value() >= 40 && LinkQuality::from_rssi(-85).value() <= 70
+        );
         assert!(LinkQuality::from_rssi(-100).value() <= 40);
     }
 

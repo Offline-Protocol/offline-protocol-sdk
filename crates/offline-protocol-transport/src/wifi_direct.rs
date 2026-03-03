@@ -408,7 +408,10 @@ mod tests {
         let message = create_test_message();
         let result = transport.send(&message);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::Error::TransportNotAvailable(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::TransportNotAvailable(_)
+        ));
     }
 
     #[test]
@@ -507,7 +510,9 @@ mod tests {
         transport.on_status_changed(TransportStatus::Available);
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let c = called.clone();
-        transport.set_on_messages_available(std::sync::Arc::new(move || c.store(true, Ordering::SeqCst)));
+        transport.set_on_messages_available(std::sync::Arc::new(move || {
+            c.store(true, Ordering::SeqCst)
+        }));
         let _ = transport.send(&create_test_message());
         assert!(called.load(Ordering::SeqCst));
     }

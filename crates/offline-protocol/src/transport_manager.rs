@@ -249,10 +249,7 @@ impl TransportManager {
         // Emit DORS observability: scores and selection (before send attempt).
         // Compute once and reuse for both observability and fallback ordering.
         let scored = self.selector.score_and_rank(message, &available);
-        let scores: Vec<(String, f32)> = scored
-            .iter()
-            .map(|(t, s)| (t.to_string(), *s))
-            .collect();
+        let scores: Vec<(String, f32)> = scored.iter().map(|(t, s)| (t.to_string(), *s)).collect();
         self.emit_dors_event(Event::dors_score_updated(scores));
         let primary_score = scored
             .iter()
@@ -287,7 +284,8 @@ impl TransportManager {
             Ok(()) => {
                 self.current_transport = Some(primary);
                 if previous != Some(primary) {
-                    let reason_code = previous.is_some_and(|p| !available.contains_key(&p))
+                    let reason_code = previous
+                        .is_some_and(|p| !available.contains_key(&p))
                         .then_some(DorsReasonCode::CurrentUnavailable)
                         .unwrap_or(DorsReasonCode::PrimarySuccess);
                     self.emit_dors_event(Event::dors_transport_switched(
@@ -332,8 +330,7 @@ impl TransportManager {
             // Emit escalation trigger at DORS boundary (typed reason), deduped.
             if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
                 if let Some(trigger_reason) = self.selector.escalation_trigger_reason() {
-                    let reason_code =
-                        Self::escalation_trigger_reason_to_code(trigger_reason);
+                    let reason_code = Self::escalation_trigger_reason_to_code(trigger_reason);
                     self.emit_escalation_trigger_if_deduped(
                         reason_code,
                         primary.to_string(),
@@ -364,12 +361,13 @@ impl TransportManager {
                     self.selector.set_current_transport(*transport_type);
                     // Emit switch only when active transport actually changed (fallback success).
                     if previous != Some(*transport_type) {
-                        let reason_code =
-                            if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
-                                DorsReasonCode::EscalationApplied
-                            } else {
-                                DorsReasonCode::FallbackSuccess
-                            };
+                        let reason_code = if primary == TransportType::BLE
+                            && *transport_type == TransportType::WiFiDirect
+                        {
+                            DorsReasonCode::EscalationApplied
+                        } else {
+                            DorsReasonCode::FallbackSuccess
+                        };
                         self.emit_dors_event(Event::dors_transport_switched(
                             previous.map(|t| t.to_string()),
                             transport_type.to_string(),
@@ -378,7 +376,8 @@ impl TransportManager {
                         ));
                     }
                     // Escalation applied only when BLE→WiFi fallback actually succeeded.
-                    if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect {
+                    if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect
+                    {
                         self.emit_dors_event(Event::dors_escalation_triggered(
                             DorsEscalationPhase::Applied,
                             primary.to_string(),
@@ -404,10 +403,7 @@ impl TransportManager {
         }
 
         let terminal_error = last_error.unwrap_or_else(|| {
-            TransportError::SendFailed(format!(
-                "All transports failed (tried {:?})",
-                attempted
-            ))
+            TransportError::SendFailed(format!("All transports failed (tried {:?})", attempted))
         });
         Err(Error::Transport(terminal_error))
     }
@@ -719,9 +715,9 @@ mod tests {
             "expected dors_score_updated"
         );
         assert!(
-            captured.iter().any(|e| {
-                matches!(e, crate::events::Event::DorsTransportSelected { .. })
-            }),
+            captured
+                .iter()
+                .any(|e| { matches!(e, crate::events::Event::DorsTransportSelected { .. }) }),
             "expected dors_transport_selected"
         );
     }

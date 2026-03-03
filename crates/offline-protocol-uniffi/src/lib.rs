@@ -7,8 +7,7 @@
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
 use offline_protocol::{
-    EstablishmentState as CoreEstablishmentState,
-    Event as CoreEvent, NetworkVisualizer,
+    EstablishmentState as CoreEstablishmentState, Event as CoreEvent, NetworkVisualizer,
     OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
     PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
 };
@@ -272,7 +271,9 @@ impl From<offline_protocol::Error> for ProtocolError {
             offline_protocol::Error::SessionNotReady(state) => {
                 ProtocolError::SessionNotReady(state.into())
             }
-            offline_protocol::Error::EncryptFailed(message) => ProtocolError::EncryptFailed(message),
+            offline_protocol::Error::EncryptFailed(message) => {
+                ProtocolError::EncryptFailed(message)
+            }
             offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
             offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
             _ => ProtocolError::Other(err.to_string()),
@@ -533,8 +534,8 @@ impl From<CoreEncryptedMessage> for MlsEncryptedMessage {
 impl From<MlsEncryptedMessage> for CoreEncryptedMessage {
     fn from(msg: MlsEncryptedMessage) -> Self {
         use offline_protocol_mls::MlsMessageType;
-        let message_type = MlsMessageType::from_str_opt(&msg.message_type)
-            .unwrap_or(MlsMessageType::Application);
+        let message_type =
+            MlsMessageType::from_str_opt(&msg.message_type).unwrap_or(MlsMessageType::Application);
         Self {
             group_id: CoreGroupId::new(msg.group_id),
             message_type,
@@ -1261,15 +1262,13 @@ impl OfflineProtocol {
             {
                 let transport = transport_arc.lock().unwrap();
                 if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
-                    ble_transport.on_peer_discovered(
-                        offline_protocol_transport::ble::PeerDevice {
-                            device_id: peer_id.clone(),
-                            address: String::new(),
-                            rssi,
-                            last_seen: SystemTime::now(),
-                            connected: true,
-                        },
-                    );
+                    ble_transport.on_peer_discovered(offline_protocol_transport::ble::PeerDevice {
+                        device_id: peer_id.clone(),
+                        address: String::new(),
+                        rssi,
+                        last_seen: SystemTime::now(),
+                        connected: true,
+                    });
                 }
             }
         }
@@ -1958,7 +1957,13 @@ impl OfflineProtocol {
         let mut protocol = self.inner.lock().unwrap();
         let core_meta = media_metadata.map(CoreMediaMetadata::from);
         protocol
-            .send_media(recipient, file_data, file_name, content_type.into(), core_meta)
+            .send_media(
+                recipient,
+                file_data,
+                file_name,
+                content_type.into(),
+                core_meta,
+            )
             .map_err(|e| e.into())
     }
 
@@ -2027,7 +2032,10 @@ impl OfflineProtocol {
     /// Cancels an active file transfer.
     pub fn cancel_file_transfer(&self, file_id: String) -> Result<(), ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
-        if protocol.file_transfer_manager_mut().cancel_transfer(&file_id) {
+        if protocol
+            .file_transfer_manager_mut()
+            .cancel_transfer(&file_id)
+        {
             Ok(())
         } else {
             Err(ProtocolError::Other("File transfer not found".to_string()))
@@ -2217,7 +2225,9 @@ impl OfflineProtocol {
             switch_cooldown_secs: config.switch_cooldown_secs,
             ble_to_wifi_retry_threshold: config.ble_to_wifi_retry_threshold,
             min_success_rate_before_escalation: config.min_success_rate_before_escalation,
-            min_ble_samples_before_success_rate_escalation: config.min_ble_samples_before_success_rate_escalation as usize,
+            min_ble_samples_before_success_rate_escalation: config
+                .min_ble_samples_before_success_rate_escalation
+                as usize,
             rssi_switch_threshold: config.rssi_switch_threshold,
             congestion_queue_threshold: config.congestion_queue_threshold as usize,
             stability_window_secs: config.stability_window_secs,
@@ -2253,7 +2263,9 @@ impl OfflineProtocol {
             switch_cooldown_secs: core.switch_cooldown_secs,
             ble_to_wifi_retry_threshold: core.ble_to_wifi_retry_threshold,
             min_success_rate_before_escalation: core.min_success_rate_before_escalation,
-            min_ble_samples_before_success_rate_escalation: core.min_ble_samples_before_success_rate_escalation as u64,
+            min_ble_samples_before_success_rate_escalation: core
+                .min_ble_samples_before_success_rate_escalation
+                as u64,
             rssi_switch_threshold: core.rssi_switch_threshold,
             congestion_queue_threshold: core.congestion_queue_threshold as u64,
             stability_window_secs: core.stability_window_secs,
@@ -3200,13 +3212,20 @@ mod tests {
             Ok(())
         }
 
-        fn load(&self, key_type: String, key_id: String) -> Result<Option<Vec<u8>>, MlsStorageError> {
+        fn load(
+            &self,
+            key_type: String,
+            key_id: String,
+        ) -> Result<Option<Vec<u8>>, MlsStorageError> {
             let guard = self.data.lock().map_err(|_| MlsStorageError::LoadFailed)?;
             Ok(guard.get(&(key_type, key_id)).cloned())
         }
 
         fn delete(&self, key_type: String, key_id: String) -> Result<(), MlsStorageError> {
-            let mut guard = self.data.lock().map_err(|_| MlsStorageError::DeleteFailed)?;
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| MlsStorageError::DeleteFailed)?;
             guard.remove(&(key_type, key_id));
             Ok(())
         }

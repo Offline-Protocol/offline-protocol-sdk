@@ -1,15 +1,18 @@
 //! Main protocol engine.
 
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
-use crate::file_transfer::{FileChunk, FileTransferManager};
-use crate::mls_observability::{
-    DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsEventRateLimiter, MlsOperationContext,
-    NoopMlsEventEmitter,
-};
+use crate::events::DecryptionFailureCode;
+use crate::file_transfer::{FileChunk, FileTransferManager, OutboundTransferState};
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
-use crate::events::DecryptionFailureCode;
-use crate::{EstablishmentState, Error, Event, EventCallback, ProtocolConfig, Result, SessionStateError, TransportManager};
+use crate::mls_observability::{
+    DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsEventRateLimiter,
+    MlsOperationContext, NoopMlsEventEmitter,
+};
+use crate::{
+    Error, EstablishmentState, Event, EventCallback, ProtocolConfig, Result, SessionStateError,
+    TransportManager,
+};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
     AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority, UserId,
@@ -428,9 +431,11 @@ struct PendingMediaMetadataEntry {
 struct OutboundMediaTransfer {
     content_type: ContentType,
     recipient: String,
+    pinned_transport: TransportType,
     total_chunks: u32,
     delivered_chunks: HashSet<u32>,
     last_updated_at: Instant,
+    media_metadata: Option<MediaMetadata>,
 }
 
 enum OutboundSendPreparation {
@@ -468,6 +473,10 @@ pub struct OfflineProtocol {
 
     /// Messages awaiting delivery/acknowledgment (store-and-forward outbox).
     outbox: HashMap<MessageId, OutboxEntry>,
+
+    /// Dedicated outbox for file chunk messages, separate from the main outbox
+    /// to prevent large file transfers from evicting regular messages.
+    media_outbox: HashMap<MessageId, OutboxEntry>,
 
     /// MLS manager for end-to-end encryption.
     mls_manager: Option<Arc<RwLock<MlsManager>>>,
@@ -545,6 +554,9 @@ pub struct OfflineProtocol {
     outbound_media_transfers: HashMap<String, OutboundMediaTransfer>,
     /// Maps each outbound media chunk message ID to (file_id, chunk_index).
     outbound_media_chunks: HashMap<MessageId, (String, u32)>,
+    /// Sliding-window state for outbound file transfers, keyed by file_id.
+    /// Chunks are only sent when the window has capacity (previous chunks ACKed).
+    outbound_media_windows: HashMap<String, OutboundTransferState>,
 }
 
 impl OfflineProtocol {
@@ -578,6 +590,7 @@ impl OfflineProtocol {
             deduplicator: Deduplicator::with_config(config.reliability.dedup.clone()),
             shared_state: Arc::new(Mutex::new(SharedState::new())),
             outbox: HashMap::new(),
+            media_outbox: HashMap::new(),
             mls_manager: None,
             pending_encrypted_messages: HashMap::new(),
             pending_key_packages: HashMap::new(),
@@ -603,6 +616,7 @@ impl OfflineProtocol {
             pending_media_metadata: HashMap::new(),
             outbound_media_transfers: HashMap::new(),
             outbound_media_chunks: HashMap::new(),
+            outbound_media_windows: HashMap::new(),
             config,
         })
     }
@@ -627,7 +641,10 @@ impl OfflineProtocol {
             return Ok(());
         }
 
-        let manager = Arc::new(RwLock::new(MlsManager::new(&self.config.user_id, storage.clone())?));
+        let manager = Arc::new(RwLock::new(MlsManager::new(
+            &self.config.user_id,
+            storage.clone(),
+        )?));
 
         // Keep initialization transactional so a restore failure cannot leave
         // partially-initialized MLS state visible and then permanently block retries.
@@ -698,8 +715,16 @@ impl OfflineProtocol {
     }
 
     #[cfg(feature = "mls-observability")]
-    fn session_id_for_observability(&self, peer_id: Option<&str>, group_id: Option<&str>) -> String {
-        let seed = format!("peer={}|group={}", peer_id.unwrap_or("none"), group_id.unwrap_or("none"));
+    fn session_id_for_observability(
+        &self,
+        peer_id: Option<&str>,
+        group_id: Option<&str>,
+    ) -> String {
+        let seed = format!(
+            "peer={}|group={}",
+            peer_id.unwrap_or("none"),
+            group_id.unwrap_or("none")
+        );
         opaque_id(&seed, &self.mls_observability_secret)
     }
 
@@ -811,7 +836,12 @@ impl OfflineProtocol {
     }
 
     #[cfg(not(feature = "mls-observability"))]
-    fn emit_mls_session_ready(&self, _peer_id: &str, _group_id: &str, _context: MlsOperationContext) {
+    fn emit_mls_session_ready(
+        &self,
+        _peer_id: &str,
+        _group_id: &str,
+        _context: MlsOperationContext,
+    ) {
     }
 
     /// Starts the protocol.
@@ -905,6 +935,37 @@ impl OfflineProtocol {
 
     fn transport_label(transport: TransportType) -> &'static str {
         transport.label()
+    }
+
+    fn select_media_transport(&self) -> Result<TransportType> {
+        let available = self.transport_manager.get_available_transports();
+
+        if let Some(current) = self.transport_manager.current_transport() {
+            if available.contains_key(&current) {
+                return Ok(current);
+            }
+        }
+
+        for preferred in [
+            TransportType::Internet,
+            TransportType::WiFiDirect,
+            TransportType::BLE,
+        ] {
+            if available.contains_key(&preferred) {
+                return Ok(preferred);
+            }
+        }
+
+        Err(Error::Other(
+            "No available transport for media transfer".to_string(),
+        ))
+    }
+
+    fn pinned_media_transport_for_message(&self, message_id: &MessageId) -> Option<TransportType> {
+        let (file_id, _) = self.outbound_media_chunks.get(message_id)?;
+        self.outbound_media_transfers
+            .get(file_id)
+            .map(|transfer| transfer.pinned_transport)
     }
 
     fn decryption_failure_code_from_kind(kind: DecryptionFailureKind) -> DecryptionFailureCode {
@@ -1314,10 +1375,28 @@ impl OfflineProtocol {
         let file_name_str: String = file_name.into();
 
         let file_id = format!("file_{}", MessageId::new().as_str());
+        let pinned_transport = self.select_media_transport()?;
 
-        let chunks = self
-            .file_transfer_manager
-            .chunk_file(file_id.clone(), file_name_str, file_data)?;
+        let (chunk_size, window_size) = match pinned_transport {
+            TransportType::BLE => {
+                use crate::constants::{CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE};
+                (CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE)
+            }
+            TransportType::Internet => {
+                use crate::constants::{CHUNK_SIZE_INTERNET, MEDIA_WINDOW_SIZE_INTERNET};
+                (CHUNK_SIZE_INTERNET, MEDIA_WINDOW_SIZE_INTERNET)
+            }
+            TransportType::WiFiDirect => {
+                use crate::constants::{DEFAULT_CHUNK_SIZE, DEFAULT_MEDIA_WINDOW_SIZE};
+                (DEFAULT_CHUNK_SIZE, DEFAULT_MEDIA_WINDOW_SIZE)
+            }
+        };
+        let chunks = self.file_transfer_manager.chunk_file(
+            file_id.clone(),
+            file_name_str,
+            file_data,
+            Some(chunk_size),
+        )?;
 
         let total_chunks = chunks.len() as u32;
         self.outbound_media_transfers.insert(
@@ -1325,34 +1404,64 @@ impl OfflineProtocol {
             OutboundMediaTransfer {
                 content_type,
                 recipient: recipient_str.clone(),
+                pinned_transport,
                 total_chunks,
                 delivered_chunks: HashSet::new(),
                 last_updated_at: Instant::now(),
+                media_metadata: media_metadata.clone(),
             },
         );
+
+        let mut window_state = OutboundTransferState::new(chunks, window_size);
+        let initial_batch = window_state.next_chunks_to_send();
+        self.outbound_media_windows
+            .insert(file_id.clone(), window_state);
+
         let state = lock_shared_state(&self.shared_state)?;
         state.emit_event(Event::file_progress(file_id.clone(), 0, total_chunks));
         drop(state);
 
-        for (index, chunk) in chunks.into_iter().enumerate() {
-            let chunk_json = chunk
-                .to_json()
-                .map_err(|e| Error::Other(format!("Failed to serialize file chunk: {}", e)))?;
+        self.send_media_chunk_batch(
+            &file_id,
+            initial_batch,
+            &recipient_str,
+            pinned_transport,
+            content_type,
+            media_metadata.as_ref(),
+        )?;
 
-            let meta_for_chunk = if index == 0 {
-                media_metadata.clone()
+        Ok(file_id)
+    }
+
+    /// Sends a batch of file chunks, wiring each into the outbox and media tracking.
+    fn send_media_chunk_batch(
+        &mut self,
+        file_id: &str,
+        chunks: Vec<FileChunk>,
+        recipient: &str,
+        pinned_transport: TransportType,
+        content_type: ContentType,
+        media_metadata: Option<&MediaMetadata>,
+    ) -> Result<()> {
+        for chunk in chunks {
+            let chunk_index = chunk.chunk_index;
+            let binary_payload = chunk.to_bytes();
+
+            let meta_for_chunk = if chunk_index == 0 {
+                media_metadata.cloned()
             } else {
                 None
             };
 
             let mut message = self.create_media_message(
-                &recipient_str,
-                chunk_json,
+                recipient,
+                String::new(),
                 ContentType::FileChunk,
                 meta_for_chunk,
             )?;
+            message.binary_content = Some(binary_payload);
 
-            if index == 0 {
+            if chunk_index == 0 {
                 use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
                 message.metadata.insert(
                     ORIGINAL_CONTENT_TYPE_KEY.to_string(),
@@ -1360,11 +1469,13 @@ impl OfflineProtocol {
                 );
             }
             self.outbound_media_chunks
-                .insert(message.id.clone(), (file_id.clone(), chunk.chunk_index));
+                .insert(message.id.clone(), (file_id.to_string(), chunk_index));
 
             let previous_transport = self.transport_manager.current_transport();
-            let send_result = self.transport_manager.send(&message);
-            let current_transport = self.transport_manager.current_transport();
+            let send_result = self
+                .transport_manager
+                .send_via_transport(&message, pinned_transport);
+            let current_transport = Some(pinned_transport);
 
             match send_result {
                 Ok(()) => {
@@ -1372,27 +1483,73 @@ impl OfflineProtocol {
                     self.emit_transport_switch_event(previous_transport, current_transport)?;
                 }
                 Err(err) => {
-                    self.handle_send_failure(
-                        &message,
-                        current_transport.or(previous_transport),
-                    )?;
+                    self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                    // send_via_transport does not record retry failures internally.
+                    self.transport_manager
+                        .record_retry_failure(pinned_transport);
                     warn!(
                         file_id = %file_id,
-                        chunk_index = index,
+                        chunk_index = chunk_index,
+                        transport = ?pinned_transport,
                         error = %err,
                         "File chunk send failed, message deferred"
                     );
                 }
             }
-            if !self.outbound_media_transfers.contains_key(&file_id) {
+            if !self.outbound_media_transfers.contains_key(file_id) {
                 return Err(Error::Other(format!(
                     "Media transfer {} could not be scheduled for reliable delivery",
                     file_id
                 )));
             }
         }
+        Ok(())
+    }
 
-        Ok(file_id)
+    /// Pumps all active windowed media transfers, sending the next batch of
+    /// chunks for any transfer whose window has capacity (previous chunks ACKed).
+    /// Should be called from the periodic tick/poll loop.
+    fn pump_media_transfers(&mut self) {
+        let file_ids: Vec<String> = self.outbound_media_windows.keys().cloned().collect();
+
+        for file_id in file_ids {
+            let transfer = match self.outbound_media_transfers.get(&file_id) {
+                Some(t) => t.clone(),
+                None => {
+                    self.outbound_media_windows.remove(&file_id);
+                    continue;
+                }
+            };
+
+            let window = match self.outbound_media_windows.get_mut(&file_id) {
+                Some(w) => w,
+                None => continue,
+            };
+
+            if !window.has_capacity() {
+                continue;
+            }
+
+            let batch = window.next_chunks_to_send();
+            if batch.is_empty() {
+                continue;
+            }
+
+            if let Err(err) = self.send_media_chunk_batch(
+                &file_id,
+                batch,
+                &transfer.recipient,
+                transfer.pinned_transport,
+                transfer.content_type,
+                transfer.media_metadata.as_ref(),
+            ) {
+                warn!(
+                    file_id = %file_id,
+                    error = %err,
+                    "Failed to pump media transfer chunks"
+                );
+            }
+        }
     }
 
     /// Creates a message carrying media content (file chunks, etc.).
@@ -1444,15 +1601,29 @@ impl OfflineProtocol {
     /// Processes an incoming file-chunk message: feeds it to the transfer
     /// manager, emits progress events, and emits `FileReceived` when complete.
     fn handle_incoming_file_chunk(&mut self, message: &Message) {
-        let chunk = match FileChunk::from_json(&message.content) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(
-                    message_id = %message.id,
-                    error = %e,
-                    "Failed to deserialize file chunk, dropping"
-                );
-                return;
+        let chunk = if let Some(ref binary) = message.binary_content {
+            match FileChunk::from_bytes(binary) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        message_id = %message.id,
+                        error = %e,
+                        "Failed to deserialize binary file chunk, dropping"
+                    );
+                    return;
+                }
+            }
+        } else {
+            match FileChunk::from_json(&message.content) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        message_id = %message.id,
+                        error = %e,
+                        "Failed to deserialize file chunk, dropping"
+                    );
+                    return;
+                }
             }
         };
 
@@ -1468,15 +1639,14 @@ impl OfflineProtocol {
                 .get(ORIGINAL_CONTENT_TYPE_KEY)
                 .map(|s| ContentType::parse(s))
                 .unwrap_or(ContentType::File);
-            self.pending_media_metadata
-                .insert(
-                    file_id.clone(),
-                    PendingMediaMetadataEntry {
-                        content_type: original_ct,
-                        media_metadata: message.media_metadata.clone(),
-                        last_updated_at: Instant::now(),
-                    },
-                );
+            self.pending_media_metadata.insert(
+                file_id.clone(),
+                PendingMediaMetadataEntry {
+                    content_type: original_ct,
+                    media_metadata: message.media_metadata.clone(),
+                    last_updated_at: Instant::now(),
+                },
+            );
         }
 
         if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {
@@ -2290,7 +2460,9 @@ impl OfflineProtocol {
             .map(VecDeque::len)
             .unwrap_or(0);
         if peer_len == 0 {
-            self.pending_queue_metrics.pending_messages_per_peer.remove(peer_id);
+            self.pending_queue_metrics
+                .pending_messages_per_peer
+                .remove(peer_id);
         } else {
             self.pending_queue_metrics
                 .pending_messages_per_peer
@@ -2304,7 +2476,8 @@ impl OfflineProtocol {
 
     fn next_pending_sequence(&mut self) -> u64 {
         let seq = self.pending_decryption_next_sequence;
-        self.pending_decryption_next_sequence = self.pending_decryption_next_sequence.wrapping_add(1);
+        self.pending_decryption_next_sequence =
+            self.pending_decryption_next_sequence.wrapping_add(1);
         seq
     }
 
@@ -2368,7 +2541,8 @@ impl OfflineProtocol {
             reason,
             PendingQueueDropReason::OverflowDropOldest | PendingQueueDropReason::OverflowDropNewest
         ) {
-            self.pending_queue_metrics.pending_messages_dropped_overflow_total = self
+            self.pending_queue_metrics
+                .pending_messages_dropped_overflow_total = self
                 .pending_queue_metrics
                 .pending_messages_dropped_overflow_total
                 .saturating_add(1);
@@ -2381,7 +2555,9 @@ impl OfflineProtocol {
                 .saturating_add(1);
         }
 
-        let limit_label = limit_triggered.map(PendingQueueLimit::as_str).unwrap_or("ttl");
+        let limit_label = limit_triggered
+            .map(PendingQueueLimit::as_str)
+            .unwrap_or("ttl");
         let counter_key = format!("{}:{}", reason.as_str(), limit_label);
         let drop_count = {
             let counter = self
@@ -2419,7 +2595,8 @@ impl OfflineProtocol {
         message_id: &str,
         detail: &str,
     ) {
-        self.pending_queue_metrics.pending_messages_eviction_failures_total = self
+        self.pending_queue_metrics
+            .pending_messages_eviction_failures_total = self
             .pending_queue_metrics
             .pending_messages_eviction_failures_total
             .saturating_add(1);
@@ -2458,7 +2635,8 @@ impl OfflineProtocol {
             return;
         }
 
-        self.pending_queue_metrics.pending_queue_invariant_violations_total = self
+        self.pending_queue_metrics
+            .pending_queue_invariant_violations_total = self
             .pending_queue_metrics
             .pending_queue_invariant_violations_total
             .saturating_add(1);
@@ -2506,7 +2684,9 @@ impl OfflineProtocol {
         {
             return false;
         }
-        if let Some(evicted) = self.remove_pending_entry_by_sequence(&entry_ref.peer_id, entry_ref.sequence) {
+        if let Some(evicted) =
+            self.remove_pending_entry_by_sequence(&entry_ref.peer_id, entry_ref.sequence)
+        {
             self.record_pending_drop(
                 reason,
                 Some(limit_triggered),
@@ -2595,7 +2775,9 @@ impl OfflineProtocol {
                 break;
             }
 
-            if let Some(expired) = self.remove_pending_entry_by_sequence(&front.peer_id, front.sequence) {
+            if let Some(expired) =
+                self.remove_pending_entry_by_sequence(&front.peer_id, front.sequence)
+            {
                 self.pending_decryption_global_order.pop_front();
                 self.record_pending_drop(
                     PendingQueueDropReason::TtlExpired,
@@ -2659,7 +2841,9 @@ impl OfflineProtocol {
                         .and_then(|queue| queue.front().map(|entry| entry.sequence));
                     let mut evicted_any = false;
                     if let Some(sequence) = evicted_sequence {
-                        if let Some(evicted) = self.remove_pending_entry_by_sequence(sender, sequence) {
+                        if let Some(evicted) =
+                            self.remove_pending_entry_by_sequence(sender, sequence)
+                        {
                             self.record_pending_drop(
                                 PendingQueueDropReason::OverflowDropOldest,
                                 Some(PendingQueueLimit::PerPeer),
@@ -2711,8 +2895,7 @@ impl OfflineProtocol {
         if self.pending_decryption_total >= global_limit {
             warn!(
                 queue_size = self.pending_decryption_total,
-                global_limit,
-                "Pending encrypted queue at global pressure limit"
+                global_limit, "Pending encrypted queue at global pressure limit"
             );
             match overflow_policy {
                 crate::config::OverflowPolicy::DropNewest => {
@@ -2828,7 +3011,8 @@ impl OfflineProtocol {
         let drained: Vec<PendingDecryptMessage> = messages.into_iter().collect();
         let drained_count = drained.len();
         for entry in &drained {
-            self.pending_decryption_live_sequences.remove(&entry.sequence);
+            self.pending_decryption_live_sequences
+                .remove(&entry.sequence);
             self.pending_decryption_total = self.pending_decryption_total.saturating_sub(1);
         }
         self.update_pending_peer_gauge(sender);
@@ -4521,7 +4705,8 @@ impl OfflineProtocol {
                                 // Internal control messages are still delivery-sensitive for
                                 // the sender (invites/accept/welcome). ACK before consume.
                                 if message.requires_ack {
-                                    if let Err(err) = self.send_delivery_ack(&message, transport_used)
+                                    if let Err(err) =
+                                        self.send_delivery_ack(&message, transport_used)
                                     {
                                         error!(
                                             message_id = %message.id,
@@ -4623,7 +4808,8 @@ impl OfflineProtocol {
                     key_package_data: payload.key_package_data,
                     local_expires_at_ms,
                 };
-                self.pending_key_packages.insert(sender.to_string(), pkg.clone());
+                self.pending_key_packages
+                    .insert(sender.to_string(), pkg.clone());
                 self.persist_peer_key_package(sender, &pkg);
 
                 // Send our key package back if auto_key_exchange is enabled
@@ -4856,7 +5042,9 @@ impl OfflineProtocol {
                         group_id: String,
                     },
                     Empty,
-                    SessionNotReady { sender: String },
+                    SessionNotReady {
+                        sender: String,
+                    },
                     Failed {
                         sender: String,
                         group_id: String,
@@ -5263,6 +5451,7 @@ impl OfflineProtocol {
         self.retry_pending_session_confirmations();
         self.kick_pending_session_reconciliation("process_tick");
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
+        self.pump_media_transfers();
         self.cleanup_expired_entries();
 
         Ok(())
@@ -5341,10 +5530,18 @@ impl OfflineProtocol {
             let previous_transport = self.transport_manager.current_transport();
             self.ensure_outbox_entry(&entry.message);
 
-            // Attempt to send via DORS-selected transport
-            match self.transport_manager.send(&entry.message) {
+            let forced_transport = self.pinned_media_transport_for_message(&entry.message.id);
+            let send_result = if let Some(transport) = forced_transport {
+                self.transport_manager
+                    .send_via_transport(&entry.message, transport)
+            } else {
+                self.transport_manager.send(&entry.message)
+            };
+            let current_transport =
+                forced_transport.or_else(|| self.transport_manager.current_transport());
+
+            match send_result {
                 Ok(()) => {
-                    let current_transport = self.transport_manager.current_transport();
                     let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
 
                     if !ack_registered_now {
@@ -5382,13 +5579,14 @@ impl OfflineProtocol {
                         );
                     }
 
-                    if let Some(transport) = previous_transport {
+                    if let Some(transport) = forced_transport.or(previous_transport) {
                         self.transport_manager.record_retry_failure(transport);
                     }
 
                     debug!(
                         message_id = %entry.message.id,
                         retry_count = entry.retry_count,
+                        transport = ?current_transport,
                         error = %e,
                         "Retry send failed, will retry later"
                     );
@@ -5451,7 +5649,11 @@ impl OfflineProtocol {
 
     /// Handles retry logic for a timed out ACK.
     fn handle_ack_timeout_retry(&mut self, message_id: &MessageId, retry_count: u32) -> Result<()> {
-        if let Some(entry) = self.outbox.get(message_id) {
+        if let Some(entry) = self
+            .outbox
+            .get(message_id)
+            .or_else(|| self.media_outbox.get(message_id))
+        {
             let message_clone = entry.message.clone();
             let last_transport = entry.last_transport;
 
@@ -5625,6 +5827,10 @@ impl OfflineProtocol {
             return;
         };
 
+        if let Some(window) = self.outbound_media_windows.get_mut(&file_id) {
+            window.on_chunk_ack(chunk_index);
+        }
+
         let Some(transfer) = self.outbound_media_transfers.get_mut(&file_id) else {
             return;
         };
@@ -5651,6 +5857,7 @@ impl OfflineProtocol {
 
         if completed {
             self.outbound_media_transfers.remove(&file_id);
+            self.outbound_media_windows.remove(&file_id);
         }
     }
 
@@ -5662,6 +5869,7 @@ impl OfflineProtocol {
         if self.outbound_media_transfers.remove(&file_id).is_some() {
             self.outbound_media_chunks
                 .retain(|_, (candidate_file_id, _)| candidate_file_id != &file_id);
+            self.outbound_media_windows.remove(&file_id);
             warn!(
                 file_id = %file_id,
                 message_id = %message_id,
@@ -5696,6 +5904,12 @@ impl OfflineProtocol {
             .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
         self.outbound_media_chunks
             .retain(|_, (file_id, _)| !stale_outbound_file_ids.contains(file_id));
+        self.outbound_media_windows
+            .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
+    }
+
+    fn is_media_outbox_message(message: &Message) -> bool {
+        message.content_type == ContentType::FileChunk
     }
 
     fn ensure_outbox_entry(&mut self, message: &Message) {
@@ -5703,9 +5917,16 @@ impl OfflineProtocol {
             return;
         }
 
-        if !self.outbox.contains_key(&message.id) && self.outbox.len() >= MAX_OUTBOX_ENTRIES {
-            if let Some((oldest_id, last_transport)) = self
-                .outbox
+        let is_media = Self::is_media_outbox_message(message);
+        let (outbox, capacity) = if is_media {
+            use crate::constants::MAX_MEDIA_OUTBOX_ENTRIES;
+            (&mut self.media_outbox, MAX_MEDIA_OUTBOX_ENTRIES)
+        } else {
+            (&mut self.outbox, MAX_OUTBOX_ENTRIES)
+        };
+
+        if !outbox.contains_key(&message.id) && outbox.len() >= capacity {
+            if let Some((oldest_id, last_transport)) = outbox
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_sent_at)
                 .map(|(id, entry)| (id.clone(), entry.last_transport))
@@ -5713,12 +5934,22 @@ impl OfflineProtocol {
                 if let Some(transport) = last_transport {
                     self.transport_manager.record_delivery_failure(transport);
                 }
-                self.outbox.remove(&oldest_id);
+                let outbox = if is_media {
+                    &mut self.media_outbox
+                } else {
+                    &mut self.outbox
+                };
+                outbox.remove(&oldest_id);
                 self.handle_outbound_media_chunk_failed(&oldest_id, "outbox eviction");
             }
         }
 
-        self.outbox
+        let outbox = if is_media {
+            &mut self.media_outbox
+        } else {
+            &mut self.outbox
+        };
+        outbox
             .entry(message.id.clone())
             .or_insert_with(|| OutboxEntry {
                 message: message.clone(),
@@ -5740,8 +5971,12 @@ impl OfflineProtocol {
         }
 
         let now = Utc::now();
-        let entry = self
-            .outbox
+        let outbox = if Self::is_media_outbox_message(message) {
+            &mut self.media_outbox
+        } else {
+            &mut self.outbox
+        };
+        let entry = outbox
             .entry(message.id.clone())
             .or_insert_with(|| OutboxEntry {
                 message: message.clone(),
@@ -5761,38 +5996,52 @@ impl OfflineProtocol {
     }
 
     fn remove_outbox_entry(&mut self, message_id: &MessageId) -> Option<OutboxEntry> {
-        self.outbox.remove(message_id)
+        self.outbox
+            .remove(message_id)
+            .or_else(|| self.media_outbox.remove(message_id))
     }
 
     fn cleanup_outbox(&mut self) {
-        if self.outbox.is_empty() {
-            return;
-        }
-
         let cutoff = Utc::now()
             - ChronoDuration::milliseconds(
                 self.config.reliability.retry.outbox_max_lifetime_ms as i64,
             );
 
-        let mut expired_ids = Vec::new();
+        let mut expired_from_outbox = Vec::new();
         for (message_id, entry) in &self.outbox {
             if entry.last_sent_at >= cutoff {
                 continue;
             }
-
             if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
             {
                 continue;
             }
-
-            expired_ids.push((message_id.clone(), entry.last_transport));
+            expired_from_outbox.push((message_id.clone(), entry.last_transport));
         }
-
-        for (message_id, last_transport) in expired_ids {
+        for (message_id, last_transport) in expired_from_outbox {
             if let Some(transport) = last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
             self.outbox.remove(&message_id);
+            self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
+        }
+
+        let mut expired_from_media = Vec::new();
+        for (message_id, entry) in &self.media_outbox {
+            if entry.last_sent_at >= cutoff {
+                continue;
+            }
+            if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
+                continue;
+            }
+            expired_from_media.push((message_id.clone(), entry.last_transport));
+        }
+        for (message_id, last_transport) in expired_from_media {
+            if let Some(transport) = last_transport {
+                self.transport_manager.record_delivery_failure(transport);
+            }
+            self.media_outbox.remove(&message_id);
             self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
     }
@@ -5957,7 +6206,10 @@ mod tests {
             self.inner.delete(key_type, key_id)
         }
 
-        fn list_keys(&self, key_type: &str) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        fn list_keys(
+            &self,
+            key_type: &str,
+        ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
             if key_type == storage_keys::PENDING_MESSAGES {
                 return Err(offline_protocol_mls::StorageError::LoadFailed(
                     "forced restore failure".to_string(),
@@ -6326,7 +6578,9 @@ mod tests {
                 .unwrap();
             manager.create_session("bob").unwrap();
         }
-        protocol.confirm_session_state("bob", "manual_test").unwrap();
+        protocol
+            .confirm_session_state("bob", "manual_test")
+            .unwrap();
 
         let encrypted = protocol
             .encrypt_content_for_recipient_strict("bob", "hello secure")
@@ -6334,9 +6588,9 @@ mod tests {
         assert!(encrypted.starts_with(internal_prefixes::ENCRYPTED));
 
         let events = emitter.take();
-        assert!(events.iter().any(|event| {
-            matches!(event, MlsLifecycleEvent::EncryptionUsed { .. })
-        }));
+        assert!(events
+            .iter()
+            .any(|event| { matches!(event, MlsLifecycleEvent::EncryptionUsed { .. }) }));
     }
 
     #[cfg(feature = "mls-observability")]
@@ -7061,8 +7315,12 @@ mod tests {
             .add_transport(TransportType::BLE, Box::new(mock_transport));
         protocol.start().unwrap();
 
-        let result =
-            protocol.send_message("bob", "must-never-leak", None::<MessagePriority>, None::<String>);
+        let result = protocol.send_message(
+            "bob",
+            "must-never-leak",
+            None::<MessagePriority>,
+            None::<String>,
+        );
         assert!(matches!(result, Err(Error::EncryptFailed(_))));
         assert_eq!(transport_handle.sent_messages().len(), 0);
     }
@@ -7396,7 +7654,8 @@ mod tests {
             .add_transport(TransportType::BLE, Box::new(transport));
         protocol.start().unwrap();
 
-        let bob_manager = MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
+        let bob_manager =
+            MlsManager::new("bob", Arc::new(crate::mls::InMemoryStorage::new())).unwrap();
         let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
         {
             let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
@@ -7459,11 +7718,10 @@ mod tests {
         assert_eq!(sessions_before, sessions_after);
 
         let sent = transport_handle.sent_messages();
-        assert!(
-            sent.iter()
-                .filter(|message| message.recipient.as_str() == "bob")
-                .all(|message| message.content.starts_with(internal_prefixes::ENCRYPTED))
-        );
+        assert!(sent
+            .iter()
+            .filter(|message| message.recipient.as_str() == "bob")
+            .all(|message| message.content.starts_with(internal_prefixes::ENCRYPTED)));
 
         let groups_after = {
             let manager = mls_handle_after.read().unwrap();
@@ -8482,7 +8740,8 @@ mod tests {
         bob_config.encryption.store_pending = true;
 
         let mut bob = OfflineProtocol::new(bob_config).unwrap();
-        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
 
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         let events_handle = Arc::clone(&events);
@@ -8533,7 +8792,10 @@ mod tests {
         assert!(!bob.confirmed_sessions.contains("alice"));
 
         let welcome_result = bob.process_internal_message(&welcome_wire);
-        assert!(matches!(welcome_result, Some(InternalMessageResult::Consumed)));
+        assert!(matches!(
+            welcome_result,
+            Some(InternalMessageResult::Consumed)
+        ));
         assert!(bob.confirmed_sessions.contains("alice"));
         assert!(!bob.pending_decryption.contains_key("alice"));
 
@@ -8563,7 +8825,8 @@ mod tests {
         bob_config.encryption.store_pending = true;
 
         let mut bob = OfflineProtocol::new(bob_config).unwrap();
-        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
 
         let mut bob_transport = MockTransport::new(TransportType::BLE);
         bob_transport.start().unwrap();
@@ -9126,7 +9389,12 @@ mod tests {
             alice_sender
                 .lock()
                 .unwrap()
-                .send_message("bob", "queued-a2b-concurrent", None::<MessagePriority>, None::<String>)
+                .send_message(
+                    "bob",
+                    "queued-a2b-concurrent",
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
                 .unwrap();
         });
 
@@ -9137,7 +9405,12 @@ mod tests {
             bob_sender
                 .lock()
                 .unwrap()
-                .send_message("alice", "queued-b2a-concurrent", None::<MessagePriority>, None::<String>)
+                .send_message(
+                    "alice",
+                    "queued-b2a-concurrent",
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
                 .unwrap();
         });
 
@@ -9164,7 +9437,10 @@ mod tests {
             })
             .expect("expected confirmation probe from bob send-path reconciliation");
 
-        let _ = bob_shared.lock().unwrap().process_internal_message(&probe_from_alice);
+        let _ = bob_shared
+            .lock()
+            .unwrap()
+            .process_internal_message(&probe_from_alice);
         let _ = alice_shared
             .lock()
             .unwrap()
@@ -9189,7 +9465,10 @@ mod tests {
             })
             .expect("expected confirmation ack from bob");
 
-        let _ = bob_shared.lock().unwrap().process_internal_message(&ack_from_alice);
+        let _ = bob_shared
+            .lock()
+            .unwrap()
+            .process_internal_message(&ack_from_alice);
         let _ = alice_shared
             .lock()
             .unwrap()
@@ -9648,8 +9927,11 @@ mod tests {
 
         let mut alice = OfflineProtocol::new(alice_config).unwrap();
         let mut bob = OfflineProtocol::new(bob_config).unwrap();
-        alice.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
-        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+        alice
+            .initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
 
         let mut alice_transport = MockTransport::new(TransportType::BLE);
         alice_transport.start().unwrap();
@@ -9697,7 +9979,9 @@ mod tests {
             .last()
             .expect("expected encrypted message from alice")
             .clone();
-        assert!(encrypted_wire.content.starts_with(internal_prefixes::ENCRYPTED));
+        assert!(encrypted_wire
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED));
 
         bob_transport_handle.queue_message(encrypted_wire);
         let received = bob.receive_message().expect("expected decrypted message");
@@ -9718,7 +10002,8 @@ mod tests {
         config.encryption.pending_queue.overflow_policy = crate::config::OverflowPolicy::DropNewest;
 
         let mut bob = OfflineProtocol::new(config).unwrap();
-        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
 
         let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
         let bob_key_package = {
@@ -9757,15 +10042,22 @@ mod tests {
         let first_result = bob.process_internal_message(&first_message);
         let second_result = bob.process_internal_message(&second_message);
 
-        assert!(matches!(first_result, Some(InternalMessageResult::Consumed)));
-        assert!(matches!(second_result, Some(InternalMessageResult::Consumed)));
+        assert!(matches!(
+            first_result,
+            Some(InternalMessageResult::Consumed)
+        ));
+        assert!(matches!(
+            second_result,
+            Some(InternalMessageResult::Consumed)
+        ));
         assert_eq!(bob.pending_decryption["alice"].len(), 1);
         assert_eq!(
             bob.pending_decryption["alice"][0].message.id.as_str(),
             first_message.id.as_str()
         );
         assert_eq!(
-            bob.pending_queue_metrics.pending_messages_dropped_overflow_total,
+            bob.pending_queue_metrics
+                .pending_messages_dropped_overflow_total,
             1
         );
     }
@@ -9891,7 +10183,10 @@ mod tests {
                     protocol.process_internal_message(&message)
                 }));
 
-                assert!(outcome.is_ok(), "panic for prefix {prefix:?} payload {payload:?}");
+                assert!(
+                    outcome.is_ok(),
+                    "panic for prefix {prefix:?} payload {payload:?}"
+                );
                 let result = outcome.unwrap();
                 assert!(matches!(result, Some(InternalMessageResult::Consumed)));
             }
@@ -10027,7 +10322,10 @@ mod tests {
             format!("{}{{", internal_prefixes::ENCRYPTED),
             format!("{}{{\"group_id\":\"bad\"", internal_prefixes::ENCRYPTED),
             format!("{}[]", internal_prefixes::ENCRYPTED),
-            format!("{}{{\"ciphertext\":\"not-array\"}}", internal_prefixes::ENCRYPTED),
+            format!(
+                "{}{{\"ciphertext\":\"not-array\"}}",
+                internal_prefixes::ENCRYPTED
+            ),
         ];
 
         let mut early_count: u64 = 0;
@@ -10051,7 +10349,11 @@ mod tests {
             assert!(matches!(result, Some(InternalMessageResult::Consumed)));
         }
 
-        let per_peer_limit = protocol.config.encryption.pending_queue.max_pending_per_peer;
+        let per_peer_limit = protocol
+            .config
+            .encryption
+            .pending_queue
+            .max_pending_per_peer;
         let global_limit = protocol.config.encryption.pending_queue.max_pending_global;
         assert!(protocol.pending_decryption_total <= global_limit);
         assert!(
@@ -10065,7 +10367,10 @@ mod tests {
 
         let metrics = protocol.pending_queue_metrics();
         assert_eq!(metrics.pending_messages_received_total, early_count);
-        assert_eq!(metrics.pending_messages_current, protocol.pending_decryption_total);
+        assert_eq!(
+            metrics.pending_messages_current,
+            protocol.pending_decryption_total
+        );
         assert!(metrics.pending_messages_dropped_overflow_total > 0);
         assert_eq!(early_count + invalid_count, 10_000);
     }
@@ -10123,7 +10428,12 @@ mod tests {
         assert_eq!(protocol.pending_decryption["peer-a"].len(), 1);
         let queued_message = &protocol.pending_decryption["peer-a"][0];
         assert_eq!(queued_message.message.content, "first");
-        assert_eq!(protocol.pending_queue_metrics.pending_messages_dropped_overflow_total, 1);
+        assert_eq!(
+            protocol
+                .pending_queue_metrics
+                .pending_messages_dropped_overflow_total,
+            1
+        );
     }
 
     #[test]
@@ -10178,7 +10488,12 @@ mod tests {
         let expired = protocol.prune_expired_pending_for_peer("sender123", Instant::now());
         assert_eq!(expired, 1);
         assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
-        assert_eq!(protocol.pending_queue_metrics.pending_messages_expired_total, 1);
+        assert_eq!(
+            protocol
+                .pending_queue_metrics
+                .pending_messages_expired_total,
+            1
+        );
     }
 
     #[test]
@@ -10186,7 +10501,8 @@ mod tests {
         let mut bob_config = create_test_config_for_user("bob");
         bob_config.encryption.enabled = true;
         let mut bob = OfflineProtocol::new(bob_config).unwrap();
-        bob.initialize_mls(Arc::new(InMemoryStorage::new())).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
 
         let alice_manager = MlsManager::new("alice", Arc::new(InMemoryStorage::new())).unwrap();
         let bob_key_package = {
@@ -10198,7 +10514,9 @@ mod tests {
             .and_then(|_| alice_manager.create_session("bob"))
             .unwrap();
 
-        let encrypted = alice_manager.encrypt_for_user("bob", b"queued secret").unwrap();
+        let encrypted = alice_manager
+            .encrypt_for_user("bob", b"queued secret")
+            .unwrap();
         let encrypted_payload = format!(
             "{}{}",
             internal_prefixes::ENCRYPTED,
@@ -10828,7 +11146,10 @@ mod tests {
                 "Key package should be restored from storage"
             );
             let welcome = protocol.establish_secure_session("bob").unwrap();
-            assert!(welcome.is_some(), "Session should be created from restored key package");
+            assert!(
+                welcome.is_some(),
+                "Session should be created from restored key package"
+            );
         }
     }
 

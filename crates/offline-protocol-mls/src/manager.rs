@@ -195,8 +195,7 @@ impl MlsManager {
         let cached = guard.as_ref().ok_or(MlsError::NotInitialized)?;
         let bytes =
             serde_json::to_vec(cached).map_err(|e| MlsError::Serialization(e.to_string()))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| MlsError::Deserialization(e.to_string()))
+        serde_json::from_slice(&bytes).map_err(|e| MlsError::Deserialization(e.to_string()))
     }
 
     // ========================================================================

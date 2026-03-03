@@ -210,8 +210,14 @@ pub struct Message {
     #[serde(default)]
     pub content_type: ContentType,
 
-    /// Message content (text, JSON-serialized file chunk, etc.).
+    /// Message content (text, JSON-serialized file chunk metadata, etc.).
     pub content: String,
+
+    /// Raw payload for file chunk data carried by the message envelope.
+    /// This avoids wrapping chunk bytes in `FileChunk` JSON/base64 content.
+    /// Note: current transport serialization still uses JSON for `Message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_content: Option<Vec<u8>>,
 
     /// Media metadata (present for non-text content types).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,6 +267,7 @@ impl Message {
             lamport_clock: LamportClock::default(),
             content_type: ContentType::default(),
             content: content.into(),
+            binary_content: None,
             media_metadata: None,
             metadata: HashMap::new(),
             requires_ack: true,
@@ -425,6 +432,7 @@ impl MessageBuilder {
             lamport_clock: self.lamport_clock,
             content_type: self.content_type,
             content: self.content,
+            binary_content: None,
             media_metadata: self.media_metadata,
             metadata: self.metadata,
             requires_ack: self.requires_ack,

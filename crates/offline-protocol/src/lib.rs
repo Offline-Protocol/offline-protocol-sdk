@@ -20,7 +20,7 @@ pub mod transport_manager;
 pub mod visualization;
 
 pub use config::{EncryptionConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig};
-pub use error::{EstablishmentState, Error, Result, SessionStateError};
+pub use error::{Error, EstablishmentState, Result, SessionStateError};
 pub use events::{
     DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
     EventCallback, GroupInfoMember, UserGroupSummary,
@@ -44,6 +44,6 @@ pub use mls::{
     EncryptedMessage, GroupId, GroupInfo, KeyPackageBundle, MlsManager, MlsStorage, WelcomeMessage,
 };
 pub use mls_observability::{
-    DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsLifecycleEvent, MlsOperationContext,
-    NoopMlsEventEmitter,
+    DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsLifecycleEvent,
+    MlsOperationContext, NoopMlsEventEmitter,
 };

@@ -331,8 +331,7 @@ impl TransportSelector {
                 a.1.total
                     .partial_cmp(&b.1.total)
                     .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        {
+            }) {
             let best_total = best_s.total;
             scored_transports
                 .iter()
@@ -609,7 +608,10 @@ impl TransportSelector {
         }
 
         // Check historical success rate (quality degradation), gated on observation volume
-        let min_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
+        let min_rate = self
+            .config
+            .min_success_rate_before_escalation
+            .clamp(0.0, 1.0);
         let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
         if let Some(history) = self.transport_history.get(&transport) {
             if history.success_ratio_sample_count() >= min_samples {
@@ -1122,7 +1124,10 @@ impl TransportSelector {
             })
             .unwrap_or(false);
 
-        let min_success_rate = self.config.min_success_rate_before_escalation.clamp(0.0, 1.0);
+        let min_success_rate = self
+            .config
+            .min_success_rate_before_escalation
+            .clamp(0.0, 1.0);
         let min_samples = self.config.min_ble_samples_before_success_rate_escalation;
         let low_success_rate = self
             .transport_history
@@ -2431,16 +2436,16 @@ mod tests {
 
         let selected_with_wifi = selector.select_transport(&message, &with_wifi).unwrap();
         assert!(
-            matches!(selected_with_wifi, TransportType::BLE | TransportType::WiFiDirect),
+            matches!(
+                selected_with_wifi,
+                TransportType::BLE | TransportType::WiFiDirect
+            ),
             "DORS may pick BLE or WiFi when both available"
         );
 
         let mut without_wifi = HashMap::new();
         without_wifi.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
-        without_wifi.insert(
-            TransportType::Internet,
-            create_test_metrics(None, 0.0, 0),
-        );
+        without_wifi.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
 
         let selected_without_wifi = selector.select_transport(&message, &without_wifi).unwrap();
         assert!(
@@ -2465,12 +2470,11 @@ mod tests {
 
         let mut transports_background = HashMap::new();
         transports_background.insert(TransportType::BLE, create_test_metrics(Some(-65), 0.2, 8));
-        transports_background.insert(
-            TransportType::Internet,
-            create_test_metrics(None, 0.0, 0),
-        );
+        transports_background.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
 
-        let selected = selector.select_transport(&message, &transports_background).unwrap();
+        let selected = selector
+            .select_transport(&message, &transports_background)
+            .unwrap();
         assert_ne!(
             selected,
             TransportType::WiFiDirect,

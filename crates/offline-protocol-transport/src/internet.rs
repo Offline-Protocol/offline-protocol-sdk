@@ -780,7 +780,10 @@ mod tests {
         let message = create_test_message();
         let result = transport.send(&message);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::Error::TransportNotAvailable(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::TransportNotAvailable(_)
+        ));
     }
 
     #[test]
