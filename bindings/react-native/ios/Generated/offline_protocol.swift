@@ -586,6 +586,178 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 
+public protocol MeshServicesProtocol: AnyObject, Sendable {
+    
+    func discoverServices(serviceId: String?) throws  -> String
+    
+    func registerService(serviceId: String, version: String, capabilities: [String: String]) throws 
+    
+    func respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String) throws  -> String
+    
+    func sendServiceRequest(provider: String, serviceId: String, method: String, body: String) throws  -> String
+    
+    func unregisterService(serviceId: String) throws  -> Bool
+    
+}
+open class MeshServices: MeshServicesProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_offline_protocol_uniffi_fn_clone_meshservices(self.handle, $0) }
+    }
+public convenience init(`protocol`: OfflineProtocol)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new(
+        FfiConverterTypeOfflineProtocol_lower(`protocol`),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        try! rustCall { uniffi_offline_protocol_uniffi_fn_free_meshservices(handle, $0) }
+    }
+
+    
+
+    
+open func discoverServices(serviceId: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(serviceId),$0
+    )
+})
+}
+    
+open func registerService(serviceId: String, version: String, capabilities: [String: String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(version),
+        FfiConverterDictionaryStringString.lower(capabilities),$0
+    )
+}
+}
+    
+open func respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(requestId),
+        FfiConverterString.lower(requester),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(status),
+        FfiConverterString.lower(body),$0
+    )
+})
+}
+    
+open func sendServiceRequest(provider: String, serviceId: String, method: String, body: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(provider),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(method),
+        FfiConverterString.lower(body),$0
+    )
+})
+}
+    
+open func unregisterService(serviceId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshServices: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MeshServices
+
+    public static func lift(_ handle: UInt64) throws -> MeshServices {
+        return MeshServices(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MeshServices) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshServices {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MeshServices, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshServices_lift(_ handle: UInt64) throws -> MeshServices {
+    return try FfiConverterTypeMeshServices.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshServices_lower(_ value: MeshServices) -> UInt64 {
+    return FfiConverterTypeMeshServices.lower(value)
+}
+
+
+
+
+
+
 public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: [UInt8]?) throws  -> String
@@ -617,8 +789,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func clearTyping(conversationId: String) throws  -> String
     
     func deriveUserIdFromPublicKey(publicKey: [UInt8])  -> String
-    
-    func discoverServices(serviceId: String?) throws  -> String
     
     func emitTestEvent() 
     
@@ -772,8 +942,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func receiveMessage()  -> String?
     
-    func registerService(serviceId: String, version: String, capabilities: [String: String]) throws 
-    
     func rejectConnectionRequest(recipient: String) throws  -> String
     
     func releaseTransportLock() 
@@ -784,8 +952,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func requestPrekeyBundle(username: String) throws  -> String
     
-    func respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String) throws  -> String
-    
     func resume() throws 
     
     func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?) throws  -> String
@@ -795,8 +961,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?) throws  -> String
     
     func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
-    
-    func sendServiceRequest(provider: String, serviceId: String, method: String, body: String) throws  -> String
     
     func setBatteryLevel(level: UInt8) 
     
@@ -817,8 +981,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func start() throws 
     
     func stop() throws 
-    
-    func unregisterService(serviceId: String) throws  -> Bool
     
     func updateAckConfig(config: AckConfig) 
     
@@ -1025,15 +1187,6 @@ open func deriveUserIdFromPublicKey(publicKey: [UInt8]) -> String  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(
             self.uniffiCloneHandle(),
         FfiConverterSequenceUInt8.lower(publicKey),$0
-    )
-})
-}
-    
-open func discoverServices(serviceId: String?)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_discover_services(
-            self.uniffiCloneHandle(),
-        FfiConverterOptionString.lower(serviceId),$0
     )
 })
 }
@@ -1698,16 +1851,6 @@ open func receiveMessage() -> String?  {
 })
 }
     
-open func registerService(serviceId: String, version: String, capabilities: [String: String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_register_service(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(serviceId),
-        FfiConverterString.lower(version),
-        FfiConverterDictionaryStringString.lower(capabilities),$0
-    )
-}
-}
-    
 open func rejectConnectionRequest(recipient: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(
@@ -1745,19 +1888,6 @@ open func requestPrekeyBundle(username: String)throws  -> String  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(username),$0
-    )
-})
-}
-    
-open func respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_respond_to_service_request(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(requestId),
-        FfiConverterString.lower(requester),
-        FfiConverterString.lower(serviceId),
-        FfiConverterString.lower(status),
-        FfiConverterString.lower(body),$0
     )
 })
 }
@@ -1812,18 +1942,6 @@ open func sendMessage(recipient: String, content: String, priority: MessagePrior
         FfiConverterString.lower(content),
         FfiConverterTypeMessagePriority_lower(priority),
         FfiConverterOptionString.lower(replyToMsg),$0
-    )
-})
-}
-    
-open func sendServiceRequest(provider: String, serviceId: String, method: String, body: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_service_request(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(provider),
-        FfiConverterString.lower(serviceId),
-        FfiConverterString.lower(method),
-        FfiConverterString.lower(body),$0
     )
 })
 }
@@ -1906,15 +2024,6 @@ open func stop()throws   {try rustCallWithError(FfiConverterTypeProtocolError_li
             self.uniffiCloneHandle(),$0
     )
 }
-}
-    
-open func unregisterService(serviceId: String)throws  -> Bool  {
-    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unregister_service(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(serviceId),$0
-    )
-})
 }
     
 open func updateAckConfig(config: AckConfig)  {try! rustCall() {
@@ -6010,6 +6119,21 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 60914) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 44115) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 22898) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 2487) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6053,9 +6177,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_discover_services() != 53846) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796) {
@@ -6286,9 +6407,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_register_service() != 36358) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6304,9 +6422,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_respond_to_service_request() != 27046) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6320,9 +6435,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_service_request() != 40365) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320) {
@@ -6353,9 +6465,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unregister_service() != 24261) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 58995) {
@@ -6395,6 +6504,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 35006) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125) {
