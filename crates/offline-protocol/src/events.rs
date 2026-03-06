@@ -1,6 +1,7 @@
 //! Event types and callbacks.
 
 use offline_protocol_core::{ContentType, MediaMetadata, Message, MessageId};
+use offline_protocol_services::ServiceEvent;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1149,6 +1150,54 @@ impl Event {
     /// Parses an event from JSON.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+}
+
+impl From<ServiceEvent> for Event {
+    fn from(event: ServiceEvent) -> Self {
+        match event {
+            ServiceEvent::ServiceDiscovered {
+                query_id,
+                service_id,
+                version,
+                provider_peer_id,
+                capabilities,
+                hop_count,
+            } => Self::ServiceDiscovered {
+                query_id,
+                service_id,
+                version,
+                provider_peer_id,
+                capabilities,
+                hop_count,
+            },
+            ServiceEvent::ServiceRequestReceived {
+                request_id,
+                service_id,
+                method,
+                body,
+                sender,
+            } => Self::ServiceRequestReceived {
+                request_id,
+                service_id,
+                method,
+                body,
+                sender,
+            },
+            ServiceEvent::ServiceResponseReceived {
+                request_id,
+                service_id,
+                status,
+                body,
+                provider_peer_id,
+            } => Self::ServiceResponseReceived {
+                request_id,
+                service_id,
+                status,
+                body,
+                provider_peer_id,
+            },
+        }
     }
 }
 

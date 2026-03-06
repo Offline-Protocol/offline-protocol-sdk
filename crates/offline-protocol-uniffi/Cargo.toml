@@ -14,6 +14,7 @@ offline-protocol-core = { workspace = true }
 offline-protocol-router = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-mls = { workspace = true }
+offline-protocol-services = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

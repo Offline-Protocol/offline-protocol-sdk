@@ -25,6 +25,7 @@ pub use events::{
     DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
     EventCallback, GroupInfoMember, UserGroupSummary,
 };
+pub use offline_protocol_services::MeshServices;
 pub use protocol::OfflineProtocol;
 pub use transport_manager::TransportManager;
 pub use visualization::{
