@@ -53,6 +53,7 @@ offline-protocol-core          ← Foundation: Message, UserId, AppId, TTL, HopC
 offline-protocol-transport     ← Transport trait + BLE/WiFi Direct/Internet impls, TransportMetrics
 offline-protocol-reliability   ← AckManager, RetryQueue (exp backoff), Deduplicator, AckOptimizer
 offline-protocol-mls           ← MlsManager, MlsStorage trait, session & group encryption (OpenMLS)
+offline-protocol-services      ← MeshServices: service registry, discovery (gossip), request/response
     ↓
 offline-protocol-router        ← DORS transport selector, RelayManager, PathSelector, gossip routing
     ↓
@@ -67,7 +68,7 @@ offline-protocol-bench         ← Criterion benchmarks
 - **`Transport` trait** (`crates/offline-protocol-transport/src/traits.rs`): all transports implement this; uses `as_any()` for safe downcasting. `MockTransport` available for tests.
 - **`MlsStorage` trait** (`crates/offline-protocol-mls/src/storage.rs`): platform-agnostic secure storage interface — apps implement this for iOS Keychain, Android Keystore, etc.
 - **DORS** (`crates/offline-protocol-router/src/dors.rs`): multi-factor scoring (RSSI, congestion, bandwidth, battery, reliability, capacity) with hysteresis, cooldown, and stability window to prevent transport flapping.
-- **Protocol control messages**: internal prefix convention (`__MLS_KEY_PKG__`, `__MLS_WELCOME__`, `__MLS_ENC__`, etc.) in `crates/offline-protocol/src/protocol.rs`.
+- **Protocol control messages**: internal prefix convention (`__MLS_KEY_PKG__`, `__MLS_WELCOME__`, `__MLS_ENC__`, etc.) in `crates/offline-protocol/src/protocol.rs`. Service messages use `__SVC_DISC_Q__`, `__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__` prefixes in `crates/offline-protocol-services/src/payloads.rs`.
 - **Event-driven**: `OfflineProtocol` emits events (MessageReceived, PeerDiscovered, TransportChanged, etc.) via `EventCallback`.
 - **Feature flag**: `mls-observability` in `offline-protocol` crate enables detailed MLS lifecycle events.
 
@@ -88,7 +89,7 @@ Conventional Commits: `<type>(<scope>): <subject>`
 
 Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`
 
-Scopes: `core`, `transport`, `router`, `reliability`, `protocol`, `uniffi`, `bindings`
+Scopes: `core`, `transport`, `router`, `reliability`, `services`, `protocol`, `uniffi`, `bindings`
 
 ## Code Style (Rust)
 
