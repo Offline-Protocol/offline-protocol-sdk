@@ -770,6 +770,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clea
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_discover_services(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session(
@@ -922,6 +924,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_proc
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_register_service(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock(
@@ -932,6 +936,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remo
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_respond_to_service_request(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request(
@@ -941,6 +947,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_service_request(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
 ): Short
@@ -961,6 +969,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unregister_service(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config(
 ): Short
@@ -1061,6 +1071,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cleanup_ex
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(`ptr`: Long,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_discover_services(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1214,6 +1226,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_fi
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_register_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`version`: RustBuffer.ByValue,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1224,6 +1238,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_tra
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_respond_to_service_request(`ptr`: Long,`requestId`: RustBuffer.ByValue,`requester`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1233,6 +1249,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`mediaMetadata`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_service_request(`ptr`: Long,`provider`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`method`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1254,6 +1272,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unregister_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1450,6 +1470,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_discover_services() != 53846.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796.toShort()) {
@@ -1680,6 +1703,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_register_service() != 36358.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1695,6 +1721,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_respond_to_service_request() != 27046.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1708,6 +1737,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_service_request() != 40365.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320.toShort()) {
@@ -1738,6 +1770,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unregister_service() != 24261.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 58995.toShort()) {
@@ -2338,6 +2373,8 @@ public interface OfflineProtocolInterface {
     
     fun `deriveUserIdFromPublicKey`(`publicKey`: List<kotlin.UByte>): kotlin.String
     
+    fun `discoverServices`(`serviceId`: kotlin.String?): kotlin.String
+    
     fun `emitTestEvent`()
     
     fun `establishSecureSession`(`peerId`: kotlin.String): MlsWelcomeMessage?
@@ -2490,6 +2527,8 @@ public interface OfflineProtocolInterface {
     
     fun `receiveMessage`(): kotlin.String?
     
+    fun `registerService`(`serviceId`: kotlin.String, `version`: kotlin.String, `capabilities`: Map<kotlin.String, kotlin.String>)
+    
     fun `rejectConnectionRequest`(`recipient`: kotlin.String): kotlin.String
     
     fun `releaseTransportLock`()
@@ -2500,6 +2539,8 @@ public interface OfflineProtocolInterface {
     
     fun `requestPrekeyBundle`(`username`: kotlin.String): kotlin.String
     
+    fun `respondToServiceRequest`(`requestId`: kotlin.String, `requester`: kotlin.String, `serviceId`: kotlin.String, `status`: kotlin.String, `body`: kotlin.String): kotlin.String
+    
     fun `resume`()
     
     fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
@@ -2509,6 +2550,8 @@ public interface OfflineProtocolInterface {
     fun `sendMedia`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `mediaMetadata`: MediaMetadata?): kotlin.String
     
     fun `sendMessage`(`recipient`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority, `replyToMsg`: kotlin.String?): kotlin.String
+    
+    fun `sendServiceRequest`(`provider`: kotlin.String, `serviceId`: kotlin.String, `method`: kotlin.String, `body`: kotlin.String): kotlin.String
     
     fun `setBatteryLevel`(`level`: kotlin.UByte)
     
@@ -2529,6 +2572,8 @@ public interface OfflineProtocolInterface {
     fun `start`()
     
     fun `stop`()
+    
+    fun `unregisterService`(`serviceId`: kotlin.String): kotlin.Boolean
     
     fun `updateAckConfig`(`config`: AckConfig)
     
@@ -2853,6 +2898,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(
         it,
         FfiConverterSequenceUByte.lower(`publicKey`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `discoverServices`(`serviceId`: kotlin.String?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_discover_services(
+        it,
+        FfiConverterOptionalString.lower(`serviceId`),_status)
 }
     }
     )
@@ -3871,6 +3930,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `registerService`(`serviceId`: kotlin.String, `version`: kotlin.String, `capabilities`: Map<kotlin.String, kotlin.String>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_register_service(
+        it,
+        FfiConverterString.lower(`serviceId`),FfiConverterString.lower(`version`),FfiConverterMapStringString.lower(`capabilities`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(ProtocolException::class)override fun `rejectConnectionRequest`(`recipient`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
@@ -3929,6 +4001,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
         it,
         FfiConverterString.lower(`username`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `respondToServiceRequest`(`requestId`: kotlin.String, `requester`: kotlin.String, `serviceId`: kotlin.String, `status`: kotlin.String, `body`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_respond_to_service_request(
+        it,
+        FfiConverterString.lower(`requestId`),FfiConverterString.lower(`requester`),FfiConverterString.lower(`serviceId`),FfiConverterString.lower(`status`),FfiConverterString.lower(`body`),_status)
 }
     }
     )
@@ -3998,6 +4084,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(
         it,
         FfiConverterString.lower(`recipient`),FfiConverterString.lower(`content`),FfiConverterTypeMessagePriority.lower(`priority`),FfiConverterOptionalString.lower(`replyToMsg`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `sendServiceRequest`(`provider`: kotlin.String, `serviceId`: kotlin.String, `method`: kotlin.String, `body`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_service_request(
+        it,
+        FfiConverterString.lower(`provider`),FfiConverterString.lower(`serviceId`),FfiConverterString.lower(`method`),FfiConverterString.lower(`body`),_status)
 }
     }
     )
@@ -4130,6 +4230,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    
+    @Throws(ProtocolException::class)override fun `unregisterService`(`serviceId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unregister_service(
+        it,
+        FfiConverterString.lower(`serviceId`),_status)
+}
+    }
+    )
+    }
     
 
     override fun `updateAckConfig`(`config`: AckConfig)
@@ -7274,6 +7388,45 @@ public object FfiConverterSequenceTypeRouteEntry: FfiConverterRustBuffer<List<Ro
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeRouteEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.String, kotlin.String>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, kotlin.String> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, kotlin.String>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterString.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, kotlin.String>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterString.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterString.write(v, buf)
         }
     }
 }
