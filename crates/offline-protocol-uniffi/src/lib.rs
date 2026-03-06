@@ -1234,6 +1234,77 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // SERVICE DISCOVERY & REQUEST/RESPONSE
+    // ========================================================================
+
+    /// Registers a local service that this node offers for discovery.
+    pub fn register_service(
+        &self,
+        service_id: String,
+        version: String,
+        capabilities: HashMap<String, String>,
+    ) -> Result<(), ProtocolError> {
+        use offline_protocol_core::{ServiceDescriptor, ServiceId};
+        let sid = ServiceId::new(&service_id)
+            .map_err(|e| ProtocolError::InvalidConfiguration(e.to_string()))?;
+        let descriptor = ServiceDescriptor {
+            service_id: sid,
+            version,
+            capabilities,
+        };
+        let mut protocol = self.inner.lock().unwrap();
+        protocol
+            .register_service(descriptor)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Unregisters a local service. Returns true if found and removed.
+    pub fn unregister_service(&self, service_id: String) -> Result<bool, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        protocol
+            .unregister_service(&service_id)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Broadcasts a service discovery query. Returns a query_id.
+    pub fn discover_services(&self, service_id: Option<String>) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        protocol
+            .discover_services(service_id.as_deref())
+            .map_err(ProtocolError::from)
+    }
+
+    /// Sends a service request to a specific provider peer. Returns a request_id.
+    pub fn send_service_request(
+        &self,
+        provider: String,
+        service_id: String,
+        method: String,
+        body: String,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        protocol
+            .send_service_request(&provider, &service_id, &method, &body)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Responds to a service request from another peer.
+    pub fn respond_to_service_request(
+        &self,
+        request_id: String,
+        requester: String,
+        service_id: String,
+        status: String,
+        body: String,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        let message_id = protocol
+            .respond_to_service_request(&request_id, &requester, &service_id, &status, &body)
+            .map_err(ProtocolError::from)?;
+        Ok(message_id.as_str())
+    }
+
+    // ========================================================================
     // BLE TRANSPORT OPERATIONS
     // ========================================================================
 

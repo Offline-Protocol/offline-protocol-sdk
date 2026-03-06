@@ -15,8 +15,8 @@ use crate::{
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
-    AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority, UserId,
-    TTL,
+    AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority,
+    ServiceDescriptor, UserId, TTL,
 };
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{
@@ -64,6 +64,14 @@ mod internal_prefixes {
     pub const USER_GROUPS: &str = "__USER_GROUPS__";
     /// Prefix for group error (relay).
     pub const GROUP_ERROR: &str = "__GROUP_ERROR__";
+    /// Prefix for service discovery query.
+    pub const SVC_DISCOVER_QUERY: &str = "__SVC_DISC_Q__";
+    /// Prefix for service discovery response.
+    pub const SVC_DISCOVER_RESPONSE: &str = "__SVC_DISC_R__";
+    /// Prefix for service request.
+    pub const SVC_REQUEST: &str = "__SVC_REQ__";
+    /// Prefix for service response.
+    pub const SVC_RESPONSE: &str = "__SVC_RESP__";
 }
 
 /// Retry interval for persisting session confirmation after a transient storage error.
@@ -124,6 +132,42 @@ struct ConnectionAcceptedPayload {
     /// Optional MLS key package data for encrypted session setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     key_package: Option<Vec<u8>>,
+}
+
+// --- Service discovery payloads ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ServiceDiscoveryQueryPayload {
+    query_id: String,
+    originator: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ServiceDiscoveryResponsePayload {
+    query_id: String,
+    service_id: String,
+    version: String,
+    provider_peer_id: String,
+    capabilities: HashMap<String, String>,
+    hop_count: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ServiceRequestPayload {
+    request_id: String,
+    service_id: String,
+    method: String,
+    body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ServiceResponsePayload {
+    request_id: String,
+    service_id: String,
+    status: String,
+    body: String,
 }
 
 // --- Group (relay) payloads ---
@@ -557,6 +601,12 @@ pub struct OfflineProtocol {
     /// Sliding-window state for outbound file transfers, keyed by file_id.
     /// Chunks are only sent when the window has capacity (previous chunks ACKed).
     outbound_media_windows: HashMap<String, OutboundTransferState>,
+
+    /// Local service registry: services this node offers.
+    local_services: HashMap<String, ServiceDescriptor>,
+
+    /// Seen discovery query IDs for dedup (query_id -> timestamp).
+    seen_discovery_queries: HashMap<String, Instant>,
 }
 
 impl OfflineProtocol {
@@ -617,6 +667,8 @@ impl OfflineProtocol {
             outbound_media_transfers: HashMap::new(),
             outbound_media_chunks: HashMap::new(),
             outbound_media_windows: HashMap::new(),
+            local_services: HashMap::new(),
+            seen_discovery_queries: HashMap::new(),
             config,
         })
     }
@@ -4629,6 +4681,106 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
+    // ========================================================================
+    // SERVICE DISCOVERY & REQUEST/RESPONSE
+    // ========================================================================
+
+    /// Registers a local service that this node offers.
+    pub fn register_service(&mut self, descriptor: ServiceDescriptor) -> Result<()> {
+        let key = descriptor.service_id.as_str().to_string();
+        self.local_services.insert(key, descriptor);
+        Ok(())
+    }
+
+    /// Unregisters a local service. Returns true if the service was found and removed.
+    pub fn unregister_service(&mut self, service_id: &str) -> Result<bool> {
+        Ok(self.local_services.remove(service_id).is_some())
+    }
+
+    /// Broadcasts a service discovery query to all known peers.
+    /// Returns a query_id. Responses arrive asynchronously as `ServiceDiscovered` events.
+    pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
+        self.ensure_plaintext_control_send_allowed("discover_services")?;
+
+        let query_id = uuid::Uuid::new_v4().to_string();
+
+        let payload = ServiceDiscoveryQueryPayload {
+            query_id: query_id.clone(),
+            originator: self.config.user_id.clone(),
+            service_id: service_id.map(|s| s.to_string()),
+        };
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
+        let content = format!("{}{}", internal_prefixes::SVC_DISCOVER_QUERY, serialized);
+
+        // Mark this query as seen to avoid re-processing our own broadcast
+        self.seen_discovery_queries
+            .insert(query_id.clone(), Instant::now());
+
+        // Broadcast to all known peers
+        let peers: Vec<String> = self.key_package_sent_to.iter().cloned().collect();
+        for peer in &peers {
+            let _ = self.send_internal_message(peer, content.clone(), MessagePriority::Medium);
+        }
+
+        info!(query_id = %query_id, service_id = ?service_id, peer_count = peers.len(), "Broadcast service discovery query");
+        Ok(query_id)
+    }
+
+    /// Sends a typed service request to a specific provider peer.
+    /// Returns a request_id. The response arrives as a `ServiceResponseReceived` event.
+    pub fn send_service_request(
+        &mut self,
+        provider: &str,
+        service_id: &str,
+        method: &str,
+        body: &str,
+    ) -> Result<String> {
+        self.ensure_plaintext_control_send_allowed("send_service_request")?;
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        let payload = ServiceRequestPayload {
+            request_id: request_id.clone(),
+            service_id: service_id.to_string(),
+            method: method.to_string(),
+            body: body.to_string(),
+        };
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
+        let content = format!("{}{}", internal_prefixes::SVC_REQUEST, serialized);
+
+        self.send_internal_message(provider, content, MessagePriority::High)?;
+        info!(request_id = %request_id, provider = %provider, service_id = %service_id, method = %method, "Sent service request");
+        Ok(request_id)
+    }
+
+    /// Responds to a service request from another peer.
+    pub fn respond_to_service_request(
+        &mut self,
+        request_id: &str,
+        requester: &str,
+        service_id: &str,
+        status: &str,
+        body: &str,
+    ) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("respond_to_service_request")?;
+
+        let payload = ServiceResponsePayload {
+            request_id: request_id.to_string(),
+            service_id: service_id.to_string(),
+            status: status.to_string(),
+            body: body.to_string(),
+        };
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
+        let content = format!("{}{}", internal_prefixes::SVC_RESPONSE, serialized);
+
+        let message_id = self.send_internal_message(requester, content, MessagePriority::High)?;
+        info!(request_id = %request_id, requester = %requester, status = %status, "Sent service response");
+        Ok(message_id)
+    }
+
     /// Receives the next available message.
     ///
     /// # Returns
@@ -5415,6 +5567,172 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // --- Service discovery & request/response ---
+
+        if content.starts_with(internal_prefixes::SVC_DISCOVER_QUERY) {
+            let data = &content[internal_prefixes::SVC_DISCOVER_QUERY.len()..];
+            if let Ok(payload) = serde_json::from_str::<ServiceDiscoveryQueryPayload>(data) {
+                // Dedup: skip if we've already seen this query
+                if self.seen_discovery_queries.contains_key(&payload.query_id) {
+                    debug!(query_id = %payload.query_id, "Duplicate discovery query, skipping");
+                    return Some(InternalMessageResult::Consumed);
+                }
+                self.seen_discovery_queries
+                    .insert(payload.query_id.clone(), Instant::now());
+
+                // Check local services for matches
+                let matches: Vec<_> = self
+                    .local_services
+                    .values()
+                    .filter(|svc| {
+                        payload
+                            .service_id
+                            .as_ref()
+                            .is_none_or(|q| q == svc.service_id.as_str())
+                    })
+                    .cloned()
+                    .collect();
+
+                // Send discovery responses back to the originator for each match
+                for svc in &matches {
+                    let response = ServiceDiscoveryResponsePayload {
+                        query_id: payload.query_id.clone(),
+                        service_id: svc.service_id.as_str().to_string(),
+                        version: svc.version.clone(),
+                        provider_peer_id: self.config.user_id.clone(),
+                        capabilities: svc.capabilities.clone(),
+                        hop_count: message.hop_count.value(),
+                    };
+                    if let Ok(serialized) = serde_json::to_string(&response) {
+                        let resp_content =
+                            format!("{}{}", internal_prefixes::SVC_DISCOVER_RESPONSE, serialized);
+                        let _ = self.send_internal_message(
+                            &payload.originator,
+                            resp_content,
+                            MessagePriority::Medium,
+                        );
+                    }
+                }
+
+                // Forward query to all other known peers (gossip)
+                let peers: Vec<String> = self
+                    .key_package_sent_to
+                    .iter()
+                    .filter(|p| p.as_str() != sender && p.as_str() != payload.originator)
+                    .cloned()
+                    .collect();
+                for peer in &peers {
+                    let fwd_content = content.to_string();
+                    let _ = self.send_internal_message(peer, fwd_content, MessagePriority::Medium);
+                }
+
+                debug!(
+                    query_id = %payload.query_id,
+                    matches = matches.len(),
+                    forwarded_to = peers.len(),
+                    "Processed service discovery query"
+                );
+            } else {
+                warn!(sender = %sender, "Failed to parse service discovery query payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::SVC_DISCOVER_RESPONSE) {
+            let data = &content[internal_prefixes::SVC_DISCOVER_RESPONSE.len()..];
+            if let Ok(payload) = serde_json::from_str::<ServiceDiscoveryResponsePayload>(data) {
+                info!(
+                    query_id = %payload.query_id,
+                    service_id = %payload.service_id,
+                    provider = %payload.provider_peer_id,
+                    "Service discovered"
+                );
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::service_discovered(
+                        payload.query_id,
+                        payload.service_id,
+                        payload.version,
+                        payload.provider_peer_id,
+                        payload.capabilities,
+                        payload.hop_count,
+                    ));
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse service discovery response payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::SVC_REQUEST) {
+            let data = &content[internal_prefixes::SVC_REQUEST.len()..];
+            if let Ok(payload) = serde_json::from_str::<ServiceRequestPayload>(data) {
+                if !self.local_services.contains_key(&payload.service_id) {
+                    // Auto-respond with not_found
+                    let response = ServiceResponsePayload {
+                        request_id: payload.request_id.clone(),
+                        service_id: payload.service_id.clone(),
+                        status: "not_found".to_string(),
+                        body: String::new(),
+                    };
+                    if let Ok(serialized) = serde_json::to_string(&response) {
+                        let resp_content =
+                            format!("{}{}", internal_prefixes::SVC_RESPONSE, serialized);
+                        let _ =
+                            self.send_internal_message(sender, resp_content, MessagePriority::High);
+                    }
+                    debug!(
+                        request_id = %payload.request_id,
+                        service_id = %payload.service_id,
+                        "Service not found, auto-responded not_found"
+                    );
+                } else {
+                    // Emit event for app to handle
+                    info!(
+                        request_id = %payload.request_id,
+                        service_id = %payload.service_id,
+                        method = %payload.method,
+                        "Service request received"
+                    );
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::service_request_received(
+                            payload.request_id,
+                            payload.service_id,
+                            payload.method,
+                            payload.body,
+                            sender.to_string(),
+                        ));
+                    }
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse service request payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::SVC_RESPONSE) {
+            let data = &content[internal_prefixes::SVC_RESPONSE.len()..];
+            if let Ok(payload) = serde_json::from_str::<ServiceResponsePayload>(data) {
+                info!(
+                    request_id = %payload.request_id,
+                    service_id = %payload.service_id,
+                    status = %payload.status,
+                    "Service response received"
+                );
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::service_response_received(
+                        payload.request_id,
+                        payload.service_id,
+                        payload.status,
+                        payload.body,
+                        sender.to_string(),
+                    ));
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse service response payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
         None // Not an internal message
     }
 
@@ -5733,6 +6051,9 @@ impl OfflineProtocol {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
+        // Prune seen discovery queries older than 60s
+        let cutoff = Instant::now() - StdDuration::from_secs(60);
+        self.seen_discovery_queries.retain(|_, ts| *ts > cutoff);
         let stale_file_ids = self
             .file_transfer_manager
             .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));

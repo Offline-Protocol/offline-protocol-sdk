@@ -36,6 +36,10 @@ pub enum Error {
     #[error("Deserialization error: {0}")]
     DeserializationError(String),
 
+    /// Invalid service ID format.
+    #[error("Invalid service ID: {0}")]
+    InvalidServiceId(String),
+
     /// Generic error with custom message.
     #[error("{0}")]
     Other(String),
