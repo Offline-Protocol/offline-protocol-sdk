@@ -65,21 +65,24 @@ npx react-native run-android
 ## Key SDK APIs used
 
 ```typescript
+// Create a MeshServices instance (separate from OfflineProtocol)
+const services = new MeshServices();
+
 // Register a service
-await protocol.registerService('echo.v1', '1.0', { format: 'json' });
+await services.registerService('echo.v1', '1.0', { format: 'json' });
 
 // Discover services on the mesh
-const queryId = await protocol.discoverServices();           // all
-const queryId = await protocol.discoverServices('echo.v1');  // filtered
+const queryId = await services.discoverServices();           // all
+const queryId = await services.discoverServices('echo.v1');  // filtered
 
 // Send a request to a discovered provider
-const requestId = await protocol.sendServiceRequest(
+const requestId = await services.sendServiceRequest(
   providerPeerId, 'echo.v1', 'ping', '{"message": "hello"}'
 );
 
 // Respond to an incoming request (in event handler)
 protocol.on('service_request_received', async (event) => {
-  await protocol.respondToServiceRequest(
+  await services.respondToServiceRequest(
     event.request_id, event.sender, event.service_id, 'ok', responseBody
   );
 });

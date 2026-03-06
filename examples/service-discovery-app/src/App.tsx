@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import {
   OfflineProtocol,
+  MeshServices,
   type ProtocolEvent,
   type ServiceDiscoveredEvent,
   type ServiceRequestReceivedEvent,
@@ -61,6 +62,7 @@ const timestamp = () => new Date().toLocaleTimeString();
 const App = () => {
   // Protocol state
   const [protocol, setProtocol] = useState<OfflineProtocol | null>(null);
+  const [services] = useState(() => new MeshServices());
   const [isStarted, setIsStarted] = useState(false);
   const [userId] = useState(generateUserId);
 
@@ -132,7 +134,7 @@ const App = () => {
           );
 
           // Auto-respond based on the method
-          if (protocol) {
+          {
             let responseBody: string;
             let status = 'ok';
 
@@ -166,7 +168,7 @@ const App = () => {
               responseBody = JSON.stringify({echo: e.body, processedBy: userId});
             }
 
-            protocol
+            services
               .respondToServiceRequest(
                 e.request_id,
                 e.sender,
@@ -202,7 +204,7 @@ const App = () => {
           break;
       }
     },
-    [protocol, userId, registeredServices, addLog],
+    [services, userId, registeredServices, addLog],
   );
 
   // Initialize protocol
@@ -259,13 +261,13 @@ const App = () => {
   // -- Service Provider actions --
 
   const handleRegisterService = async () => {
-    if (!protocol || !isStarted) return;
+    if (!isStarted) return;
     if (!newServiceId.trim()) {
       Alert.alert('Error', 'Service ID is required');
       return;
     }
     try {
-      await protocol.registerService(newServiceId.trim(), newServiceVersion, {
+      await services.registerService(newServiceId.trim(), newServiceVersion, {
         format: 'json',
         transport: 'mesh',
       });
@@ -284,9 +286,8 @@ const App = () => {
   };
 
   const handleUnregisterService = async (serviceId: string) => {
-    if (!protocol) return;
     try {
-      await protocol.unregisterService(serviceId);
+      await services.unregisterService(serviceId);
       setRegisteredServices(prev => prev.filter(s => s.serviceId !== serviceId));
       addLog('out', `Unregistered service "${serviceId}"`);
     } catch (err: any) {
@@ -297,9 +298,9 @@ const App = () => {
   // -- Service Discovery actions --
 
   const handleDiscover = async () => {
-    if (!protocol || !isStarted) return;
+    if (!isStarted) return;
     try {
-      const queryId = await protocol.discoverServices();
+      const queryId = await services.discoverServices();
       addLog('out', `Discovery broadcast sent (query: ${queryId.slice(0, 8)}...)`);
     } catch (err: any) {
       Alert.alert('Error', err.message);
@@ -307,9 +308,9 @@ const App = () => {
   };
 
   const handleDiscoverSpecific = async (serviceId: string) => {
-    if (!protocol || !isStarted) return;
+    if (!isStarted) return;
     try {
-      const queryId = await protocol.discoverServices(serviceId);
+      const queryId = await services.discoverServices(serviceId);
       addLog('out', `Searching for "${serviceId}" (query: ${queryId.slice(0, 8)}...)`);
     } catch (err: any) {
       Alert.alert('Error', err.message);
@@ -317,9 +318,9 @@ const App = () => {
   };
 
   const handleSendRequest = async (service: DiscoveredService) => {
-    if (!protocol || !isStarted) return;
+    if (!isStarted) return;
     try {
-      const requestId = await protocol.sendServiceRequest(
+      const requestId = await services.sendServiceRequest(
         service.providerPeerId,
         service.serviceId,
         requestMethod,

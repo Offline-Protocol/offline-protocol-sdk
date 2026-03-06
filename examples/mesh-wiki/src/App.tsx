@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import {
   OfflineProtocol,
+  MeshServices,
   type ProtocolEvent,
   type ServiceDiscoveredEvent,
   type ServiceRequestReceivedEvent,
@@ -207,6 +208,7 @@ function truncate(str: string, maxLen: number): string {
 const App = () => {
   // Protocol state
   const [protocol, setProtocol] = useState<OfflineProtocol | null>(null);
+  const [services] = useState(() => new MeshServices());
   const [isStarted, setIsStarted] = useState(false);
   const [userId] = useState(generateUserId);
 
@@ -284,9 +286,9 @@ const App = () => {
           );
 
           // Look up the topic in our local knowledge pack
-          if (protocol) {
+          {
             if (!enabledPacks.has(e.service_id)) {
-              protocol
+              services
                 .respondToServiceRequest(
                   e.request_id,
                   e.sender,
@@ -329,7 +331,7 @@ const App = () => {
               });
             }
 
-            protocol
+            services
               .respondToServiceRequest(
                 e.request_id,
                 e.sender,
@@ -402,7 +404,7 @@ const App = () => {
           break;
       }
     },
-    [protocol, userId, enabledPacks, pendingRequests, addLog],
+    [services, userId, enabledPacks, pendingRequests, addLog],
   );
 
   // Initialize protocol
@@ -459,20 +461,20 @@ const App = () => {
   // -- Host actions --
 
   const handleTogglePack = async (packId: string, enable: boolean) => {
-    if (!protocol || !isStarted) return;
+    if (!isStarted) return;
     const pack = KNOWLEDGE_PACKS[packId];
     if (!pack) return;
 
     try {
       if (enable) {
-        await protocol.registerService(pack.serviceId, pack.version, {
+        await services.registerService(pack.serviceId, pack.version, {
           topics: Object.keys(pack.entries).join(','),
           packName: pack.name,
         });
         setEnabledPacks(prev => new Set(prev).add(packId));
         addLog('out', `Hosting "${pack.name}" (${Object.keys(pack.entries).length} topics)`);
       } else {
-        await protocol.unregisterService(pack.serviceId);
+        await services.unregisterService(pack.serviceId);
         setEnabledPacks(prev => {
           const next = new Set(prev);
           next.delete(packId);
@@ -488,9 +490,9 @@ const App = () => {
   // -- Search actions --
 
   const handleScanMesh = async () => {
-    if (!protocol || !isStarted) return;
+    if (!isStarted) return;
     try {
-      const queryId = await protocol.discoverServices();
+      const queryId = await services.discoverServices();
       addLog(
         'out',
         `Scanning mesh for all knowledge packs (query: ${queryId.slice(0, 8)}...)`,
@@ -504,9 +506,9 @@ const App = () => {
     pack: DiscoveredPack,
     topicKey: string,
   ) => {
-    if (!protocol || !isStarted) return;
+    if (!isStarted) return;
     try {
-      const requestId = await protocol.sendServiceRequest(
+      const requestId = await services.sendServiceRequest(
         pack.providerPeerId,
         pack.serviceId,
         topicKey,
