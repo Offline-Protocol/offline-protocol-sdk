@@ -688,6 +688,68 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // Service Discovery & Request/Response
+
+    @ReactMethod
+    fun registerService(serviceId: String, version: String, capabilitiesJson: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val capabilities = mutableMapOf<String, String>()
+            try {
+                val json = JSONObject(capabilitiesJson)
+                json.keys().forEach { key -> capabilities[key] = json.getString(key) }
+            } catch (_: Exception) { /* empty capabilities */ }
+            proto.registerService(serviceId, version, capabilities)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_REGISTER_SERVICE", "Failed to register service: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun unregisterService(serviceId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val removed = proto.unregisterService(serviceId)
+            promise.resolve(removed)
+        } catch (e: Exception) {
+            promise.reject("ERROR_UNREGISTER_SERVICE", "Failed to unregister service: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun discoverServices(serviceId: String?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val queryId = proto.discoverServices(serviceId)
+            promise.resolve(queryId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_DISCOVER_SERVICES", "Failed to discover services: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun sendServiceRequest(provider: String, serviceId: String, method: String, body: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val requestId = proto.sendServiceRequest(provider, serviceId, method, body)
+            promise.resolve(requestId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_SERVICE_REQUEST", "Failed to send service request: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val messageId = proto.respondToServiceRequest(requestId, requester, serviceId, status, body)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_SERVICE_RESPONSE", "Failed to respond to service request: ${e.message}", e)
+        }
+    }
+
     @ReactMethod
     fun receiveMessage(promise: Promise) {
         val messageJson = protocol?.receiveMessage()

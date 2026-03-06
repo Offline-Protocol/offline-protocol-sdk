@@ -762,6 +762,101 @@ export class OfflineProtocol {
     return messageId;
   }
 
+  // ==========================================================================
+  // SERVICE DISCOVERY & REQUEST/RESPONSE
+  // ==========================================================================
+
+  /**
+   * Registers a local service that this node offers for discovery by other peers.
+   *
+   * @param serviceId - Unique service identifier (e.g., "weather.v1")
+   * @param version - Service version string
+   * @param capabilities - Key-value map of service capabilities
+   */
+  async registerService(
+    serviceId: string,
+    version: string,
+    capabilities: Record<string, string> = {}
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.registerService(
+      serviceId,
+      version,
+      JSON.stringify(capabilities)
+    );
+  }
+
+  /**
+   * Unregisters a local service.
+   *
+   * @param serviceId - Service identifier to unregister
+   * @returns true if the service was found and removed
+   */
+  async unregisterService(serviceId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.unregisterService(serviceId);
+  }
+
+  /**
+   * Broadcasts a service discovery query to the mesh.
+   * Responses arrive asynchronously as `service_discovered` events.
+   *
+   * @param serviceId - Optional service ID to filter by (null discovers all)
+   * @returns Query ID for correlating responses
+   */
+  async discoverServices(serviceId?: string): Promise<string> {
+    return await OfflineProtocolNativeModule.discoverServices(serviceId ?? null);
+  }
+
+  /**
+   * Sends a service request to a specific provider peer.
+   * The response arrives as a `service_response_received` event.
+   *
+   * @param provider - Peer ID of the service provider
+   * @param serviceId - Service identifier
+   * @param method - Method name or action to invoke
+   * @param body - Request body (JSON string or arbitrary string)
+   * @returns Request ID for correlating the response
+   */
+  async sendServiceRequest(
+    provider: string,
+    serviceId: string,
+    method: string,
+    body: string
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.sendServiceRequest(
+      provider,
+      serviceId,
+      method,
+      body
+    );
+  }
+
+  /**
+   * Responds to a service request from another peer.
+   * Call this after receiving a `service_request_received` event.
+   *
+   * @param requestId - Request ID from the received event
+   * @param requester - Peer ID of the requester
+   * @param serviceId - Service identifier
+   * @param status - Response status ("ok", "error", or custom)
+   * @param body - Response body
+   * @returns Message ID of the response
+   */
+  async respondToServiceRequest(
+    requestId: string,
+    requester: string,
+    serviceId: string,
+    status: string,
+    body: string
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.respondToServiceRequest(
+      requestId,
+      requester,
+      serviceId,
+      status,
+      body
+    );
+  }
+
   /**
    * Gets the list of active transports
    *
