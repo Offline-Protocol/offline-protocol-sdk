@@ -545,6 +545,10 @@ pub struct OfflineProtocol {
     /// Set of peers we've already sent our key package to.
     key_package_sent_to: std::collections::HashSet<String>,
 
+    /// All discovered/connected peers, tracked independently of encryption.
+    /// Used by service discovery to know who to broadcast queries to.
+    known_peers: std::collections::HashSet<String>,
+
     /// Sessions confirmed established (received Welcome or successful decrypt).
     /// Only encrypt messages when the session is confirmed to avoid race conditions.
     confirmed_sessions: std::collections::HashSet<String>,
@@ -656,6 +660,7 @@ impl OfflineProtocol {
             pending_encrypted_messages: HashMap::new(),
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
+            known_peers: std::collections::HashSet::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             pending_decryption: HashMap::new(),
             pending_decryption_global_order: VecDeque::new(),
@@ -4186,13 +4191,16 @@ impl OfflineProtocol {
     ///
     /// * `peer_id` - The ID of the discovered peer
     pub fn on_neighbor_discovered(&mut self, peer_id: &str) {
-        // Only send key package if encryption is enabled and auto key exchange is on
-        if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
+        // Don't track ourselves
+        if peer_id == self.config.user_id {
             return;
         }
 
-        // Don't send to ourselves
-        if peer_id == self.config.user_id {
+        // Always track discovered peers for service discovery and routing
+        self.known_peers.insert(peer_id.to_string());
+
+        // Only send key package if encryption is enabled and auto key exchange is on
+        if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
             return;
         }
 
@@ -4221,6 +4229,7 @@ impl OfflineProtocol {
     pub fn on_neighbor_lost(&mut self, peer_id: &str) {
         // Remove from key package sent tracking so we can re-send if they reconnect
         self.key_package_sent_to.remove(peer_id);
+        self.known_peers.remove(peer_id);
     }
 
     /// Establishes a secure MLS session with a peer.
@@ -4729,8 +4738,8 @@ impl OfflineProtocol {
         self.seen_discovery_queries
             .insert(query_id.clone(), Instant::now());
 
-        // Broadcast to all known peers
-        let peers: Vec<String> = self.key_package_sent_to.iter().cloned().collect();
+        // Broadcast to all known peers (not just those with key packages)
+        let peers: Vec<String> = self.known_peers.iter().cloned().collect();
         for peer in &peers {
             let _ = self.send_internal_message(peer, content.clone(), MessagePriority::Medium);
         }
@@ -5636,7 +5645,7 @@ impl OfflineProtocol {
                         content.to_string()
                     };
                     let peers: Vec<String> = self
-                        .key_package_sent_to
+                        .known_peers
                         .iter()
                         .filter(|p| p.as_str() != sender && p.as_str() != payload.originator)
                         .cloned()
