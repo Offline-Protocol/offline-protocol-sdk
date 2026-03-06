@@ -548,7 +548,7 @@ export function ChatDetailScreen({
       // Keep keyboard open for quick follow-up messages
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
-      }, 50);
+      }, 16);
     } catch (error) {
       Alert.alert('Send Failed', 'Failed to send message. Please try again.');
     }

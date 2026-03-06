@@ -61,7 +61,7 @@ export const ENCRYPTED_MESSAGE_PREFIX = '__encrypted__::';
  * Interval in milliseconds for rebroadcasting presence messages.
  * This ensures other devices know this device is still online.
  */
-export const PRESENCE_REBROADCAST_INTERVAL_MS = 60 * 1000; // 1 minute
+export const PRESENCE_REBROADCAST_INTERVAL_MS = 15 * 1000; // 15 seconds
 
 /**
  * Maximum number of presence messages to send per broadcast tick.

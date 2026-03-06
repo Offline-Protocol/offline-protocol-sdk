@@ -15,7 +15,7 @@ export const LINKING_ERROR =
  * Default delay in milliseconds before refreshing runtime state after protocol start.
  * This gives the protocol time to fully initialize before querying state.
  */
-export const PROTOCOL_START_DELAY_MS = 500;
+export const PROTOCOL_START_DELAY_MS = 100;
 
 /**
  * Maximum number of events to keep in memory for the event history.

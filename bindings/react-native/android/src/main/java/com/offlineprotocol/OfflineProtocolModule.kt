@@ -41,9 +41,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         const val MIN_HISTORY_WINDOW = 1L
         const val MAX_HISTORY_WINDOW = 100L
         const val BLE_RESTART_DELAY_MS = 1000L
-        // Reduced from 100ms; latency-sensitive work is now event-driven.
-        // This tick handles retries, ACK timeouts, and DORS only.
-        const val PROCESS_INTERVAL_MS = 500L
+        // Matches iOS 100ms tick. Handles retries, ACK timeouts, welcome
+        // processing, and DORS. Latency-sensitive work is also event-driven.
+        const val PROCESS_INTERVAL_MS = 100L
         const val MAX_RECEIVE_DRAIN_PER_TICK = 100
         const val LOG_INTERVAL_MS = 5000L
         const val LOG_INTERVAL_THRESHOLD_MS = 100L

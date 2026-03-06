@@ -109,7 +109,7 @@ export function ChatScreen({
     if (peerMessages.length > 0) {
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      }, 16);
     }
   }, [peerMessages.length]);
 

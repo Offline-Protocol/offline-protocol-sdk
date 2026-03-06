@@ -49,6 +49,31 @@ const buildEventProcessingKey = (event: Record<string, unknown>): string => {
   return `${eventType}|${messageId}|${seenAt}|${timestamp}|${peerHint}`;
 };
 
+/**
+ * Polls getEstablishmentState with exponential backoff until the MLS session
+ * reaches HaveKeyPackage (triggers establishSecureSession) or SessionPending.
+ * Replaces the old 750ms × 8 fixed-interval loop with 100ms → 200ms → 400ms.
+ */
+async function awaitEstablishment(
+  proto: OfflineProtocol | null | undefined,
+  peerId: string,
+  maxAttempts = 5,
+): Promise<void> {
+  let delay = 100;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const state = await proto?.getEstablishmentState(peerId);
+    if (state === 'HaveKeyPackage') {
+      await proto?.establishSecureSession(peerId);
+      return;
+    }
+    if (state === 'SessionPending') {
+      return;
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 400);
+  }
+}
+
 // Relay (WebSocket) types – used for groups and online messaging
 export interface OnlineMessage {
   id: string;
@@ -852,7 +877,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     dors: {
       preferOnline: true,
       switchHysteresis: 15.0,
-      switchCooldownSecs: 20,
+      switchCooldownSecs: 10,
       bleToWifiRetryThreshold: 2,
       minSuccessRateBeforeEscalation: 0.3,
       minBleSamplesBeforeSuccessRateEscalation: 5,
@@ -879,8 +904,8 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       requireEncryption: false,
     },
     reliability: {
-      ack: { defaultTimeoutMs: 15000 },
-      retry: { maxRetries: 8 },
+      ack: { defaultTimeoutMs: 8000 },
+      retry: { maxRetries: 5, initialDelayMs: 300, maxDelayMs: 5000 },
     },
   });
 
@@ -928,18 +953,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
           keyPackage: localKeyPackage?.keyPackageData,
         });
 
-        // Retry briefly because key package import/propagation is asynchronous.
-        for (let attempt = 0; attempt < 8; attempt += 1) {
-          const state = await protocol.getEstablishmentState(peerId);
-          if (state === 'HaveKeyPackage') {
-            await protocol.establishSecureSession(peerId);
-            break;
-          }
-          if (state === 'SessionPending') {
-            break;
-          }
-          await new Promise<void>(resolve => setTimeout(() => resolve(), 750));
-        }
+        await awaitEstablishment(protocol, peerId);
 
         // Optimistically add contact on the accepter side.
         // The MLS session creator stays in Pending until the remote peer
@@ -1466,17 +1480,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
                   );
                 });
               }
-              for (let attempt = 0; attempt < 8; attempt += 1) {
-                const state = await protocol?.getEstablishmentState(peerId);
-                if (state === 'HaveKeyPackage') {
-                  await protocol?.establishSecureSession(peerId);
-                  break;
-                }
-                if (state === 'SessionPending') {
-                  break;
-                }
-                await new Promise<void>(resolve => setTimeout(() => resolve(), 750));
-              }
+              await awaitEstablishment(protocol, peerId);
 
               // Optimistically add contact on the sender side too.
               // secure_session_established may take time if we need to
