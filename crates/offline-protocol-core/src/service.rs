@@ -42,17 +42,44 @@ pub struct ServiceDescriptor {
     pub capabilities: HashMap<String, String>,
 }
 
-/// A discovered service record received from the mesh.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceRecord {
-    /// The service identifier.
-    pub service_id: ServiceId,
-    /// Version of the service.
-    pub version: String,
-    /// Peer user ID of the provider.
-    pub provider: String,
-    /// Arbitrary key-value capabilities.
-    pub capabilities: HashMap<String, String>,
-    /// Number of hops the discovery response traversed.
-    pub hop_count: u8,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_service_id_valid() {
+        let id = ServiceId::new("my.service").unwrap();
+        assert_eq!(id.as_str(), "my.service");
+        assert_eq!(id.to_string(), "my.service");
+    }
+
+    #[test]
+    fn test_service_id_empty_rejected() {
+        let err = ServiceId::new("").unwrap_err();
+        assert!(matches!(err, Error::InvalidServiceId(_)));
+    }
+
+    #[test]
+    fn test_service_id_serde_roundtrip() {
+        let id = ServiceId::new("weather.v1").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let parsed: ServiceId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_service_descriptor_serde_roundtrip() {
+        let mut caps = HashMap::new();
+        caps.insert("format".to_string(), "json".to_string());
+        let desc = ServiceDescriptor {
+            service_id: ServiceId::new("echo").unwrap(),
+            version: "1.0".to_string(),
+            capabilities: caps,
+        };
+        let json = serde_json::to_string(&desc).unwrap();
+        let parsed: ServiceDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.service_id.as_str(), "echo");
+        assert_eq!(parsed.version, "1.0");
+        assert_eq!(parsed.capabilities.get("format").unwrap(), "json");
+    }
 }
