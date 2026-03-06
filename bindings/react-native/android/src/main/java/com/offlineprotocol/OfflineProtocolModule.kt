@@ -698,7 +698,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             try {
                 val json = JSONObject(capabilitiesJson)
                 json.keys().forEach { key -> capabilities[key] = json.getString(key) }
-            } catch (_: Exception) { /* empty capabilities */ }
+            } catch (parseErr: Exception) {
+                android.util.Log.w("OfflineProtocol", "Failed to parse capabilities JSON, registering with empty capabilities: ${parseErr.message}")
+            }
             proto.registerService(serviceId, version, capabilities)
             promise.resolve(null)
         } catch (e: Exception) {

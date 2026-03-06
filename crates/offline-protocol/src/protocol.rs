@@ -93,6 +93,8 @@ const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
 const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// TTL for deduplicating service discovery queries.
 const DISCOVERY_QUERY_DEDUP_TTL_SECS: u64 = 60;
+/// Default maximum hops for service discovery query gossip forwarding.
+const DISCOVERY_QUERY_DEFAULT_MAX_HOPS: u8 = 10;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +146,13 @@ struct ServiceDiscoveryQueryPayload {
     originator: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     service_id: Option<String>,
+    /// Remaining hops before this query stops being forwarded.
+    #[serde(default = "default_discovery_max_hops")]
+    remaining_hops: u8,
+}
+
+fn default_discovery_max_hops() -> u8 {
+    DISCOVERY_QUERY_DEFAULT_MAX_HOPS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4710,6 +4719,7 @@ impl OfflineProtocol {
             query_id: query_id.clone(),
             originator: self.config.user_id.clone(),
             service_id: service_id.map(|s| s.to_string()),
+            remaining_hops: DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
         };
         let serialized =
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -5616,26 +5626,38 @@ impl OfflineProtocol {
                     }
                 }
 
-                // Forward query to all other known peers (gossip)
-                let peers: Vec<String> = self
-                    .key_package_sent_to
-                    .iter()
-                    .filter(|p| p.as_str() != sender && p.as_str() != payload.originator)
-                    .cloned()
-                    .collect();
-                let fwd_content = content.to_string();
-                for peer in &peers {
-                    let _ = self.send_internal_message(
-                        peer,
-                        fwd_content.clone(),
-                        MessagePriority::Medium,
-                    );
-                }
+                // Forward query to all other known peers (gossip) if hops remain
+                let forwarded_count = if payload.remaining_hops > 0 {
+                    let mut fwd_payload = payload.clone();
+                    fwd_payload.remaining_hops -= 1;
+                    let fwd_content = if let Ok(serialized) = serde_json::to_string(&fwd_payload) {
+                        format!("{}{}", internal_prefixes::SVC_DISCOVER_QUERY, serialized)
+                    } else {
+                        content.to_string()
+                    };
+                    let peers: Vec<String> = self
+                        .key_package_sent_to
+                        .iter()
+                        .filter(|p| p.as_str() != sender && p.as_str() != payload.originator)
+                        .cloned()
+                        .collect();
+                    for peer in &peers {
+                        let _ = self.send_internal_message(
+                            peer,
+                            fwd_content.clone(),
+                            MessagePriority::Medium,
+                        );
+                    }
+                    peers.len()
+                } else {
+                    debug!(query_id = %payload.query_id, "Discovery query reached max hops, not forwarding");
+                    0
+                };
 
                 debug!(
                     query_id = %payload.query_id,
                     matches = matches.len(),
-                    forwarded_to = peers.len(),
+                    forwarded_to = forwarded_count,
                     "Processed service discovery query"
                 );
             } else {
@@ -11632,6 +11654,7 @@ mod tests {
             query_id: "q-001".to_string(),
             originator: "alice".to_string(),
             service_id: Some("weather".to_string()),
+            remaining_hops: DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
         };
         let content = format!(
             "{}{}",
@@ -11660,6 +11683,7 @@ mod tests {
             query_id: "q-dedup".to_string(),
             originator: "alice".to_string(),
             service_id: None,
+            remaining_hops: DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
         };
         let content = format!(
             "{}{}",
@@ -11921,6 +11945,36 @@ mod tests {
         let query_id = protocol.discover_services(None).unwrap();
         assert!(!query_id.is_empty());
         assert!(protocol.seen_discovery_queries.contains_key(&query_id));
+    }
+
+    #[test]
+    fn test_require_encryption_blocks_service_discovery_control_messages() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let discover_result = protocol.discover_services(None);
+        assert!(matches!(discover_result, Err(Error::EncryptFailed(_))));
+
+        let request_result =
+            protocol.send_service_request("bob", "echo.v1", "ping", "{}");
+        assert!(matches!(request_result, Err(Error::EncryptFailed(_))));
+
+        let respond_result =
+            protocol.respond_to_service_request("req-1", "alice", "echo.v1", "ok", "pong");
+        assert!(matches!(respond_result, Err(Error::EncryptFailed(_))));
+
+        assert_eq!(transport_handle.sent_messages().len(), 0);
     }
 
     #[test]
