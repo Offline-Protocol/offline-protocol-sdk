@@ -13,13 +13,24 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+/// A message to send to a peer.
+#[derive(Debug, Clone)]
+pub struct OutboundMessage {
+    /// The recipient peer ID.
+    pub recipient: String,
+    /// The serialized message content.
+    pub content: String,
+    /// The message priority.
+    pub priority: MessagePriority,
+}
+
 /// Result of initiating a service discovery broadcast.
 #[must_use]
 pub struct DiscoverResult {
     /// Unique query identifier for correlating responses.
     pub query_id: String,
-    /// Messages to send: (recipient, content, priority).
-    pub messages: Vec<(String, String, MessagePriority)>,
+    /// Messages to send to peers.
+    pub messages: Vec<OutboundMessage>,
 }
 
 /// Result of sending a service request.
@@ -27,15 +38,15 @@ pub struct DiscoverResult {
 pub struct SendRequestResult {
     /// Unique request identifier for correlating the response.
     pub request_id: String,
-    /// Message to send: (recipient, content, priority).
-    pub message: (String, String, MessagePriority),
+    /// Message to send to the provider.
+    pub message: OutboundMessage,
 }
 
 /// Result of responding to a service request.
 #[must_use]
 pub struct SendResponseResult {
-    /// Message to send: (recipient, content, priority).
-    pub message: (String, String, MessagePriority),
+    /// Message to send to the requester.
+    pub message: OutboundMessage,
 }
 
 /// Action returned from handling an incoming service message.
@@ -44,8 +55,8 @@ pub enum ServiceAction {
     NotHandled,
     /// The message was consumed as a service message.
     Consumed {
-        /// Messages to send: `(recipient, content, priority)`.
-        messages_to_send: Vec<(String, String, MessagePriority)>,
+        /// Messages to send to peers.
+        messages_to_send: Vec<OutboundMessage>,
         /// Events to emit to the application.
         events_to_emit: Vec<ServiceEvent>,
     },
@@ -56,6 +67,15 @@ pub enum ServiceAction {
 /// Manages local service registration, discovery query generation and handling,
 /// and service request/response routing. All methods return **actions** (messages
 /// to send, events to emit) rather than performing I/O directly.
+///
+/// ## Multi-hop discovery limitation
+///
+/// Discovery **queries** are forwarded across multiple hops via gossip. However,
+/// discovery **responses** are currently sent only to the direct sender of the
+/// query (one hop back) rather than being relayed all the way to the original
+/// querier. In practice this means that services more than one hop away will
+/// generate responses that reach intermediate forwarders but not the node that
+/// initiated the query. Multi-hop response relay is planned for a future release.
 pub struct MeshServices {
     local_services: HashMap<String, ServiceDescriptor>,
     seen_discovery_queries: HashMap<String, Instant>,
@@ -92,6 +112,9 @@ impl MeshServices {
 
     /// Generates a discovery broadcast to known peers, capped at
     /// [`DISCOVERY_INITIAL_BROADCAST_MAX`] recipients.
+    ///
+    /// See the [multi-hop limitation](MeshServices#multi-hop-discovery-limitation)
+    /// note on `MeshServices`.
     pub fn discover_services(
         &mut self,
         user_id: &str,
@@ -120,9 +143,13 @@ impl MeshServices {
             user_id,
         );
 
-        let messages: Vec<(String, String, MessagePriority)> = selected_peers
+        let messages: Vec<OutboundMessage> = selected_peers
             .into_iter()
-            .map(|peer| (peer, content.clone(), MessagePriority::Medium))
+            .map(|peer| OutboundMessage {
+                recipient: peer,
+                content: content.clone(),
+                priority: MessagePriority::Medium,
+            })
             .collect();
 
         info!(query_id = %query_id, service_id = ?service_id, peer_count = messages.len(), "Broadcast service discovery query");
@@ -167,7 +194,11 @@ impl MeshServices {
         info!(request_id = %request_id, provider = %provider, service_id = %service_id, method = %method, "Sent service request");
         Ok(SendRequestResult {
             request_id,
-            message: (provider.to_string(), content, MessagePriority::High),
+            message: OutboundMessage {
+                recipient: provider.to_string(),
+                content,
+                priority: MessagePriority::High,
+            },
         })
     }
 
@@ -203,7 +234,11 @@ impl MeshServices {
 
         info!(request_id = %request_id, requester = %requester, status = %status, "Sent service response");
         Ok(SendResponseResult {
-            message: (requester.to_string(), content, MessagePriority::High),
+            message: OutboundMessage {
+                recipient: requester.to_string(),
+                content,
+                priority: MessagePriority::High,
+            },
         })
     }
 
@@ -332,7 +367,11 @@ impl MeshServices {
             };
             if let Ok(serialized) = serde_json::to_string(&response) {
                 let resp_content = format!("{}{}", SVC_DISCOVER_RESPONSE, serialized);
-                messages.push((sender.to_string(), resp_content, MessagePriority::Medium));
+                messages.push(OutboundMessage {
+                    recipient: sender.to_string(),
+                    content: resp_content,
+                    priority: MessagePriority::Medium,
+                });
             }
         }
 
@@ -362,7 +401,11 @@ impl MeshServices {
                 user_id,
             );
             for peer in &forward_peers {
-                messages.push((peer.clone(), fwd_content.clone(), MessagePriority::Medium));
+                messages.push(OutboundMessage {
+                    recipient: peer.clone(),
+                    content: fwd_content.clone(),
+                    priority: MessagePriority::Medium,
+                });
             }
             forward_peers.len()
         } else {
@@ -474,7 +517,11 @@ impl MeshServices {
             let mut messages = Vec::new();
             if let Ok(serialized) = serde_json::to_string(&response) {
                 let resp_content = format!("{}{}", SVC_RESPONSE, serialized);
-                messages.push((sender.to_string(), resp_content, MessagePriority::High));
+                messages.push(OutboundMessage {
+                    recipient: sender.to_string(),
+                    content: resp_content,
+                    priority: MessagePriority::High,
+                });
             }
             debug!(
                 request_id = %payload.request_id,
@@ -665,8 +712,8 @@ mod tests {
             .send_service_request("bob", "echo.v1", "ping", "{}")
             .unwrap();
         assert!(!result.request_id.is_empty());
-        assert_eq!(result.message.0, "bob");
-        assert!(result.message.1.starts_with(SVC_REQUEST));
+        assert_eq!(result.message.recipient, "bob");
+        assert!(result.message.content.starts_with(SVC_REQUEST));
     }
 
     #[test]
@@ -691,8 +738,8 @@ mod tests {
         let result = svc
             .respond_to_service_request("req-1", "alice", "echo.v1", "ok", "pong")
             .unwrap();
-        assert_eq!(result.message.0, "alice");
-        assert!(result.message.1.starts_with(SVC_RESPONSE));
+        assert_eq!(result.message.recipient, "alice");
+        assert!(result.message.content.starts_with(SVC_RESPONSE));
     }
 
     #[test]
@@ -756,9 +803,9 @@ mod tests {
                 assert!(!messages_to_send.is_empty());
                 assert!(events_to_emit.is_empty());
                 // Response should go to the sender ("alice"), not the originator field
-                assert!(messages_to_send
-                    .iter()
-                    .any(|(r, c, _)| r == "alice" && c.starts_with(SVC_DISCOVER_RESPONSE)));
+                assert!(messages_to_send.iter().any(
+                    |m| m.recipient == "alice" && m.content.starts_with(SVC_DISCOVER_RESPONSE)
+                ));
             }
             ServiceAction::NotHandled => panic!("Should have been handled"),
         }
@@ -851,7 +898,7 @@ mod tests {
                 events_to_emit,
             } => {
                 assert_eq!(messages_to_send.len(), 1);
-                assert!(messages_to_send[0].1.contains("not_found"));
+                assert!(messages_to_send[0].content.contains("not_found"));
                 assert!(events_to_emit.is_empty());
             }
             ServiceAction::NotHandled => panic!("Should have been handled"),
@@ -1201,20 +1248,23 @@ mod tests {
                 // Should have a discovery response back to sender
                 let responses: Vec<_> = messages_to_send
                     .iter()
-                    .filter(|(_, c, _)| c.starts_with(SVC_DISCOVER_RESPONSE))
+                    .filter(|m| m.content.starts_with(SVC_DISCOVER_RESPONSE))
                     .collect();
                 assert_eq!(responses.len(), 1, "Should have one discovery response");
-                assert_eq!(responses[0].0, "alice", "Response should go to sender");
+                assert_eq!(
+                    responses[0].recipient, "alice",
+                    "Response should go to sender"
+                );
 
                 // Should also have forwarded query messages to other peers
                 let forwards: Vec<_> = messages_to_send
                     .iter()
-                    .filter(|(_, c, _)| c.starts_with(SVC_DISCOVER_QUERY))
+                    .filter(|m| m.content.starts_with(SVC_DISCOVER_QUERY))
                     .collect();
                 assert_eq!(forwards.len(), 3, "Should forward to all 3 eligible peers");
                 // Forwarded queries should NOT go to the sender
                 assert!(
-                    forwards.iter().all(|(r, _, _)| r != "alice"),
+                    forwards.iter().all(|m| m.recipient != "alice"),
                     "Should not forward back to sender"
                 );
 

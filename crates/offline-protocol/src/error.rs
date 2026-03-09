@@ -164,6 +164,10 @@ pub enum Error {
     #[error("Failed to encrypt message: {0}")]
     EncryptFailed(String),
 
+    /// Service error.
+    #[error("Service error: {0}")]
+    Service(#[from] offline_protocol_services::ServiceError),
+
     /// Serialization error.
     #[error("Serialization error: {0}")]
     Serialization(String),

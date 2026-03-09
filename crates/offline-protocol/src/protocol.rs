@@ -4657,18 +4657,23 @@ impl OfflineProtocol {
     pub fn register_service(&mut self, descriptor: ServiceDescriptor) -> Result<()> {
         self.mesh_services
             .register_service(descriptor)
-            .map_err(|e| Error::Other(e.to_string()))
+            .map_err(Error::Service)
     }
 
     /// Unregisters a local service. Returns true if the service was found and removed.
     pub fn unregister_service(&mut self, service_id: &str) -> Result<bool> {
         self.mesh_services
             .unregister_service(service_id)
-            .map_err(|e| Error::Other(e.to_string()))
+            .map_err(Error::Service)
     }
 
     /// Broadcasts a service discovery query to all known peers.
     /// Returns a query_id. Responses arrive asynchronously as `ServiceDiscovered` events.
+    ///
+    /// **Note:** Discovery responses currently travel only one hop back (to the
+    /// immediate sender of the query). Multi-hop response relay is not yet
+    /// implemented, so services more than one hop away will generate responses
+    /// that reach intermediate forwarders but not the original querier.
     pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
         self.ensure_plaintext_control_send_allowed("discover_services")?;
 
@@ -4676,11 +4681,11 @@ impl OfflineProtocol {
         let result = self
             .mesh_services
             .discover_services(&self.config.user_id, &peers, service_id)
-            .map_err(|e| Error::Other(e.to_string()))?;
+            .map_err(Error::Service)?;
         let mut send_failures = 0usize;
-        for (recipient, content, priority) in result.messages {
+        for msg in result.messages {
             if self
-                .send_internal_message(&recipient, content, priority)
+                .send_internal_message(&msg.recipient, msg.content, msg.priority)
                 .is_err()
             {
                 send_failures += 1;
@@ -4710,9 +4715,9 @@ impl OfflineProtocol {
         let result = self
             .mesh_services
             .send_service_request(provider, service_id, method, body)
-            .map_err(|e| Error::Other(e.to_string()))?;
-        let (recipient, content, priority) = result.message;
-        self.send_internal_message(&recipient, content, priority)?;
+            .map_err(Error::Service)?;
+        let msg = result.message;
+        self.send_internal_message(&msg.recipient, msg.content, msg.priority)?;
         Ok(result.request_id)
     }
 
@@ -4730,9 +4735,9 @@ impl OfflineProtocol {
         let result = self
             .mesh_services
             .respond_to_service_request(request_id, requester, service_id, status, body)
-            .map_err(|e| Error::Other(e.to_string()))?;
-        let (recipient, content, priority) = result.message;
-        let message_id = self.send_internal_message(&recipient, content, priority)?;
+            .map_err(Error::Service)?;
+        let msg = result.message;
+        let message_id = self.send_internal_message(&msg.recipient, msg.content, msg.priority)?;
         Ok(message_id)
     }
 
@@ -5546,8 +5551,9 @@ impl OfflineProtocol {
                     messages_to_send,
                     events_to_emit,
                 } => {
-                    for (recipient, msg, priority) in messages_to_send {
-                        let _ = self.send_internal_message(&recipient, msg, priority);
+                    for msg in messages_to_send {
+                        let _ =
+                            self.send_internal_message(&msg.recipient, msg.content, msg.priority);
                     }
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
                         for svc_event in events_to_emit {

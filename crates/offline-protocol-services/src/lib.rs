@@ -20,5 +20,6 @@ pub use payloads::{
     SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE, VALID_SERVICE_STATUSES,
 };
 pub use services::{
-    DiscoverResult, MeshServices, SendRequestResult, SendResponseResult, ServiceAction,
+    DiscoverResult, MeshServices, OutboundMessage, SendRequestResult, SendResponseResult,
+    ServiceAction,
 };
