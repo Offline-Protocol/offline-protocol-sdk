@@ -537,6 +537,15 @@ impl MeshServices {
             });
         }
 
+        // Validate status from untrusted input
+        if !VALID_SERVICE_STATUSES.contains(&payload.status.as_str()) {
+            warn!(sender = %sender, status = %payload.status, "Service response with invalid status, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
+
         info!(
             request_id = %payload.request_id,
             service_id = %payload.service_id,
@@ -1122,6 +1131,95 @@ mod tests {
                     events_to_emit.is_empty(),
                     "Should not emit event for oversized method"
                 );
+            }
+            ServiceAction::NotHandled => panic!("Should have been handled"),
+        }
+    }
+
+    #[test]
+    fn test_handle_response_invalid_status_dropped() {
+        let mut svc = MeshServices::new();
+
+        let payload = ServiceResponsePayload {
+            request_id: "req-bad".to_string(),
+            service_id: "echo".to_string(),
+            status: "invalid_status".to_string(),
+            body: "data".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            SVC_RESPONSE,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let action = svc.handle_incoming_message(&content, "bob", 0, "user1", &[]);
+        match action {
+            ServiceAction::Consumed {
+                messages_to_send,
+                events_to_emit,
+            } => {
+                assert!(messages_to_send.is_empty());
+                assert!(
+                    events_to_emit.is_empty(),
+                    "Should not emit event for invalid status"
+                );
+            }
+            ServiceAction::NotHandled => panic!("Should have been handled"),
+        }
+    }
+
+    #[test]
+    fn test_handle_discover_query_with_match_and_forwarding() {
+        let mut svc = MeshServices::new();
+        svc.register_service(ServiceDescriptor {
+            service_id: ServiceId::new("weather").unwrap(),
+            version: "2.0".to_string(),
+            capabilities: HashMap::new(),
+        })
+        .unwrap();
+
+        let payload = ServiceDiscoveryQueryPayload {
+            query_id: "q-combined".to_string(),
+            originator: "alice".to_string(),
+            service_id: Some("weather".to_string()),
+            remaining_hops: 5,
+        };
+        let content = format!(
+            "{}{}",
+            SVC_DISCOVER_QUERY,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        // Provide peers to forward to (excluding sender "alice" and originator "alice")
+        let peers = vec!["bob".to_string(), "charlie".to_string(), "dave".to_string()];
+        let action = svc.handle_incoming_message(&content, "alice", 1, "user1", &peers);
+        match action {
+            ServiceAction::Consumed {
+                messages_to_send,
+                events_to_emit,
+            } => {
+                // Should have a discovery response back to sender
+                let responses: Vec<_> = messages_to_send
+                    .iter()
+                    .filter(|(_, c, _)| c.starts_with(SVC_DISCOVER_RESPONSE))
+                    .collect();
+                assert_eq!(responses.len(), 1, "Should have one discovery response");
+                assert_eq!(responses[0].0, "alice", "Response should go to sender");
+
+                // Should also have forwarded query messages to other peers
+                let forwards: Vec<_> = messages_to_send
+                    .iter()
+                    .filter(|(_, c, _)| c.starts_with(SVC_DISCOVER_QUERY))
+                    .collect();
+                assert_eq!(forwards.len(), 3, "Should forward to all 3 eligible peers");
+                // Forwarded queries should NOT go to the sender
+                assert!(
+                    forwards.iter().all(|(r, _, _)| r != "alice"),
+                    "Should not forward back to sender"
+                );
+
+                // No events emitted for queries — events only on discovery responses
+                assert!(events_to_emit.is_empty());
             }
             ServiceAction::NotHandled => panic!("Should have been handled"),
         }

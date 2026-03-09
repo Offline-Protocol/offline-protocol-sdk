@@ -11796,6 +11796,57 @@ mod tests {
     }
 
     #[test]
+    fn test_known_peers_capacity_limit() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Fill to capacity
+        for i in 0..MAX_KNOWN_PEERS {
+            protocol.on_neighbor_discovered(&format!("peer-{i}"));
+        }
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+
+        // One more should be rejected
+        protocol.on_neighbor_discovered("peer-overflow");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+        assert!(!protocol.known_peers.contains("peer-overflow"));
+
+        // Existing peer should still be updatable (no-op insert, not rejected)
+        protocol.on_neighbor_discovered("peer-0");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+        assert!(protocol.known_peers.contains("peer-0"));
+
+        // Removing a peer frees capacity
+        protocol.on_neighbor_lost("peer-0");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS - 1);
+
+        // Now the new peer can be added
+        protocol.on_neighbor_discovered("peer-overflow");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+        assert!(protocol.known_peers.contains("peer-overflow"));
+    }
+
+    #[test]
+    fn test_known_peers_does_not_track_self() {
+        let config = create_test_config();
+        let self_id = config.user_id.clone();
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        protocol.on_neighbor_discovered(&self_id);
+        assert!(protocol.known_peers.is_empty());
+    }
+
+    #[test]
+    fn test_on_neighbor_lost_removes_from_known_peers() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        protocol.on_neighbor_discovered("alice");
+        assert!(protocol.known_peers.contains("alice"));
+
+        protocol.on_neighbor_lost("alice");
+        assert!(!protocol.known_peers.contains("alice"));
+    }
+
+    #[test]
     fn test_seen_discovery_queries_cleanup() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
