@@ -25,8 +25,9 @@ fn default_discovery_max_hops() -> u8 {
     DISCOVERY_QUERY_DEFAULT_MAX_HOPS
 }
 
+/// Wire-format payload for a service discovery query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceDiscoveryQueryPayload {
+pub(crate) struct ServiceDiscoveryQueryPayload {
     pub query_id: String,
     pub originator: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,8 +36,9 @@ pub struct ServiceDiscoveryQueryPayload {
     pub remaining_hops: u8,
 }
 
+/// Wire-format payload for a service discovery response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceDiscoveryResponsePayload {
+pub(crate) struct ServiceDiscoveryResponsePayload {
     pub query_id: String,
     pub service_id: String,
     pub version: String,
@@ -45,16 +47,18 @@ pub struct ServiceDiscoveryResponsePayload {
     pub hop_count: u8,
 }
 
+/// Wire-format payload for a service request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceRequestPayload {
+pub(crate) struct ServiceRequestPayload {
     pub request_id: String,
     pub service_id: String,
     pub method: String,
     pub body: String,
 }
 
+/// Wire-format payload for a service response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceResponsePayload {
+pub(crate) struct ServiceResponsePayload {
     pub request_id: String,
     pub service_id: String,
     pub status: String,

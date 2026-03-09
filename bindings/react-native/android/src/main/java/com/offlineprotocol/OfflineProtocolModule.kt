@@ -778,6 +778,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             protocol = null
+            meshServices = null
             listenerCount = 0
             currentConfig = null
             promise.resolve(null)

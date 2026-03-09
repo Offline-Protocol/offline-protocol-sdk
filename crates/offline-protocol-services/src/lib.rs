@@ -1,17 +1,23 @@
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
+//! Mesh service discovery and request/response for the Offline Protocol SDK.
+
+/// Error types for mesh service operations.
 pub mod error;
+/// Event types emitted by mesh service operations.
 pub mod events;
-pub mod payloads;
+pub(crate) mod payloads;
+/// Core service registry and message handling logic.
 pub mod services;
 
 pub use error::ServiceError;
 pub use events::ServiceEvent;
 pub use payloads::{
-    ServiceDiscoveryQueryPayload, ServiceDiscoveryResponsePayload, ServiceRequestPayload,
-    ServiceResponsePayload, DISCOVERY_GOSSIP_MAX_FANOUT, DISCOVERY_QUERY_DEDUP_TTL_SECS,
-    DISCOVERY_QUERY_DEFAULT_MAX_HOPS, DISCOVERY_QUERY_MAX_DEDUP_ENTRIES, SVC_DISCOVER_QUERY,
-    SVC_DISCOVER_RESPONSE, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE,
+    DISCOVERY_GOSSIP_MAX_FANOUT, DISCOVERY_QUERY_DEDUP_TTL_SECS,
+    DISCOVERY_QUERY_DEFAULT_MAX_HOPS, DISCOVERY_QUERY_MAX_DEDUP_ENTRIES,
+    SVC_DISCOVER_QUERY, SVC_DISCOVER_RESPONSE, SVC_MESSAGE_PREFIX,
+    SVC_REQUEST, SVC_RESPONSE,
 };
 pub use services::{
     DiscoverResult, MeshServices, SendRequestResult, SendResponseResult, ServiceAction,

@@ -6,8 +6,26 @@ use std::collections::HashMap;
 use crate::error::Error;
 
 /// Unique identifier for a service.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ServiceId(String);
+
+impl TryFrom<String> for ServiceId {
+    type Error = Error;
+
+    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
+        ServiceId::new(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        ServiceId::new(s).map_err(serde::de::Error::custom)
+    }
+}
 
 impl ServiceId {
     /// Creates a new ServiceId, validating that it is non-empty.
@@ -65,6 +83,12 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let parsed: ServiceId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_service_id_empty_deserialization_rejected() {
+        let result: std::result::Result<ServiceId, _> = serde_json::from_str("\"\"");
+        assert!(result.is_err());
     }
 
     #[test]

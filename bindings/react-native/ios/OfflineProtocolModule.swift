@@ -901,6 +901,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             // Ignore stop failures during destroy
         }
         protocolInstance = nil
+        meshServicesInstance = nil
         currentConfig = nil
         resolver(nil)
     }

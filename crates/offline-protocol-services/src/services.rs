@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Result of initiating a service discovery broadcast.
+#[must_use]
 pub struct DiscoverResult {
     /// Unique query identifier for correlating responses.
     pub query_id: String,
@@ -20,6 +21,7 @@ pub struct DiscoverResult {
 }
 
 /// Result of sending a service request.
+#[must_use]
 pub struct SendRequestResult {
     /// Unique request identifier for correlating the response.
     pub request_id: String,
@@ -28,18 +30,19 @@ pub struct SendRequestResult {
 }
 
 /// Result of responding to a service request.
+#[must_use]
 pub struct SendResponseResult {
     /// Message to send: (recipient, content, priority).
     pub message: (String, String, MessagePriority),
 }
 
-/// Action returned from handling an incoming message.
+/// Action returned from handling an incoming service message.
 pub enum ServiceAction {
     /// The message was not a service message; caller should continue processing.
     NotHandled,
     /// The message was consumed as a service message.
     Consumed {
-        /// Messages to send: (recipient, content, priority).
+        /// Messages to send: `(recipient, content, priority)`.
         messages_to_send: Vec<(String, String, MessagePriority)>,
         /// Events to emit to the application.
         events_to_emit: Vec<ServiceEvent>,
@@ -262,7 +265,7 @@ impl MeshServices {
                 payload
                     .service_id
                     .as_ref()
-                    .map_or(true, |q| q == svc.service_id.as_str())
+                    .is_none_or(|q| q == svc.service_id.as_str())
             })
             .cloned()
             .collect();
@@ -307,12 +310,14 @@ impl MeshServices {
                 .collect();
             // Limit fanout to prevent gossip flooding in dense meshes
             if forward_peers.len() > DISCOVERY_GOSSIP_MAX_FANOUT {
-                // Deterministic shuffle using query_id as seed to avoid
-                // needing a random number generator dependency.
-                let seed = forward_peers.len() as u64
-                    ^ payload.query_id.bytes().fold(0u64, |acc, b| {
-                        acc.wrapping_mul(31).wrapping_add(b as u64)
-                    });
+                // Deterministic shuffle using query_id + user_id as seed so
+                // different nodes select different forwarding subsets.
+                let seed = payload
+                    .query_id
+                    .bytes()
+                    .chain(user_id.bytes())
+                    .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+                    ^ forward_peers.len() as u64;
                 // Fisher-Yates partial shuffle (first FANOUT elements)
                 for i in 0..DISCOVERY_GOSSIP_MAX_FANOUT {
                     let j = i + ((seed.wrapping_mul((i as u64).wrapping_add(1)))

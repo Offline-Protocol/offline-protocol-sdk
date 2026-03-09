@@ -4671,8 +4671,21 @@ impl OfflineProtocol {
             .mesh_services
             .discover_services(&self.config.user_id, &peers, service_id)
             .map_err(|e| Error::Other(e.to_string()))?;
+        let mut send_failures = 0usize;
         for (recipient, content, priority) in result.messages {
-            let _ = self.send_internal_message(&recipient, content, priority);
+            if self
+                .send_internal_message(&recipient, content, priority)
+                .is_err()
+            {
+                send_failures += 1;
+            }
+        }
+        if send_failures > 0 {
+            warn!(
+                failures = send_failures,
+                total = peers.len(),
+                "Some discovery broadcasts failed to send"
+            );
         }
         Ok(result.query_id)
     }
@@ -5519,7 +5532,10 @@ impl OfflineProtocol {
                 &self.config.user_id,
                 &peers,
             ) {
-                ServiceAction::NotHandled => {}
+                ServiceAction::NotHandled => {
+                    warn!(sender = %sender, "Received unknown service message prefix, consuming");
+                    return Some(InternalMessageResult::Consumed);
+                }
                 ServiceAction::Consumed {
                     messages_to_send,
                     events_to_emit,
@@ -11421,9 +11437,7 @@ mod tests {
 
     #[test]
     fn test_process_svc_discover_query_with_match() {
-        use offline_protocol_services::{
-            ServiceDiscoveryQueryPayload, DISCOVERY_QUERY_DEFAULT_MAX_HOPS, SVC_DISCOVER_QUERY,
-        };
+        use offline_protocol_services::SVC_DISCOVER_QUERY;
 
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
@@ -11439,17 +11453,16 @@ mod tests {
         };
         protocol.register_service(descriptor).unwrap();
 
-        // Build a discovery query message from a remote peer
-        let payload = ServiceDiscoveryQueryPayload {
-            query_id: "q-001".to_string(),
-            originator: "alice".to_string(),
-            service_id: Some("weather".to_string()),
-            remaining_hops: DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
-        };
+        // Build a discovery query message from a remote peer using raw JSON
         let content = format!(
             "{}{}",
             SVC_DISCOVER_QUERY,
-            serde_json::to_string(&payload).unwrap()
+            serde_json::json!({
+                "query_id": "q-001",
+                "originator": "alice",
+                "service_id": "weather",
+                "remaining_hops": 10
+            })
         );
         let message = Message::new(
             UserId::new("alice").unwrap(),
@@ -11470,22 +11483,18 @@ mod tests {
 
     #[test]
     fn test_process_svc_discover_query_dedup() {
-        use offline_protocol_services::{
-            ServiceDiscoveryQueryPayload, DISCOVERY_QUERY_DEFAULT_MAX_HOPS, SVC_DISCOVER_QUERY,
-        };
+        use offline_protocol_services::SVC_DISCOVER_QUERY;
 
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-        let payload = ServiceDiscoveryQueryPayload {
-            query_id: "q-dedup".to_string(),
-            originator: "alice".to_string(),
-            service_id: None,
-            remaining_hops: DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
-        };
         let content = format!(
             "{}{}",
             SVC_DISCOVER_QUERY,
-            serde_json::to_string(&payload).unwrap()
+            serde_json::json!({
+                "query_id": "q-dedup",
+                "originator": "alice",
+                "remaining_hops": 10
+            })
         );
 
         let make_msg = || {
@@ -11508,7 +11517,7 @@ mod tests {
 
     #[test]
     fn test_process_svc_discover_response_emits_event() {
-        use offline_protocol_services::{ServiceDiscoveryResponsePayload, SVC_DISCOVER_RESPONSE};
+        use offline_protocol_services::SVC_DISCOVER_RESPONSE;
 
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11518,18 +11527,17 @@ mod tests {
             events_handle.lock().unwrap().push(event);
         });
 
-        let payload = ServiceDiscoveryResponsePayload {
-            query_id: "q-123".to_string(),
-            service_id: "weather".to_string(),
-            version: "2.0".to_string(),
-            provider_peer_id: "bob".to_string(),
-            capabilities: HashMap::new(),
-            hop_count: 1,
-        };
         let content = format!(
             "{}{}",
             SVC_DISCOVER_RESPONSE,
-            serde_json::to_string(&payload).unwrap()
+            serde_json::json!({
+                "query_id": "q-123",
+                "service_id": "weather",
+                "version": "2.0",
+                "provider_peer_id": "bob",
+                "capabilities": {},
+                "hop_count": 1
+            })
         );
         let message = Message::new(
             UserId::new("bob").unwrap(),
@@ -11564,7 +11572,7 @@ mod tests {
 
     #[test]
     fn test_process_svc_request_unregistered_auto_not_found() {
-        use offline_protocol_services::{ServiceRequestPayload, SVC_REQUEST};
+        use offline_protocol_services::SVC_REQUEST;
 
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11575,16 +11583,15 @@ mod tests {
         });
 
         // No services registered — request should auto-respond not_found
-        let payload = ServiceRequestPayload {
-            request_id: "req-001".to_string(),
-            service_id: "nonexistent".to_string(),
-            method: "get".to_string(),
-            body: "{}".to_string(),
-        };
         let content = format!(
             "{}{}",
             SVC_REQUEST,
-            serde_json::to_string(&payload).unwrap()
+            serde_json::json!({
+                "request_id": "req-001",
+                "service_id": "nonexistent",
+                "method": "get",
+                "body": "{}"
+            })
         );
         let message = Message::new(
             UserId::new("alice").unwrap(),
@@ -11607,7 +11614,7 @@ mod tests {
 
     #[test]
     fn test_process_svc_request_registered_emits_event() {
-        use offline_protocol_services::{ServiceRequestPayload, SVC_REQUEST};
+        use offline_protocol_services::SVC_REQUEST;
 
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11625,16 +11632,15 @@ mod tests {
         };
         protocol.register_service(descriptor).unwrap();
 
-        let payload = ServiceRequestPayload {
-            request_id: "req-002".to_string(),
-            service_id: "echo".to_string(),
-            method: "ping".to_string(),
-            body: "hello".to_string(),
-        };
         let content = format!(
             "{}{}",
             SVC_REQUEST,
-            serde_json::to_string(&payload).unwrap()
+            serde_json::json!({
+                "request_id": "req-002",
+                "service_id": "echo",
+                "method": "ping",
+                "body": "hello"
+            })
         );
         let message = Message::new(
             UserId::new("alice").unwrap(),
@@ -11668,7 +11674,7 @@ mod tests {
 
     #[test]
     fn test_process_svc_response_emits_event() {
-        use offline_protocol_services::{ServiceResponsePayload, SVC_RESPONSE};
+        use offline_protocol_services::SVC_RESPONSE;
 
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
@@ -11678,16 +11684,15 @@ mod tests {
             events_handle.lock().unwrap().push(event);
         });
 
-        let payload = ServiceResponsePayload {
-            request_id: "req-003".to_string(),
-            service_id: "echo".to_string(),
-            status: "ok".to_string(),
-            body: "pong".to_string(),
-        };
         let content = format!(
             "{}{}",
             SVC_RESPONSE,
-            serde_json::to_string(&payload).unwrap()
+            serde_json::json!({
+                "request_id": "req-003",
+                "service_id": "echo",
+                "status": "ok",
+                "body": "pong"
+            })
         );
         let message = Message::new(
             UserId::new("bob").unwrap(),
