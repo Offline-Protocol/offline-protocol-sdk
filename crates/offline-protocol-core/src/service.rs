@@ -5,6 +5,9 @@ use std::collections::HashMap;
 
 use crate::error::Error;
 
+/// Maximum length for a service ID.
+pub const MAX_SERVICE_ID_LEN: usize = 256;
+
 /// Unique identifier for a service.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ServiceId(String);
@@ -28,11 +31,30 @@ impl<'de> Deserialize<'de> for ServiceId {
 }
 
 impl ServiceId {
-    /// Creates a new ServiceId, validating that it is non-empty.
+    /// Creates a new ServiceId with validation.
+    ///
+    /// Rejects empty strings, whitespace-only strings, strings exceeding
+    /// [`MAX_SERVICE_ID_LEN`], and strings starting with `__` (reserved for
+    /// internal protocol message prefixes).
     pub fn new(id: impl Into<String>) -> Result<Self, Error> {
         let id = id.into();
         if id.is_empty() {
             return Err(Error::InvalidServiceId("service ID cannot be empty".into()));
+        }
+        if id.trim().is_empty() {
+            return Err(Error::InvalidServiceId(
+                "service ID cannot be whitespace-only".into(),
+            ));
+        }
+        if id.len() > MAX_SERVICE_ID_LEN {
+            return Err(Error::InvalidServiceId(format!(
+                "service ID exceeds maximum length of {MAX_SERVICE_ID_LEN}"
+            )));
+        }
+        if id.starts_with("__") {
+            return Err(Error::InvalidServiceId(
+                "service ID cannot start with '__' (reserved for protocol internals)".into(),
+            ));
         }
         Ok(Self(id))
     }
@@ -75,6 +97,42 @@ mod tests {
     fn test_service_id_empty_rejected() {
         let err = ServiceId::new("").unwrap_err();
         assert!(matches!(err, Error::InvalidServiceId(_)));
+    }
+
+    #[test]
+    fn test_service_id_whitespace_only_rejected() {
+        let err = ServiceId::new("   ").unwrap_err();
+        assert!(matches!(err, Error::InvalidServiceId(_)));
+        let err = ServiceId::new("\t\n").unwrap_err();
+        assert!(matches!(err, Error::InvalidServiceId(_)));
+    }
+
+    #[test]
+    fn test_service_id_too_long_rejected() {
+        let long_id = "a".repeat(MAX_SERVICE_ID_LEN + 1);
+        let err = ServiceId::new(long_id).unwrap_err();
+        assert!(matches!(err, Error::InvalidServiceId(_)));
+    }
+
+    #[test]
+    fn test_service_id_max_length_accepted() {
+        let max_id = "a".repeat(MAX_SERVICE_ID_LEN);
+        let id = ServiceId::new(max_id).unwrap();
+        assert_eq!(id.as_str().len(), MAX_SERVICE_ID_LEN);
+    }
+
+    #[test]
+    fn test_service_id_reserved_prefix_rejected() {
+        let err = ServiceId::new("__SVC_DISC_Q__").unwrap_err();
+        assert!(matches!(err, Error::InvalidServiceId(_)));
+        let err = ServiceId::new("__internal").unwrap_err();
+        assert!(matches!(err, Error::InvalidServiceId(_)));
+    }
+
+    #[test]
+    fn test_service_id_single_underscore_accepted() {
+        let id = ServiceId::new("_my_service").unwrap();
+        assert_eq!(id.as_str(), "_my_service");
     }
 
     #[test]

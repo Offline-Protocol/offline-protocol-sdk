@@ -84,6 +84,8 @@ const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
 const PENDING_DROP_WARN_EVERY: u64 = 100;
 const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
 const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
+/// Maximum number of tracked known peers for service discovery.
+const MAX_KNOWN_PEERS: usize = 1000;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4138,8 +4140,12 @@ impl OfflineProtocol {
             return;
         }
 
-        // Always track discovered peers for service discovery and routing
-        self.known_peers.insert(peer_id.to_string());
+        // Track discovered peers for service discovery and routing, with capacity limit
+        if self.known_peers.len() < MAX_KNOWN_PEERS || self.known_peers.contains(peer_id) {
+            self.known_peers.insert(peer_id.to_string());
+        } else {
+            debug!(peer_id = %peer_id, cap = MAX_KNOWN_PEERS, "Known peers at capacity, not tracking new peer");
+        }
 
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {

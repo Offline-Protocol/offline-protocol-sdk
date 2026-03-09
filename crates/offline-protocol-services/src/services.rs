@@ -2,12 +2,14 @@ use crate::error::ServiceError;
 use crate::events::ServiceEvent;
 use crate::payloads::{
     ServiceDiscoveryQueryPayload, ServiceDiscoveryResponsePayload, ServiceRequestPayload,
-    ServiceResponsePayload, DISCOVERY_GOSSIP_MAX_FANOUT, DISCOVERY_QUERY_DEDUP_TTL_SECS,
-    DISCOVERY_QUERY_DEFAULT_MAX_HOPS, DISCOVERY_QUERY_MAX_DEDUP_ENTRIES, SVC_DISCOVER_QUERY,
-    SVC_DISCOVER_RESPONSE, SVC_REQUEST, SVC_RESPONSE,
+    ServiceResponsePayload, DISCOVERY_GOSSIP_MAX_FANOUT, DISCOVERY_INITIAL_BROADCAST_MAX,
+    DISCOVERY_QUERY_DEDUP_TTL_SECS, DISCOVERY_QUERY_DEFAULT_MAX_HOPS,
+    DISCOVERY_QUERY_MAX_DEDUP_ENTRIES, MAX_SERVICE_BODY_SIZE, MAX_SERVICE_METHOD_LEN,
+    MAX_SERVICE_PAYLOAD_SIZE, SVC_DISCOVER_QUERY, SVC_DISCOVER_RESPONSE, SVC_REQUEST, SVC_RESPONSE,
+    VALID_SERVICE_STATUSES,
 };
 use offline_protocol_core::{MessagePriority, ServiceDescriptor};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -57,6 +59,8 @@ pub enum ServiceAction {
 pub struct MeshServices {
     local_services: HashMap<String, ServiceDescriptor>,
     seen_discovery_queries: HashMap<String, Instant>,
+    /// Insertion-order index for O(1) oldest-entry eviction.
+    seen_discovery_order: VecDeque<String>,
 }
 
 impl MeshServices {
@@ -65,6 +69,7 @@ impl MeshServices {
         Self {
             local_services: HashMap::new(),
             seen_discovery_queries: HashMap::new(),
+            seen_discovery_order: VecDeque::new(),
         }
     }
 
@@ -85,7 +90,8 @@ impl MeshServices {
         self.local_services.contains_key(service_id)
     }
 
-    /// Generates a discovery broadcast to all known peers.
+    /// Generates a discovery broadcast to known peers, capped at
+    /// [`DISCOVERY_INITIAL_BROADCAST_MAX`] recipients.
     pub fn discover_services(
         &mut self,
         user_id: &str,
@@ -106,9 +112,17 @@ impl MeshServices {
 
         self.record_seen_query(query_id.clone());
 
-        let messages: Vec<(String, String, MessagePriority)> = known_peers
-            .iter()
-            .map(|peer| (peer.clone(), content.clone(), MessagePriority::Medium))
+        // Apply fanout limit to the initial broadcast to bound message generation.
+        let selected_peers = select_fanout_peers(
+            known_peers,
+            DISCOVERY_INITIAL_BROADCAST_MAX,
+            &query_id,
+            user_id,
+        );
+
+        let messages: Vec<(String, String, MessagePriority)> = selected_peers
+            .into_iter()
+            .map(|peer| (peer, content.clone(), MessagePriority::Medium))
             .collect();
 
         info!(query_id = %query_id, service_id = ?service_id, peer_count = messages.len(), "Broadcast service discovery query");
@@ -123,6 +137,21 @@ impl MeshServices {
         method: &str,
         body: &str,
     ) -> Result<SendRequestResult, ServiceError> {
+        if body.len() > MAX_SERVICE_BODY_SIZE {
+            return Err(ServiceError::PayloadTooLarge(format!(
+                "request body size {} exceeds maximum {}",
+                body.len(),
+                MAX_SERVICE_BODY_SIZE
+            )));
+        }
+        if method.len() > MAX_SERVICE_METHOD_LEN {
+            return Err(ServiceError::PayloadTooLarge(format!(
+                "method length {} exceeds maximum {}",
+                method.len(),
+                MAX_SERVICE_METHOD_LEN
+            )));
+        }
+
         let request_id = uuid::Uuid::new_v4().to_string();
 
         let payload = ServiceRequestPayload {
@@ -151,6 +180,17 @@ impl MeshServices {
         status: &str,
         body: &str,
     ) -> Result<SendResponseResult, ServiceError> {
+        if !VALID_SERVICE_STATUSES.contains(&status) {
+            return Err(ServiceError::InvalidStatus(status.to_string()));
+        }
+        if body.len() > MAX_SERVICE_BODY_SIZE {
+            return Err(ServiceError::PayloadTooLarge(format!(
+                "response body size {} exceeds maximum {}",
+                body.len(),
+                MAX_SERVICE_BODY_SIZE
+            )));
+        }
+
         let payload = ServiceResponsePayload {
             request_id: request_id.to_string(),
             service_id: service_id.to_string(),
@@ -200,6 +240,8 @@ impl MeshServices {
     pub fn cleanup_expired(&mut self) {
         let cutoff = Instant::now() - Duration::from_secs(DISCOVERY_QUERY_DEDUP_TTL_SECS);
         self.seen_discovery_queries.retain(|_, ts| *ts > cutoff);
+        self.seen_discovery_order
+            .retain(|id| self.seen_discovery_queries.contains_key(id));
     }
 
     /// Provides read access to `seen_discovery_queries` for testing / inspection.
@@ -207,20 +249,17 @@ impl MeshServices {
         &self.seen_discovery_queries
     }
 
-    /// Inserts a query ID into the dedup map, evicting the oldest entries if at capacity.
+    /// Inserts a query ID into the dedup map, evicting the oldest entry if at capacity.
     fn record_seen_query(&mut self, query_id: String) {
         if self.seen_discovery_queries.len() >= DISCOVERY_QUERY_MAX_DEDUP_ENTRIES {
-            // Evict the oldest entry
-            if let Some(oldest_key) = self
-                .seen_discovery_queries
-                .iter()
-                .min_by_key(|(_, ts)| *ts)
-                .map(|(k, _)| k.clone())
-            {
-                self.seen_discovery_queries.remove(&oldest_key);
+            // Evict the oldest entry using insertion-order index (O(1)).
+            if let Some(oldest) = self.seen_discovery_order.pop_front() {
+                self.seen_discovery_queries.remove(&oldest);
             }
         }
-        self.seen_discovery_queries.insert(query_id, Instant::now());
+        self.seen_discovery_queries
+            .insert(query_id.clone(), Instant::now());
+        self.seen_discovery_order.push_back(query_id);
     }
 
     // --- private handlers ---
@@ -234,6 +273,15 @@ impl MeshServices {
         known_peers: &[String],
     ) -> Option<ServiceAction> {
         let data = content.strip_prefix(SVC_DISCOVER_QUERY)?;
+
+        if data.len() > MAX_SERVICE_PAYLOAD_SIZE {
+            warn!(sender = %sender, size = data.len(), "Discovery query payload too large, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
+
         let payload: ServiceDiscoveryQueryPayload = match serde_json::from_str(data) {
             Ok(p) => p,
             Err(_) => {
@@ -270,7 +318,9 @@ impl MeshServices {
             .cloned()
             .collect();
 
-        // Send discovery responses back to the originator for each match
+        // Send discovery responses back to the *sender* (not the originator) to
+        // prevent a spoofed originator field from leaking our service list to an
+        // arbitrary peer. The sender relays the response back along the path.
         for svc in &matches {
             let response = ServiceDiscoveryResponsePayload {
                 query_id: payload.query_id.clone(),
@@ -282,15 +332,11 @@ impl MeshServices {
             };
             if let Ok(serialized) = serde_json::to_string(&response) {
                 let resp_content = format!("{}{}", SVC_DISCOVER_RESPONSE, serialized);
-                messages.push((
-                    payload.originator.clone(),
-                    resp_content,
-                    MessagePriority::Medium,
-                ));
+                messages.push((sender.to_string(), resp_content, MessagePriority::Medium));
             }
         }
 
-        // Forward query to all other known peers (gossip) if hops remain
+        // Forward query to other known peers (gossip) if hops remain
         let forwarded_count = if payload.remaining_hops > 0 {
             let mut fwd_payload = payload.clone();
             fwd_payload.remaining_hops -= 1;
@@ -304,35 +350,19 @@ impl MeshServices {
                     });
                 }
             };
-            let mut forward_peers: Vec<&String> = known_peers
+            let eligible_peers: Vec<String> = known_peers
                 .iter()
                 .filter(|p| p.as_str() != sender && p.as_str() != payload.originator)
+                .cloned()
                 .collect();
-            // Limit fanout to prevent gossip flooding in dense meshes
-            if forward_peers.len() > DISCOVERY_GOSSIP_MAX_FANOUT {
-                // Deterministic shuffle using query_id + user_id as seed so
-                // different nodes select different forwarding subsets.
-                let seed = payload
-                    .query_id
-                    .bytes()
-                    .chain(user_id.bytes())
-                    .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
-                    ^ forward_peers.len() as u64;
-                // Fisher-Yates partial shuffle (first FANOUT elements)
-                for i in 0..DISCOVERY_GOSSIP_MAX_FANOUT {
-                    let j = i + ((seed.wrapping_mul((i as u64).wrapping_add(1)))
-                        as usize
-                        % (forward_peers.len() - i));
-                    forward_peers.swap(i, j);
-                }
-                forward_peers.truncate(DISCOVERY_GOSSIP_MAX_FANOUT);
-            }
+            let forward_peers = select_fanout_peers(
+                &eligible_peers,
+                DISCOVERY_GOSSIP_MAX_FANOUT,
+                &payload.query_id,
+                user_id,
+            );
             for peer in &forward_peers {
-                messages.push((
-                    (*peer).clone(),
-                    fwd_content.clone(),
-                    MessagePriority::Medium,
-                ));
+                messages.push((peer.clone(), fwd_content.clone(), MessagePriority::Medium));
             }
             forward_peers.len()
         } else {
@@ -355,6 +385,15 @@ impl MeshServices {
 
     fn try_handle_discover_response(&self, content: &str, sender: &str) -> Option<ServiceAction> {
         let data = content.strip_prefix(SVC_DISCOVER_RESPONSE)?;
+
+        if data.len() > MAX_SERVICE_PAYLOAD_SIZE {
+            warn!(sender = %sender, size = data.len(), "Discovery response payload too large, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
+
         let payload: ServiceDiscoveryResponsePayload = match serde_json::from_str(data) {
             Ok(p) => p,
             Err(_) => {
@@ -388,6 +427,15 @@ impl MeshServices {
 
     fn try_handle_request(&self, content: &str, sender: &str) -> Option<ServiceAction> {
         let data = content.strip_prefix(SVC_REQUEST)?;
+
+        if data.len() > MAX_SERVICE_PAYLOAD_SIZE {
+            warn!(sender = %sender, size = data.len(), "Service request payload too large, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
+
         let payload: ServiceRequestPayload = match serde_json::from_str(data) {
             Ok(p) => p,
             Err(_) => {
@@ -398,6 +446,22 @@ impl MeshServices {
                 });
             }
         };
+
+        // Validate field sizes from untrusted input
+        if payload.body.len() > MAX_SERVICE_BODY_SIZE {
+            warn!(sender = %sender, size = payload.body.len(), "Service request body too large, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
+        if payload.method.len() > MAX_SERVICE_METHOD_LEN {
+            warn!(sender = %sender, len = payload.method.len(), "Service request method too long, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
 
         if !self.local_services.contains_key(&payload.service_id) {
             // Auto-respond with not_found
@@ -444,6 +508,15 @@ impl MeshServices {
 
     fn try_handle_response(&self, content: &str, sender: &str) -> Option<ServiceAction> {
         let data = content.strip_prefix(SVC_RESPONSE)?;
+
+        if data.len() > MAX_SERVICE_PAYLOAD_SIZE {
+            warn!(sender = %sender, size = data.len(), "Service response payload too large, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
+
         let payload: ServiceResponsePayload = match serde_json::from_str(data) {
             Ok(p) => p,
             Err(_) => {
@@ -454,6 +527,15 @@ impl MeshServices {
                 });
             }
         };
+
+        // Validate body size from untrusted input
+        if payload.body.len() > MAX_SERVICE_BODY_SIZE {
+            warn!(sender = %sender, size = payload.body.len(), "Service response body too large, dropping");
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![],
+                events_to_emit: vec![],
+            });
+        }
 
         info!(
             request_id = %payload.request_id,
@@ -473,6 +555,40 @@ impl MeshServices {
             }],
         })
     }
+}
+
+/// Selects up to `max` peers from `peers` using a deterministic pseudo-random
+/// subset selection. When `peers.len() <= max`, all peers are returned.
+///
+/// The selection uses a simple hash-based seed derived from `query_id` and
+/// `user_id` so that different nodes select different subsets for the same query,
+/// improving mesh coverage. The distribution has some bias because we use a
+/// lightweight hash rather than a full PRNG — this is intentional as uniform
+/// randomness is not critical for gossip fanout and avoids adding a `rand`
+/// dependency.
+fn select_fanout_peers(peers: &[String], max: usize, query_id: &str, user_id: &str) -> Vec<String> {
+    if peers.len() <= max {
+        return peers.to_vec();
+    }
+
+    let seed = query_id
+        .bytes()
+        .chain(user_id.bytes())
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+        ^ peers.len() as u64;
+
+    let mut indices: Vec<usize> = (0..peers.len()).collect();
+    // Partial Fisher-Yates shuffle for the first `max` elements.
+    for i in 0..max {
+        let remaining = peers.len() - i;
+        let j = i + (seed.wrapping_mul((i as u64).wrapping_add(7)) as usize % remaining);
+        indices.swap(i, j);
+    }
+
+    indices[..max]
+        .iter()
+        .map(|&idx| peers[idx].clone())
+        .collect()
 }
 
 impl Default for MeshServices {
@@ -526,6 +642,14 @@ mod tests {
     }
 
     #[test]
+    fn test_discover_services_initial_broadcast_fanout_limit() {
+        let mut svc = MeshServices::new();
+        let peers: Vec<String> = (0..50).map(|i| format!("peer-{i}")).collect();
+        let result = svc.discover_services("user1", &peers, None).unwrap();
+        assert_eq!(result.messages.len(), DISCOVERY_INITIAL_BROADCAST_MAX);
+    }
+
+    #[test]
     fn test_send_service_request() {
         let svc = MeshServices::new();
         let result = svc
@@ -537,6 +661,22 @@ mod tests {
     }
 
     #[test]
+    fn test_send_service_request_body_too_large() {
+        let svc = MeshServices::new();
+        let large_body = "x".repeat(MAX_SERVICE_BODY_SIZE + 1);
+        let result = svc.send_service_request("bob", "echo.v1", "ping", &large_body);
+        assert!(matches!(result, Err(ServiceError::PayloadTooLarge(_))));
+    }
+
+    #[test]
+    fn test_send_service_request_method_too_long() {
+        let svc = MeshServices::new();
+        let long_method = "m".repeat(MAX_SERVICE_METHOD_LEN + 1);
+        let result = svc.send_service_request("bob", "echo.v1", &long_method, "{}");
+        assert!(matches!(result, Err(ServiceError::PayloadTooLarge(_))));
+    }
+
+    #[test]
     fn test_respond_to_service_request() {
         let svc = MeshServices::new();
         let result = svc
@@ -544,6 +684,31 @@ mod tests {
             .unwrap();
         assert_eq!(result.message.0, "alice");
         assert!(result.message.1.starts_with(SVC_RESPONSE));
+    }
+
+    #[test]
+    fn test_respond_to_service_request_invalid_status() {
+        let svc = MeshServices::new();
+        let result = svc.respond_to_service_request("req-1", "alice", "echo.v1", "invalid", "");
+        assert!(matches!(result, Err(ServiceError::InvalidStatus(_))));
+    }
+
+    #[test]
+    fn test_respond_to_service_request_body_too_large() {
+        let svc = MeshServices::new();
+        let large_body = "x".repeat(MAX_SERVICE_BODY_SIZE + 1);
+        let result = svc.respond_to_service_request("req-1", "alice", "echo.v1", "ok", &large_body);
+        assert!(matches!(result, Err(ServiceError::PayloadTooLarge(_))));
+    }
+
+    #[test]
+    fn test_respond_valid_statuses() {
+        let svc = MeshServices::new();
+        for status in VALID_SERVICE_STATUSES {
+            let result =
+                svc.respond_to_service_request("req-1", "alice", "echo.v1", status, "body");
+            assert!(result.is_ok(), "status '{status}' should be valid");
+        }
     }
 
     #[test]
@@ -579,10 +744,9 @@ mod tests {
                 messages_to_send,
                 events_to_emit,
             } => {
-                // Should have response to originator + forward to charlie
-                assert!(messages_to_send.len() >= 1);
+                assert!(!messages_to_send.is_empty());
                 assert!(events_to_emit.is_empty());
-                // Check response message exists
+                // Response should go to the sender ("alice"), not the originator field
                 assert!(messages_to_send
                     .iter()
                     .any(|(r, c, _)| r == "alice" && c.starts_with(SVC_DISCOVER_RESPONSE)));
@@ -776,8 +940,11 @@ mod tests {
             "old-query".to_string(),
             Instant::now() - Duration::from_secs(120),
         );
+        svc.seen_discovery_order.push_back("old-query".to_string());
         svc.seen_discovery_queries
             .insert("fresh-query".to_string(), Instant::now());
+        svc.seen_discovery_order
+            .push_back("fresh-query".to_string());
 
         svc.cleanup_expired();
 
@@ -819,11 +986,13 @@ mod tests {
     fn test_dedup_cap_evicts_oldest() {
         let mut svc = MeshServices::new();
 
-        // Fill to capacity
+        // Fill to capacity using record_seen_query for consistent state
         let base = Instant::now() - Duration::from_secs(30);
         for i in 0..DISCOVERY_QUERY_MAX_DEDUP_ENTRIES {
+            let key = format!("q-{i}");
             svc.seen_discovery_queries
-                .insert(format!("q-{i}"), base + Duration::from_millis(i as u64));
+                .insert(key.clone(), base + Duration::from_millis(i as u64));
+            svc.seen_discovery_order.push_back(key);
         }
         assert_eq!(
             svc.seen_discovery_queries().len(),
@@ -870,5 +1039,126 @@ mod tests {
             }
             ServiceAction::NotHandled => panic!("Should have been handled"),
         }
+    }
+
+    #[test]
+    fn test_oversized_payload_dropped() {
+        let mut svc = MeshServices::new();
+
+        // Build a request with oversized body
+        let huge_body = "x".repeat(MAX_SERVICE_PAYLOAD_SIZE + 1);
+        let content = format!("{}{}", SVC_REQUEST, huge_body);
+
+        let action = svc.handle_incoming_message(&content, "alice", 0, "user1", &[]);
+        assert!(matches!(
+            action,
+            ServiceAction::Consumed {
+                messages_to_send,
+                events_to_emit,
+            } if messages_to_send.is_empty() && events_to_emit.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_oversized_request_body_dropped() {
+        let mut svc = MeshServices::new();
+        svc.register_service(make_descriptor("echo")).unwrap();
+
+        let large_body = "x".repeat(MAX_SERVICE_BODY_SIZE + 1);
+        let payload = ServiceRequestPayload {
+            request_id: "req-big".to_string(),
+            service_id: "echo".to_string(),
+            method: "ping".to_string(),
+            body: large_body,
+        };
+        let content = format!(
+            "{}{}",
+            SVC_REQUEST,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let action = svc.handle_incoming_message(&content, "alice", 0, "user1", &[]);
+        match action {
+            ServiceAction::Consumed {
+                messages_to_send,
+                events_to_emit,
+            } => {
+                assert!(messages_to_send.is_empty());
+                assert!(
+                    events_to_emit.is_empty(),
+                    "Should not emit event for oversized body"
+                );
+            }
+            ServiceAction::NotHandled => panic!("Should have been handled"),
+        }
+    }
+
+    #[test]
+    fn test_oversized_method_dropped() {
+        let mut svc = MeshServices::new();
+        svc.register_service(make_descriptor("echo")).unwrap();
+
+        let long_method = "m".repeat(MAX_SERVICE_METHOD_LEN + 1);
+        let payload = ServiceRequestPayload {
+            request_id: "req-longmethod".to_string(),
+            service_id: "echo".to_string(),
+            method: long_method,
+            body: "{}".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            SVC_REQUEST,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let action = svc.handle_incoming_message(&content, "alice", 0, "user1", &[]);
+        match action {
+            ServiceAction::Consumed {
+                messages_to_send,
+                events_to_emit,
+            } => {
+                assert!(messages_to_send.is_empty());
+                assert!(
+                    events_to_emit.is_empty(),
+                    "Should not emit event for oversized method"
+                );
+            }
+            ServiceAction::NotHandled => panic!("Should have been handled"),
+        }
+    }
+
+    #[test]
+    fn test_select_fanout_peers_all_when_under_limit() {
+        let peers: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let selected = select_fanout_peers(&peers, 5, "q-1", "user1");
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn test_select_fanout_peers_caps_at_max() {
+        let peers: Vec<String> = (0..50).map(|i| format!("p-{i}")).collect();
+        let selected = select_fanout_peers(&peers, 5, "q-1", "user1");
+        assert_eq!(selected.len(), 5);
+    }
+
+    #[test]
+    fn test_select_fanout_peers_deterministic() {
+        let peers: Vec<String> = (0..20).map(|i| format!("p-{i}")).collect();
+        let a = select_fanout_peers(&peers, 5, "q-1", "user1");
+        let b = select_fanout_peers(&peers, 5, "q-1", "user1");
+        assert_eq!(a, b, "Same inputs should produce same selection");
+    }
+
+    #[test]
+    fn test_select_fanout_peers_varies_by_user() {
+        let peers: Vec<String> = (0..20).map(|i| format!("p-{i}")).collect();
+        let a = select_fanout_peers(&peers, 5, "q-1", "user1");
+        let b = select_fanout_peers(&peers, 5, "q-1", "user2");
+        // Different users should (usually) select different subsets
+        // This is probabilistic but with 20 peers and 5 selected, collision is unlikely
+        assert_ne!(
+            a, b,
+            "Different users should typically select different peers"
+        );
     }
 }

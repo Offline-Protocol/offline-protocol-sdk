@@ -7,8 +7,20 @@ pub const DISCOVERY_QUERY_DEDUP_TTL_SECS: u64 = 60;
 pub const DISCOVERY_QUERY_DEFAULT_MAX_HOPS: u8 = 10;
 /// Maximum number of peers to forward a discovery query to per hop.
 pub const DISCOVERY_GOSSIP_MAX_FANOUT: usize = 5;
+/// Maximum number of peers the originator broadcasts an initial discovery query to.
+pub const DISCOVERY_INITIAL_BROADCAST_MAX: usize = 20;
 /// Maximum number of seen discovery query IDs to track for dedup.
 pub const DISCOVERY_QUERY_MAX_DEDUP_ENTRIES: usize = 10_000;
+
+/// Maximum allowed size (bytes) for the raw payload string after stripping the prefix.
+pub const MAX_SERVICE_PAYLOAD_SIZE: usize = 131_072; // 128 KB
+/// Maximum allowed size (bytes) for a service request/response body field.
+pub const MAX_SERVICE_BODY_SIZE: usize = 65_536; // 64 KB
+/// Maximum allowed length for a service request method field.
+pub const MAX_SERVICE_METHOD_LEN: usize = 256;
+
+/// Valid values for service response status.
+pub const VALID_SERVICE_STATUSES: &[&str] = &["ok", "not_found", "error"];
 
 /// Common prefix shared by all service message types.
 pub const SVC_MESSAGE_PREFIX: &str = "__SVC_";
