@@ -21,6 +21,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
     private var protocol: OfflineProtocol? = null
+    private var meshServices: MeshServices? = null
     private var bleManager: BleManager? = null
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
@@ -304,7 +305,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             applyInitialRuntimeConfig(proto, parsed.rawJson)
 
             protocol = proto
-            
+            meshServices = MeshServices(proto)
+
             // Initialize BLE manager if BLE is enabled
             if (config.bleEnabled) {
                 bleManager = BleManager(reactApplicationContext, proto, config.userId) { level, message, context ->
@@ -688,6 +690,70 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // Service Discovery & Request/Response (via MeshServices)
+
+    @ReactMethod
+    fun registerService(serviceId: String, version: String, capabilitiesJson: String, promise: Promise) {
+        try {
+            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
+            val capabilities = mutableMapOf<String, String>()
+            try {
+                val json = JSONObject(capabilitiesJson)
+                json.keys().forEach { key -> capabilities[key] = json.getString(key) }
+            } catch (parseErr: Exception) {
+                android.util.Log.w("OfflineProtocol", "Failed to parse capabilities JSON, registering with empty capabilities: ${parseErr.message}")
+            }
+            svc.registerService(serviceId, version, capabilities)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_REGISTER_SERVICE", "Failed to register service: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun unregisterService(serviceId: String, promise: Promise) {
+        try {
+            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
+            val removed = svc.unregisterService(serviceId)
+            promise.resolve(removed)
+        } catch (e: Exception) {
+            promise.reject("ERROR_UNREGISTER_SERVICE", "Failed to unregister service: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun discoverServices(serviceId: String?, promise: Promise) {
+        try {
+            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
+            val queryId = svc.discoverServices(serviceId)
+            promise.resolve(queryId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_DISCOVER_SERVICES", "Failed to discover services: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun sendServiceRequest(provider: String, serviceId: String, method: String, body: String, promise: Promise) {
+        try {
+            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
+            val requestId = svc.sendServiceRequest(provider, serviceId, method, body)
+            promise.resolve(requestId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_SERVICE_REQUEST", "Failed to send service request: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String, promise: Promise) {
+        try {
+            val svc = meshServices ?: throw IllegalStateException("MeshServices not initialized")
+            val messageId = svc.respondToServiceRequest(requestId, requester, serviceId, status, body)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_SERVICE_RESPONSE", "Failed to respond to service request: ${e.message}", e)
+        }
+    }
+
     @ReactMethod
     fun receiveMessage(promise: Promise) {
         val messageJson = protocol?.receiveMessage()
@@ -712,6 +778,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
 
             protocol = null
+            meshServices = null
             listenerCount = 0
             currentConfig = null
             promise.resolve(null)

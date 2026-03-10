@@ -15,8 +15,8 @@ use crate::{
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
-    AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority, UserId,
-    TTL,
+    AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority,
+    ServiceDescriptor, UserId, TTL,
 };
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{
@@ -24,6 +24,7 @@ use offline_protocol_reliability::{
     RetryQueue,
 };
 use offline_protocol_router::{DorsConfig, PathSelector, RelayManager, TransportSelector};
+use offline_protocol_services::{MeshServices, ServiceAction};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -83,6 +84,8 @@ const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
 const PENDING_DROP_WARN_EVERY: u64 = 100;
 const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
 const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
+/// Maximum number of tracked known peers for service discovery.
+const MAX_KNOWN_PEERS: usize = 1000;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -490,6 +493,10 @@ pub struct OfflineProtocol {
     /// Set of peers we've already sent our key package to.
     key_package_sent_to: std::collections::HashSet<String>,
 
+    /// All discovered/connected peers, tracked independently of encryption.
+    /// Used by service discovery to know who to broadcast queries to.
+    known_peers: std::collections::HashSet<String>,
+
     /// Sessions confirmed established (received Welcome or successful decrypt).
     /// Only encrypt messages when the session is confirmed to avoid race conditions.
     confirmed_sessions: std::collections::HashSet<String>,
@@ -557,6 +564,9 @@ pub struct OfflineProtocol {
     /// Sliding-window state for outbound file transfers, keyed by file_id.
     /// Chunks are only sent when the window has capacity (previous chunks ACKed).
     outbound_media_windows: HashMap<String, OutboundTransferState>,
+
+    /// Mesh service registry and handler (extracted crate).
+    mesh_services: MeshServices,
 }
 
 impl OfflineProtocol {
@@ -595,6 +605,7 @@ impl OfflineProtocol {
             pending_encrypted_messages: HashMap::new(),
             pending_key_packages: HashMap::new(),
             key_package_sent_to: std::collections::HashSet::new(),
+            known_peers: std::collections::HashSet::new(),
             confirmed_sessions: std::collections::HashSet::new(),
             pending_decryption: HashMap::new(),
             pending_decryption_global_order: VecDeque::new(),
@@ -617,6 +628,7 @@ impl OfflineProtocol {
             outbound_media_transfers: HashMap::new(),
             outbound_media_chunks: HashMap::new(),
             outbound_media_windows: HashMap::new(),
+            mesh_services: MeshServices::new(),
             config,
         })
     }
@@ -4123,13 +4135,20 @@ impl OfflineProtocol {
     ///
     /// * `peer_id` - The ID of the discovered peer
     pub fn on_neighbor_discovered(&mut self, peer_id: &str) {
-        // Only send key package if encryption is enabled and auto key exchange is on
-        if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
+        // Don't track ourselves
+        if peer_id == self.config.user_id {
             return;
         }
 
-        // Don't send to ourselves
-        if peer_id == self.config.user_id {
+        // Track discovered peers for service discovery and routing, with capacity limit
+        if self.known_peers.len() < MAX_KNOWN_PEERS || self.known_peers.contains(peer_id) {
+            self.known_peers.insert(peer_id.to_string());
+        } else {
+            debug!(peer_id = %peer_id, cap = MAX_KNOWN_PEERS, "Known peers at capacity, not tracking new peer");
+        }
+
+        // Only send key package if encryption is enabled and auto key exchange is on
+        if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
             return;
         }
 
@@ -4158,6 +4177,7 @@ impl OfflineProtocol {
     pub fn on_neighbor_lost(&mut self, peer_id: &str) {
         // Remove from key package sent tracking so we can re-send if they reconnect
         self.key_package_sent_to.remove(peer_id);
+        self.known_peers.remove(peer_id);
     }
 
     /// Establishes a secure MLS session with a peer.
@@ -4626,6 +4646,98 @@ impl OfflineProtocol {
 
         let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
         info!(recipient = %recipient, "Rejected connection request");
+        Ok(message_id)
+    }
+
+    // ========================================================================
+    // SERVICE DISCOVERY & REQUEST/RESPONSE
+    // ========================================================================
+
+    /// Registers a local service that this node offers.
+    pub fn register_service(&mut self, descriptor: ServiceDescriptor) -> Result<()> {
+        self.mesh_services
+            .register_service(descriptor)
+            .map_err(Error::Service)
+    }
+
+    /// Unregisters a local service. Returns true if the service was found and removed.
+    pub fn unregister_service(&mut self, service_id: &str) -> Result<bool> {
+        self.mesh_services
+            .unregister_service(service_id)
+            .map_err(Error::Service)
+    }
+
+    /// Broadcasts a service discovery query to all known peers.
+    /// Returns a query_id. Responses arrive asynchronously as `ServiceDiscovered` events.
+    ///
+    /// **Note:** Discovery responses currently travel only one hop back (to the
+    /// immediate sender of the query). Multi-hop response relay is not yet
+    /// implemented, so services more than one hop away will generate responses
+    /// that reach intermediate forwarders but not the original querier.
+    pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
+        self.ensure_plaintext_control_send_allowed("discover_services")?;
+
+        let peers: Vec<String> = self.known_peers.iter().cloned().collect();
+        let result = self
+            .mesh_services
+            .discover_services(&self.config.user_id, &peers, service_id)
+            .map_err(Error::Service)?;
+        let mut send_failures = 0usize;
+        for msg in result.messages {
+            if self
+                .send_internal_message(&msg.recipient, msg.content, msg.priority)
+                .is_err()
+            {
+                send_failures += 1;
+            }
+        }
+        if send_failures > 0 {
+            warn!(
+                failures = send_failures,
+                total = peers.len(),
+                "Some discovery broadcasts failed to send"
+            );
+        }
+        Ok(result.query_id)
+    }
+
+    /// Sends a typed service request to a specific provider peer.
+    /// Returns a request_id. The response arrives as a `ServiceResponseReceived` event.
+    pub fn send_service_request(
+        &mut self,
+        provider: &str,
+        service_id: &str,
+        method: &str,
+        body: &str,
+    ) -> Result<String> {
+        self.ensure_plaintext_control_send_allowed("send_service_request")?;
+
+        let result = self
+            .mesh_services
+            .send_service_request(provider, service_id, method, body)
+            .map_err(Error::Service)?;
+        let msg = result.message;
+        self.send_internal_message(&msg.recipient, msg.content, msg.priority)?;
+        Ok(result.request_id)
+    }
+
+    /// Responds to a service request from another peer.
+    pub fn respond_to_service_request(
+        &mut self,
+        request_id: &str,
+        requester: &str,
+        service_id: &str,
+        status: &str,
+        body: &str,
+    ) -> Result<MessageId> {
+        self.ensure_plaintext_control_send_allowed("respond_to_service_request")?;
+
+        let result = self
+            .mesh_services
+            .respond_to_service_request(request_id, requester, service_id, status, body)
+            .map_err(Error::Service)?;
+        let msg = result.message;
+        let message_id = self.send_internal_message(&msg.recipient, msg.content, msg.priority)?;
         Ok(message_id)
     }
 
@@ -5415,6 +5527,44 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // --- Service discovery & request/response (delegated to MeshServices) ---
+        // Only allocate peer list when the message is actually a service message.
+        if content.starts_with(offline_protocol_services::SVC_MESSAGE_PREFIX) {
+            let peers: Vec<String> = self
+                .known_peers
+                .iter()
+                .filter(|p| p.as_str() != sender)
+                .cloned()
+                .collect();
+            match self.mesh_services.handle_incoming_message(
+                content,
+                sender,
+                message.hop_count.value(),
+                &self.config.user_id,
+                &peers,
+            ) {
+                ServiceAction::NotHandled => {
+                    warn!(sender = %sender, "Received unknown service message prefix, consuming");
+                    return Some(InternalMessageResult::Consumed);
+                }
+                ServiceAction::Consumed {
+                    messages_to_send,
+                    events_to_emit,
+                } => {
+                    for msg in messages_to_send {
+                        let _ =
+                            self.send_internal_message(&msg.recipient, msg.content, msg.priority);
+                    }
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        for svc_event in events_to_emit {
+                            state.emit_event(Event::from(svc_event));
+                        }
+                    }
+                    return Some(InternalMessageResult::Consumed);
+                }
+            }
+        }
+
         None // Not an internal message
     }
 
@@ -5733,6 +5883,7 @@ impl OfflineProtocol {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
+        self.mesh_services.cleanup_expired();
         let stale_file_ids = self
             .file_transfer_manager
             .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
@@ -5757,6 +5908,11 @@ impl OfflineProtocol {
     /// Gets the configuration.
     pub fn config(&self) -> &ProtocolConfig {
         &self.config
+    }
+
+    /// Gets a reference to the mesh services registry.
+    pub fn mesh_services(&self) -> &MeshServices {
+        &self.mesh_services
     }
 
     /// Gets a mutable reference to the transport manager.
@@ -6789,6 +6945,16 @@ mod tests {
         assert_eq!(internal_prefixes::CONN_REQUEST, "__CONN_REQ__");
         assert_eq!(internal_prefixes::CONN_ACCEPT, "__CONN_ACC__");
         assert_eq!(internal_prefixes::CONN_REJECT, "__CONN_REJ__");
+        assert_eq!(
+            offline_protocol_services::SVC_DISCOVER_QUERY,
+            "__SVC_DISC_Q__"
+        );
+        assert_eq!(
+            offline_protocol_services::SVC_DISCOVER_RESPONSE,
+            "__SVC_DISC_R__"
+        );
+        assert_eq!(offline_protocol_services::SVC_REQUEST, "__SVC_REQ__");
+        assert_eq!(offline_protocol_services::SVC_RESPONSE, "__SVC_RESP__");
     }
 
     #[test]
@@ -10168,6 +10334,10 @@ mod tests {
             internal_prefixes::GROUP_INFO,
             internal_prefixes::USER_GROUPS,
             internal_prefixes::GROUP_ERROR,
+            offline_protocol_services::SVC_DISCOVER_QUERY,
+            offline_protocol_services::SVC_DISCOVER_RESPONSE,
+            offline_protocol_services::SVC_REQUEST,
+            offline_protocol_services::SVC_RESPONSE,
         ];
 
         for prefix in prefixes {
@@ -11251,5 +11421,446 @@ mod tests {
             let welcome = result.unwrap();
             assert!(welcome.is_some());
         }
+    }
+
+    // ========================================================================
+    // SERVICE DISCOVERY & REQUEST/RESPONSE TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_register_and_unregister_service() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let descriptor = ServiceDescriptor {
+            service_id: offline_protocol_core::ServiceId::new("echo.v1").unwrap(),
+            version: "1.0".to_string(),
+            capabilities: HashMap::new(),
+        };
+        protocol.register_service(descriptor).unwrap();
+        assert!(protocol.mesh_services().has_service("echo.v1"));
+
+        let removed = protocol.unregister_service("echo.v1").unwrap();
+        assert!(removed);
+        assert!(!protocol.mesh_services().has_service("echo.v1"));
+
+        let removed_again = protocol.unregister_service("echo.v1").unwrap();
+        assert!(!removed_again);
+    }
+
+    #[test]
+    fn test_process_svc_discover_query_with_match() {
+        use offline_protocol_services::SVC_DISCOVER_QUERY;
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Register a service
+        let descriptor = ServiceDescriptor {
+            service_id: offline_protocol_core::ServiceId::new("weather").unwrap(),
+            version: "2.0".to_string(),
+            capabilities: {
+                let mut m = HashMap::new();
+                m.insert("format".to_string(), "json".to_string());
+                m
+            },
+        };
+        protocol.register_service(descriptor).unwrap();
+
+        // Build a discovery query message from a remote peer using raw JSON
+        let content = format!(
+            "{}{}",
+            SVC_DISCOVER_QUERY,
+            serde_json::json!({
+                "query_id": "q-001",
+                "originator": "alice",
+                "service_id": "weather",
+                "remaining_hops": 10
+            })
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // The query should be recorded in seen set
+        assert!(protocol
+            .mesh_services()
+            .seen_discovery_queries()
+            .contains_key("q-001"));
+    }
+
+    #[test]
+    fn test_process_svc_discover_query_dedup() {
+        use offline_protocol_services::SVC_DISCOVER_QUERY;
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let content = format!(
+            "{}{}",
+            SVC_DISCOVER_QUERY,
+            serde_json::json!({
+                "query_id": "q-dedup",
+                "originator": "alice",
+                "remaining_hops": 10
+            })
+        );
+
+        let make_msg = || {
+            Message::new(
+                UserId::new("alice").unwrap(),
+                UserId::new("user123").unwrap(),
+                AppId::new("test-app").unwrap(),
+                &content,
+            )
+        };
+
+        // First time: processes normally
+        let r1 = protocol.process_internal_message(&make_msg());
+        assert!(matches!(r1, Some(InternalMessageResult::Consumed)));
+
+        // Second time: deduplicated (still consumed, but no further action)
+        let r2 = protocol.process_internal_message(&make_msg());
+        assert!(matches!(r2, Some(InternalMessageResult::Consumed)));
+    }
+
+    #[test]
+    fn test_process_svc_discover_response_emits_event() {
+        use offline_protocol_services::SVC_DISCOVER_RESPONSE;
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let content = format!(
+            "{}{}",
+            SVC_DISCOVER_RESPONSE,
+            serde_json::json!({
+                "query_id": "q-123",
+                "service_id": "weather",
+                "version": "2.0",
+                "provider_peer_id": "bob",
+                "capabilities": {},
+                "hop_count": 1
+            })
+        );
+        let message = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            Event::ServiceDiscovered {
+                query_id,
+                service_id,
+                version,
+                provider_peer_id,
+                hop_count,
+                ..
+            } => {
+                assert_eq!(query_id, "q-123");
+                assert_eq!(service_id, "weather");
+                assert_eq!(version, "2.0");
+                assert_eq!(provider_peer_id, "bob");
+                assert_eq!(*hop_count, 1);
+            }
+            other => panic!("Wrong event type: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_process_svc_request_unregistered_auto_not_found() {
+        use offline_protocol_services::SVC_REQUEST;
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        // No services registered — request should auto-respond not_found
+        let content = format!(
+            "{}{}",
+            SVC_REQUEST,
+            serde_json::json!({
+                "request_id": "req-001",
+                "service_id": "nonexistent",
+                "method": "get",
+                "body": "{}"
+            })
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // No ServiceRequestReceived event should be emitted
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.is_empty(),
+            "Should not emit event for unregistered service, got {:?}",
+            *captured
+        );
+    }
+
+    #[test]
+    fn test_process_svc_request_registered_emits_event() {
+        use offline_protocol_services::SVC_REQUEST;
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        // Register the service first
+        let descriptor = ServiceDescriptor {
+            service_id: offline_protocol_core::ServiceId::new("echo").unwrap(),
+            version: "1.0".to_string(),
+            capabilities: HashMap::new(),
+        };
+        protocol.register_service(descriptor).unwrap();
+
+        let content = format!(
+            "{}{}",
+            SVC_REQUEST,
+            serde_json::json!({
+                "request_id": "req-002",
+                "service_id": "echo",
+                "method": "ping",
+                "body": "hello"
+            })
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            Event::ServiceRequestReceived {
+                request_id,
+                service_id,
+                method,
+                body,
+                sender,
+            } => {
+                assert_eq!(request_id, "req-002");
+                assert_eq!(service_id, "echo");
+                assert_eq!(method, "ping");
+                assert_eq!(body, "hello");
+                assert_eq!(sender, "alice");
+            }
+            other => panic!("Wrong event type: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_process_svc_response_emits_event() {
+        use offline_protocol_services::SVC_RESPONSE;
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let content = format!(
+            "{}{}",
+            SVC_RESPONSE,
+            serde_json::json!({
+                "request_id": "req-003",
+                "service_id": "echo",
+                "status": "ok",
+                "body": "pong"
+            })
+        );
+        let message = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            Event::ServiceResponseReceived {
+                request_id,
+                service_id,
+                status,
+                body,
+                provider_peer_id,
+            } => {
+                assert_eq!(request_id, "req-003");
+                assert_eq!(service_id, "echo");
+                assert_eq!(status, "ok");
+                assert_eq!(body, "pong");
+                assert_eq!(provider_peer_id, "bob");
+            }
+            other => panic!("Wrong event type: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_process_regular_message_not_consumed_by_service_handlers() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "Hello, this is a normal message",
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(result.is_none(), "Regular messages should not be consumed");
+    }
+
+    #[test]
+    fn test_discover_services_no_peers() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Start protocol so send_internal_message doesn't fail with NotStarted
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        // No peers in key_package_sent_to — should succeed with empty broadcast
+        let query_id = protocol.discover_services(None).unwrap();
+        assert!(!query_id.is_empty());
+        assert!(protocol
+            .mesh_services()
+            .seen_discovery_queries()
+            .contains_key(&query_id));
+    }
+
+    #[test]
+    fn test_require_encryption_blocks_service_discovery_control_messages() {
+        let mut config = create_test_config();
+        config.encryption.enabled = true;
+        config.encryption.require_encryption = true;
+
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let discover_result = protocol.discover_services(None);
+        assert!(matches!(discover_result, Err(Error::EncryptFailed(_))));
+
+        let request_result = protocol.send_service_request("bob", "echo.v1", "ping", "{}");
+        assert!(matches!(request_result, Err(Error::EncryptFailed(_))));
+
+        let respond_result =
+            protocol.respond_to_service_request("req-1", "alice", "echo.v1", "ok", "pong");
+        assert!(matches!(respond_result, Err(Error::EncryptFailed(_))));
+
+        assert_eq!(transport_handle.sent_messages().len(), 0);
+    }
+
+    #[test]
+    fn test_known_peers_capacity_limit() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Fill to capacity
+        for i in 0..MAX_KNOWN_PEERS {
+            protocol.on_neighbor_discovered(&format!("peer-{i}"));
+        }
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+
+        // One more should be rejected
+        protocol.on_neighbor_discovered("peer-overflow");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+        assert!(!protocol.known_peers.contains("peer-overflow"));
+
+        // Existing peer should still be updatable (no-op insert, not rejected)
+        protocol.on_neighbor_discovered("peer-0");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+        assert!(protocol.known_peers.contains("peer-0"));
+
+        // Removing a peer frees capacity
+        protocol.on_neighbor_lost("peer-0");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS - 1);
+
+        // Now the new peer can be added
+        protocol.on_neighbor_discovered("peer-overflow");
+        assert_eq!(protocol.known_peers.len(), MAX_KNOWN_PEERS);
+        assert!(protocol.known_peers.contains("peer-overflow"));
+    }
+
+    #[test]
+    fn test_known_peers_does_not_track_self() {
+        let config = create_test_config();
+        let self_id = config.user_id.clone();
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+
+        protocol.on_neighbor_discovered(&self_id);
+        assert!(protocol.known_peers.is_empty());
+    }
+
+    #[test]
+    fn test_on_neighbor_lost_removes_from_known_peers() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        protocol.on_neighbor_discovered("alice");
+        assert!(protocol.known_peers.contains("alice"));
+
+        protocol.on_neighbor_lost("alice");
+        assert!(!protocol.known_peers.contains("alice"));
+    }
+
+    #[test]
+    fn test_seen_discovery_queries_cleanup() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Cleanup is tested directly in offline-protocol-services crate.
+        // Here we verify the integration: cleanup_expired_entries() delegates.
+        protocol.cleanup_expired_entries();
+
+        // Just verify it doesn't panic and the method is wired correctly
+        assert!(protocol.mesh_services().seen_discovery_queries().is_empty());
     }
 }

@@ -76,7 +76,28 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: `offline-protocol-core`
 
-### 5. offline-protocol
+### 5. offline-protocol-services
+
+**Purpose**: Standalone service discovery and request/response over the mesh.
+
+**Key Components**:
+- `MeshServices` - Service registry, discovery query generation/handling, request/response routing
+- `ServiceEvent` - Events emitted by service operations (`ServiceDiscovered`, `ServiceRequestReceived`, `ServiceResponseReceived`)
+- `ServiceAction` - Return type from message handling (either `NotHandled` or `Consumed` with messages to send and events to emit)
+
+**Design**: All methods return **actions** (messages to send, events to emit) rather than performing I/O directly. Discovery uses gossip flooding with hop-limited forwarding and deduplication.
+
+**Constants**:
+- Discovery query dedup TTL: 60 seconds
+- Default max hops: 10
+- Max gossip fanout per hop: 5
+- Max dedup entries: 10,000
+
+**Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
+
+**Dependencies**: `offline-protocol-core`
+
+### 6. offline-protocol
 
 **Purpose**: Main SDK API integrating all components.
 
@@ -94,7 +115,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Dependencies**: All other crates
 
-### 6. offline-protocol-uniffi
+### 7. offline-protocol-uniffi
 
 **Purpose:** UniFFI bindings for cross-platform interoperability (replaces old C FFI)
 
@@ -105,11 +126,9 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 - Native exception handling
 - Complete API surface (36 methods)
 
-**Key Functions:**
-- `new(config)` - Create protocol instance
-- `send_message()` - Type-safe messaging
-- `offline_protocol_start/stop` - Lifecycle
-- `offline_protocol_send_message` - Messaging
+**Key Interfaces:**
+- `OfflineProtocol` - Main protocol instance (lifecycle, messaging, MLS, routing, transports)
+- `MeshServices` - Standalone service discovery and request/response (takes `OfflineProtocol` reference)
 
 **Safety Patterns**:
 - Pointer validation (null checks)

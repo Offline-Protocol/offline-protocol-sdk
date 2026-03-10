@@ -790,6 +790,47 @@ export interface GroupErrorEvent extends BaseEvent {
 }
 
 // ============================================================================
+// SERVICE DISCOVERY & REQUEST/RESPONSE EVENTS
+// ============================================================================
+
+/**
+ * A service was discovered on the mesh in response to a discovery query.
+ */
+export interface ServiceDiscoveredEvent extends BaseEvent {
+  type: 'service_discovered';
+  query_id: string;
+  service_id: string;
+  version: string;
+  provider_peer_id: string;
+  capabilities: Record<string, string>;
+  hop_count: number;
+}
+
+/**
+ * A service request was received from another peer.
+ */
+export interface ServiceRequestReceivedEvent extends BaseEvent {
+  type: 'service_request_received';
+  request_id: string;
+  service_id: string;
+  method: string;
+  body: string;
+  sender: string;
+}
+
+/**
+ * A response to a service request was received.
+ */
+export interface ServiceResponseReceivedEvent extends BaseEvent {
+  type: 'service_response_received';
+  request_id: string;
+  service_id: string;
+  status: string;
+  body: string;
+  provider_peer_id: string;
+}
+
+// ============================================================================
 // DORS OBSERVABILITY EVENTS (from SDK DORS decision / escalation)
 // ============================================================================
 
@@ -893,7 +934,10 @@ export type ProtocolEvent =
   | DorsScoreUpdatedEvent
   | DorsTransportSelectedEvent
   | DorsTransportSwitchedEvent
-  | DorsEscalationTriggeredEvent;
+  | DorsEscalationTriggeredEvent
+  | ServiceDiscoveredEvent
+  | ServiceRequestReceivedEvent
+  | ServiceResponseReceivedEvent;
 
 /**
  * Event listener type

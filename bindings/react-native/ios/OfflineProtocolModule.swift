@@ -21,6 +21,7 @@ import React
 @objc(OfflineProtocolModule)
 class OfflineProtocolModule: RCTEventEmitter {
     private var protocolInstance: OfflineProtocol?
+    private var meshServicesInstance: MeshServices?
     private var bleManager: BleManager?
     private var internetManager: InternetManager?
     private var wifiDirectManager: WifiDirectManager?
@@ -357,7 +358,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             applyInitialRuntimeConfig(proto, rawConfig: parsed.raw)
 
             protocolInstance = proto
-            
+            meshServicesInstance = try MeshServices(protocol: proto)
+
             // Initialize BLE manager if BLE is enabled
             if config.bleEnabled {
                 let manager = BleManager(protocol: proto, deviceId: config.userId)
@@ -788,6 +790,97 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
+    // MARK: - Service Discovery & Request/Response (via MeshServices)
+
+    @objc func registerService(_ serviceId: String,
+                               version: String,
+                               capabilitiesJson: String,
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let svc = meshServicesInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
+            }
+            var capabilities: [String: String] = [:]
+            if let data = capabilitiesJson.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                capabilities = parsed
+            }
+            try svc.registerService(serviceId: serviceId, version: version, capabilities: capabilities)
+            resolver(NSNull())
+        } catch {
+            rejecter("ERROR_REGISTER_SERVICE", "Failed to register service: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func unregisterService(_ serviceId: String,
+                                 resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let svc = meshServicesInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
+            }
+            let removed = try svc.unregisterService(serviceId: serviceId)
+            resolver(removed)
+        } catch {
+            rejecter("ERROR_UNREGISTER_SERVICE", "Failed to unregister service: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func discoverServices(_ serviceId: String?,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let svc = meshServicesInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
+            }
+            let queryId = try svc.discoverServices(serviceId: serviceId)
+            resolver(queryId)
+        } catch {
+            rejecter("ERROR_DISCOVER_SERVICES", "Failed to discover services: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func sendServiceRequest(_ provider: String,
+                                  serviceId: String,
+                                  method: String,
+                                  body: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let svc = meshServicesInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
+            }
+            let requestId = try svc.sendServiceRequest(provider: provider, serviceId: serviceId, method: method, body: body)
+            resolver(requestId)
+        } catch {
+            rejecter("ERROR_SERVICE_REQUEST", "Failed to send service request: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func respondToServiceRequest(_ requestId: String,
+                                       requester: String,
+                                       serviceId: String,
+                                       status: String,
+                                       body: String,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let svc = meshServicesInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "MeshServices not initialized"])
+            }
+            let messageId = try svc.respondToServiceRequest(requestId: requestId, requester: requester, serviceId: serviceId, status: status, body: body)
+            resolver(messageId)
+        } catch {
+            rejecter("ERROR_SERVICE_RESPONSE", "Failed to respond to service request: \(error.localizedDescription)", error)
+        }
+    }
+
     @objc func receiveMessage(_ resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
         if let messageJson = protocolInstance?.receiveMessage() {
@@ -808,6 +901,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             // Ignore stop failures during destroy
         }
         protocolInstance = nil
+        meshServicesInstance = nil
         currentConfig = nil
         resolver(nil)
     }

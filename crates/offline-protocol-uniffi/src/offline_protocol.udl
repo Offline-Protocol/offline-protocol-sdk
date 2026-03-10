@@ -415,13 +415,13 @@ interface OfflineProtocol {
     // Connection requests (transport-agnostic, routed via DORS)
     [Throws=ProtocolError]
     string send_connection_request(string recipient, string sender_name, sequence<u8>? key_package);
-    
+
     [Throws=ProtocolError]
     string accept_connection_request(string recipient, string accepter_name, sequence<u8>? key_package);
-    
+
     [Throws=ProtocolError]
     string reject_connection_request(string recipient);
-    
+
     // BLE transport callback (event-driven sending, replaces timer-based polling)
     void set_ble_transport_callback(BleTransportCallback callback);
     
@@ -818,6 +818,27 @@ interface OfflineProtocol {
     // Returns JSON string to send via WebSocket relay.
     [Throws=ProtocolError]
     string group_get_user_groups();
+};
+
+// Standalone mesh services interface
+interface MeshServices {
+    [Throws=ProtocolError]
+    constructor(OfflineProtocol protocol);
+
+    [Throws=ProtocolError]
+    void register_service(string service_id, string version, record<DOMString, string> capabilities);
+
+    [Throws=ProtocolError]
+    boolean unregister_service(string service_id);
+
+    [Throws=ProtocolError]
+    string discover_services(string? service_id);
+
+    [Throws=ProtocolError]
+    string send_service_request(string provider, string service_id, string method, string body);
+
+    [Throws=ProtocolError]
+    string respond_to_service_request(string request_id, string requester, string service_id, string status, string body);
 };
 
 // BLE fragment for outgoing data

@@ -415,6 +415,36 @@ RCT_EXTERN_METHOD(mlsProcessWelcome:(NSString *)welcomeJson
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Service Discovery & Request/Response
+RCT_EXTERN_METHOD(registerService:(NSString *)serviceId
+                  version:(NSString *)version
+                  capabilitiesJson:(NSString *)capabilitiesJson
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(unregisterService:(NSString *)serviceId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(discoverServices:(NSString * _Nullable)serviceId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendServiceRequest:(NSString *)provider
+                  serviceId:(NSString *)serviceId
+                  method:(NSString *)method
+                  body:(NSString *)body
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(respondToServiceRequest:(NSString *)requestId
+                  requester:(NSString *)requester
+                  serviceId:(NSString *)serviceId
+                  status:(NSString *)status
+                  body:(NSString *)body
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Group Management (Relay Server API)
 RCT_EXTERN_METHOD(groupCreate:(NSString *)name
                   resolver:(RCTPromiseResolveBlock)resolve

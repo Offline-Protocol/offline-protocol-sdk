@@ -1,8 +1,10 @@
 //! Event types and callbacks.
 
 use offline_protocol_core::{ContentType, MediaMetadata, Message, MessageId};
+use offline_protocol_services::ServiceEvent;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -520,6 +522,51 @@ pub enum Event {
     /// A group operation failed (from relay).
     GroupError { reason: String },
 
+    // --- Service discovery ---
+    /// A service was discovered on the mesh in response to a discovery query.
+    ServiceDiscovered {
+        /// Query ID that triggered this discovery.
+        query_id: String,
+        /// Service identifier.
+        service_id: String,
+        /// Service version.
+        version: String,
+        /// Peer user ID of the provider.
+        provider_peer_id: String,
+        /// Service capabilities.
+        capabilities: HashMap<String, String>,
+        /// Number of hops from the provider.
+        hop_count: u8,
+    },
+
+    /// A service request was received from another peer.
+    ServiceRequestReceived {
+        /// Unique request identifier.
+        request_id: String,
+        /// Service identifier being invoked.
+        service_id: String,
+        /// Method name or action.
+        method: String,
+        /// Request body (JSON or arbitrary string).
+        body: String,
+        /// Peer user ID of the requester.
+        sender: String,
+    },
+
+    /// A response to a service request was received.
+    ServiceResponseReceived {
+        /// Request identifier this response corresponds to.
+        request_id: String,
+        /// Service identifier.
+        service_id: String,
+        /// Status: "ok", "not_found", or "error".
+        status: String,
+        /// Response body.
+        body: String,
+        /// Peer user ID of the provider.
+        provider_peer_id: String,
+    },
+
     // --- DORS observability (OFF-258) ---
     /// DORS scored all available transports for this decision cycle.
     DorsScoreUpdated {
@@ -988,6 +1035,59 @@ impl Event {
         Self::GroupError { reason }
     }
 
+    /// Creates a ServiceDiscovered event.
+    pub fn service_discovered(
+        query_id: String,
+        service_id: String,
+        version: String,
+        provider_peer_id: String,
+        capabilities: HashMap<String, String>,
+        hop_count: u8,
+    ) -> Self {
+        Self::ServiceDiscovered {
+            query_id,
+            service_id,
+            version,
+            provider_peer_id,
+            capabilities,
+            hop_count,
+        }
+    }
+
+    /// Creates a ServiceRequestReceived event.
+    pub fn service_request_received(
+        request_id: String,
+        service_id: String,
+        method: String,
+        body: String,
+        sender: String,
+    ) -> Self {
+        Self::ServiceRequestReceived {
+            request_id,
+            service_id,
+            method,
+            body,
+            sender,
+        }
+    }
+
+    /// Creates a ServiceResponseReceived event.
+    pub fn service_response_received(
+        request_id: String,
+        service_id: String,
+        status: String,
+        body: String,
+        provider_peer_id: String,
+    ) -> Self {
+        Self::ServiceResponseReceived {
+            request_id,
+            service_id,
+            status,
+            body,
+            provider_peer_id,
+        }
+    }
+
     /// Creates a DorsScoreUpdated event (DORS observability).
     pub fn dors_score_updated(scores: Vec<(String, f32)>) -> Self {
         Self::DorsScoreUpdated { scores }
@@ -1050,6 +1150,54 @@ impl Event {
     /// Parses an event from JSON.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+}
+
+impl From<ServiceEvent> for Event {
+    fn from(event: ServiceEvent) -> Self {
+        match event {
+            ServiceEvent::ServiceDiscovered {
+                query_id,
+                service_id,
+                version,
+                provider_peer_id,
+                capabilities,
+                hop_count,
+            } => Self::ServiceDiscovered {
+                query_id,
+                service_id,
+                version,
+                provider_peer_id,
+                capabilities,
+                hop_count,
+            },
+            ServiceEvent::ServiceRequestReceived {
+                request_id,
+                service_id,
+                method,
+                body,
+                sender,
+            } => Self::ServiceRequestReceived {
+                request_id,
+                service_id,
+                method,
+                body,
+                sender,
+            },
+            ServiceEvent::ServiceResponseReceived {
+                request_id,
+                service_id,
+                status,
+                body,
+                provider_peer_id,
+            } => Self::ServiceResponseReceived {
+                request_id,
+                service_id,
+                status,
+                body,
+                provider_peer_id,
+            },
+        }
     }
 }
 
@@ -1360,6 +1508,50 @@ impl fmt::Debug for Event {
             Self::ConnectionRejected { rejected_by: _ } => f
                 .debug_struct("ConnectionRejected")
                 .field("rejected_by", &"[REDACTED]")
+                .finish(),
+            Self::ServiceDiscovered {
+                query_id,
+                service_id,
+                version,
+                provider_peer_id: _,
+                capabilities,
+                hop_count,
+            } => f
+                .debug_struct("ServiceDiscovered")
+                .field("query_id", query_id)
+                .field("service_id", service_id)
+                .field("version", version)
+                .field("provider_peer_id", &"[REDACTED]")
+                .field("capabilities_count", &capabilities.len())
+                .field("hop_count", hop_count)
+                .finish(),
+            Self::ServiceRequestReceived {
+                request_id,
+                service_id,
+                method,
+                body,
+                sender: _,
+            } => f
+                .debug_struct("ServiceRequestReceived")
+                .field("request_id", request_id)
+                .field("service_id", service_id)
+                .field("method", method)
+                .field("body", &format!("[REDACTED {} bytes]", body.len()))
+                .field("sender", &"[REDACTED]")
+                .finish(),
+            Self::ServiceResponseReceived {
+                request_id,
+                service_id,
+                status,
+                body,
+                provider_peer_id: _,
+            } => f
+                .debug_struct("ServiceResponseReceived")
+                .field("request_id", request_id)
+                .field("service_id", service_id)
+                .field("status", status)
+                .field("body", &format!("[REDACTED {} bytes]", body.len()))
+                .field("provider_peer_id", &"[REDACTED]")
                 .finish(),
             Self::GroupCreated { group_id, name } => f
                 .debug_struct("GroupCreated")
