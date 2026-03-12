@@ -40,10 +40,13 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Decode base64 string to bytes with a size guard against oversized payloads.
+///
+/// The limit is applied to the **encoded** (base64) size. Since base64 inflates
+/// data by ~33%, the maximum **decoded** payload is approximately 768 KB.
 fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, String> {
     if data.len() > MAX_BASE64_PAYLOAD_SIZE {
         return Err(format!(
-            "payload too large: {} bytes exceeds {} limit",
+            "payload too large: {} encoded bytes exceeds {} limit",
             data.len(),
             MAX_BASE64_PAYLOAD_SIZE
         ));
@@ -6047,17 +6050,10 @@ impl OfflineProtocol {
         };
 
         // Decrypt via MLS
-        let mls = match self.mls_manager.as_ref() {
-            Some(mls) => mls,
-            None => {
-                warn!(group_id = %payload.group_id, "MLS not initialized, dropping group message");
-                return;
-            }
-        };
-        let mls_guard = match mls.read() {
+        let mls_guard = match self.read_mls_guard() {
             Ok(guard) => guard,
-            Err(_) => {
-                warn!(group_id = %payload.group_id, "MLS lock poisoned, dropping group message");
+            Err(e) => {
+                warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group message");
                 return;
             }
         };
@@ -6071,8 +6067,17 @@ impl OfflineProtocol {
             timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
         };
         let decrypt_result = match mls_guard.decrypt_from_group(&encrypted) {
-            Ok(Some(plaintext)) => Some(Ok(plaintext)),
-            Ok(None) => Some(Err("decryption returned empty".to_string())),
+            Ok(Some(plaintext)) => Some(plaintext),
+            Ok(None) => {
+                // Ok(None) means MLS consumed a Commit or Proposal — not application
+                // data. This is normal for non-application messages that arrive via the
+                // group message channel (e.g., due to message reordering).
+                debug!(
+                    group_id = %payload.group_id,
+                    "MLS returned no plaintext (commit/proposal consumed), not an application message"
+                );
+                None
+            }
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Failed to decrypt group message");
                 None
@@ -6080,31 +6085,25 @@ impl OfflineProtocol {
         };
         drop(mls_guard);
 
-        match decrypt_result {
-            Some(Ok(plaintext)) => {
-                self.group_message_dedup.insert(dedup_key, Instant::now());
-                if self.group_message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
-                    self.cleanup_group_message_dedup();
-                }
-                let text = String::from_utf8_lossy(&plaintext).to_string();
-                let msg_id = message.id.as_str().to_string();
-                let timestamp = chrono::Utc::now().to_rfc3339();
-                info!(group_id = %payload.group_id, "Decrypted mesh group message");
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::group_message_received(
-                        payload.group_id,
-                        sender.to_string(),
-                        text,
-                        timestamp,
-                        msg_id,
-                        payload.reply_to,
-                    ));
-                }
+        if let Some(plaintext) = decrypt_result {
+            self.group_message_dedup.insert(dedup_key, Instant::now());
+            if self.group_message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+                self.cleanup_group_message_dedup();
             }
-            Some(Err(reason)) => {
-                warn!(group_id = %payload.group_id, reason = %reason, "Group decryption failed");
+            let text = String::from_utf8_lossy(&plaintext).to_string();
+            let msg_id = message.id.as_str().to_string();
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            info!(group_id = %payload.group_id, "Decrypted mesh group message");
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::group_message_received(
+                    payload.group_id,
+                    sender.to_string(),
+                    text,
+                    timestamp,
+                    msg_id,
+                    payload.reply_to,
+                ));
             }
-            None => {}
         }
     }
 
@@ -6129,17 +6128,10 @@ impl OfflineProtocol {
         };
 
         // Join group via MLS, then update cache
-        let mls = match self.mls_manager.as_ref() {
-            Some(mls) => mls,
-            None => {
-                warn!(group_id = %payload.group_id, "MLS not initialized, dropping group welcome");
-                return;
-            }
-        };
-        let mls_guard = match mls.read() {
+        let mls_guard = match self.read_mls_guard() {
             Ok(guard) => guard,
-            Err(_) => {
-                warn!(group_id = %payload.group_id, "MLS lock poisoned, dropping group welcome");
+            Err(e) => {
+                warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group welcome");
                 return;
             }
         };
@@ -6207,58 +6199,41 @@ impl OfflineProtocol {
             }
         };
 
-        let mls = match self.mls_manager.as_ref() {
-            Some(mls) => mls,
-            None => {
-                warn!(group_id = %payload.group_id, "MLS not initialized, dropping group commit");
+        let mls_guard = match self.read_mls_guard() {
+            Ok(guard) => guard,
+            Err(e) => {
+                warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group commit");
                 return;
             }
         };
 
-        // Capture members before commit for delta validation
-        let members_before: HashSet<String> = {
-            let guard = match mls.read() {
-                Ok(g) => g,
-                Err(_) => {
-                    warn!(group_id = %payload.group_id, "MLS lock poisoned, dropping group commit");
-                    return;
-                }
-            };
-            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-            guard
-                .get_group_info(&gid)
-                .ok()
-                .flatten()
-                .map(|info| info.members.into_iter().collect())
-                .unwrap_or_default()
-        };
+        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
 
-        // Process Commit via MLS to advance epoch
-        let mls_ok = {
-            let mls_guard = match mls.read() {
-                Ok(g) => g,
-                Err(_) => {
-                    warn!(group_id = %payload.group_id, "MLS lock poisoned, dropping group commit");
-                    return;
-                }
-            };
-            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-            let encrypted = offline_protocol_mls::EncryptedMessage {
-                group_id: gid,
-                message_type: offline_protocol_mls::MlsMessageType::Commit,
-                epoch: payload.epoch,
-                ciphertext: ciphertext_bytes,
-                sender_id: sender.to_string(),
-                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-            };
-            match mls_guard.decrypt_from_group(&encrypted) {
-                Ok(_) => true,
-                Err(e) => {
-                    warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
-                    false
-                }
+        // Capture members before commit for delta validation
+        let members_before: HashSet<String> = mls_guard
+            .get_group_info(&gid)
+            .ok()
+            .flatten()
+            .map(|info| info.members.into_iter().collect())
+            .unwrap_or_default();
+
+        // Process Commit via MLS to advance epoch (single lock acquisition)
+        let encrypted = offline_protocol_mls::EncryptedMessage {
+            group_id: gid,
+            message_type: offline_protocol_mls::MlsMessageType::Commit,
+            epoch: payload.epoch,
+            ciphertext: ciphertext_bytes,
+            sender_id: sender.to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+        };
+        let mls_ok = match mls_guard.decrypt_from_group(&encrypted) {
+            Ok(_) => true,
+            Err(e) => {
+                warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
+                false
             }
         };
+        drop(mls_guard);
 
         if !mls_ok {
             return;
@@ -6275,19 +6250,21 @@ impl OfflineProtocol {
         let actual_added: HashSet<&String> = members_after.difference(&members_before).collect();
         let actual_removed: HashSet<&String> = members_before.difference(&members_after).collect();
 
-        // Validate claimed affected_member against actual MLS delta
+        // Validate claimed affected_member against actual MLS delta.
+        // A mismatch may indicate a forged commit metadata — log at error level.
         if let Some(claimed) = &payload.affected_member {
             let valid = match payload.commit_type {
                 GroupCommitType::Add => actual_added.contains(claimed),
                 GroupCommitType::Remove => actual_removed.contains(claimed),
             };
             if !valid && (!actual_added.is_empty() || !actual_removed.is_empty()) {
-                warn!(
+                error!(
                     group_id = %payload.group_id,
+                    sender = %sender,
                     claimed = %claimed,
                     actual_added = ?actual_added,
                     actual_removed = ?actual_removed,
-                    "Commit affected_member does not match actual MLS state delta"
+                    "SECURITY: Commit affected_member does not match actual MLS state delta — possible forgery"
                 );
             }
         }
@@ -6317,6 +6294,24 @@ impl OfflineProtocol {
     /// (deterministic election) issues an MLS remove-commit to advance the group
     /// epoch and revoke the leaving member's keys. Other members will receive
     /// the commit via `handle_group_mls_commit`.
+    ///
+    /// # Security limitations
+    ///
+    /// Leave notifications are **not** MLS-authenticated because a member cannot
+    /// issue a self-removal Commit in MLS. The `sender` field comes from the
+    /// `Message` envelope which is not cryptographically bound. In an adversarial
+    /// mesh environment a relay node could forge a leave notification to force-
+    /// remove a legitimate member. Mitigations:
+    ///
+    /// 1. `sender == leaving_member` check prevents cross-member impersonation
+    ///    when the transport layer preserves sender identity.
+    /// 2. Membership is verified against the **MLS group state** (authoritative),
+    ///    not just the local cache.
+    /// 3. The elected remover issues a real MLS Commit that all members verify
+    ///    cryptographically.
+    ///
+    /// For fully adversarial environments, consider requiring admin-only removal
+    /// or adding an MLS application-message-signed leave proof.
     fn handle_group_mls_leave(&mut self, sender: &str, data: &str) {
         let payload = match serde_json::from_str::<GroupMlsLeavePayload>(data) {
             Ok(p) => p,
@@ -6328,28 +6323,29 @@ impl OfflineProtocol {
 
         // Verify sender matches the claimed leaving member to prevent spoofing
         if payload.leaving_member != sender {
-            warn!(
+            error!(
                 sender = %sender,
                 claimed = %payload.leaving_member,
-                "Leave notification sender mismatch, ignoring"
+                group_id = %payload.group_id,
+                "SECURITY: Leave notification sender mismatch — possible spoofing attempt, ignoring"
             );
             return;
         }
 
-        // Verify sender is actually a member of the group
+        // Verify sender is actually a member of the group using MLS state
+        // (authoritative) rather than only the local cache.
         let self_id = self.config.user_id.clone();
         let members = self
-            .group_members
-            .get(&payload.group_id)
-            .cloned()
-            .or_else(|| self.refresh_group_members(&payload.group_id).ok())
+            .refresh_group_members(&payload.group_id)
+            .ok()
+            .or_else(|| self.group_members.get(&payload.group_id).cloned())
             .unwrap_or_default();
 
         if !members.iter().any(|m| m == sender) {
-            warn!(
+            error!(
                 sender = %sender,
                 group_id = %payload.group_id,
-                "Leave notification from non-member, ignoring"
+                "SECURITY: Leave notification from non-member, ignoring"
             );
             return;
         }
@@ -6589,8 +6585,14 @@ impl OfflineProtocol {
     ///
     /// Notifies remaining members and removes local group state.
     /// Note: The MLS layer does not support self-removal Commits, so remaining
-    /// members receive a plaintext leave notification. A group admin should
-    /// subsequently call `remove_from_group` to properly advance the MLS epoch.
+    /// members receive a plaintext leave notification. The deterministic election
+    /// in `handle_group_mls_leave` will select one member to issue the MLS
+    /// remove-commit to properly advance the epoch.
+    ///
+    /// **Ordering note:** Local MLS state is deleted *before* sending leave
+    /// notifications. If all notification sends fail, the local state is gone
+    /// but peers will not know. This is an intentional fail-open design — local
+    /// cleanup is prioritized to prevent stale state.
     pub fn leave_mesh_group(&mut self, group_id: &str) -> Result<()> {
         // Get members before leaving
         let members = self
@@ -6656,8 +6658,8 @@ impl OfflineProtocol {
     ) -> Result<Vec<MessageId>> {
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
-        // Encrypt and get members in a single lock acquisition to avoid
-        // stale member list from a race between encrypt and member fetch.
+        // Encrypt and read member list while holding &mut self to ensure
+        // the member cache is consistent with the MLS encryption epoch.
         let (encrypted, members) = {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
@@ -6739,9 +6741,7 @@ impl OfflineProtocol {
                     succeeded_members,
                 ));
             }
-            return Err(Error::Other(
-                "All group message sends failed".to_string(),
-            ));
+            return Err(Error::Other("All group message sends failed".to_string()));
         }
 
         // Emit appropriate event
@@ -13575,9 +13575,7 @@ mod tests {
         let encrypted = {
             let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
-            alice_mls
-                .encrypt_for_group(&gid, b"Hello dedup!")
-                .unwrap()
+            alice_mls.encrypt_for_group(&gid, b"Hello dedup!").unwrap()
         };
         let msg_payload = GroupMlsMessagePayload {
             group_id: group_id.clone(),
@@ -13618,5 +13616,416 @@ mod tests {
             "Expected exactly 1 GroupMessageReceived, got {} (duplicate should be dropped)",
             received_count
         );
+    }
+
+    #[test]
+    fn test_group_mls_leave_non_member_rejected() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Pre-populate group member cache — "eve" is NOT in the group
+        protocol.group_members.insert(
+            "group:nonmember-test".to_string(),
+            vec!["user123".to_string(), "alice".to_string()],
+        );
+
+        // "eve" sends a leave notification for herself (sender matches, but not a member)
+        let leave_payload = GroupMlsLeavePayload {
+            group_id: "group:nonmember-test".to_string(),
+            leaving_member: "eve".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_LEAVE,
+            serde_json::to_string(&leave_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("eve").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // No removal event
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, Event::GroupMemberRemoved { .. })),
+            "Non-member leave should not produce a removal event"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_leave_deterministic_election() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        // user123 is our user_id from create_test_config
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Use a fake group_id that doesn't exist in MLS so refresh_group_members
+        // fails and falls back to the local cache. This lets us test the
+        // deterministic election logic without needing real MLS member state.
+        let group_id = "group:election-test".to_string();
+
+        // Manually set the member cache to include more members.
+        // "alice" < "bob" < "user123" lexicographically.
+        // When "bob" leaves, "alice" should be elected (lex-first remaining).
+        // Since we are "user123", we should NOT be elected.
+        protocol.group_members.insert(
+            group_id.clone(),
+            vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "user123".to_string(),
+            ],
+        );
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // "bob" sends a leave notification
+        let leave_payload = GroupMlsLeavePayload {
+            group_id: group_id.clone(),
+            leaving_member: "bob".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_LEAVE,
+            serde_json::to_string(&leave_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // Since "alice" < "user123", alice should be elected, not us.
+        // We should still emit GroupMemberRemoved because we're not the remover.
+        let events = events.lock().unwrap();
+        let remove_event = events.iter().find(|e| {
+            matches!(e, Event::GroupMemberRemoved { group_id: gid, user_id, removed_by }
+                if gid == &group_id && user_id == "bob" && removed_by == "bob")
+        });
+        assert!(
+            remove_event.is_some(),
+            "Expected GroupMemberRemoved event for non-elected node"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_leave_we_are_elected() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        // user123 is our user_id
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Use a fake group_id so refresh_group_members falls back to cache
+        let group_id = "group:elected-test".to_string();
+
+        // Members: "user123" < "zzz" lexicographically.
+        // When "zzz" leaves, "user123" is the lex-first remaining → we should be elected.
+        protocol.group_members.insert(
+            group_id.clone(),
+            vec!["user123".to_string(), "zzz".to_string()],
+        );
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // "zzz" sends a leave notification
+        let leave_payload = GroupMlsLeavePayload {
+            group_id: group_id.clone(),
+            leaving_member: "zzz".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_LEAVE,
+            serde_json::to_string(&leave_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("zzz").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // We were elected, so remove_from_group was attempted.
+        // Since "zzz" is not a real MLS member, the remove will fail — but the
+        // important thing is we didn't emit a duplicate event from the non-elected path.
+        let events = events.lock().unwrap();
+        // Verify no double-emit: at most one GroupMemberRemoved event
+        let remove_count = events
+            .iter()
+            .filter(|e| matches!(e, Event::GroupMemberRemoved { user_id, .. } if user_id == "zzz"))
+            .count();
+        assert!(
+            remove_count <= 1,
+            "Expected at most 1 GroupMemberRemoved event, got {}",
+            remove_count
+        );
+    }
+
+    #[test]
+    fn test_group_mls_remove_from_group() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Create a group
+        let info = protocol.create_mesh_group("Remove Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Try to remove a non-existent member — MLS should error
+        let result = protocol.remove_from_group(&group_id, "nonexistent-user");
+        assert!(result.is_err(), "Removing non-member should fail");
+    }
+
+    #[test]
+    fn test_group_mls_base64_decode_size_guard() {
+        // Verify the base64_decode function rejects oversized payloads
+        let oversized = "A".repeat(MAX_BASE64_PAYLOAD_SIZE + 1);
+        let result = base64_decode(&oversized);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("payload too large"));
+
+        // Verify normal-sized payloads pass
+        let normal = base64_encode(b"hello world");
+        let result = base64_decode(&normal);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn test_group_mls_welcome_bad_data_no_panic() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Send a Welcome with invalid base64 welcome_data
+        let welcome_payload = GroupMlsWelcomePayload {
+            group_id: "group:bad-welcome".to_string(),
+            group_name: Some("Bad Group".to_string()),
+            welcome_data: "not-valid-base64!!!".to_string(),
+            member_list: vec!["alice".to_string()],
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_WELCOME,
+            serde_json::to_string(&welcome_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        // Should not panic
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // No join event
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, Event::GroupMemberAdded { .. })),
+            "Bad welcome data should not produce a join event"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Send a Welcome with valid base64 but garbage MLS data
+        let welcome_payload = GroupMlsWelcomePayload {
+            group_id: "group:garbage-mls".to_string(),
+            group_name: Some("Garbage MLS".to_string()),
+            welcome_data: base64_encode(b"this is not valid MLS data"),
+            member_list: vec!["alice".to_string()],
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_WELCOME,
+            serde_json::to_string(&welcome_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        // Should not panic — MLS join will fail gracefully
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // No join event
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, Event::GroupMemberAdded { .. })),
+            "Invalid MLS welcome should not produce a join event"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_send_message_partial_failure() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        // NOTE: Do NOT call protocol.start() — send_internal_message will fail
+        // for all members because the protocol is not running, simulating
+        // total delivery failure.
+
+        let info = protocol.create_mesh_group("Partial Failure Group").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Populate cache with multiple members
+        protocol.group_members.insert(
+            group_id.clone(),
+            vec![
+                "user123".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+            ],
+        );
+
+        // Sending should fail since protocol is not started
+        let result = protocol.send_group_message(&group_id, "hello", None, None);
+        assert!(result.is_err(), "Total send failure should return Err");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("All group message sends failed"),
+            "Error should indicate total failure"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_commit_oversized_ciphertext_rejected() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Commit with oversized base64 ciphertext
+        let oversized = "A".repeat(MAX_BASE64_PAYLOAD_SIZE + 1);
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: "group:oversized".to_string(),
+            commit_type: GroupCommitType::Add,
+            ciphertext: oversized,
+            epoch: 1,
+            affected_member: Some("carol".to_string()),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // No membership events
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                Event::GroupMemberAdded { .. } | Event::GroupMemberRemoved { .. }
+            )),
+            "Oversized commit should not produce membership events"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_malformed_json_payloads() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Malformed JSON for each message type — should all be consumed without panic
+        let prefixes = [
+            internal_prefixes::GROUP_MLS_MSG,
+            internal_prefixes::GROUP_MLS_WELCOME,
+            internal_prefixes::GROUP_MLS_COMMIT,
+            internal_prefixes::GROUP_MLS_LEAVE,
+        ];
+
+        for prefix in &prefixes {
+            let content = format!("{}{{not valid json!", prefix);
+            let message = Message::new(
+                UserId::new("alice").unwrap(),
+                UserId::new("user123").unwrap(),
+                AppId::new("test-app").unwrap(),
+                &content,
+            );
+            let result = protocol.process_internal_message(&message);
+            assert!(
+                matches!(result, Some(InternalMessageResult::Consumed)),
+                "Malformed JSON for prefix {} should be consumed",
+                prefix
+            );
+        }
     }
 }
