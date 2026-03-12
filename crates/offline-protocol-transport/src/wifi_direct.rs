@@ -10,6 +10,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+/// Thread-safe, optional callback shared between transport implementations.
+type SharedCallback = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 /// Peer device information for Wi-Fi Direct
 #[derive(Debug, Clone)]
 pub struct WifiDirectPeer {
@@ -68,7 +71,7 @@ pub struct WifiDirectTransport {
     /// Platform-specific handle (opaque pointer to Android WifiP2pManager)
     platform_handle: Arc<Mutex<Option<usize>>>,
     /// Platform callback invoked when new messages are available to send.
-    on_messages_available: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    on_messages_available: SharedCallback,
 }
 
 impl WifiDirectTransport {

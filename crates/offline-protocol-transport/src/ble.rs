@@ -18,6 +18,9 @@ use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, SystemTime};
 
+/// Thread-safe, optional callback shared between BLE/Wi-Fi Direct transports.
+type SharedCallback = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 /// Peer device information
 #[derive(Debug, Clone)]
 pub struct PeerDevice {
@@ -108,7 +111,7 @@ pub struct BleTransport {
     /// Platform callback invoked when new fragments are available to send.
     /// Called from `send()` after enqueueing — the platform layer should
     /// respond by calling `get_next_fragment()` and performing the BLE write.
-    on_fragments_available: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    on_fragments_available: SharedCallback,
 }
 
 impl BleTransport {

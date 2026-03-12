@@ -179,7 +179,7 @@ impl MlsManager {
             .credential
             .read()
             .map_err(|_| MlsError::NotInitialized)?;
-        guard.clone().ok_or_else(|| MlsError::NotInitialized)
+        guard.clone().ok_or(MlsError::NotInitialized)
     }
 
     /// Gets a signer for MLS operations, using the in-memory cache.
@@ -483,12 +483,14 @@ impl MlsManager {
         // Include group name in welcome for the invitee
         let group_name = self.load_group_metadata(group_id)?.and_then(|m| m.name);
 
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+
         let welcome_msg = WelcomeMessage {
             group_id: group_id.clone(),
             welcome_data: welcome_bytes,
             inviter_id: self.user_id.clone(),
             group_name,
-            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            timestamp_ms: now_ms,
         };
 
         let commit_msg = EncryptedMessage {
@@ -497,7 +499,7 @@ impl MlsManager {
             epoch: group.epoch().as_u64(),
             ciphertext: commit_bytes,
             sender_id: self.user_id.clone(),
-            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            timestamp_ms: now_ms,
         };
 
         Ok((welcome_msg, commit_msg))
