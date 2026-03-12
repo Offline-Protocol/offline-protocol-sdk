@@ -13,6 +13,7 @@ use crate::{
     Error, EstablishmentState, Event, EventCallback, ProtocolConfig, Result, SessionStateError,
     TransportManager,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
     AppId, ContentType, LamportClock, MediaMetadata, Message, MessageId, MessagePriority,
@@ -32,6 +33,16 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
+
+/// Encode bytes to base64 string.
+fn base64_encode(data: &[u8]) -> String {
+    BASE64.encode(data)
+}
+
+/// Decode base64 string to bytes.
+fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
+    BASE64.decode(data)
+}
 
 /// Internal message prefixes for protocol messages.
 mod internal_prefixes {
@@ -65,6 +76,14 @@ mod internal_prefixes {
     pub const USER_GROUPS: &str = "__USER_GROUPS__";
     /// Prefix for group error (relay).
     pub const GROUP_ERROR: &str = "__GROUP_ERROR__";
+    /// Prefix for MLS-encrypted group messages (mesh).
+    pub const GROUP_MLS_MSG: &str = "__GRP_MLS_MSG__";
+    /// Prefix for MLS Welcome messages for group invites (mesh).
+    pub const GROUP_MLS_WELCOME: &str = "__GRP_MLS_WELCOME__";
+    /// Prefix for MLS Commit messages for group membership changes (mesh).
+    pub const GROUP_MLS_COMMIT: &str = "__GRP_MLS_COMMIT__";
+    /// Prefix for group leave notifications (mesh).
+    pub const GROUP_MLS_LEAVE: &str = "__GRP_MLS_LEAVE__";
 }
 
 /// Retry interval for persisting session confirmation after a transient storage error.
@@ -83,6 +102,8 @@ const PENDING_TTL_SPIKE_WARN_THRESHOLD: usize = 25;
 const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
 const PENDING_DROP_WARN_EVERY: u64 = 100;
 const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
+/// TTL for group message dedup entries (5 minutes).
+const GROUP_MESSAGE_DEDUP_TTL_SECS: u64 = 300;
 const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 const MAX_KNOWN_PEERS: usize = 1000;
@@ -193,6 +214,53 @@ struct UserGroupsPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GroupErrorPayload {
     reason: String,
+}
+
+// --- Group (mesh/MLS) payloads ---
+
+/// Payload for MLS-encrypted group messages sent via mesh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupMlsMessagePayload {
+    /// MLS group identifier.
+    group_id: String,
+    /// Base64-encoded MLS ciphertext.
+    ciphertext: String,
+}
+
+/// Payload for MLS Welcome messages (group invites) sent via mesh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupMlsWelcomePayload {
+    /// MLS group identifier.
+    group_id: String,
+    /// Human-readable group name.
+    group_name: Option<String>,
+    /// Base64-encoded MLS Welcome data.
+    welcome_data: String,
+    /// Current member list (user IDs) at the time of invite.
+    member_list: Vec<String>,
+}
+
+/// Payload for MLS Commit messages (membership changes) sent via mesh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupMlsCommitPayload {
+    /// MLS group identifier.
+    group_id: String,
+    /// Type of commit: "add" or "remove".
+    commit_type: String,
+    /// Base64-encoded MLS commit ciphertext.
+    ciphertext: String,
+    /// User ID of the affected member (added or removed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    affected_member: Option<String>,
+}
+
+/// Payload for group leave notifications sent via mesh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupMlsLeavePayload {
+    /// MLS group identifier.
+    group_id: String,
+    /// User ID of the leaving member.
+    leaving_member: String,
 }
 
 /// A received key package awaiting use for session creation.
@@ -567,6 +635,14 @@ pub struct OfflineProtocol {
 
     /// Mesh service registry and handler (extracted crate).
     mesh_services: MeshServices,
+
+    /// Cached group membership lists for fan-out without holding MLS lock.
+    /// Maps group_id -> list of member user IDs.
+    group_members: HashMap<String, Vec<String>>,
+
+    /// Deduplication cache for group messages received via multiple paths.
+    /// Key: (group_id, epoch, sender_id), Value: when first seen.
+    group_message_dedup: HashMap<(String, u64, String), Instant>,
 }
 
 impl OfflineProtocol {
@@ -629,6 +705,8 @@ impl OfflineProtocol {
             outbound_media_chunks: HashMap::new(),
             outbound_media_windows: HashMap::new(),
             mesh_services: MeshServices::new(),
+            group_members: HashMap::new(),
+            group_message_dedup: HashMap::new(),
             config,
         })
     }
@@ -5395,6 +5473,219 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // --- Group (mesh/MLS) messages ---
+
+        if content.starts_with(internal_prefixes::GROUP_MLS_MSG) {
+            let data = &content[internal_prefixes::GROUP_MLS_MSG.len()..];
+            // Strip optional reply_to metadata suffix
+            let (json_data, _reply_to) = if let Some(idx) = data.rfind("|reply_to:") {
+                (&data[..idx], Some(&data[idx + 10..]))
+            } else {
+                (data, None)
+            };
+            if let Ok(payload) = serde_json::from_str::<GroupMlsMessagePayload>(json_data) {
+                // Dedup check: (group_id, epoch from encrypted msg, sender)
+                let dedup_key = (
+                    payload.group_id.clone(),
+                    0u64, // epoch not in payload, use sender+group as dedup key
+                    sender.to_string(),
+                );
+                if self.group_message_dedup.contains_key(&dedup_key) {
+                    debug!(
+                        group_id = %payload.group_id,
+                        sender = %sender,
+                        "Duplicate group message, skipping"
+                    );
+                    return Some(InternalMessageResult::Consumed);
+                }
+
+                // Decrypt the group message
+                match base64_decode(&payload.ciphertext) {
+                    Ok(ciphertext_bytes) => {
+                        let mls = self.mls_manager.as_ref();
+                        if let Some(mls) = mls {
+                            if let Ok(mls_guard) = mls.read() {
+                                let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                                let encrypted = offline_protocol_mls::EncryptedMessage {
+                                    group_id: gid,
+                                    message_type: offline_protocol_mls::MlsMessageType::Application,
+                                    epoch: 0,
+                                    ciphertext: ciphertext_bytes,
+                                    sender_id: sender.to_string(),
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                };
+                                match mls_guard.decrypt_from_group(&encrypted) {
+                                    Ok(Some(plaintext)) => {
+                                        self.group_message_dedup.insert(dedup_key, Instant::now());
+                                        let text = String::from_utf8_lossy(&plaintext).to_string();
+                                        let msg_id = message.id.as_str().to_string();
+                                        let timestamp = chrono::Utc::now().to_rfc3339();
+                                        info!(group_id = %payload.group_id, "Decrypted mesh group message");
+                                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                            state.emit_event(Event::group_message_received(
+                                                payload.group_id,
+                                                sender.to_string(),
+                                                text,
+                                                timestamp,
+                                                msg_id,
+                                                _reply_to.map(|s| s.to_string()),
+                                            ));
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        warn!(group_id = %payload.group_id, "Group decryption returned empty");
+                                    }
+                                    Err(e) => {
+                                        warn!(group_id = %payload.group_id, error = %e, "Failed to decrypt group message");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(group_id = %payload.group_id, error = %e, "Failed to decode group message ciphertext");
+                    }
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse GroupMlsMessage payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_MLS_WELCOME) {
+            let data = &content[internal_prefixes::GROUP_MLS_WELCOME.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupMlsWelcomePayload>(data) {
+                info!(group_id = %payload.group_id, "Received mesh group Welcome");
+                match base64_decode(&payload.welcome_data) {
+                    Ok(welcome_bytes) => {
+                        let mls = self.mls_manager.as_ref();
+                        if let Some(mls) = mls {
+                            if let Ok(mls_guard) = mls.read() {
+                                let welcome = offline_protocol_mls::WelcomeMessage {
+                                    group_id: offline_protocol_mls::GroupId::new(&payload.group_id),
+                                    welcome_data: welcome_bytes,
+                                    inviter_id: sender.to_string(),
+                                    group_name: payload.group_name.clone(),
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                };
+                                match mls_guard.join_group(&welcome) {
+                                    Ok(group_info) => {
+                                        let members = group_info.members.clone();
+                                        let group_id = payload.group_id.clone();
+                                        drop(mls_guard);
+                                        self.group_members.insert(group_id.clone(), members);
+                                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                            state.emit_event(Event::group_member_added(
+                                                group_id,
+                                                self.config.user_id.clone(),
+                                                sender.to_string(),
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(group_id = %payload.group_id, error = %e, "Failed to join mesh group");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(group_id = %payload.group_id, error = %e, "Failed to decode welcome data");
+                    }
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse GroupMlsWelcome payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_MLS_COMMIT) {
+            let data = &content[internal_prefixes::GROUP_MLS_COMMIT.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupMlsCommitPayload>(data) {
+                info!(
+                    group_id = %payload.group_id,
+                    commit_type = %payload.commit_type,
+                    "Received mesh group Commit"
+                );
+
+                // For commits with ciphertext, process via MLS to advance epoch
+                if !payload.ciphertext.is_empty() {
+                    if let Ok(ciphertext_bytes) = base64_decode(&payload.ciphertext) {
+                        let mls = self.mls_manager.as_ref();
+                        if let Some(mls) = mls {
+                            if let Ok(mls_guard) = mls.read() {
+                                let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                                let encrypted = offline_protocol_mls::EncryptedMessage {
+                                    group_id: gid,
+                                    message_type: offline_protocol_mls::MlsMessageType::Commit,
+                                    epoch: 0,
+                                    ciphertext: ciphertext_bytes,
+                                    sender_id: sender.to_string(),
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                };
+                                if let Err(e) = mls_guard.decrypt_from_group(&encrypted) {
+                                    warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Refresh cache and emit event
+                let _ = self.refresh_group_members(&payload.group_id);
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    match payload.commit_type.as_str() {
+                        "add" => {
+                            if let Some(member) = &payload.affected_member {
+                                state.emit_event(Event::group_member_added(
+                                    payload.group_id.clone(),
+                                    member.clone(),
+                                    sender.to_string(),
+                                ));
+                            }
+                        }
+                        "remove" => {
+                            if let Some(member) = &payload.affected_member {
+                                state.emit_event(Event::group_member_removed(
+                                    payload.group_id.clone(),
+                                    member.clone(),
+                                    sender.to_string(),
+                                ));
+                            }
+                        }
+                        _ => {
+                            warn!(commit_type = %payload.commit_type, "Unknown commit type");
+                        }
+                    }
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse GroupMlsCommit payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        if content.starts_with(internal_prefixes::GROUP_MLS_LEAVE) {
+            let data = &content[internal_prefixes::GROUP_MLS_LEAVE.len()..];
+            if let Ok(payload) = serde_json::from_str::<GroupMlsLeavePayload>(data) {
+                info!(
+                    group_id = %payload.group_id,
+                    leaving_member = %payload.leaving_member,
+                    "Received mesh group leave notification"
+                );
+                let _ = self.refresh_group_members(&payload.group_id);
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::group_member_removed(
+                        payload.group_id,
+                        payload.leaving_member.clone(),
+                        payload.leaving_member,
+                    ));
+                }
+            } else {
+                warn!(sender = %sender, "Failed to parse GroupMlsLeave payload");
+            }
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Group (relay) messages ---
 
         if content.starts_with(internal_prefixes::GROUP_CREATED) {
@@ -5878,12 +6169,372 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    // ========================================================================
+    // MESH GROUP MESSAGING (MLS-encrypted, transport-agnostic)
+    // ========================================================================
+
+    /// Refreshes the cached member list for a group from MlsManager.
+    fn refresh_group_members(&mut self, group_id: &str) -> Result<Vec<String>> {
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
+        let mls_guard = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let info = mls_guard
+            .get_group_info(&gid)?
+            .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
+        let members = info.members.clone();
+        drop(mls_guard);
+        self.group_members
+            .insert(group_id.to_string(), members.clone());
+        Ok(members)
+    }
+
+    /// Creates a new MLS group for mesh messaging.
+    ///
+    /// The group is created locally via MLS. Members can be invited with
+    /// `invite_to_group()`. Messages sent via `send_group_message()` are
+    /// MLS-encrypted and fan-out via DORS to each member individually.
+    pub fn create_mesh_group(
+        &mut self,
+        group_name: &str,
+    ) -> Result<offline_protocol_mls::GroupInfo> {
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
+        let mls_guard = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let group_info = mls_guard.create_group(group_name)?;
+        let group_id = group_info.group_id.as_str().to_string();
+        let members = group_info.members.clone();
+        drop(mls_guard);
+
+        self.group_members.insert(group_id.clone(), members);
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_created(group_id, group_name.to_string()));
+        }
+
+        Ok(group_info)
+    }
+
+    /// Invites a user to an MLS mesh group.
+    ///
+    /// Requires the invitee's key package to be available in `pending_key_packages`.
+    /// Sends a Welcome to the invitee and a Commit to all existing members.
+    pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
+        // Get the invitee's key package
+        let key_pkg = self
+            .pending_key_packages
+            .get(invitee_user_id)
+            .ok_or_else(|| {
+                Error::Other(format!("No key package available for {}", invitee_user_id))
+            })?
+            .key_package_data
+            .clone();
+
+        // Add member via MLS
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
+        let mls_guard = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let welcome = mls_guard.add_group_member(&gid, &key_pkg)?;
+        let group_name = welcome.group_name.clone();
+        drop(mls_guard);
+
+        // Refresh member list after add
+        let members = self.refresh_group_members(group_id)?;
+
+        // Send Welcome to invitee
+        let welcome_payload = GroupMlsWelcomePayload {
+            group_id: group_id.to_string(),
+            group_name,
+            welcome_data: base64_encode(&welcome.welcome_data),
+            member_list: members.clone(),
+        };
+        let welcome_content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_WELCOME,
+            serde_json::to_string(&welcome_payload)
+                .map_err(|e| Error::Other(format!("Serialize welcome: {}", e)))?
+        );
+        self.send_internal_message(invitee_user_id, welcome_content, MessagePriority::High)?;
+
+        // Send Commit to all existing members (excluding self and invitee)
+        let self_id = self.config.user_id.clone();
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: group_id.to_string(),
+            commit_type: "add".to_string(),
+            ciphertext: String::new(), // Commit is already applied locally
+            affected_member: Some(invitee_user_id.to_string()),
+        };
+        let commit_content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload)
+                .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
+        );
+        for member in &members {
+            if member == &self_id || member == invitee_user_id {
+                continue;
+            }
+            let _ =
+                self.send_internal_message(member, commit_content.clone(), MessagePriority::High);
+        }
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_member_added(
+                group_id.to_string(),
+                invitee_user_id.to_string(),
+                self_id,
+            ));
+        }
+
+        info!(group_id = %group_id, invitee = %invitee_user_id, "Invited member to mesh group");
+        Ok(())
+    }
+
+    /// Removes a member from an MLS mesh group.
+    ///
+    /// Sends a Commit to all remaining members.
+    pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
+        let mls_guard = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let commit_msg = mls_guard.remove_group_member(&gid, member_id)?;
+        drop(mls_guard);
+
+        // Refresh member list after removal
+        let members = self.refresh_group_members(group_id)?;
+
+        // Fan-out Commit to remaining members
+        let self_id = self.config.user_id.clone();
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: group_id.to_string(),
+            commit_type: "remove".to_string(),
+            ciphertext: base64_encode(&commit_msg.ciphertext),
+            affected_member: Some(member_id.to_string()),
+        };
+        let commit_content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload)
+                .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
+        );
+        for member in &members {
+            if member == &self_id {
+                continue;
+            }
+            let _ =
+                self.send_internal_message(member, commit_content.clone(), MessagePriority::High);
+        }
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::group_member_removed(
+                group_id.to_string(),
+                member_id.to_string(),
+                self_id,
+            ));
+        }
+
+        info!(group_id = %group_id, member = %member_id, "Removed member from mesh group");
+        Ok(())
+    }
+
+    /// Leaves an MLS mesh group.
+    ///
+    /// Notifies remaining members and removes local group state.
+    pub fn leave_mesh_group(&mut self, group_id: &str) -> Result<()> {
+        // Get members before leaving
+        let members = self
+            .group_members
+            .get(group_id)
+            .cloned()
+            .or_else(|| self.refresh_group_members(group_id).ok())
+            .unwrap_or_default();
+
+        let self_id = self.config.user_id.clone();
+
+        // Leave the MLS group
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
+        let mls_guard = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        mls_guard.leave_group(&gid)?;
+        drop(mls_guard);
+
+        // Notify remaining members
+        let leave_payload = GroupMlsLeavePayload {
+            group_id: group_id.to_string(),
+            leaving_member: self_id.clone(),
+        };
+        let leave_content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_LEAVE,
+            serde_json::to_string(&leave_payload)
+                .map_err(|e| Error::Other(format!("Serialize leave: {}", e)))?
+        );
+        for member in &members {
+            if member == &self_id {
+                continue;
+            }
+            let _ =
+                self.send_internal_message(member, leave_content.clone(), MessagePriority::Medium);
+        }
+
+        // Remove from cache
+        self.group_members.remove(group_id);
+
+        info!(group_id = %group_id, "Left mesh group");
+        Ok(())
+    }
+
+    /// Sends a message to all members of an MLS mesh group.
+    ///
+    /// The message is MLS-encrypted once, then fan-out as individual
+    /// point-to-point messages via `send_internal_message()`. Each member's
+    /// delivery goes through the full DORS/ACK/retry stack independently.
+    pub fn send_group_message(
+        &mut self,
+        group_id: &str,
+        content: &str,
+        priority: Option<MessagePriority>,
+        reply_to_msg: Option<&str>,
+    ) -> Result<Vec<MessageId>> {
+        let priority = priority.unwrap_or(MessagePriority::Medium);
+
+        // Encrypt via MLS
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
+        let mls_guard = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let encrypted = mls_guard.encrypt_for_group(&gid, content.as_bytes())?;
+        drop(mls_guard);
+
+        let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+
+        // Get members from cache or refresh
+        let members = match self.group_members.get(group_id) {
+            Some(m) => m.clone(),
+            None => self.refresh_group_members(group_id)?,
+        };
+
+        let self_id = self.config.user_id.clone();
+
+        // Build the internal message payload
+        let msg_payload = GroupMlsMessagePayload {
+            group_id: group_id.to_string(),
+            ciphertext: ciphertext_b64,
+        };
+        let payload_json = serde_json::to_string(&msg_payload)
+            .map_err(|e| Error::Other(format!("Serialize group message: {}", e)))?;
+
+        let mut base_content = format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload_json);
+
+        // If there's a reply_to_msg, include it as metadata in the payload
+        if let Some(reply_id) = reply_to_msg {
+            // Re-serialize with reply_to embedded
+            let extended = format!("{}|reply_to:{}", base_content, reply_id);
+            base_content = extended;
+        }
+
+        // Fan-out to each member
+        let mut message_ids = Vec::new();
+        let mut failed_members = Vec::new();
+        let mut succeeded_members = Vec::new();
+
+        for member in &members {
+            if member == &self_id {
+                continue;
+            }
+            match self.send_internal_message(member, base_content.clone(), priority) {
+                Ok(mid) => {
+                    message_ids.push(mid);
+                    succeeded_members.push(member.clone());
+                }
+                Err(e) => {
+                    warn!(
+                        group_id = %group_id,
+                        member = %member,
+                        error = %e,
+                        "Failed to send group message to member"
+                    );
+                    failed_members.push(member.clone());
+                }
+            }
+        }
+
+        let member_count = succeeded_members.len() as u32;
+
+        // Emit appropriate event
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            if failed_members.is_empty() {
+                state.emit_event(Event::group_message_sent(
+                    group_id.to_string(),
+                    message_ids.iter().map(|m| m.as_str().to_string()).collect(),
+                    member_count,
+                ));
+            } else {
+                state.emit_event(Event::group_message_partial_failure(
+                    group_id.to_string(),
+                    failed_members,
+                    succeeded_members,
+                ));
+            }
+        }
+
+        Ok(message_ids)
+    }
+
+    /// Lists all MLS mesh groups (excluding 1:1 sessions).
+    pub fn list_mesh_groups(&self) -> Result<Vec<String>> {
+        let mls = self
+            .mls_manager
+            .as_ref()
+            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
+        let mls_guard = mls
+            .read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let groups = mls_guard.list_groups()?;
+        Ok(groups.into_iter().map(|g| g.as_str().to_string()).collect())
+    }
+
+    /// Cleans up expired group message dedup entries.
+    fn cleanup_group_message_dedup(&mut self) {
+        let cutoff = Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS);
+        self.group_message_dedup
+            .retain(|_, seen_at| *seen_at > cutoff);
+    }
+
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
     fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
+        self.cleanup_group_message_dedup();
         let stale_file_ids = self
             .file_transfer_manager
             .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
@@ -11862,5 +12513,385 @@ mod tests {
 
         // Just verify it doesn't panic and the method is wired correctly
         assert!(protocol.mesh_services().seen_discovery_queries().is_empty());
+    }
+
+    // ========================================================================
+    // MESH GROUP MESSAGING TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_group_mls_create_mesh_group_requires_mls() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        // Without MLS initialization, create_mesh_group should fail
+        let result = protocol.create_mesh_group("Test Group");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("MLS not initialized"),
+            "Expected MLS not initialized error"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_create_mesh_group_with_mls() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let group_info = protocol.create_mesh_group("Test Group").unwrap();
+        assert_eq!(group_info.name, Some("Test Group".to_string()));
+        assert!(group_info.group_id.as_str().starts_with("group:"));
+        assert!(group_info.members.contains(&"user123".to_string()));
+
+        // Verify group is cached
+        let cached = protocol.group_members.get(group_info.group_id.as_str());
+        assert!(cached.is_some());
+        assert!(cached.unwrap().contains(&"user123".to_string()));
+    }
+
+    #[test]
+    fn test_group_mls_list_mesh_groups() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        // Initially no groups
+        let groups = protocol.list_mesh_groups().unwrap();
+        assert!(groups.is_empty());
+
+        // Create a group
+        let info = protocol.create_mesh_group("My Group").unwrap();
+        let groups = protocol.list_mesh_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0], info.group_id.as_str());
+    }
+
+    #[test]
+    fn test_group_mls_send_message_requires_mls() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let result = protocol.send_group_message("some-group", "hello", None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_group_mls_send_message_group_not_found() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        // Sending to non-existent group should fail
+        let result = protocol.send_group_message("nonexistent-group", "hello", None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_group_mls_send_message_solo_group() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Create group (only self is a member)
+        let info = protocol.create_mesh_group("Solo Group").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Sending in a solo group should succeed but produce no message IDs
+        // (no other members to fan out to)
+        let result = protocol.send_group_message(&group_id, "hello", None, None);
+        assert!(result.is_ok());
+        let message_ids = result.unwrap();
+        assert!(message_ids.is_empty(), "No messages should be sent to self");
+    }
+
+    #[test]
+    fn test_group_mls_leave_mesh_group() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Leave Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Verify group exists in cache
+        assert!(protocol.group_members.contains_key(&group_id));
+
+        // Leave the group
+        protocol.leave_mesh_group(&group_id).unwrap();
+
+        // Verify group removed from cache
+        assert!(!protocol.group_members.contains_key(&group_id));
+    }
+
+    #[test]
+    fn test_group_mls_invite_requires_key_package() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let info = protocol.create_mesh_group("Invite Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Inviting without key package should fail
+        let result = protocol.invite_to_group(&group_id, "bob");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("No key package"),
+            "Expected no key package error"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_dedup_cache() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Insert dedup entry
+        let key = ("group1".to_string(), 0u64, "alice".to_string());
+        protocol
+            .group_message_dedup
+            .insert(key.clone(), Instant::now());
+        assert!(protocol.group_message_dedup.contains_key(&key));
+
+        // Cleanup should keep recent entries
+        protocol.cleanup_group_message_dedup();
+        assert!(protocol.group_message_dedup.contains_key(&key));
+
+        // Insert old entry and verify cleanup removes it
+        let old_key = ("group2".to_string(), 0u64, "bob".to_string());
+        protocol.group_message_dedup.insert(
+            old_key.clone(),
+            Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS + 1),
+        );
+        protocol.cleanup_group_message_dedup();
+        assert!(!protocol.group_message_dedup.contains_key(&old_key));
+        assert!(protocol.group_message_dedup.contains_key(&key));
+    }
+
+    #[test]
+    fn test_group_mls_process_leave_message() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Pre-populate group member cache
+        protocol.group_members.insert(
+            "group:test-123".to_string(),
+            vec![
+                "user123".to_string(),
+                "alice".to_string(),
+                "bob".to_string(),
+            ],
+        );
+
+        // Simulate receiving a leave message
+        let leave_payload = GroupMlsLeavePayload {
+            group_id: "group:test-123".to_string(),
+            leaving_member: "alice".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_LEAVE,
+            serde_json::to_string(&leave_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // Check that GroupMemberRemoved event was emitted
+        let events = events.lock().unwrap();
+        let leave_event = events.iter().find(|e| {
+            matches!(e, Event::GroupMemberRemoved { group_id, user_id, .. }
+                if group_id == "group:test-123" && user_id == "alice")
+        });
+        assert!(leave_event.is_some(), "Expected GroupMemberRemoved event");
+    }
+
+    #[test]
+    fn test_group_mls_process_commit_add_message() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Create a group first so refresh_group_members can find it
+        let info = protocol.create_mesh_group("Commit Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Simulate receiving a commit "add" message (no ciphertext, just notification)
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: group_id.clone(),
+            commit_type: "add".to_string(),
+            ciphertext: String::new(),
+            affected_member: Some("carol".to_string()),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // Check that GroupMemberAdded event was emitted
+        let events = events.lock().unwrap();
+        let add_event = events.iter().find(|e| {
+            matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, .. }
+                if gid == &group_id && user_id == "carol")
+        });
+        assert!(
+            add_event.is_some(),
+            "Expected GroupMemberAdded event for carol"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_refresh_group_members() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        // Create group
+        let info = protocol.create_mesh_group("Refresh Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // refresh_group_members should populate cache
+        protocol.group_members.clear();
+        let members = protocol.refresh_group_members(&group_id).unwrap();
+        assert!(members.contains(&"user123".to_string()));
+        assert!(protocol.group_members.contains_key(&group_id));
+    }
+
+    #[test]
+    fn test_group_mls_group_events_emitted_on_create() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        protocol.create_mesh_group("Event Test").unwrap();
+
+        let events = events.lock().unwrap();
+        let created_event = events
+            .iter()
+            .find(|e| matches!(e, Event::GroupCreated { name, .. } if name == "Event Test"));
+        assert!(created_event.is_some(), "Expected GroupCreated event");
+    }
+
+    #[test]
+    fn test_group_mls_cleanup_includes_group_dedup() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Add an expired dedup entry
+        protocol.group_message_dedup.insert(
+            ("g1".to_string(), 0u64, "s1".to_string()),
+            Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS + 1),
+        );
+        assert_eq!(protocol.group_message_dedup.len(), 1);
+
+        // cleanup_expired_entries should clean it up
+        protocol.cleanup_expired_entries();
+        assert!(protocol.group_message_dedup.is_empty());
+    }
+
+    #[test]
+    fn test_group_mls_internal_prefixes_defined() {
+        // Verify all new prefixes are unique and well-formed
+        assert!(internal_prefixes::GROUP_MLS_MSG.starts_with("__"));
+        assert!(internal_prefixes::GROUP_MLS_MSG.ends_with("__"));
+        assert!(internal_prefixes::GROUP_MLS_WELCOME.starts_with("__"));
+        assert!(internal_prefixes::GROUP_MLS_COMMIT.starts_with("__"));
+        assert!(internal_prefixes::GROUP_MLS_LEAVE.starts_with("__"));
+
+        // All prefixes are distinct
+        let prefixes = [
+            internal_prefixes::GROUP_MLS_MSG,
+            internal_prefixes::GROUP_MLS_WELCOME,
+            internal_prefixes::GROUP_MLS_COMMIT,
+            internal_prefixes::GROUP_MLS_LEAVE,
+        ];
+        for (i, a) in prefixes.iter().enumerate() {
+            for (j, b) in prefixes.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "Prefixes must be unique");
+                    assert!(!a.starts_with(b), "No prefix should be a prefix of another");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_group_mls_payload_serialization_roundtrip() {
+        let msg_payload = GroupMlsMessagePayload {
+            group_id: "group:abc".to_string(),
+            ciphertext: "dGVzdA==".to_string(),
+        };
+        let json = serde_json::to_string(&msg_payload).unwrap();
+        let parsed: GroupMlsMessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.group_id, "group:abc");
+        assert_eq!(parsed.ciphertext, "dGVzdA==");
+
+        let welcome_payload = GroupMlsWelcomePayload {
+            group_id: "group:def".to_string(),
+            group_name: Some("Test Group".to_string()),
+            welcome_data: "d2VsY29tZQ==".to_string(),
+            member_list: vec!["alice".to_string(), "bob".to_string()],
+        };
+        let json = serde_json::to_string(&welcome_payload).unwrap();
+        let parsed: GroupMlsWelcomePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.group_id, "group:def");
+        assert_eq!(parsed.group_name, Some("Test Group".to_string()));
+        assert_eq!(parsed.member_list.len(), 2);
+
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: "group:ghi".to_string(),
+            commit_type: "add".to_string(),
+            ciphertext: "Y29tbWl0".to_string(),
+            affected_member: Some("carol".to_string()),
+        };
+        let json = serde_json::to_string(&commit_payload).unwrap();
+        let parsed: GroupMlsCommitPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.commit_type, "add");
+        assert_eq!(parsed.affected_member, Some("carol".to_string()));
+
+        let leave_payload = GroupMlsLeavePayload {
+            group_id: "group:jkl".to_string(),
+            leaving_member: "dave".to_string(),
+        };
+        let json = serde_json::to_string(&leave_payload).unwrap();
+        let parsed: GroupMlsLeavePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.leaving_member, "dave");
     }
 }

@@ -522,6 +522,26 @@ pub enum Event {
     /// A group operation failed (from relay).
     GroupError { reason: String },
 
+    /// A group message was sent to all members via mesh (MLS-encrypted fan-out).
+    GroupMessageSent {
+        /// MLS group identifier.
+        group_id: String,
+        /// Per-member message IDs from fan-out.
+        message_ids: Vec<String>,
+        /// Number of members the message was sent to.
+        member_count: u32,
+    },
+
+    /// A group message was only partially delivered (some members failed).
+    GroupMessagePartialFailure {
+        /// MLS group identifier.
+        group_id: String,
+        /// Members for whom send failed.
+        failed_members: Vec<String>,
+        /// Members for whom send succeeded.
+        succeeded_members: Vec<String>,
+    },
+
     // --- Service discovery ---
     /// A service was discovered on the mesh in response to a discovery query.
     ServiceDiscovered {
@@ -1033,6 +1053,32 @@ impl Event {
     /// Creates a GroupError event.
     pub fn group_error(reason: String) -> Self {
         Self::GroupError { reason }
+    }
+
+    /// Creates a GroupMessageSent event.
+    pub fn group_message_sent(
+        group_id: String,
+        message_ids: Vec<String>,
+        member_count: u32,
+    ) -> Self {
+        Self::GroupMessageSent {
+            group_id,
+            message_ids,
+            member_count,
+        }
+    }
+
+    /// Creates a GroupMessagePartialFailure event.
+    pub fn group_message_partial_failure(
+        group_id: String,
+        failed_members: Vec<String>,
+        succeeded_members: Vec<String>,
+    ) -> Self {
+        Self::GroupMessagePartialFailure {
+            group_id,
+            failed_members,
+            succeeded_members,
+        }
     }
 
     /// Creates a ServiceDiscovered event.
@@ -1610,6 +1656,26 @@ impl fmt::Debug for Event {
             Self::GroupError { reason } => f
                 .debug_struct("GroupError")
                 .field("reason", reason)
+                .finish(),
+            Self::GroupMessageSent {
+                group_id,
+                message_ids,
+                member_count,
+            } => f
+                .debug_struct("GroupMessageSent")
+                .field("group_id", group_id)
+                .field("message_count", &message_ids.len())
+                .field("member_count", member_count)
+                .finish(),
+            Self::GroupMessagePartialFailure {
+                group_id,
+                failed_members,
+                succeeded_members,
+            } => f
+                .debug_struct("GroupMessagePartialFailure")
+                .field("group_id", group_id)
+                .field("failed_count", &failed_members.len())
+                .field("succeeded_count", &succeeded_members.len())
                 .finish(),
             Self::DorsScoreUpdated { scores } => f
                 .debug_struct("DorsScoreUpdated")

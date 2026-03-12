@@ -766,6 +766,34 @@ interface OfflineProtocol {
     string clear_typing(string conversation_id);
     
     // ========================================================================
+    // MESH GROUP MESSAGING (MLS-encrypted, transport-agnostic)
+    // ========================================================================
+
+    // Create a new MLS mesh group
+    [Throws=ProtocolError]
+    MlsGroupInfo create_mesh_group(string group_name);
+
+    // Send an MLS-encrypted message to all group members via mesh
+    [Throws=ProtocolError]
+    sequence<string> send_mesh_group_message(string group_id, string content, MessagePriority? priority, string? reply_to_msg);
+
+    // Invite a user to an MLS mesh group
+    [Throws=ProtocolError]
+    void invite_to_mesh_group(string group_id, string invitee_user_id);
+
+    // Remove a member from an MLS mesh group
+    [Throws=ProtocolError]
+    void remove_from_mesh_group(string group_id, string member_id);
+
+    // Leave an MLS mesh group
+    [Throws=ProtocolError]
+    void leave_mesh_group(string group_id);
+
+    // List all MLS mesh groups (excluding 1:1 sessions)
+    [Throws=ProtocolError]
+    sequence<string> list_mesh_groups();
+
+    // ========================================================================
     // GROUP MANAGEMENT (RELAY SERVER API)
     // ========================================================================
     

@@ -3115,6 +3115,97 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // MESH GROUP MESSAGING (MLS-encrypted, transport-agnostic)
+    // ========================================================================
+
+    /// Create a new MLS mesh group.
+    pub fn create_mesh_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .create_mesh_group(&group_name)
+            .map(MlsGroupInfo::from)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Send an MLS-encrypted message to all group members via mesh.
+    pub fn send_mesh_group_message(
+        &self,
+        group_id: String,
+        content: String,
+        priority: Option<MessagePriority>,
+        reply_to_msg: Option<String>,
+    ) -> Result<Vec<String>, ProtocolError> {
+        let core_priority = priority.map(|p| match p {
+            MessagePriority::Low => CorePriority::Low,
+            MessagePriority::Medium => CorePriority::Medium,
+            MessagePriority::High | MessagePriority::Critical => CorePriority::High,
+        });
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .send_group_message(&group_id, &content, core_priority, reply_to_msg.as_deref())
+            .map(|ids| ids.into_iter().map(|id| id.as_str().to_string()).collect())
+            .map_err(|e| ProtocolError::SendFailed(e.to_string()))
+    }
+
+    /// Invite a user to an MLS mesh group.
+    pub fn invite_to_mesh_group(
+        &self,
+        group_id: String,
+        invitee_user_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .invite_to_group(&group_id, &invitee_user_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Remove a member from an MLS mesh group.
+    pub fn remove_from_mesh_group(
+        &self,
+        group_id: String,
+        member_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .remove_from_group(&group_id, &member_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Leave an MLS mesh group.
+    pub fn leave_mesh_group(&self, group_id: String) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .leave_mesh_group(&group_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// List all MLS mesh groups (excluding 1:1 sessions).
+    pub fn list_mesh_groups(&self) -> Result<Vec<String>, ProtocolError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .list_mesh_groups()
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    // ========================================================================
     // GROUP MANAGEMENT (RELAY SERVER API)
     // ========================================================================
 
