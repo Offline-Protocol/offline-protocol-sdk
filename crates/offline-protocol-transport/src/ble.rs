@@ -11,15 +11,12 @@ use crate::constants::{
     BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES, BLE_MAX_FRAGMENT_COUNT,
     BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC, FRAGMENT_VERSION,
 };
-use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
+use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, SystemTime};
-
-/// Thread-safe, optional callback shared between BLE/Wi-Fi Direct transports.
-type SharedCallback = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
 /// Peer device information
 #[derive(Debug, Clone)]

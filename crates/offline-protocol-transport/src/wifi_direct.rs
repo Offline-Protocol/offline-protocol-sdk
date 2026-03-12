@@ -4,14 +4,11 @@
 //! This is primarily for Android devices and offers faster data transfer than BLE.
 
 // Constants are defined but not used in Rust code (used in native Android code)
-use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
+use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-
-/// Thread-safe, optional callback shared between transport implementations.
-type SharedCallback = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
 /// Peer device information for Wi-Fi Direct
 #[derive(Debug, Clone)]

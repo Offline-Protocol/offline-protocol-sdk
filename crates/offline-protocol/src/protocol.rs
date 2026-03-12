@@ -118,6 +118,10 @@ const GROUP_MESSAGE_DEDUP_TTL_SECS: u64 = 300;
 const MAX_GROUP_MESSAGE_DEDUP_ENTRIES: usize = 10_000;
 /// Maximum allowed base64-encoded payload size for incoming group messages (1 MB).
 const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
+/// Maximum number of buffered out-of-order commits per group.
+const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
+/// TTL for buffered pending commits (2 minutes).
+const PENDING_COMMIT_TTL_SECS: u64 = 120;
 const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 const MAX_KNOWN_PEERS: usize = 1000;
@@ -292,6 +296,21 @@ pub(crate) struct GroupMlsLeavePayload {
     pub(crate) group_id: String,
     /// User ID of the leaving member.
     pub(crate) leaving_member: String,
+}
+
+/// A commit that arrived out-of-order and is waiting to be processed.
+///
+/// In mesh networks, messages can arrive out of order. If a Commit arrives
+/// before a prior Commit, MLS decryption will fail. We buffer it here and
+/// retry after successfully processing a later commit for the same group.
+#[derive(Debug, Clone)]
+struct PendingCommit {
+    /// The original sender of this commit.
+    sender: String,
+    /// The raw JSON data (after prefix strip) for replay.
+    data: String,
+    /// When this pending commit was first buffered.
+    buffered_at: Instant,
 }
 
 /// A received key package awaiting use for session creation.
@@ -674,6 +693,11 @@ pub struct OfflineProtocol {
     /// Deduplication cache for group messages received via multiple paths.
     /// Key: message ID, Value: when first seen.
     group_message_dedup: HashMap<String, Instant>,
+
+    /// Buffer for out-of-order MLS commits that failed to decrypt.
+    /// Maps group_id -> list of pending commits awaiting retry.
+    /// When a commit succeeds for a group, buffered commits are drained and retried.
+    pending_commits: HashMap<String, Vec<PendingCommit>>,
 }
 
 impl OfflineProtocol {
@@ -738,6 +762,7 @@ impl OfflineProtocol {
             mesh_services: MeshServices::new(),
             group_members: HashMap::new(),
             group_message_dedup: HashMap::new(),
+            pending_commits: HashMap::new(),
             config,
         })
     }
@@ -6040,6 +6065,14 @@ impl OfflineProtocol {
             return;
         }
 
+        // Mark as seen BEFORE attempting decode/decrypt to prevent replay
+        // amplification: an adversary replaying the same message (even with a bad
+        // epoch) should only trigger one MLS crypto operation.
+        self.group_message_dedup.insert(dedup_key, Instant::now());
+        if self.group_message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+            self.cleanup_group_message_dedup();
+        }
+
         // Size guard before base64 decode
         let ciphertext_bytes = match base64_decode(&payload.ciphertext) {
             Ok(bytes) => bytes,
@@ -6086,10 +6119,6 @@ impl OfflineProtocol {
         drop(mls_guard);
 
         if let Some(plaintext) = decrypt_result {
-            self.group_message_dedup.insert(dedup_key, Instant::now());
-            if self.group_message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
-                self.cleanup_group_message_dedup();
-            }
             let text = String::from_utf8_lossy(&plaintext).to_string();
             let msg_id = message.id.as_str().to_string();
             let timestamp = chrono::Utc::now().to_rfc3339();
@@ -6168,12 +6197,30 @@ impl OfflineProtocol {
     ///
     /// Validates the `affected_member` claim against actual MLS state delta
     /// to prevent forged membership events.
+    ///
+    /// If decryption fails (e.g., due to out-of-order delivery in a mesh network),
+    /// the commit is buffered for deferred retry. When a subsequent commit for the
+    /// same group succeeds, buffered commits are drained and retried.
     fn handle_group_mls_commit(&mut self, sender: &str, data: &str) {
+        if self.try_process_commit(sender, data) {
+            // Success — drain any buffered commits for this group
+            let group_id = serde_json::from_str::<GroupMlsCommitPayload>(data)
+                .map(|p| p.group_id)
+                .unwrap_or_default();
+            self.drain_pending_commits(&group_id);
+        }
+    }
+
+    /// Attempts to process a single MLS Commit. Returns `true` on success.
+    ///
+    /// On failure, buffers the commit for later retry unless the payload is
+    /// unparseable or the ciphertext is invalid.
+    fn try_process_commit(&mut self, sender: &str, data: &str) -> bool {
         let payload = match serde_json::from_str::<GroupMlsCommitPayload>(data) {
             Ok(p) => p,
             Err(_) => {
                 warn!(sender = %sender, "Failed to parse GroupMlsCommit payload");
-                return;
+                return false;
             }
         };
 
@@ -6188,14 +6235,14 @@ impl OfflineProtocol {
                 group_id = %payload.group_id,
                 "Received Commit with empty ciphertext, cannot advance MLS epoch"
             );
-            return;
+            return false;
         }
 
         let ciphertext_bytes = match base64_decode(&payload.ciphertext) {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Failed to decode commit ciphertext");
-                return;
+                return false;
             }
         };
 
@@ -6203,7 +6250,7 @@ impl OfflineProtocol {
             Ok(guard) => guard,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group commit");
-                return;
+                return false;
             }
         };
 
@@ -6229,14 +6276,44 @@ impl OfflineProtocol {
         let mls_ok = match mls_guard.decrypt_from_group(&encrypted) {
             Ok(_) => true,
             Err(e) => {
-                warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
+                error!(
+                    group_id = %payload.group_id,
+                    epoch = payload.epoch,
+                    error = %e,
+                    "Failed to process group commit — buffering for deferred retry"
+                );
                 false
             }
         };
         drop(mls_guard);
 
         if !mls_ok {
-            return;
+            // Buffer for retry — the commit may have arrived before a prior commit
+            let pending = PendingCommit {
+                sender: sender.to_string(),
+                data: data.to_string(),
+                buffered_at: Instant::now(),
+            };
+            let buf = self
+                .pending_commits
+                .entry(payload.group_id.clone())
+                .or_default();
+            if buf.len() < MAX_PENDING_COMMITS_PER_GROUP {
+                buf.push(pending);
+                debug!(
+                    group_id = %payload.group_id,
+                    buffered_count = buf.len(),
+                    "Buffered out-of-order commit for deferred retry"
+                );
+            } else {
+                warn!(
+                    group_id = %payload.group_id,
+                    "Pending commit buffer full, dropping oldest"
+                );
+                buf.remove(0);
+                buf.push(pending);
+            }
+            return false;
         }
 
         // Refresh cache and compute actual membership delta
@@ -6285,6 +6362,62 @@ impl OfflineProtocol {
                     sender.to_string(),
                 ));
             }
+        }
+
+        true
+    }
+
+    /// Drains and retries buffered pending commits for a group after a
+    /// successful commit advanced the epoch. Each successful retry triggers
+    /// another drain pass (at most `MAX_PENDING_COMMITS_PER_GROUP` iterations).
+    fn drain_pending_commits(&mut self, group_id: &str) {
+        // Limit iterations to avoid unbounded looping
+        for _ in 0..MAX_PENDING_COMMITS_PER_GROUP {
+            let pending = match self.pending_commits.get_mut(group_id) {
+                Some(buf) if !buf.is_empty() => std::mem::take(buf),
+                _ => break,
+            };
+
+            let mut any_succeeded = false;
+            let mut still_pending = Vec::new();
+
+            for entry in pending {
+                // Drop expired entries
+                if entry.buffered_at.elapsed() > StdDuration::from_secs(PENDING_COMMIT_TTL_SECS) {
+                    debug!(
+                        group_id = %group_id,
+                        "Dropping expired pending commit"
+                    );
+                    continue;
+                }
+                if self.try_process_commit(&entry.sender, &entry.data) {
+                    any_succeeded = true;
+                } else {
+                    still_pending.push(entry);
+                }
+            }
+
+            // Re-buffer commits that still failed
+            if !still_pending.is_empty() {
+                self.pending_commits
+                    .entry(group_id.to_string())
+                    .or_default()
+                    .extend(still_pending);
+            }
+
+            if !any_succeeded {
+                break;
+            }
+            // Another commit succeeded — loop again in case it unblocked more
+        }
+
+        // Clean up empty entries
+        if self
+            .pending_commits
+            .get(group_id)
+            .map_or(true, |v| v.is_empty())
+        {
+            self.pending_commits.remove(group_id);
         }
     }
 
@@ -6583,16 +6716,17 @@ impl OfflineProtocol {
 
     /// Leaves an MLS mesh group.
     ///
-    /// Notifies remaining members and removes local group state.
+    /// Notifies remaining members and then removes local group state.
     /// Note: The MLS layer does not support self-removal Commits, so remaining
     /// members receive a plaintext leave notification. The deterministic election
     /// in `handle_group_mls_leave` will select one member to issue the MLS
     /// remove-commit to properly advance the epoch.
     ///
-    /// **Ordering note:** Local MLS state is deleted *before* sending leave
-    /// notifications. If all notification sends fail, the local state is gone
-    /// but peers will not know. This is an intentional fail-open design — local
-    /// cleanup is prioritized to prevent stale state.
+    /// **Ordering note:** Leave notifications are sent *before* deleting local
+    /// MLS state. If all notification sends fail, local state is preserved and
+    /// the caller receives an error so the leave can be retried. This prevents
+    /// orphaned membership where the leaver is gone locally but peers never
+    /// learn about the departure.
     pub fn leave_mesh_group(&mut self, group_id: &str) -> Result<()> {
         // Get members before leaving
         let members = self
@@ -6604,13 +6738,7 @@ impl OfflineProtocol {
 
         let self_id = self.config.user_id.clone();
 
-        // Leave the MLS group (deletes local state only)
-        let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
-        mls_guard.leave_group(&gid)?;
-        drop(mls_guard);
-
-        // Notify remaining members
+        // Build leave notification payload before touching MLS state
         let leave_payload = GroupMlsLeavePayload {
             group_id: group_id.to_string(),
             leaving_member: self_id.clone(),
@@ -6621,21 +6749,44 @@ impl OfflineProtocol {
             serde_json::to_string(&leave_payload)
                 .map_err(|e| Error::Other(format!("Serialize leave: {}", e)))?
         );
+
+        // Send notifications first — if all fail, keep local state intact for retry
+        let mut any_sent = false;
+        let mut had_recipients = false;
         for member in &members {
             if member == &self_id {
                 continue;
             }
-            if let Err(e) =
-                self.send_internal_message(member, leave_content.clone(), MessagePriority::Medium)
+            had_recipients = true;
+            match self.send_internal_message(member, leave_content.clone(), MessagePriority::Medium)
             {
-                warn!(
-                    group_id = %group_id,
-                    member = %member,
-                    error = %e,
-                    "Failed to send leave notification to group member"
-                );
+                Ok(_) => {
+                    any_sent = true;
+                }
+                Err(e) => {
+                    warn!(
+                        group_id = %group_id,
+                        member = %member,
+                        error = %e,
+                        "Failed to send leave notification to group member"
+                    );
+                }
             }
         }
+
+        // If there were other members but no notification succeeded, fail so the
+        // caller can retry rather than silently orphaning the membership.
+        if had_recipients && !any_sent {
+            return Err(Error::Other(
+                "All leave notifications failed — local state preserved for retry".to_string(),
+            ));
+        }
+
+        // Now safe to delete local MLS state — at least one peer was notified
+        let mls_guard = self.read_mls_guard()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        mls_guard.leave_group(&gid)?;
+        drop(mls_guard);
 
         // Remove from cache
         self.group_members.remove(group_id);
@@ -6787,6 +6938,13 @@ impl OfflineProtocol {
             entries.truncate(MAX_GROUP_MESSAGE_DEDUP_ENTRIES);
             self.group_message_dedup = entries.into_iter().collect();
         }
+
+        // Expire stale pending commits
+        let commit_cutoff = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS);
+        self.pending_commits.retain(|_, commits| {
+            commits.retain(|c| c.buffered_at > commit_cutoff);
+            !commits.is_empty()
+        });
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
@@ -14027,5 +14185,334 @@ mod tests {
                 prefix
             );
         }
+    }
+
+    // ========================================================================
+    // Dedup-before-decrypt (anti-replay amplification)
+    // ========================================================================
+
+    #[test]
+    fn test_group_mls_dedup_inserted_before_decrypt_attempt() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Create a group so MLS is available for the group_id
+        let info = protocol.create_mesh_group("Dedup Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Build a group message with bad ciphertext (will fail decryption)
+        let msg_payload = GroupMlsMessagePayload {
+            group_id: group_id.clone(),
+            ciphertext: base64_encode(b"definitely-not-valid-mls-ciphertext"),
+            epoch: 1,
+            reply_to: None,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_MSG,
+            serde_json::to_string(&msg_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let msg_id = message.id.as_str().to_string();
+
+        // Process the message — decryption will fail but dedup should be recorded
+        let _ = protocol.process_internal_message(&message);
+        assert!(
+            protocol.group_message_dedup.contains_key(&msg_id),
+            "Dedup entry must be inserted even when decryption fails"
+        );
+
+        // Second delivery of same message should be skipped entirely
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        let _ = protocol.process_internal_message(&message);
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, Event::GroupMessageReceived { .. })),
+            "Replayed message after dedup must not produce any event"
+        );
+    }
+
+    // ========================================================================
+    // Leave notification ordering (send-before-delete)
+    // ========================================================================
+
+    #[test]
+    fn test_group_mls_leave_preserves_state_on_total_send_failure() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        // Note: protocol NOT started — send_internal_message will fail with NotStarted
+
+        let info = protocol.create_mesh_group("Leave Fail Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Inject a fake member so there are recipients
+        protocol
+            .group_members
+            .get_mut(&group_id)
+            .unwrap()
+            .push("bob".to_string());
+
+        // Attempt to leave — all sends should fail because protocol isn't started
+        let result = protocol.leave_mesh_group(&group_id);
+        assert!(
+            result.is_err(),
+            "Leave should fail when all notifications fail"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("local state preserved"),
+            "Error should indicate state was preserved for retry"
+        );
+
+        // Verify local MLS state is still intact (group still exists)
+        let groups = protocol.list_mesh_groups().unwrap();
+        assert!(
+            groups.contains(&group_id),
+            "Group should still exist locally after failed leave"
+        );
+
+        // Verify cache is still intact
+        assert!(
+            protocol.group_members.contains_key(&group_id),
+            "Group member cache should be preserved after failed leave"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_leave_deletes_state_after_successful_notification() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Leave OK Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Solo group (only self) — no recipients, leave should succeed directly
+        let result = protocol.leave_mesh_group(&group_id);
+        assert!(result.is_ok(), "Leave with no other members should succeed");
+
+        // Verify local state was cleaned up
+        let groups = protocol.list_mesh_groups().unwrap();
+        assert!(
+            !groups.contains(&group_id),
+            "Group should be removed after successful leave"
+        );
+        assert!(
+            !protocol.group_members.contains_key(&group_id),
+            "Cache should be cleared after successful leave"
+        );
+    }
+
+    // ========================================================================
+    // Out-of-order commit buffering
+    // ========================================================================
+
+    #[test]
+    fn test_group_mls_commit_failure_buffers_for_retry() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Buffer Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Send a commit with bad ciphertext — should be buffered
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: group_id.clone(),
+            commit_type: GroupCommitType::Add,
+            ciphertext: base64_encode(b"bad-commit-data"),
+            epoch: 99,
+            affected_member: Some("new-member".to_string()),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+        let _ = protocol.process_internal_message(&message);
+
+        // Verify commit was buffered
+        assert!(
+            protocol.pending_commits.contains_key(&group_id),
+            "Failed commit should be buffered"
+        );
+        assert_eq!(
+            protocol.pending_commits.get(&group_id).unwrap().len(),
+            1,
+            "Exactly one commit should be buffered"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_pending_commit_buffer_cap() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Cap Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Fill the buffer beyond capacity
+        for i in 0..(MAX_PENDING_COMMITS_PER_GROUP + 4) {
+            let commit_payload = GroupMlsCommitPayload {
+                group_id: group_id.clone(),
+                commit_type: GroupCommitType::Add,
+                ciphertext: base64_encode(format!("bad-commit-{}", i).as_bytes()),
+                epoch: i as u64,
+                affected_member: None,
+            };
+            let content = format!(
+                "{}{}",
+                internal_prefixes::GROUP_MLS_COMMIT,
+                serde_json::to_string(&commit_payload).unwrap()
+            );
+            let message = Message::new(
+                UserId::new("alice").unwrap(),
+                UserId::new("user123").unwrap(),
+                AppId::new("test-app").unwrap(),
+                &content,
+            );
+            let _ = protocol.process_internal_message(&message);
+        }
+
+        // Buffer should be capped at MAX_PENDING_COMMITS_PER_GROUP
+        let buffered = protocol.pending_commits.get(&group_id).unwrap();
+        assert_eq!(
+            buffered.len(),
+            MAX_PENDING_COMMITS_PER_GROUP,
+            "Buffer should not exceed cap"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_pending_commit_expired_entries_cleaned_up() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let group_id = "test-group".to_string();
+        // Insert a pending commit with an expired timestamp
+        let expired = PendingCommit {
+            sender: "alice".to_string(),
+            data: "{}".to_string(),
+            buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
+        };
+        protocol
+            .pending_commits
+            .entry(group_id.clone())
+            .or_default()
+            .push(expired);
+
+        // Insert a recent one
+        let recent = PendingCommit {
+            sender: "bob".to_string(),
+            data: "{}".to_string(),
+            buffered_at: Instant::now(),
+        };
+        protocol
+            .pending_commits
+            .entry(group_id.clone())
+            .or_default()
+            .push(recent);
+
+        // Run cleanup
+        protocol.cleanup_group_message_dedup();
+
+        // Expired entry should be removed, recent one retained
+        let buf = protocol.pending_commits.get(&group_id).unwrap();
+        assert_eq!(buf.len(), 1, "Only recent pending commit should survive");
+        assert_eq!(buf[0].sender, "bob");
+    }
+
+    #[test]
+    fn test_group_mls_commit_empty_ciphertext_not_buffered() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("No Buffer Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Empty ciphertext — this is a malformed commit, not an ordering issue
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: group_id.clone(),
+            commit_type: GroupCommitType::Remove,
+            ciphertext: String::new(),
+            epoch: 1,
+            affected_member: None,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+        let _ = protocol.process_internal_message(&message);
+
+        // Empty ciphertext should NOT be buffered (it's not an ordering issue)
+        assert!(
+            !protocol.pending_commits.contains_key(&group_id)
+                || protocol.pending_commits.get(&group_id).unwrap().is_empty(),
+            "Empty ciphertext commits must not be buffered"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_double_leave_is_idempotent() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Double Leave").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // First leave should succeed
+        let result = protocol.leave_mesh_group(&group_id);
+        assert!(result.is_ok());
+
+        // Second leave is idempotent — MLS delete_group silently succeeds when
+        // the group doesn't exist, and there are no members to notify.
+        let result = protocol.leave_mesh_group(&group_id);
+        assert!(
+            result.is_ok(),
+            "Double leave should be idempotent (no error)"
+        );
+
+        // Verify state is clean
+        assert!(!protocol.group_members.contains_key(&group_id));
+        let groups = protocol.list_mesh_groups().unwrap();
+        assert!(!groups.contains(&group_id));
     }
 }

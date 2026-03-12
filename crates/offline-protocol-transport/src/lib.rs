@@ -21,7 +21,7 @@ pub use ble::{BleTransport, BleTransportBuilder, PeerDevice};
 pub use error::{Error, Result};
 pub use internet::{InternetConfig, InternetTransport};
 pub use traits::{Transport, TransportStatus};
-pub use types::{LinkQuality, TransportMetrics, TransportType};
+pub use types::{LinkQuality, SharedCallback, TransportMetrics, TransportType};
 pub use wifi_direct::{WifiDirectConfig, WifiDirectPeer, WifiDirectTransport};
 
 // MockTransport is only available for testing
