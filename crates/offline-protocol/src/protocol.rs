@@ -122,6 +122,11 @@ const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 const PENDING_COMMIT_TTL_SECS: u64 = 120;
+/// Maximum plaintext content size for outgoing group messages (512 KB).
+/// After MLS encryption + base64, the wire payload must stay within
+/// `MAX_BASE64_PAYLOAD_SIZE` (1 MB). 512 KB plaintext leaves headroom for MLS
+/// framing overhead and the base64 expansion (~33%).
+const MAX_GROUP_CONTENT_LENGTH: usize = 524_288;
 const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 const MAX_KNOWN_PEERS: usize = 1000;
@@ -6202,25 +6207,22 @@ impl OfflineProtocol {
     /// the commit is buffered for deferred retry. When a subsequent commit for the
     /// same group succeeds, buffered commits are drained and retried.
     fn handle_group_mls_commit(&mut self, sender: &str, data: &str) {
-        if self.try_process_commit(sender, data) {
+        if let Some(group_id) = self.try_process_commit(sender, data) {
             // Success — drain any buffered commits for this group
-            let group_id = serde_json::from_str::<GroupMlsCommitPayload>(data)
-                .map(|p| p.group_id)
-                .unwrap_or_default();
             self.drain_pending_commits(&group_id);
         }
     }
 
-    /// Attempts to process a single MLS Commit. Returns `true` on success.
+    /// Attempts to process a single MLS Commit. Returns the group ID on success.
     ///
     /// On failure, buffers the commit for later retry unless the payload is
     /// unparseable or the ciphertext is invalid.
-    fn try_process_commit(&mut self, sender: &str, data: &str) -> bool {
+    fn try_process_commit(&mut self, sender: &str, data: &str) -> Option<String> {
         let payload = match serde_json::from_str::<GroupMlsCommitPayload>(data) {
             Ok(p) => p,
             Err(_) => {
                 warn!(sender = %sender, "Failed to parse GroupMlsCommit payload");
-                return false;
+                return None;
             }
         };
 
@@ -6235,14 +6237,14 @@ impl OfflineProtocol {
                 group_id = %payload.group_id,
                 "Received Commit with empty ciphertext, cannot advance MLS epoch"
             );
-            return false;
+            return None;
         }
 
         let ciphertext_bytes = match base64_decode(&payload.ciphertext) {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Failed to decode commit ciphertext");
-                return false;
+                return None;
             }
         };
 
@@ -6250,7 +6252,7 @@ impl OfflineProtocol {
             Ok(guard) => guard,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group commit");
-                return false;
+                return None;
             }
         };
 
@@ -6313,7 +6315,7 @@ impl OfflineProtocol {
                 buf.remove(0);
                 buf.push(pending);
             }
-            return false;
+            return None;
         }
 
         // Refresh cache and compute actual membership delta
@@ -6364,7 +6366,7 @@ impl OfflineProtocol {
             }
         }
 
-        true
+        Some(payload.group_id)
     }
 
     /// Drains and retries buffered pending commits for a group after a
@@ -6390,7 +6392,10 @@ impl OfflineProtocol {
                     );
                     continue;
                 }
-                if self.try_process_commit(&entry.sender, &entry.data) {
+                if self
+                    .try_process_commit(&entry.sender, &entry.data)
+                    .is_some()
+                {
                     any_succeeded = true;
                 } else {
                     still_pending.push(entry);
@@ -6516,10 +6521,9 @@ impl OfflineProtocol {
             }
         }
 
-        let _ = self.refresh_group_members(&payload.group_id);
-
         // Only emit the leave event if we didn't already emit via remove_from_group
         if !should_remove {
+            let _ = self.refresh_group_members(&payload.group_id);
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::group_member_removed(
                     payload.group_id,
@@ -6807,6 +6811,14 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<&str>,
     ) -> Result<Vec<MessageId>> {
+        if content.len() > MAX_GROUP_CONTENT_LENGTH {
+            return Err(Error::Other(format!(
+                "Group message content too large: {} bytes exceeds {} limit",
+                content.len(),
+                MAX_GROUP_CONTENT_LENGTH
+            )));
+        }
+
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
         // Encrypt and read member list while holding &mut self to ensure
