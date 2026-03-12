@@ -38,7 +38,11 @@ pub use offline_protocol_mls::{
 // Re-export the in-memory storage for testing
 pub use offline_protocol_mls::storage::InMemoryStorage;
 
+use crate::protocol::{
+    internal_prefixes, GroupCommitType, GroupMlsCommitPayload, GroupMlsWelcomePayload,
+};
 use crate::{Error, OfflineProtocol, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use offline_protocol_core::MessagePriority;
 use std::sync::Arc;
 
@@ -109,7 +113,8 @@ pub fn create_manager(
 
 /// Result of distributing an MLS commit to group members.
 #[derive(Debug)]
-pub struct CommitDistributionResult {
+#[allow(dead_code)]
+pub(crate) struct CommitDistributionResult {
     /// Number of members the commit was sent to.
     pub sent_count: usize,
 
@@ -128,14 +133,19 @@ pub struct CommitDistributionResult {
 /// * `protocol` - The protocol instance to send messages through
 /// * `mls_manager` - The MLS manager for group info
 /// * `commit` - The commit message to distribute
+/// * `commit_type` - The type of commit (Add or Remove)
+/// * `affected_member` - The user ID of the affected member, if applicable
 ///
 /// # Returns
 ///
 /// Returns a result indicating how many members received the commit.
-pub fn distribute_commit(
+#[allow(dead_code)]
+pub(crate) fn distribute_commit(
     protocol: &mut OfflineProtocol,
     mls_manager: &MlsManager,
     commit: &EncryptedMessage,
+    commit_type: GroupCommitType,
+    affected_member: Option<&str>,
 ) -> Result<CommitDistributionResult> {
     let group_info = mls_manager
         .get_group_info(&commit.group_id)
@@ -144,17 +154,16 @@ pub fn distribute_commit(
 
     let sender_id = mls_manager.user_id();
 
-    // Build a __GRP_MLS_COMMIT__ internal message so the commit bypasses
-    // the MLS 1:1 encryption layer (it is already MLS group ciphertext).
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    let commit_payload = serde_json::json!({
-        "group_id": commit.group_id.as_str(),
-        "commit_type": "add",
-        "ciphertext": BASE64.encode(&commit.ciphertext),
-        "epoch": commit.epoch,
-    });
+    let commit_payload = GroupMlsCommitPayload {
+        group_id: commit.group_id.as_str().to_string(),
+        commit_type,
+        ciphertext: BASE64.encode(&commit.ciphertext),
+        epoch: commit.epoch,
+        affected_member: affected_member.map(|s| s.to_string()),
+    };
     let commit_content = format!(
-        "__GRP_MLS_COMMIT__{}",
+        "{}{}",
+        internal_prefixes::GROUP_MLS_COMMIT,
         serde_json::to_string(&commit_payload)
             .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
     );
@@ -192,22 +201,33 @@ pub fn distribute_commit(
 /// # Arguments
 ///
 /// * `protocol` - The protocol instance to send messages through
+/// * `mls_manager` - The MLS manager (used to fetch member list)
 /// * `welcome` - The welcome message to send
 /// * `recipient` - The user ID of the new member
-pub fn send_welcome(
+#[allow(dead_code)]
+pub(crate) fn send_welcome(
     protocol: &mut OfflineProtocol,
+    mls_manager: &MlsManager,
     welcome: &WelcomeMessage,
     recipient: &str,
 ) -> Result<()> {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-    let welcome_payload = serde_json::json!({
-        "group_id": welcome.group_id.as_str(),
-        "group_name": welcome.group_name,
-        "welcome_data": BASE64.encode(&welcome.welcome_data),
-        "member_list": [],
-    });
+    // Fetch current member list so the invitee knows who is in the group
+    let member_list = mls_manager
+        .get_group_info(&welcome.group_id)
+        .ok()
+        .flatten()
+        .map(|info| info.members)
+        .unwrap_or_default();
+
+    let welcome_payload = GroupMlsWelcomePayload {
+        group_id: welcome.group_id.as_str().to_string(),
+        group_name: welcome.group_name.clone(),
+        welcome_data: BASE64.encode(&welcome.welcome_data),
+        member_list,
+    };
     let welcome_content = format!(
-        "__GRP_MLS_WELCOME__{}",
+        "{}{}",
+        internal_prefixes::GROUP_MLS_WELCOME,
         serde_json::to_string(&welcome_payload)
             .map_err(|e| Error::Other(format!("Serialize welcome: {}", e)))?
     );
@@ -227,7 +247,8 @@ pub fn send_welcome(
 /// * `mls_manager` - The MLS manager
 /// * `group_id` - The group to remove the member from
 /// * `member_id` - The user ID of the member to remove
-pub fn remove_member_and_distribute(
+#[allow(dead_code)]
+pub(crate) fn remove_member_and_distribute(
     protocol: &mut OfflineProtocol,
     mls_manager: &MlsManager,
     group_id: &GroupId,
@@ -237,7 +258,13 @@ pub fn remove_member_and_distribute(
         .remove_group_member(group_id, member_id)
         .map_err(|e| Error::Other(format!("Failed to remove member: {}", e)))?;
 
-    distribute_commit(protocol, mls_manager, &commit)
+    distribute_commit(
+        protocol,
+        mls_manager,
+        &commit,
+        GroupCommitType::Remove,
+        Some(member_id),
+    )
 }
 
 /// Updates group keys and distributes the commit to all members.
@@ -250,7 +277,8 @@ pub fn remove_member_and_distribute(
 /// * `protocol` - The protocol instance to send messages through
 /// * `mls_manager` - The MLS manager
 /// * `group_id` - The group to update keys for
-pub fn update_keys_and_distribute(
+#[allow(dead_code)]
+pub(crate) fn update_keys_and_distribute(
     protocol: &mut OfflineProtocol,
     mls_manager: &MlsManager,
     group_id: &GroupId,
@@ -259,13 +287,15 @@ pub fn update_keys_and_distribute(
         .update_keys(group_id)
         .map_err(|e| Error::Other(format!("Failed to update keys: {}", e)))?;
 
-    distribute_commit(protocol, mls_manager, &commit)
+    // Key updates are neither add nor remove; use Add as the generic commit type
+    // with no affected member, since this is purely a key rotation.
+    distribute_commit(protocol, mls_manager, &commit, GroupCommitType::Add, None)
 }
 
 /// Adds a member to a group and sends the welcome message.
 ///
 /// This is a convenience function that combines `add_group_member` with
-/// automatic welcome message delivery.
+/// automatic welcome message delivery and commit distribution.
 ///
 /// # Arguments
 ///
@@ -274,7 +304,8 @@ pub fn update_keys_and_distribute(
 /// * `group_id` - The group to add the member to
 /// * `member_key_package` - The new member's key package
 /// * `member_id` - The user ID of the new member
-pub fn add_member_and_send_welcome(
+#[allow(dead_code)]
+pub(crate) fn add_member_and_send_welcome(
     protocol: &mut OfflineProtocol,
     mls_manager: &MlsManager,
     group_id: &GroupId,
@@ -285,8 +316,14 @@ pub fn add_member_and_send_welcome(
         .add_group_member(group_id, member_key_package)
         .map_err(|e| Error::Other(format!("Failed to add member: {}", e)))?;
 
-    send_welcome(protocol, &welcome, member_id)?;
-    distribute_commit(protocol, mls_manager, &commit)?;
+    send_welcome(protocol, mls_manager, &welcome, member_id)?;
+    distribute_commit(
+        protocol,
+        mls_manager,
+        &commit,
+        GroupCommitType::Add,
+        Some(member_id),
+    )?;
     Ok(())
 }
 
