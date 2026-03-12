@@ -261,11 +261,13 @@ pub fn add_member_and_send_welcome(
     member_key_package: &[u8],
     member_id: &str,
 ) -> Result<()> {
-    let (welcome, _commit) = mls_manager
+    let (welcome, commit) = mls_manager
         .add_group_member(group_id, member_key_package)
         .map_err(|e| Error::Other(format!("Failed to add member: {}", e)))?;
 
-    send_welcome(protocol, &welcome, member_id)
+    send_welcome(protocol, &welcome, member_id)?;
+    distribute_commit(protocol, mls_manager, &commit)?;
+    Ok(())
 }
 
 #[cfg(test)]

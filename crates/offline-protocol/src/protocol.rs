@@ -227,6 +227,8 @@ struct GroupMlsMessagePayload {
     group_id: String,
     /// Base64-encoded MLS ciphertext.
     ciphertext: String,
+    /// MLS epoch at which the message was encrypted.
+    epoch: u64,
     /// Optional reply-to message ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     reply_to: Option<String>,
@@ -264,6 +266,8 @@ struct GroupMlsCommitPayload {
     commit_type: GroupCommitType,
     /// Base64-encoded MLS commit ciphertext.
     ciphertext: String,
+    /// MLS epoch at which the commit was created.
+    epoch: u64,
     /// User ID of the affected member (added or removed).
     #[serde(skip_serializing_if = "Option::is_none")]
     affected_member: Option<String>,
@@ -5514,7 +5518,7 @@ impl OfflineProtocol {
                                 let encrypted = offline_protocol_mls::EncryptedMessage {
                                     group_id: gid,
                                     message_type: offline_protocol_mls::MlsMessageType::Application,
-                                    epoch: 0,
+                                    epoch: payload.epoch,
                                     ciphertext: ciphertext_bytes,
                                     sender_id: sender.to_string(),
                                     timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
@@ -5624,51 +5628,71 @@ impl OfflineProtocol {
                     "Received mesh group Commit"
                 );
 
-                // Process Commit via MLS to advance epoch — required for state consistency
-                if payload.ciphertext.is_empty() {
+                // Process Commit via MLS to advance epoch — required for state consistency.
+                // Only emit membership events if MLS processing succeeds to prevent
+                // forged commits from producing fake membership events.
+                let mls_ok = if payload.ciphertext.is_empty() {
                     warn!(
                         group_id = %payload.group_id,
                         "Received Commit with empty ciphertext, cannot advance MLS epoch"
                     );
-                } else if let Ok(ciphertext_bytes) = base64_decode(&payload.ciphertext) {
-                    if let Some(mls) = self.mls_manager.as_ref() {
-                        if let Ok(mls_guard) = mls.read() {
-                            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                            let encrypted = offline_protocol_mls::EncryptedMessage {
-                                group_id: gid,
-                                message_type: offline_protocol_mls::MlsMessageType::Commit,
-                                epoch: 0,
-                                ciphertext: ciphertext_bytes,
-                                sender_id: sender.to_string(),
-                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                            };
-                            if let Err(e) = mls_guard.decrypt_from_group(&encrypted) {
-                                warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
+                    false
+                } else {
+                    match base64_decode(&payload.ciphertext) {
+                        Ok(ciphertext_bytes) => {
+                            let mut success = false;
+                            if let Some(mls) = self.mls_manager.as_ref() {
+                                if let Ok(mls_guard) = mls.read() {
+                                    let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                                    let encrypted = offline_protocol_mls::EncryptedMessage {
+                                        group_id: gid,
+                                        message_type: offline_protocol_mls::MlsMessageType::Commit,
+                                        epoch: payload.epoch,
+                                        ciphertext: ciphertext_bytes,
+                                        sender_id: sender.to_string(),
+                                        timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                                    };
+                                    match mls_guard.decrypt_from_group(&encrypted) {
+                                        Ok(_) => {
+                                            success = true;
+                                        }
+                                        Err(e) => {
+                                            warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
+                                        }
+                                    }
+                                }
                             }
+                            success
+                        }
+                        Err(e) => {
+                            warn!(group_id = %payload.group_id, error = %e, "Failed to decode commit ciphertext");
+                            false
                         }
                     }
-                }
+                };
 
-                // Refresh cache and emit event
-                let _ = self.refresh_group_members(&payload.group_id);
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    match payload.commit_type {
-                        GroupCommitType::Add => {
-                            if let Some(member) = &payload.affected_member {
-                                state.emit_event(Event::group_member_added(
-                                    payload.group_id.clone(),
-                                    member.clone(),
-                                    sender.to_string(),
-                                ));
+                if mls_ok {
+                    // Refresh cache and emit event only after successful MLS processing
+                    let _ = self.refresh_group_members(&payload.group_id);
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        match payload.commit_type {
+                            GroupCommitType::Add => {
+                                if let Some(member) = &payload.affected_member {
+                                    state.emit_event(Event::group_member_added(
+                                        payload.group_id.clone(),
+                                        member.clone(),
+                                        sender.to_string(),
+                                    ));
+                                }
                             }
-                        }
-                        GroupCommitType::Remove => {
-                            if let Some(member) = &payload.affected_member {
-                                state.emit_event(Event::group_member_removed(
-                                    payload.group_id.clone(),
-                                    member.clone(),
-                                    sender.to_string(),
-                                ));
+                            GroupCommitType::Remove => {
+                                if let Some(member) = &payload.affected_member {
+                                    state.emit_event(Event::group_member_removed(
+                                        payload.group_id.clone(),
+                                        member.clone(),
+                                        sender.to_string(),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -6296,6 +6320,7 @@ impl OfflineProtocol {
             group_id: group_id.to_string(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(&commit.ciphertext),
+            epoch: commit.epoch,
             affected_member: Some(invitee_user_id.to_string()),
         };
         let commit_content = format!(
@@ -6342,6 +6367,7 @@ impl OfflineProtocol {
             group_id: group_id.to_string(),
             commit_type: GroupCommitType::Remove,
             ciphertext: base64_encode(&commit_msg.ciphertext),
+            epoch: commit_msg.epoch,
             affected_member: Some(member_id.to_string()),
         };
         let commit_content = format!(
@@ -6440,6 +6466,7 @@ impl OfflineProtocol {
         drop(mls_guard);
 
         let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+        let epoch = encrypted.epoch;
 
         // Get members from cache or refresh
         let members = match self.group_members.get(group_id) {
@@ -6453,6 +6480,7 @@ impl OfflineProtocol {
         let msg_payload = GroupMlsMessagePayload {
             group_id: group_id.to_string(),
             ciphertext: ciphertext_b64,
+            epoch,
             reply_to: reply_to_msg.map(|s| s.to_string()),
         };
         let base_content = format!(
@@ -12725,7 +12753,7 @@ mod tests {
     }
 
     #[test]
-    fn test_group_mls_process_commit_add_message() {
+    fn test_group_mls_process_commit_empty_ciphertext_no_event() {
         let storage = Arc::new(crate::mls::InMemoryStorage::default());
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage).unwrap();
@@ -12741,11 +12769,13 @@ mod tests {
         let info = protocol.create_mesh_group("Commit Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
-        // Simulate receiving a commit "add" message (empty ciphertext for test)
+        // Simulate receiving a commit "add" message with empty ciphertext.
+        // MLS processing will fail, so no membership event should be emitted.
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.clone(),
             commit_type: GroupCommitType::Add,
             ciphertext: String::new(),
+            epoch: 1,
             affected_member: Some("carol".to_string()),
         };
         let content = format!(
@@ -12763,15 +12793,15 @@ mod tests {
         let result = protocol.process_internal_message(&message);
         assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
-        // Check that GroupMemberAdded event was emitted
+        // No membership event should be emitted since MLS processing failed
         let events = events.lock().unwrap();
         let add_event = events.iter().find(|e| {
             matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, .. }
                 if gid == &group_id && user_id == "carol")
         });
         assert!(
-            add_event.is_some(),
-            "Expected GroupMemberAdded event for carol"
+            add_event.is_none(),
+            "Should NOT emit GroupMemberAdded when MLS commit processing fails"
         );
     }
 
@@ -12857,28 +12887,32 @@ mod tests {
 
     #[test]
     fn test_group_mls_payload_serialization_roundtrip() {
-        // Message payload with reply_to
+        // Message payload with reply_to and epoch
         let msg_payload = GroupMlsMessagePayload {
             group_id: "group:abc".to_string(),
             ciphertext: "dGVzdA==".to_string(),
+            epoch: 42,
             reply_to: Some("msg-123".to_string()),
         };
         let json = serde_json::to_string(&msg_payload).unwrap();
         let parsed: GroupMlsMessagePayload = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.group_id, "group:abc");
         assert_eq!(parsed.ciphertext, "dGVzdA==");
+        assert_eq!(parsed.epoch, 42);
         assert_eq!(parsed.reply_to, Some("msg-123".to_string()));
 
         // Message payload without reply_to (should not include field in JSON)
         let msg_no_reply = GroupMlsMessagePayload {
             group_id: "group:abc".to_string(),
             ciphertext: "dGVzdA==".to_string(),
+            epoch: 1,
             reply_to: None,
         };
         let json_no_reply = serde_json::to_string(&msg_no_reply).unwrap();
         assert!(!json_no_reply.contains("reply_to"));
         let parsed_no_reply: GroupMlsMessagePayload = serde_json::from_str(&json_no_reply).unwrap();
         assert_eq!(parsed_no_reply.reply_to, None);
+        assert_eq!(parsed_no_reply.epoch, 1);
 
         let welcome_payload = GroupMlsWelcomePayload {
             group_id: "group:def".to_string(),
@@ -12896,12 +12930,14 @@ mod tests {
             group_id: "group:ghi".to_string(),
             commit_type: GroupCommitType::Add,
             ciphertext: "Y29tbWl0".to_string(),
+            epoch: 5,
             affected_member: Some("carol".to_string()),
         };
         let json = serde_json::to_string(&commit_payload).unwrap();
         let parsed: GroupMlsCommitPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.commit_type, GroupCommitType::Add);
         assert_eq!(parsed.affected_member, Some("carol".to_string()));
+        assert_eq!(parsed.epoch, 5);
 
         // Verify enum serializes to lowercase
         assert!(json.contains("\"add\""));

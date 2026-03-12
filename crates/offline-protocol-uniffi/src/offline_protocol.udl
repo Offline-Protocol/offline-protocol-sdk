@@ -63,6 +63,12 @@ dictionary MlsEncryptedMessage {
     u64 timestamp_ms;
 };
 
+// Result of adding a member to an MLS group
+dictionary MlsAddMemberResult {
+    MlsWelcomeMessage welcome;
+    MlsEncryptedMessage commit;
+};
+
 // Group information
 dictionary MlsGroupInfo {
     string group_id;
@@ -669,9 +675,9 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     MlsGroupInfo mls_create_group(string group_name);
     
-    // Add a member to a group (returns Welcome to send to new member)
+    // Add a member to a group (returns Welcome for invitee + Commit for existing members)
     [Throws=ProtocolError]
-    MlsWelcomeMessage mls_add_group_member(string group_id, sequence<u8> member_key_package);
+    MlsAddMemberResult mls_add_group_member(string group_id, sequence<u8> member_key_package);
     
     // Remove a member from a group
     [Throws=ProtocolError]

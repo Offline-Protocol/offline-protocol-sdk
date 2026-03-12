@@ -547,6 +547,17 @@ impl From<MlsEncryptedMessage> for CoreEncryptedMessage {
     }
 }
 
+/// Result of adding a member to an MLS group.
+///
+/// Contains both the Welcome message (to be sent to the invitee) and the
+/// Commit message (to be distributed to all existing group members so they
+/// can advance their MLS epoch).
+#[derive(Debug, Clone)]
+pub struct MlsAddMemberResult {
+    pub welcome: MlsWelcomeMessage,
+    pub commit: MlsEncryptedMessage,
+}
+
 /// Group information
 #[derive(Debug, Clone)]
 pub struct MlsGroupInfo {
@@ -2831,19 +2842,25 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
-    /// Add a member to a group
+    /// Add a member to a group.
+    ///
+    /// Returns both the Welcome (for the invitee) and the Commit (to distribute
+    /// to existing members so they advance their MLS epoch).
     pub fn mls_add_group_member(
         &self,
         group_id: String,
         member_key_package: Vec<u8>,
-    ) -> Result<MlsWelcomeMessage, ProtocolError> {
+    ) -> Result<MlsAddMemberResult, ProtocolError> {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
             .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
         guard
             .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
-            .map(|(welcome, _commit)| MlsWelcomeMessage::from(welcome))
+            .map(|(welcome, commit)| MlsAddMemberResult {
+                welcome: MlsWelcomeMessage::from(welcome),
+                commit: MlsEncryptedMessage::from(commit),
+            })
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
