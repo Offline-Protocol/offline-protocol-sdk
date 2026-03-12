@@ -2843,7 +2843,7 @@ impl OfflineProtocol {
             .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
         guard
             .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
-            .map(MlsWelcomeMessage::from)
+            .map(|(welcome, _commit)| MlsWelcomeMessage::from(welcome))
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 

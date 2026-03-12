@@ -104,6 +104,8 @@ const PENDING_DROP_WARN_EVERY: u64 = 100;
 const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
 /// TTL for group message dedup entries (5 minutes).
 const GROUP_MESSAGE_DEDUP_TTL_SECS: u64 = 300;
+/// Maximum number of group message dedup entries before forced cleanup.
+const MAX_GROUP_MESSAGE_DEDUP_ENTRIES: usize = 10_000;
 const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 const MAX_KNOWN_PEERS: usize = 1000;
@@ -225,6 +227,9 @@ struct GroupMlsMessagePayload {
     group_id: String,
     /// Base64-encoded MLS ciphertext.
     ciphertext: String,
+    /// Optional reply-to message ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_to: Option<String>,
 }
 
 /// Payload for MLS Welcome messages (group invites) sent via mesh.
@@ -240,13 +245,23 @@ struct GroupMlsWelcomePayload {
     member_list: Vec<String>,
 }
 
+/// Type of group membership commit operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum GroupCommitType {
+    /// A member was added to the group.
+    Add,
+    /// A member was removed from the group.
+    Remove,
+}
+
 /// Payload for MLS Commit messages (membership changes) sent via mesh.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GroupMlsCommitPayload {
     /// MLS group identifier.
     group_id: String,
-    /// Type of commit: "add" or "remove".
-    commit_type: String,
+    /// Type of commit operation.
+    commit_type: GroupCommitType,
     /// Base64-encoded MLS commit ciphertext.
     ciphertext: String,
     /// User ID of the affected member (added or removed).
@@ -641,8 +656,8 @@ pub struct OfflineProtocol {
     group_members: HashMap<String, Vec<String>>,
 
     /// Deduplication cache for group messages received via multiple paths.
-    /// Key: (group_id, epoch, sender_id), Value: when first seen.
-    group_message_dedup: HashMap<(String, u64, String), Instant>,
+    /// Key: message ID, Value: when first seen.
+    group_message_dedup: HashMap<String, Instant>,
 }
 
 impl OfflineProtocol {
@@ -5477,23 +5492,13 @@ impl OfflineProtocol {
 
         if content.starts_with(internal_prefixes::GROUP_MLS_MSG) {
             let data = &content[internal_prefixes::GROUP_MLS_MSG.len()..];
-            // Strip optional reply_to metadata suffix
-            let (json_data, _reply_to) = if let Some(idx) = data.rfind("|reply_to:") {
-                (&data[..idx], Some(&data[idx + 10..]))
-            } else {
-                (data, None)
-            };
-            if let Ok(payload) = serde_json::from_str::<GroupMlsMessagePayload>(json_data) {
-                // Dedup check: (group_id, epoch from encrypted msg, sender)
-                let dedup_key = (
-                    payload.group_id.clone(),
-                    0u64, // epoch not in payload, use sender+group as dedup key
-                    sender.to_string(),
-                );
+            if let Ok(payload) = serde_json::from_str::<GroupMlsMessagePayload>(data) {
+                // Dedup check using the unique message ID
+                let dedup_key = message.id.as_str().to_string();
                 if self.group_message_dedup.contains_key(&dedup_key) {
                     debug!(
                         group_id = %payload.group_id,
-                        sender = %sender,
+                        msg_id = %dedup_key,
                         "Duplicate group message, skipping"
                     );
                     return Some(InternalMessageResult::Consumed);
@@ -5502,9 +5507,9 @@ impl OfflineProtocol {
                 // Decrypt the group message
                 match base64_decode(&payload.ciphertext) {
                     Ok(ciphertext_bytes) => {
-                        let mls = self.mls_manager.as_ref();
-                        if let Some(mls) = mls {
-                            if let Ok(mls_guard) = mls.read() {
+                        // Borrow only mls_manager to allow mutable access to other self fields
+                        let decrypt_result = self.mls_manager.as_ref().and_then(|mls| {
+                            mls.read().ok().and_then(|mls_guard| {
                                 let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
                                 let encrypted = offline_protocol_mls::EncryptedMessage {
                                     group_id: gid,
@@ -5515,31 +5520,42 @@ impl OfflineProtocol {
                                     timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                                 };
                                 match mls_guard.decrypt_from_group(&encrypted) {
-                                    Ok(Some(plaintext)) => {
-                                        self.group_message_dedup.insert(dedup_key, Instant::now());
-                                        let text = String::from_utf8_lossy(&plaintext).to_string();
-                                        let msg_id = message.id.as_str().to_string();
-                                        let timestamp = chrono::Utc::now().to_rfc3339();
-                                        info!(group_id = %payload.group_id, "Decrypted mesh group message");
-                                        if let Ok(state) = lock_shared_state(&self.shared_state) {
-                                            state.emit_event(Event::group_message_received(
-                                                payload.group_id,
-                                                sender.to_string(),
-                                                text,
-                                                timestamp,
-                                                msg_id,
-                                                _reply_to.map(|s| s.to_string()),
-                                            ));
-                                        }
-                                    }
-                                    Ok(None) => {
-                                        warn!(group_id = %payload.group_id, "Group decryption returned empty");
-                                    }
+                                    Ok(Some(plaintext)) => Some(Ok(plaintext)),
+                                    Ok(None) => Some(Err("decryption returned empty")),
                                     Err(e) => {
                                         warn!(group_id = %payload.group_id, error = %e, "Failed to decrypt group message");
+                                        None
                                     }
                                 }
+                            })
+                        });
+                        match decrypt_result {
+                            Some(Ok(plaintext)) => {
+                                self.group_message_dedup.insert(dedup_key, Instant::now());
+                                // Enforce dedup cache size cap
+                                if self.group_message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES
+                                {
+                                    self.cleanup_group_message_dedup();
+                                }
+                                let text = String::from_utf8_lossy(&plaintext).to_string();
+                                let msg_id = message.id.as_str().to_string();
+                                let timestamp = chrono::Utc::now().to_rfc3339();
+                                info!(group_id = %payload.group_id, "Decrypted mesh group message");
+                                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                    state.emit_event(Event::group_message_received(
+                                        payload.group_id,
+                                        sender.to_string(),
+                                        text,
+                                        timestamp,
+                                        msg_id,
+                                        payload.reply_to,
+                                    ));
+                                }
                             }
+                            Some(Err(reason)) => {
+                                warn!(group_id = %payload.group_id, reason, "Group decryption failed");
+                            }
+                            None => {}
                         }
                     }
                     Err(e) => {
@@ -5558,9 +5574,9 @@ impl OfflineProtocol {
                 info!(group_id = %payload.group_id, "Received mesh group Welcome");
                 match base64_decode(&payload.welcome_data) {
                     Ok(welcome_bytes) => {
-                        let mls = self.mls_manager.as_ref();
-                        if let Some(mls) = mls {
-                            if let Ok(mls_guard) = mls.read() {
+                        // Join group via MLS, then update cache (requires separate borrows)
+                        let join_result = self.mls_manager.as_ref().and_then(|mls| {
+                            mls.read().ok().and_then(|mls_guard| {
                                 let welcome = offline_protocol_mls::WelcomeMessage {
                                     group_id: offline_protocol_mls::GroupId::new(&payload.group_id),
                                     welcome_data: welcome_bytes,
@@ -5569,23 +5585,23 @@ impl OfflineProtocol {
                                     timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
                                 };
                                 match mls_guard.join_group(&welcome) {
-                                    Ok(group_info) => {
-                                        let members = group_info.members.clone();
-                                        let group_id = payload.group_id.clone();
-                                        drop(mls_guard);
-                                        self.group_members.insert(group_id.clone(), members);
-                                        if let Ok(state) = lock_shared_state(&self.shared_state) {
-                                            state.emit_event(Event::group_member_added(
-                                                group_id,
-                                                self.config.user_id.clone(),
-                                                sender.to_string(),
-                                            ));
-                                        }
-                                    }
+                                    Ok(group_info) => Some(group_info.members.clone()),
                                     Err(e) => {
                                         warn!(group_id = %payload.group_id, error = %e, "Failed to join mesh group");
+                                        None
                                     }
                                 }
+                            })
+                        });
+                        if let Some(members) = join_result {
+                            let group_id = payload.group_id.clone();
+                            self.group_members.insert(group_id.clone(), members);
+                            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                                state.emit_event(Event::group_member_added(
+                                    group_id,
+                                    self.config.user_id.clone(),
+                                    sender.to_string(),
+                                ));
                             }
                         }
                     }
@@ -5604,28 +5620,30 @@ impl OfflineProtocol {
             if let Ok(payload) = serde_json::from_str::<GroupMlsCommitPayload>(data) {
                 info!(
                     group_id = %payload.group_id,
-                    commit_type = %payload.commit_type,
+                    commit_type = ?payload.commit_type,
                     "Received mesh group Commit"
                 );
 
-                // For commits with ciphertext, process via MLS to advance epoch
-                if !payload.ciphertext.is_empty() {
-                    if let Ok(ciphertext_bytes) = base64_decode(&payload.ciphertext) {
-                        let mls = self.mls_manager.as_ref();
-                        if let Some(mls) = mls {
-                            if let Ok(mls_guard) = mls.read() {
-                                let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                                let encrypted = offline_protocol_mls::EncryptedMessage {
-                                    group_id: gid,
-                                    message_type: offline_protocol_mls::MlsMessageType::Commit,
-                                    epoch: 0,
-                                    ciphertext: ciphertext_bytes,
-                                    sender_id: sender.to_string(),
-                                    timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-                                };
-                                if let Err(e) = mls_guard.decrypt_from_group(&encrypted) {
-                                    warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
-                                }
+                // Process Commit via MLS to advance epoch — required for state consistency
+                if payload.ciphertext.is_empty() {
+                    warn!(
+                        group_id = %payload.group_id,
+                        "Received Commit with empty ciphertext, cannot advance MLS epoch"
+                    );
+                } else if let Ok(ciphertext_bytes) = base64_decode(&payload.ciphertext) {
+                    if let Some(mls) = self.mls_manager.as_ref() {
+                        if let Ok(mls_guard) = mls.read() {
+                            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                            let encrypted = offline_protocol_mls::EncryptedMessage {
+                                group_id: gid,
+                                message_type: offline_protocol_mls::MlsMessageType::Commit,
+                                epoch: 0,
+                                ciphertext: ciphertext_bytes,
+                                sender_id: sender.to_string(),
+                                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+                            };
+                            if let Err(e) = mls_guard.decrypt_from_group(&encrypted) {
+                                warn!(group_id = %payload.group_id, error = %e, "Failed to process group commit");
                             }
                         }
                     }
@@ -5634,8 +5652,8 @@ impl OfflineProtocol {
                 // Refresh cache and emit event
                 let _ = self.refresh_group_members(&payload.group_id);
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    match payload.commit_type.as_str() {
-                        "add" => {
+                    match payload.commit_type {
+                        GroupCommitType::Add => {
                             if let Some(member) = &payload.affected_member {
                                 state.emit_event(Event::group_member_added(
                                     payload.group_id.clone(),
@@ -5644,7 +5662,7 @@ impl OfflineProtocol {
                                 ));
                             }
                         }
-                        "remove" => {
+                        GroupCommitType::Remove => {
                             if let Some(member) = &payload.affected_member {
                                 state.emit_event(Event::group_member_removed(
                                     payload.group_id.clone(),
@@ -5652,9 +5670,6 @@ impl OfflineProtocol {
                                     sender.to_string(),
                                 ));
                             }
-                        }
-                        _ => {
-                            warn!(commit_type = %payload.commit_type, "Unknown commit type");
                         }
                     }
                 }
@@ -5667,6 +5682,15 @@ impl OfflineProtocol {
         if content.starts_with(internal_prefixes::GROUP_MLS_LEAVE) {
             let data = &content[internal_prefixes::GROUP_MLS_LEAVE.len()..];
             if let Ok(payload) = serde_json::from_str::<GroupMlsLeavePayload>(data) {
+                // Verify sender matches the claimed leaving member to prevent spoofing
+                if payload.leaving_member != sender.to_string() {
+                    warn!(
+                        sender = %sender,
+                        claimed = %payload.leaving_member,
+                        "Leave notification sender mismatch, ignoring"
+                    );
+                    return Some(InternalMessageResult::Consumed);
+                }
                 info!(
                     group_id = %payload.group_id,
                     leaving_member = %payload.leaving_member,
@@ -6173,15 +6197,23 @@ impl OfflineProtocol {
     // MESH GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================
 
-    /// Refreshes the cached member list for a group from MlsManager.
-    fn refresh_group_members(&mut self, group_id: &str) -> Result<Vec<String>> {
+    /// Acquires a read guard on the MLS manager.
+    ///
+    /// Returns an error if MLS is not initialized or the lock is poisoned.
+    fn read_mls_guard(
+        &self,
+    ) -> Result<std::sync::RwLockReadGuard<'_, offline_protocol_mls::MlsManager>> {
         let mls = self
             .mls_manager
             .as_ref()
             .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
-        let mls_guard = mls
-            .read()
-            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        mls.read()
+            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))
+    }
+
+    /// Refreshes the cached member list for a group from MlsManager.
+    fn refresh_group_members(&mut self, group_id: &str) -> Result<Vec<String>> {
+        let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         let info = mls_guard
             .get_group_info(&gid)?
@@ -6202,13 +6234,7 @@ impl OfflineProtocol {
         &mut self,
         group_name: &str,
     ) -> Result<offline_protocol_mls::GroupInfo> {
-        let mls = self
-            .mls_manager
-            .as_ref()
-            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
-        let mls_guard = mls
-            .read()
-            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let mls_guard = self.read_mls_guard()?;
         let group_info = mls_guard.create_group(group_name)?;
         let group_id = group_info.group_id.as_str().to_string();
         let members = group_info.members.clone();
@@ -6238,16 +6264,10 @@ impl OfflineProtocol {
             .key_package_data
             .clone();
 
-        // Add member via MLS
-        let mls = self
-            .mls_manager
-            .as_ref()
-            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
-        let mls_guard = mls
-            .read()
-            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        // Add member via MLS — returns both Welcome (for invitee) and Commit (for existing members)
+        let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
-        let welcome = mls_guard.add_group_member(&gid, &key_pkg)?;
+        let (welcome, commit) = mls_guard.add_group_member(&gid, &key_pkg)?;
         let group_name = welcome.group_name.clone();
         drop(mls_guard);
 
@@ -6270,11 +6290,12 @@ impl OfflineProtocol {
         self.send_internal_message(invitee_user_id, welcome_content, MessagePriority::High)?;
 
         // Send Commit to all existing members (excluding self and invitee)
+        // so they can process it and advance their MLS epoch
         let self_id = self.config.user_id.clone();
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.to_string(),
-            commit_type: "add".to_string(),
-            ciphertext: String::new(), // Commit is already applied locally
+            commit_type: GroupCommitType::Add,
+            ciphertext: base64_encode(&commit.ciphertext),
             affected_member: Some(invitee_user_id.to_string()),
         };
         let commit_content = format!(
@@ -6307,13 +6328,7 @@ impl OfflineProtocol {
     ///
     /// Sends a Commit to all remaining members.
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
-        let mls = self
-            .mls_manager
-            .as_ref()
-            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
-        let mls_guard = mls
-            .read()
-            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         let commit_msg = mls_guard.remove_group_member(&gid, member_id)?;
         drop(mls_guard);
@@ -6325,7 +6340,7 @@ impl OfflineProtocol {
         let self_id = self.config.user_id.clone();
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.to_string(),
-            commit_type: "remove".to_string(),
+            commit_type: GroupCommitType::Remove,
             ciphertext: base64_encode(&commit_msg.ciphertext),
             affected_member: Some(member_id.to_string()),
         };
@@ -6358,6 +6373,9 @@ impl OfflineProtocol {
     /// Leaves an MLS mesh group.
     ///
     /// Notifies remaining members and removes local group state.
+    /// Note: The MLS layer does not support self-removal Commits, so remaining
+    /// members receive a plaintext leave notification. A group admin should
+    /// subsequently call `remove_from_group` to properly advance the MLS epoch.
     pub fn leave_mesh_group(&mut self, group_id: &str) -> Result<()> {
         // Get members before leaving
         let members = self
@@ -6369,14 +6387,8 @@ impl OfflineProtocol {
 
         let self_id = self.config.user_id.clone();
 
-        // Leave the MLS group
-        let mls = self
-            .mls_manager
-            .as_ref()
-            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
-        let mls_guard = mls
-            .read()
-            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        // Leave the MLS group (deletes local state only)
+        let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         mls_guard.leave_group(&gid)?;
         drop(mls_guard);
@@ -6422,13 +6434,7 @@ impl OfflineProtocol {
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
         // Encrypt via MLS
-        let mls = self
-            .mls_manager
-            .as_ref()
-            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
-        let mls_guard = mls
-            .read()
-            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         let encrypted = mls_guard.encrypt_for_group(&gid, content.as_bytes())?;
         drop(mls_guard);
@@ -6443,22 +6449,18 @@ impl OfflineProtocol {
 
         let self_id = self.config.user_id.clone();
 
-        // Build the internal message payload
+        // Build the internal message payload with reply_to as a proper field
         let msg_payload = GroupMlsMessagePayload {
             group_id: group_id.to_string(),
             ciphertext: ciphertext_b64,
+            reply_to: reply_to_msg.map(|s| s.to_string()),
         };
-        let payload_json = serde_json::to_string(&msg_payload)
-            .map_err(|e| Error::Other(format!("Serialize group message: {}", e)))?;
-
-        let mut base_content = format!("{}{}", internal_prefixes::GROUP_MLS_MSG, payload_json);
-
-        // If there's a reply_to_msg, include it as metadata in the payload
-        if let Some(reply_id) = reply_to_msg {
-            // Re-serialize with reply_to embedded
-            let extended = format!("{}|reply_to:{}", base_content, reply_id);
-            base_content = extended;
-        }
+        let base_content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_MSG,
+            serde_json::to_string(&msg_payload)
+                .map_err(|e| Error::Other(format!("Serialize group message: {}", e)))?
+        );
 
         // Fan-out to each member
         let mut message_ids = Vec::new();
@@ -6510,22 +6512,23 @@ impl OfflineProtocol {
 
     /// Lists all MLS mesh groups (excluding 1:1 sessions).
     pub fn list_mesh_groups(&self) -> Result<Vec<String>> {
-        let mls = self
-            .mls_manager
-            .as_ref()
-            .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
-        let mls_guard = mls
-            .read()
-            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+        let mls_guard = self.read_mls_guard()?;
         let groups = mls_guard.list_groups()?;
         Ok(groups.into_iter().map(|g| g.as_str().to_string()).collect())
     }
 
-    /// Cleans up expired group message dedup entries.
+    /// Cleans up expired group message dedup entries and enforces size cap.
     fn cleanup_group_message_dedup(&mut self) {
         let cutoff = Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS);
         self.group_message_dedup
             .retain(|_, seen_at| *seen_at > cutoff);
+        // If still over cap after TTL cleanup, drop oldest entries
+        if self.group_message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+            let mut entries: Vec<_> = self.group_message_dedup.drain().collect();
+            entries.sort_by_key(|(_, ts)| std::cmp::Reverse(*ts));
+            entries.truncate(MAX_GROUP_MESSAGE_DEDUP_ENTRIES);
+            self.group_message_dedup = entries.into_iter().collect();
+        }
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
@@ -12647,8 +12650,8 @@ mod tests {
     fn test_group_mls_dedup_cache() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-        // Insert dedup entry
-        let key = ("group1".to_string(), 0u64, "alice".to_string());
+        // Insert dedup entry using message ID as key
+        let key = "msg-001".to_string();
         protocol
             .group_message_dedup
             .insert(key.clone(), Instant::now());
@@ -12659,7 +12662,7 @@ mod tests {
         assert!(protocol.group_message_dedup.contains_key(&key));
 
         // Insert old entry and verify cleanup removes it
-        let old_key = ("group2".to_string(), 0u64, "bob".to_string());
+        let old_key = "msg-002".to_string();
         protocol.group_message_dedup.insert(
             old_key.clone(),
             Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS + 1),
@@ -12738,10 +12741,10 @@ mod tests {
         let info = protocol.create_mesh_group("Commit Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
-        // Simulate receiving a commit "add" message (no ciphertext, just notification)
+        // Simulate receiving a commit "add" message (empty ciphertext for test)
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.clone(),
-            commit_type: "add".to_string(),
+            commit_type: GroupCommitType::Add,
             ciphertext: String::new(),
             affected_member: Some("carol".to_string()),
         };
@@ -12816,7 +12819,7 @@ mod tests {
 
         // Add an expired dedup entry
         protocol.group_message_dedup.insert(
-            ("g1".to_string(), 0u64, "s1".to_string()),
+            "msg-expired-001".to_string(),
             Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS + 1),
         );
         assert_eq!(protocol.group_message_dedup.len(), 1);
@@ -12854,14 +12857,28 @@ mod tests {
 
     #[test]
     fn test_group_mls_payload_serialization_roundtrip() {
+        // Message payload with reply_to
         let msg_payload = GroupMlsMessagePayload {
             group_id: "group:abc".to_string(),
             ciphertext: "dGVzdA==".to_string(),
+            reply_to: Some("msg-123".to_string()),
         };
         let json = serde_json::to_string(&msg_payload).unwrap();
         let parsed: GroupMlsMessagePayload = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.group_id, "group:abc");
         assert_eq!(parsed.ciphertext, "dGVzdA==");
+        assert_eq!(parsed.reply_to, Some("msg-123".to_string()));
+
+        // Message payload without reply_to (should not include field in JSON)
+        let msg_no_reply = GroupMlsMessagePayload {
+            group_id: "group:abc".to_string(),
+            ciphertext: "dGVzdA==".to_string(),
+            reply_to: None,
+        };
+        let json_no_reply = serde_json::to_string(&msg_no_reply).unwrap();
+        assert!(!json_no_reply.contains("reply_to"));
+        let parsed_no_reply: GroupMlsMessagePayload = serde_json::from_str(&json_no_reply).unwrap();
+        assert_eq!(parsed_no_reply.reply_to, None);
 
         let welcome_payload = GroupMlsWelcomePayload {
             group_id: "group:def".to_string(),
@@ -12877,14 +12894,17 @@ mod tests {
 
         let commit_payload = GroupMlsCommitPayload {
             group_id: "group:ghi".to_string(),
-            commit_type: "add".to_string(),
+            commit_type: GroupCommitType::Add,
             ciphertext: "Y29tbWl0".to_string(),
             affected_member: Some("carol".to_string()),
         };
         let json = serde_json::to_string(&commit_payload).unwrap();
         let parsed: GroupMlsCommitPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.commit_type, "add");
+        assert_eq!(parsed.commit_type, GroupCommitType::Add);
         assert_eq!(parsed.affected_member, Some("carol".to_string()));
+
+        // Verify enum serializes to lowercase
+        assert!(json.contains("\"add\""));
 
         let leave_payload = GroupMlsLeavePayload {
             group_id: "group:jkl".to_string(),
@@ -12893,5 +12913,46 @@ mod tests {
         let json = serde_json::to_string(&leave_payload).unwrap();
         let parsed: GroupMlsLeavePayload = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.leaving_member, "dave");
+    }
+
+    #[test]
+    fn test_group_mls_leave_sender_mismatch_rejected() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Simulate a spoofed leave: sender is "bob" but claims "alice" left
+        let leave_payload = GroupMlsLeavePayload {
+            group_id: "group:test-123".to_string(),
+            leaving_member: "alice".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_LEAVE,
+            serde_json::to_string(&leave_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("bob").unwrap(), // sender != leaving_member
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // No event should be emitted for spoofed leave
+        let events = events.lock().unwrap();
+        let leave_event = events
+            .iter()
+            .find(|e| matches!(e, Event::GroupMemberRemoved { .. }));
+        assert!(leave_event.is_none(), "Spoofed leave should not emit event");
     }
 }
