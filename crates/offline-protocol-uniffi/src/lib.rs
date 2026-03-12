@@ -2064,6 +2064,7 @@ impl OfflineProtocol {
 
     /// Processes a received file chunk (manual path, for platforms handling
     /// their own chunk routing outside the protocol receive loop).
+    #[allow(clippy::too_many_arguments)]
     pub fn process_file_chunk(
         &self,
         file_id: String,
@@ -3158,7 +3159,8 @@ impl OfflineProtocol {
         let core_priority = priority.map(|p| match p {
             MessagePriority::Low => CorePriority::Low,
             MessagePriority::Medium => CorePriority::Medium,
-            MessagePriority::High | MessagePriority::Critical => CorePriority::High,
+            MessagePriority::High => CorePriority::High,
+            MessagePriority::Critical => CorePriority::Critical,
         });
         let mut guard = self
             .inner

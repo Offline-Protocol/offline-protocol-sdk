@@ -119,9 +119,9 @@ pub struct CommitDistributionResult {
 
 /// Distributes an MLS commit message to all group members.
 ///
-/// This sends the commit to all members of the group (excluding the sender).
-/// The commit is encoded as base64 and sent as the message content with
-/// appropriate MLS metadata.
+/// This sends the commit to all members of the group (excluding the sender)
+/// via the internal message path (bypassing MLS 1:1 encryption) since the
+/// commit is already MLS group ciphertext.
 ///
 /// # Arguments
 ///
@@ -142,8 +142,22 @@ pub fn distribute_commit(
         .map_err(|e| Error::Other(format!("Failed to get group info: {}", e)))?
         .ok_or_else(|| Error::Other("Group not found".to_string()))?;
 
-    let encoded = encode_for_transport(commit)?;
     let sender_id = mls_manager.user_id();
+
+    // Build a __GRP_MLS_COMMIT__ internal message so the commit bypasses
+    // the MLS 1:1 encryption layer (it is already MLS group ciphertext).
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    let commit_payload = serde_json::json!({
+        "group_id": commit.group_id.as_str(),
+        "commit_type": "add",
+        "ciphertext": BASE64.encode(&commit.ciphertext),
+        "epoch": commit.epoch,
+    });
+    let commit_content = format!(
+        "__GRP_MLS_COMMIT__{}",
+        serde_json::to_string(&commit_payload)
+            .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
+    );
 
     let mut sent_count = 0;
     let mut failed_recipients = Vec::new();
@@ -154,11 +168,10 @@ pub fn distribute_commit(
             continue;
         }
 
-        match protocol.send_message(
+        match protocol.send_internal_message(
             member_id,
-            &encoded,
-            Some(MessagePriority::High),
-            None::<String>,
+            commit_content.clone(),
+            MessagePriority::High,
         ) {
             Ok(_) => sent_count += 1,
             Err(_) => failed_recipients.push(member_id.clone()),
@@ -173,6 +186,9 @@ pub fn distribute_commit(
 
 /// Distributes an MLS Welcome message to a new group member.
 ///
+/// This sends via the internal message path (bypassing MLS 1:1 encryption)
+/// since the welcome is already MLS group ciphertext.
+///
 /// # Arguments
 ///
 /// * `protocol` - The protocol instance to send messages through
@@ -183,16 +199,20 @@ pub fn send_welcome(
     welcome: &WelcomeMessage,
     recipient: &str,
 ) -> Result<()> {
-    let encoded = welcome
-        .to_base64()
-        .map_err(|e| Error::Other(format!("Failed to encode welcome: {}", e)))?;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    let welcome_payload = serde_json::json!({
+        "group_id": welcome.group_id.as_str(),
+        "group_name": welcome.group_name,
+        "welcome_data": BASE64.encode(&welcome.welcome_data),
+        "member_list": [],
+    });
+    let welcome_content = format!(
+        "__GRP_MLS_WELCOME__{}",
+        serde_json::to_string(&welcome_payload)
+            .map_err(|e| Error::Other(format!("Serialize welcome: {}", e)))?
+    );
 
-    protocol.send_message(
-        recipient,
-        &encoded,
-        Some(MessagePriority::High),
-        None::<String>,
-    )?;
+    protocol.send_internal_message(recipient, welcome_content, MessagePriority::High)?;
     Ok(())
 }
 

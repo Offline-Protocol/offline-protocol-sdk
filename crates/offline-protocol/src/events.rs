@@ -480,47 +480,75 @@ pub enum Event {
 
     // --- Group (relay) events ---
     /// A group was created (from relay).
-    GroupCreated { group_id: String, name: String },
+    GroupCreated {
+        /// Group identifier.
+        group_id: String,
+        /// Human-readable group name.
+        name: String,
+    },
 
     /// A message was received in a group (from relay).
     GroupMessageReceived {
+        /// Group identifier.
         group_id: String,
+        /// User ID of the sender.
         sender: String,
+        /// Message content.
         content: String,
+        /// ISO-8601 timestamp.
         timestamp: String,
+        /// Unique message identifier.
         message_id: String,
+        /// Optional reply-to message ID.
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to_msg: Option<String>,
     },
 
     /// A member was added to a group (from relay).
     GroupMemberAdded {
+        /// Group identifier.
         group_id: String,
+        /// User ID of the added member.
         user_id: String,
+        /// User ID of who performed the add.
         added_by: String,
     },
 
     /// A member was removed from a group (from relay).
     GroupMemberRemoved {
+        /// Group identifier.
         group_id: String,
+        /// User ID of the removed member.
         user_id: String,
+        /// User ID of who performed the removal.
         removed_by: String,
     },
 
     /// Group info was received (from relay).
     GroupInfo {
+        /// Group identifier.
         group_id: String,
+        /// Human-readable group name.
         name: String,
+        /// User ID of the group creator.
         created_by: String,
+        /// ISO-8601 creation timestamp.
         created_at: String,
+        /// Group member list.
         members: Vec<GroupInfoMember>,
     },
 
     /// User's groups list was received (from relay).
-    UserGroups { groups: Vec<UserGroupSummary> },
+    UserGroups {
+        /// List of group summaries.
+        groups: Vec<UserGroupSummary>,
+    },
 
     /// A group operation failed (from relay).
-    GroupError { reason: String },
+    GroupError {
+        /// Human-readable error reason.
+        reason: String,
+    },
 
     /// A group message was sent to all members via mesh (MLS-encrypted fan-out).
     GroupMessageSent {
@@ -636,16 +664,22 @@ pub enum Event {
 /// Member entry in GroupInfo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupInfoMember {
+    /// User ID of the member.
     pub user_id: String,
+    /// Role within the group (e.g. "admin", "member").
     pub role: String,
+    /// ISO-8601 timestamp when the member joined.
     pub joined_at: String,
 }
 
 /// Group summary in UserGroups.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserGroupSummary {
+    /// Group identifier.
     pub group_id: String,
+    /// Human-readable group name.
     pub name: String,
+    /// ISO-8601 creation timestamp.
     pub created_at: String,
 }
 
@@ -914,6 +948,7 @@ impl Event {
     }
 
     /// Creates a WelcomeSendFailed event.
+    #[allow(clippy::too_many_arguments)]
     pub fn welcome_send_failed(
         peer_id: String,
         message_id: String,

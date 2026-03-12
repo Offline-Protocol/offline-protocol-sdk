@@ -1316,7 +1316,7 @@ impl OfflineProtocol {
     /// Handles the full send orchestration: state check, deduplication, transport send,
     /// success/failure handling, and transport switch events. Does NOT emit a
     /// `MessageSent` event — internal messages are not user-visible content.
-    fn send_internal_message(
+    pub(crate) fn send_internal_message(
         &mut self,
         recipient: &str,
         content: String,
@@ -2497,7 +2497,7 @@ impl OfflineProtocol {
 
         self.pending_encrypted_messages
             .entry(recipient.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(pending);
 
         debug!(recipient = %recipient, message_id = %message_id_str, "Queued message pending session establishment");
@@ -3345,7 +3345,7 @@ impl OfflineProtocol {
             let manager = mls
                 .read()
                 .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-            manager.list_sessions().map_err(|e| Error::Mls(e.into()))?
+            manager.list_sessions().map_err(Error::Mls)?
         };
         let session_set: std::collections::HashSet<_> = sessions.into_iter().collect();
 
@@ -5010,8 +5010,7 @@ impl OfflineProtocol {
         let sender = message.sender.as_str();
 
         // Handle key package messages
-        if content.starts_with(internal_prefixes::KEY_PACKAGE) {
-            let data = &content[internal_prefixes::KEY_PACKAGE.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
             if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
                 debug!(sender = %sender, "Received key package");
                 let now_ms = Utc::now().timestamp_millis() as u64;
@@ -5031,10 +5030,11 @@ impl OfflineProtocol {
                 self.persist_peer_key_package(sender, &pkg);
 
                 // Send our key package back if auto_key_exchange is enabled
-                if self.config.encryption.auto_key_exchange && self.config.encryption.enabled {
-                    if !self.key_package_sent_to.contains(sender) {
-                        let _ = self.send_key_package_to(sender);
-                    }
+                if self.config.encryption.auto_key_exchange
+                    && self.config.encryption.enabled
+                    && !self.key_package_sent_to.contains(sender)
+                {
+                    let _ = self.send_key_package_to(sender);
                 }
             }
             return Some(InternalMessageResult::Consumed);
@@ -5140,8 +5140,7 @@ impl OfflineProtocol {
         }
 
         // Handle welcome messages (session invitation)
-        if content.starts_with(internal_prefixes::WELCOME) {
-            let data = &content[internal_prefixes::WELCOME.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::WELCOME) {
             if let Ok(welcome) = serde_json::from_str::<WelcomeMessage>(data) {
                 debug!(sender = %sender, group_id = %welcome.group_id, "Received welcome message");
 
@@ -5249,8 +5248,7 @@ impl OfflineProtocol {
         }
 
         // Handle encrypted messages
-        if content.starts_with(internal_prefixes::ENCRYPTED) {
-            let data = &content[internal_prefixes::ENCRYPTED.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::ENCRYPTED) {
             if let Ok(encrypted) = serde_json::from_str::<EncryptedMessage>(data) {
                 // Track state to update after releasing MLS lock
                 enum DecryptResult {
@@ -5455,8 +5453,7 @@ impl OfflineProtocol {
         }
 
         // Handle connection request messages
-        if content.starts_with(internal_prefixes::CONN_REQUEST) {
-            let data = &content[internal_prefixes::CONN_REQUEST.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::CONN_REQUEST) {
             if let Ok(payload) = serde_json::from_str::<ConnectionRequestPayload>(data) {
                 info!(sender = %sender, sender_name = %payload.sender_name, "Received connection request");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -5474,8 +5471,7 @@ impl OfflineProtocol {
         }
 
         // Handle connection accepted messages
-        if content.starts_with(internal_prefixes::CONN_ACCEPT) {
-            let data = &content[internal_prefixes::CONN_ACCEPT.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::CONN_ACCEPT) {
             if let Ok(payload) = serde_json::from_str::<ConnectionAcceptedPayload>(data) {
                 info!(sender = %sender, accepted_by_name = %payload.accepted_by_name, "Connection request accepted");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -5493,7 +5489,10 @@ impl OfflineProtocol {
         }
 
         // Handle connection rejected messages
-        if content.starts_with(internal_prefixes::CONN_REJECT) {
+        if content
+            .strip_prefix(internal_prefixes::CONN_REJECT)
+            .is_some()
+        {
             info!(sender = %sender, "Connection request rejected");
             if let Ok(state) = lock_shared_state(&self.shared_state) {
                 state.emit_event(Event::connection_rejected(sender.to_string()));
@@ -5503,34 +5502,29 @@ impl OfflineProtocol {
 
         // --- Group (mesh/MLS) messages ---
 
-        if content.starts_with(internal_prefixes::GROUP_MLS_MSG) {
-            let data = &content[internal_prefixes::GROUP_MLS_MSG.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_MSG) {
             self.handle_group_mls_msg(message, sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_MLS_WELCOME) {
-            let data = &content[internal_prefixes::GROUP_MLS_WELCOME.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_WELCOME) {
             self.handle_group_mls_welcome(sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_MLS_COMMIT) {
-            let data = &content[internal_prefixes::GROUP_MLS_COMMIT.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_COMMIT) {
             self.handle_group_mls_commit(sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_MLS_LEAVE) {
-            let data = &content[internal_prefixes::GROUP_MLS_LEAVE.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_LEAVE) {
             self.handle_group_mls_leave(sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 
         // --- Group (relay) messages ---
 
-        if content.starts_with(internal_prefixes::GROUP_CREATED) {
-            let data = &content[internal_prefixes::GROUP_CREATED.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_CREATED) {
             if let Ok(payload) = serde_json::from_str::<GroupCreatedPayload>(data) {
                 info!(group_id = %payload.group_id, "Group created");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -5542,8 +5536,7 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_MSG) {
-            let data = &content[internal_prefixes::GROUP_MSG.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MSG) {
             if let Ok(payload) = serde_json::from_str::<GroupMessageReceivedPayload>(data) {
                 info!(group_id = %payload.group_id, message_id = %payload.message_id, "Group message received");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -5562,8 +5555,7 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_MEMBER_ADDED) {
-            let data = &content[internal_prefixes::GROUP_MEMBER_ADDED.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MEMBER_ADDED) {
             if let Ok(payload) = serde_json::from_str::<GroupMemberAddedPayload>(data) {
                 info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member added");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -5579,8 +5571,7 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_MEMBER_REMOVED) {
-            let data = &content[internal_prefixes::GROUP_MEMBER_REMOVED.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MEMBER_REMOVED) {
             if let Ok(payload) = serde_json::from_str::<GroupMemberRemovedPayload>(data) {
                 info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member removed");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -5596,8 +5587,7 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_INFO) {
-            let data = &content[internal_prefixes::GROUP_INFO.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_INFO) {
             if let Ok(payload) = serde_json::from_str::<GroupInfoPayload>(data) {
                 info!(group_id = %payload.group_id, "Group info received");
                 let members: Vec<crate::events::GroupInfoMember> = payload
@@ -5624,8 +5614,7 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::USER_GROUPS) {
-            let data = &content[internal_prefixes::USER_GROUPS.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::USER_GROUPS) {
             if let Ok(payload) = serde_json::from_str::<UserGroupsPayload>(data) {
                 info!(count = payload.groups.len(), "User groups received");
                 let groups: Vec<crate::events::UserGroupSummary> = payload
@@ -5646,8 +5635,7 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
-        if content.starts_with(internal_prefixes::GROUP_ERROR) {
-            let data = &content[internal_prefixes::GROUP_ERROR.len()..];
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_ERROR) {
             if let Ok(payload) = serde_json::from_str::<GroupErrorPayload>(data) {
                 warn!(reason = %payload.reason, "Group error");
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -6290,6 +6278,11 @@ impl OfflineProtocol {
     }
 
     /// Handles an incoming group leave notification.
+    ///
+    /// After verifying the sender, the lexicographically-first remaining member
+    /// (deterministic election) issues an MLS remove-commit to advance the group
+    /// epoch and revoke the leaving member's keys. Other members will receive
+    /// the commit via `handle_group_mls_commit`.
     fn handle_group_mls_leave(&mut self, sender: &str, data: &str) {
         let payload = match serde_json::from_str::<GroupMlsLeavePayload>(data) {
             Ok(p) => p,
@@ -6314,6 +6307,41 @@ impl OfflineProtocol {
             leaving_member = %payload.leaving_member,
             "Received mesh group leave notification"
         );
+
+        // Deterministic election: lexicographically-first remaining member
+        // (excluding the leaver) issues the MLS remove-commit to advance epoch.
+        let self_id = self.config.user_id.clone();
+        let members = self
+            .group_members
+            .get(&payload.group_id)
+            .cloned()
+            .or_else(|| self.refresh_group_members(&payload.group_id).ok())
+            .unwrap_or_default();
+
+        let should_remove = members
+            .iter()
+            .filter(|m| m.as_str() != sender)
+            .min()
+            .map(|first| first == &self_id)
+            .unwrap_or(false);
+
+        if should_remove {
+            debug!(
+                group_id = %payload.group_id,
+                leaving_member = %sender,
+                "Elected to issue MLS remove-commit for leaving member"
+            );
+            // Issue MLS remove + distribute commit to advance epoch and revoke keys
+            if let Err(e) = self.remove_from_group(&payload.group_id, sender) {
+                warn!(
+                    group_id = %payload.group_id,
+                    leaving_member = %sender,
+                    error = %e,
+                    "Failed to issue MLS remove-commit for leaving member"
+                );
+            }
+        }
+
         let _ = self.refresh_group_members(&payload.group_id);
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::group_member_removed(

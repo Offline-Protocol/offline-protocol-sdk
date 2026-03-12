@@ -284,10 +284,11 @@ impl TransportManager {
             Ok(()) => {
                 self.current_transport = Some(primary);
                 if previous != Some(primary) {
-                    let reason_code = previous
-                        .is_some_and(|p| !available.contains_key(&p))
-                        .then_some(DorsReasonCode::CurrentUnavailable)
-                        .unwrap_or(DorsReasonCode::PrimarySuccess);
+                    let reason_code = if previous.is_some_and(|p| !available.contains_key(&p)) {
+                        DorsReasonCode::CurrentUnavailable
+                    } else {
+                        DorsReasonCode::PrimarySuccess
+                    };
                     self.emit_dors_event(Event::dors_transport_switched(
                         previous.map(|t| t.to_string()),
                         primary.to_string(),
