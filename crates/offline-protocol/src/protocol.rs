@@ -52,7 +52,7 @@ fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, String> {
 }
 
 /// Internal message prefixes for protocol messages.
-pub(crate) mod internal_prefixes {
+mod internal_prefixes {
     /// Prefix for key package messages.
     pub const KEY_PACKAGE: &str = "__MLS_KEY_PKG__";
     /// Prefix for welcome messages.
@@ -1316,7 +1316,7 @@ impl OfflineProtocol {
     /// Handles the full send orchestration: state check, deduplication, transport send,
     /// success/failure handling, and transport switch events. Does NOT emit a
     /// `MessageSent` event — internal messages are not user-visible content.
-    pub(crate) fn send_internal_message(
+    fn send_internal_message(
         &mut self,
         recipient: &str,
         content: String,
@@ -6726,6 +6726,23 @@ impl OfflineProtocol {
         }
 
         let member_count = succeeded_members.len() as u32;
+
+        // Check for total delivery failure: there were members to send to but
+        // every send failed. Return an error so callers don't confuse this with
+        // a solo-group scenario (which legitimately returns Ok(vec![])).
+        let had_recipients = members.iter().any(|m| m != &self_id);
+        if had_recipients && message_ids.is_empty() {
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::group_message_partial_failure(
+                    group_id.to_string(),
+                    failed_members,
+                    succeeded_members,
+                ));
+            }
+            return Err(Error::Other(
+                "All group message sends failed".to_string(),
+            ));
+        }
 
         // Emit appropriate event
         if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -13507,6 +13524,99 @@ mod tests {
                 .iter()
                 .all(|e| !matches!(e, Event::GroupMessageReceived { .. })),
             "Oversized payload should not produce a message event"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_duplicate_message_rejected() {
+        // Verifies that a duplicate group message (same message ID) is silently
+        // dropped and does NOT emit a second GroupMessageReceived event.
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+        let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        alice.initialize_mls(storage_a).unwrap();
+        bob.initialize_mls(storage_b).unwrap();
+        alice.start().unwrap();
+        bob.start().unwrap();
+
+        // Alice creates group, Bob joins
+        let group_info = alice.create_mesh_group("Dedup Test Group").unwrap();
+        let group_id = group_info.group_id.as_str().to_string();
+
+        let bob_kp = {
+            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            bob_mls.generate_key_package().unwrap()
+        };
+        let (welcome, _commit) = {
+            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let gid = offline_protocol_mls::GroupId::new(&group_id);
+            alice_mls
+                .add_group_member(&gid, &bob_kp.key_package_data)
+                .unwrap()
+        };
+        {
+            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            bob_mls.join_group(&welcome).unwrap();
+        }
+        bob.group_members.insert(
+            group_id.clone(),
+            vec!["alice".to_string(), "bob".to_string()],
+        );
+
+        // Set up Bob's event capture
+        let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let bob_events_clone = bob_events.clone();
+        bob.on_event(move |event| {
+            bob_events_clone.lock().unwrap().push(event);
+        });
+
+        // Alice encrypts a message
+        let encrypted = {
+            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let gid = offline_protocol_mls::GroupId::new(&group_id);
+            alice_mls
+                .encrypt_for_group(&gid, b"Hello dedup!")
+                .unwrap()
+        };
+        let msg_payload = GroupMlsMessagePayload {
+            group_id: group_id.clone(),
+            ciphertext: base64_encode(&encrypted.ciphertext),
+            epoch: encrypted.epoch,
+            reply_to: None,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_MSG,
+            serde_json::to_string(&msg_payload).unwrap()
+        );
+
+        // Build a message with a fixed ID so we can send the same one twice
+        let bob_message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        // First delivery — should succeed and emit GroupMessageReceived
+        let result1 = bob.process_internal_message(&bob_message);
+        assert!(matches!(result1, Some(InternalMessageResult::Consumed)));
+
+        // Second delivery of the SAME message — should be deduped (no event)
+        let result2 = bob.process_internal_message(&bob_message);
+        assert!(matches!(result2, Some(InternalMessageResult::Consumed)));
+
+        // Verify exactly ONE GroupMessageReceived event (the duplicate was dropped)
+        let events = bob_events.lock().unwrap();
+        let received_count = events
+            .iter()
+            .filter(|e| matches!(e, Event::GroupMessageReceived { .. }))
+            .count();
+        assert_eq!(
+            received_count, 1,
+            "Expected exactly 1 GroupMessageReceived, got {} (duplicate should be dropped)",
+            received_count
         );
     }
 }
