@@ -576,8 +576,9 @@ pub enum Event {
     GroupEpochForkDetected {
         /// MLS group identifier.
         group_id: String,
-        /// Our local epoch when the fork was detected.
-        local_epoch: u64,
+        /// Our local epoch when the fork was detected, or `None` if MLS
+        /// state was unavailable at detection time.
+        local_epoch: Option<u64>,
     },
 
     /// An epoch fork was successfully resolved by the leader issuing a
@@ -1144,7 +1145,7 @@ impl Event {
     }
 
     /// Creates a GroupEpochForkDetected event.
-    pub fn group_epoch_fork_detected(group_id: String, local_epoch: u64) -> Self {
+    pub fn group_epoch_fork_detected(group_id: String, local_epoch: Option<u64>) -> Self {
         Self::GroupEpochForkDetected {
             group_id,
             local_epoch,

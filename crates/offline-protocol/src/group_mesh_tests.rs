@@ -2971,7 +2971,7 @@ fn test_epoch_fork_not_duplicated_if_already_tracked() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: Instant::now(),
             resolution_attempted: false,
         },
@@ -2994,7 +2994,10 @@ fn test_epoch_fork_not_duplicated_if_already_tracked() {
     protocol.drain_pending_commits(&group_id);
 
     // The original fork state should be preserved (epoch 1), not overwritten
-    assert_eq!(protocol.group_mesh.epoch_forks[&group_id].local_epoch, 1);
+    assert_eq!(
+        protocol.group_mesh.epoch_forks[&group_id].local_epoch,
+        Some(1)
+    );
 }
 
 #[test]
@@ -3008,7 +3011,7 @@ fn test_epoch_fork_max_entries_eviction() {
             gid.clone(),
             EpochForkState {
                 group_id: gid,
-                local_epoch: i as u64,
+                local_epoch: Some(i as u64),
                 detected_at: Instant::now(),
                 resolution_attempted: false,
             },
@@ -3053,7 +3056,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: Instant::now(),
             resolution_attempted: false,
         },
@@ -3126,7 +3129,7 @@ fn test_epoch_fork_resolution_by_leader() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: past,
             resolution_attempted: false,
         },
@@ -3169,7 +3172,7 @@ fn test_epoch_fork_resolution_skipped_for_non_leader() {
         fake_group_id.clone(),
         EpochForkState {
             group_id: fake_group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: past,
             resolution_attempted: false,
         },
@@ -3199,7 +3202,7 @@ fn test_epoch_fork_not_resolved_before_delay() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: Instant::now(),
             resolution_attempted: false,
         },
@@ -3230,7 +3233,7 @@ fn test_epoch_fork_stale_entries_cleaned_up() {
         "stale_group".to_string(),
         EpochForkState {
             group_id: "stale_group".to_string(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: very_old,
             resolution_attempted: true,
         },
@@ -3483,7 +3486,7 @@ fn test_epoch_fork_cleanup_does_not_duplicate_existing_fork() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 42,
+            local_epoch: Some(42),
             detected_at: original_detected_at,
             resolution_attempted: false,
         },
@@ -3506,7 +3509,10 @@ fn test_epoch_fork_cleanup_does_not_duplicate_existing_fork() {
     protocol.cleanup_group_message_dedup();
 
     // Original fork state should be preserved
-    assert_eq!(protocol.group_mesh.epoch_forks[&group_id].local_epoch, 42);
+    assert_eq!(
+        protocol.group_mesh.epoch_forks[&group_id].local_epoch,
+        Some(42)
+    );
 
     // No new fork detection event should be emitted
     let events = events.lock().unwrap();
@@ -3617,7 +3623,7 @@ fn test_epoch_fork_resolution_includes_failed_members() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: past,
             resolution_attempted: false,
         },
@@ -3672,7 +3678,7 @@ fn test_epoch_fork_resolution_no_failed_members_when_all_succeed() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: past,
             resolution_attempted: false,
         },
@@ -3712,7 +3718,7 @@ fn test_epoch_fork_update_keys_failure_leaves_resolution_attempted() {
         fake_group_id.clone(),
         EpochForkState {
             group_id: fake_group_id.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: past,
             resolution_attempted: false,
         },
@@ -3764,7 +3770,7 @@ fn test_epoch_fork_mls_unavailable_resets_resolution_attempted() {
         group_id.clone(),
         EpochForkState {
             group_id: group_id.clone(),
-            local_epoch: 0,
+            local_epoch: Some(0),
             detected_at: past,
             resolution_attempted: false,
         },
@@ -3851,7 +3857,7 @@ fn test_epoch_fork_multiple_groups_resolve_independently() {
         group_a.clone(),
         EpochForkState {
             group_id: group_a.clone(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: past,
             resolution_attempted: false,
         },
@@ -3862,7 +3868,7 @@ fn test_epoch_fork_multiple_groups_resolve_independently() {
         group_b.clone(),
         EpochForkState {
             group_id: group_b.clone(),
-            local_epoch: 2,
+            local_epoch: Some(2),
             detected_at: Instant::now(),
             resolution_attempted: false,
         },
@@ -3906,7 +3912,7 @@ fn test_epoch_fork_stale_cleanup_removes_old_attempted_and_unattempted() {
         "stale_attempted".to_string(),
         EpochForkState {
             group_id: "stale_attempted".to_string(),
-            local_epoch: 1,
+            local_epoch: Some(1),
             detected_at: very_old,
             resolution_attempted: true,
         },
@@ -3917,7 +3923,7 @@ fn test_epoch_fork_stale_cleanup_removes_old_attempted_and_unattempted() {
         "stale_unattempted".to_string(),
         EpochForkState {
             group_id: "stale_unattempted".to_string(),
-            local_epoch: 2,
+            local_epoch: Some(2),
             detected_at: very_old,
             resolution_attempted: false,
         },
@@ -3928,7 +3934,7 @@ fn test_epoch_fork_stale_cleanup_removes_old_attempted_and_unattempted() {
         "recent_fork".to_string(),
         EpochForkState {
             group_id: "recent_fork".to_string(),
-            local_epoch: 3,
+            local_epoch: Some(3),
             detected_at: Instant::now(),
             resolution_attempted: false,
         },
@@ -3957,9 +3963,9 @@ fn test_epoch_fork_stale_cleanup_removes_old_attempted_and_unattempted() {
 }
 
 #[test]
-fn test_epoch_fork_detection_with_mls_unavailable_logs_epoch_zero() {
+fn test_epoch_fork_detection_with_mls_unavailable_uses_none_epoch() {
     // When MLS is not initialized, flag_potential_epoch_fork should
-    // still work — local_epoch falls back to 0 with a warning logged.
+    // still work — local_epoch is None with a warning logged.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // MLS NOT initialized
 
@@ -3987,8 +3993,231 @@ fn test_epoch_fork_detection_with_mls_unavailable_logs_epoch_zero() {
         "Fork should be detected even when MLS is unavailable"
     );
     assert_eq!(
-        protocol.group_mesh.epoch_forks[&group_id].local_epoch, 0,
-        "local_epoch should fall back to 0 when MLS is unavailable"
+        protocol.group_mesh.epoch_forks[&group_id].local_epoch, None,
+        "local_epoch should be None when MLS is unavailable"
+    );
+}
+
+#[test]
+fn test_pending_leave_elections_size_cap_eviction() {
+    let (mut protocol, _events) = setup_with_events();
+
+    // Fill up to MAX_PENDING_LEAVE_ELECTIONS
+    for i in 0..MAX_PENDING_LEAVE_ELECTIONS {
+        let gid = format!("group_{}", i);
+        let member = format!("member_{}", i);
+        let key = leave_election_key(&gid, &member);
+        protocol.group_mesh.pending_leave_elections.insert(
+            key,
+            PendingLeaveElection {
+                group_id: gid,
+                leaving_member: member,
+                received_at: Instant::now(),
+            },
+        );
+    }
+    assert_eq!(
+        protocol.group_mesh.pending_leave_elections.len(),
+        MAX_PENDING_LEAVE_ELECTIONS
+    );
+
+    // Inject a leave notification that triggers a new election insertion.
+    // We need to set up the group membership for the leave handler to work.
+    let new_group = "group:overflow".to_string();
+    let new_leaver = "new_leaver";
+    protocol.group_mesh.members.insert(
+        new_group.clone(),
+        vec![
+            "alice".to_string(), // alice < test_user, so test_user is not the remover
+            "test_user".to_string(),
+            new_leaver.to_string(),
+        ],
+    );
+
+    // Build leave payload
+    let leave_payload = GroupMlsLeavePayload {
+        group_id: new_group.clone(),
+        leaving_member: new_leaver.to_string(),
+    };
+    let data = serde_json::to_string(&leave_payload).unwrap();
+
+    // test_user is not the lex-first remaining member (alice is), so it records a pending election
+    protocol.handle_group_mls_leave(new_leaver, &data);
+
+    // Should still be at cap (one old evicted, one new added)
+    assert!(
+        protocol.group_mesh.pending_leave_elections.len() <= MAX_PENDING_LEAVE_ELECTIONS,
+        "Pending leave elections should not exceed MAX_PENDING_LEAVE_ELECTIONS"
+    );
+    // The new election should exist
+    let new_key = leave_election_key(&new_group, new_leaver);
+    assert!(
+        protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&new_key),
+        "New leave election should be inserted after eviction"
+    );
+}
+
+#[test]
+fn test_leave_election_circuit_breaker_max_lifetime() {
+    let (mut protocol, _events) = setup_with_events();
+    let group_id = "group:circuit-breaker".to_string();
+    let leaving_member = "leaver";
+
+    // Insert an election that has exceeded max lifetime
+    let very_old = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_MAX_LIFETIME_SECS + 10);
+    let key = leave_election_key(&group_id, leaving_member);
+    protocol.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: leaving_member.to_string(),
+            received_at: very_old,
+        },
+    );
+
+    // Even if the member is still in the group, the election should be abandoned
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "test_user".to_string(),
+            leaving_member.to_string(),
+            "other".to_string(),
+        ],
+    );
+
+    protocol.check_leave_election_timeouts();
+
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Leave election should be abandoned after max lifetime"
+    );
+}
+
+#[test]
+fn test_non_key_update_commit_does_not_clear_fork_state() {
+    // A successful Add or Remove commit should NOT clear fork state.
+    // Only KeyUpdate commits (the resolution mechanism) clear it.
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Fork Preserve Test");
+
+    // Insert a fork state for this group
+    alice.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: Some(1),
+            detected_at: Instant::now(),
+            resolution_attempted: false,
+        },
+    );
+
+    // Create a valid key-update commit from bob, but wrap it with Add commit type
+    // to simulate a successful non-KeyUpdate commit going through process_commit_core.
+    let bob_update = {
+        let mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        mls.update_keys(&gid).unwrap()
+    };
+
+    // Wrap as an Add commit (non-KeyUpdate) — the MLS payload is valid and will
+    // succeed in process_commit_core, but the commit_type is Add.
+    let add_commit_payload = GroupMlsCommitPayload {
+        group_id: group_id.clone(),
+        commit_type: GroupCommitType::Add,
+        ciphertext: base64_encode(&bob_update.ciphertext),
+        epoch: bob_update.epoch,
+        affected_member: Some("charlie".to_string()),
+    };
+    let data = serde_json::to_string(&add_commit_payload).unwrap();
+
+    // Process through alice — the MLS commit succeeds but commit_type is Add
+    alice.handle_group_mls_commit("bob", &data);
+
+    // Fork state should still exist because this was an Add commit, not KeyUpdate
+    assert!(
+        alice.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork state should NOT be cleared by a non-KeyUpdate commit"
+    );
+}
+
+#[test]
+fn test_key_update_commit_clears_fork_state() {
+    // Verify that a KeyUpdate commit DOES clear fork state (the complement test).
+    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Fork Clear KU Test");
+
+    alice.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: Some(1),
+            detected_at: Instant::now(),
+            resolution_attempted: false,
+        },
+    );
+
+    let bob_update = {
+        let mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        mls.update_keys(&gid).unwrap()
+    };
+
+    let ku_commit_payload = GroupMlsCommitPayload {
+        group_id: group_id.clone(),
+        commit_type: GroupCommitType::KeyUpdate,
+        ciphertext: base64_encode(&bob_update.ciphertext),
+        epoch: bob_update.epoch,
+        affected_member: None,
+    };
+    let data = serde_json::to_string(&ku_commit_payload).unwrap();
+
+    alice.handle_group_mls_commit("bob", &data);
+
+    assert!(
+        !alice.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork state SHOULD be cleared by a KeyUpdate commit"
+    );
+}
+
+#[test]
+fn test_epoch_fork_detection_event_has_none_epoch_when_mls_unavailable() {
+    // Verify the emitted event carries None for local_epoch when MLS is unavailable
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    // MLS NOT initialized
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let group_id = "group:event-none-epoch".to_string();
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 1,
+        });
+
+    protocol.drain_pending_commits(&group_id);
+
+    let events = events.lock().unwrap();
+    let fork_event = events.iter().find(|e| {
+        matches!(e, Event::GroupEpochForkDetected { group_id: gid, local_epoch: None, .. } if gid == &group_id)
+    });
+    assert!(
+        fork_event.is_some(),
+        "Fork detection event should have local_epoch=None when MLS is unavailable"
     );
 }
 

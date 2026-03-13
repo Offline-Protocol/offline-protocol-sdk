@@ -37,6 +37,12 @@ pub(super) const LEAVE_ELECTION_TIMEOUT_SECS: u64 = 30;
 pub(super) const EPOCH_FORK_RESOLUTION_DELAY_SECS: u64 = 10;
 /// Maximum number of tracked epoch fork states to prevent unbounded growth.
 pub(super) const MAX_EPOCH_FORK_ENTRIES: usize = 32;
+/// Maximum number of tracked pending leave elections to prevent unbounded growth.
+pub(super) const MAX_PENDING_LEAVE_ELECTIONS: usize = 64;
+/// Maximum lifetime for a leave election before it is abandoned (5 minutes).
+/// After this, the election is cleaned up regardless of whether the member
+/// was removed — prevents infinite retry loops when all candidates fail.
+pub(super) const LEAVE_ELECTION_MAX_LIFETIME_SECS: u64 = 300;
 
 /// Builds a deterministic key for leave election tracking: "group_id:member_id".
 pub(crate) fn leave_election_key(group_id: &str, member_id: &str) -> String {
@@ -241,8 +247,8 @@ pub(crate) struct PendingLeaveElection {
 pub(crate) struct EpochForkState {
     /// Group with the suspected fork.
     pub(crate) group_id: String,
-    /// Our local epoch when the fork was detected.
-    pub(crate) local_epoch: u64,
+    /// Our local epoch when the fork was detected, or `None` if MLS was unavailable.
+    pub(crate) local_epoch: Option<u64>,
     /// When the fork was first suspected.
     pub(crate) detected_at: Instant,
     /// Whether the leader has already attempted resolution.
@@ -566,9 +572,13 @@ impl OfflineProtocol {
             self.group_mesh.pending_leave_elections.remove(&key);
         }
 
-        // If we had a suspected fork for this group and a commit just
-        // succeeded, the fork may have resolved — clear the tracking.
-        self.group_mesh.epoch_forks.remove(&payload.group_id);
+        // Only clear fork tracking when a KeyUpdate commit succeeds — these
+        // are the resolution commits issued by the leader. Regular Add/Remove
+        // commits from the same branch succeeding doesn't prove the fork is
+        // resolved; members on the other branch are still diverged.
+        if matches!(payload.commit_type, GroupCommitType::KeyUpdate) {
+            self.group_mesh.epoch_forks.remove(&payload.group_id);
+        }
 
         CommitOutcome::Success(payload.group_id)
     }
@@ -724,11 +734,9 @@ impl OfflineProtocol {
             );
         }
 
-        let local_epoch = local_epoch.unwrap_or(0);
-
         warn!(
             group_id = %group_id,
-            local_epoch = local_epoch,
+            local_epoch = ?local_epoch,
             "Potential epoch fork detected — buffered commits expired without resolution"
         );
 
@@ -852,6 +860,18 @@ impl OfflineProtocol {
         } else {
             // We're not the elected remover — record the election so we can
             // take over if the elected member fails to issue the commit in time.
+            if self.group_mesh.pending_leave_elections.len() >= MAX_PENDING_LEAVE_ELECTIONS {
+                // Evict the oldest entry to prevent unbounded growth.
+                if let Some(oldest_key) = self
+                    .group_mesh
+                    .pending_leave_elections
+                    .values()
+                    .min_by_key(|e| e.received_at)
+                    .map(|e| leave_election_key(&e.group_id, &e.leaving_member))
+                {
+                    self.group_mesh.pending_leave_elections.remove(&oldest_key);
+                }
+            }
             let key = leave_election_key(&payload.group_id, sender);
             self.group_mesh.pending_leave_elections.insert(
                 key,
@@ -1502,7 +1522,7 @@ impl OfflineProtocol {
 
             info!(
                 group_id = %fork.group_id,
-                local_epoch = fork.local_epoch,
+                local_epoch = ?fork.local_epoch,
                 "Attempting epoch fork resolution as elected leader"
             );
 
@@ -1623,6 +1643,7 @@ impl OfflineProtocol {
     /// so, the next eligible member in the sorted remaining list takes over.
     pub(crate) fn check_leave_election_timeouts(&mut self) {
         let timeout = StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS);
+        let max_lifetime = StdDuration::from_secs(LEAVE_ELECTION_MAX_LIFETIME_SECS);
         let self_id = self.config.user_id.clone();
 
         // Collect timed-out elections
@@ -1636,6 +1657,20 @@ impl OfflineProtocol {
 
         for election in timed_out {
             let election_key = leave_election_key(&election.group_id, &election.leaving_member);
+
+            // Circuit breaker: abandon the election after max lifetime to
+            // prevent infinite per-tick retry loops when all candidates fail.
+            if election.received_at.elapsed() > max_lifetime {
+                warn!(
+                    group_id = %election.group_id,
+                    leaving_member = %election.leaving_member,
+                    "Leave election exceeded max lifetime, abandoning — member may need manual removal"
+                );
+                self.group_mesh
+                    .pending_leave_elections
+                    .remove(&election_key);
+                continue;
+            }
 
             // Refresh membership from MLS (authoritative) to avoid using
             // stale election-time lists where members may have since left.
