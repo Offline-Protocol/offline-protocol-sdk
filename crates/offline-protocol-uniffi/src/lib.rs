@@ -9,7 +9,8 @@
 use offline_protocol::{
     EstablishmentState as CoreEstablishmentState, Event as CoreEvent, NetworkVisualizer,
     OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
-    PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
+    PendingQueueConfig as CorePendingQueueConfig, PresenceStatus as CorePresenceStatus,
+    ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::{
     ContentType as CoreContentType, MediaMetadata as CoreMediaMetadata,
@@ -297,6 +298,24 @@ impl From<MessagePriority> for CorePriority {
             MessagePriority::Medium => CorePriority::Medium,
             MessagePriority::High => CorePriority::High,
             MessagePriority::Critical => CorePriority::Critical,
+        }
+    }
+}
+
+/// Presence status for a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceStatus {
+    Online,
+    Away,
+    Offline,
+}
+
+impl From<PresenceStatus> for CorePresenceStatus {
+    fn from(status: PresenceStatus) -> Self {
+        match status {
+            PresenceStatus::Online => CorePresenceStatus::Online,
+            PresenceStatus::Away => CorePresenceStatus::Away,
+            PresenceStatus::Offline => CorePresenceStatus::Offline,
         }
     }
 }
@@ -3054,10 +3073,57 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // PRESENCE AND KEY MANAGEMENT (RELAY SERVER API)
+    // PRESENCE, TYPING INDICATORS, AND READ RECEIPTS
     // ========================================================================
 
-    /// Check if a user is online.
+    /// Send a presence update to a peer via the protocol (routed through DORS).
+    pub fn send_presence_update(
+        &self,
+        recipient: String,
+        status: PresenceStatus,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        let message_id = protocol
+            .send_presence_update(&recipient, status.into())
+            .map_err(ProtocolError::from)?;
+        Ok(message_id.as_str())
+    }
+
+    /// Send a typing indicator to a peer via the protocol (routed through DORS).
+    /// For direct messages, conversation_id should be the recipient's username.
+    /// For group chats, conversation_id should be the group_id.
+    pub fn send_typing_indicator(
+        &self,
+        recipient: String,
+        conversation_id: String,
+        is_typing: bool,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        let message_id = protocol
+            .send_typing_indicator(&recipient, &conversation_id, is_typing)
+            .map_err(ProtocolError::from)?;
+        Ok(message_id.as_str())
+    }
+
+    /// Send a read receipt to a peer via the protocol (routed through DORS).
+    /// Indicates that the given messages have been read.
+    pub fn send_read_receipt(
+        &self,
+        recipient: String,
+        message_ids: Vec<String>,
+    ) -> Result<String, ProtocolError> {
+        let mut protocol = self.inner.lock().unwrap();
+        let message_id = protocol
+            .send_read_receipt(&recipient, message_ids)
+            .map_err(ProtocolError::from)?;
+        Ok(message_id.as_str())
+    }
+
+    // ========================================================================
+    // RELAY SERVER API (JSON payload formatters for WebSocket relay)
+    // ========================================================================
+
+    /// Check if a user is online via relay server.
     /// Returns JSON string to send via WebSocket relay.
     pub fn check_presence(&self, username: String) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
@@ -3082,14 +3148,12 @@ impl OfflineProtocol {
 
     /// Upload identity key and prekeys for Signal Protocol.
     /// Returns JSON string to send via WebSocket relay.
-    /// Parameters are JSON strings that will be parsed and included in the payload.
     pub fn upload_keys(
         &self,
         identity_key: String,
         signed_prekey_json: String,
         one_time_prekeys_json: String,
     ) -> Result<String, ProtocolError> {
-        // Parse the JSON strings into values
         let signed_prekey: serde_json::Value =
             serde_json::from_str(&signed_prekey_json).map_err(|e| {
                 ProtocolError::Other(format!("Failed to parse signed_prekey JSON: {}", e))
@@ -3110,9 +3174,7 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(format!("Failed to serialize UploadKeys: {}", e)))
     }
 
-    /// Set typing indicator in a conversation.
-    /// For direct messages, conversation_id should be the recipient's username.
-    /// For group chats, conversation_id should be the group_id.
+    /// Set typing indicator via relay server (JSON payload formatter).
     /// Returns JSON string to send via WebSocket relay.
     pub fn set_typing(&self, conversation_id: String) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
@@ -3123,9 +3185,7 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(format!("Failed to serialize SetTyping: {}", e)))
     }
 
-    /// Clear typing indicator in a conversation.
-    /// For direct messages, conversation_id should be the recipient's username.
-    /// For group chats, conversation_id should be the group_id.
+    /// Clear typing indicator via relay server (JSON payload formatter).
     /// Returns JSON string to send via WebSocket relay.
     pub fn clear_typing(&self, conversation_id: String) -> Result<String, ProtocolError> {
         let payload = serde_json::json!({
