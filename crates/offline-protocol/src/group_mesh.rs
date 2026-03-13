@@ -707,19 +707,24 @@ impl OfflineProtocol {
             }
         }
 
-        let local_epoch = self
-            .refresh_group_members(group_id)
-            .ok()
-            .and_then(|_| {
-                let mls_guard = self.read_mls_guard().ok()?;
-                let gid = offline_protocol_mls::GroupId::new(group_id);
-                mls_guard
-                    .get_group_info(&gid)
-                    .ok()
-                    .flatten()
-                    .map(|i| i.epoch)
-            })
-            .unwrap_or(0);
+        let local_epoch = self.refresh_group_members(group_id).ok().and_then(|_| {
+            let mls_guard = self.read_mls_guard().ok()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            mls_guard
+                .get_group_info(&gid)
+                .ok()
+                .flatten()
+                .map(|i| i.epoch)
+        });
+
+        if local_epoch.is_none() {
+            warn!(
+                group_id = %group_id,
+                "Could not read local MLS epoch during fork detection — MLS unavailable or group not found"
+            );
+        }
+
+        let local_epoch = local_epoch.unwrap_or(0);
 
         warn!(
             group_id = %group_id,
@@ -1329,12 +1334,32 @@ impl OfflineProtocol {
             self.group_mesh.message_dedup = entries.into_iter().collect();
         }
 
-        // Expire stale pending commits
+        // Expire stale pending commits, tracking groups where retried commits
+        // expired — these are strong epoch fork signals (same as drain_pending_commits).
         let commit_cutoff = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS);
-        self.group_mesh.pending_commits.retain(|_, commits| {
-            commits.retain(|c| c.buffered_at > commit_cutoff);
+        let mut fork_candidates: Vec<String> = Vec::new();
+        self.group_mesh.pending_commits.retain(|group_id, commits| {
+            let mut retried_expired = false;
+            commits.retain(|c| {
+                let alive = c.buffered_at > commit_cutoff;
+                if !alive && c.retry_count > 0 {
+                    retried_expired = true;
+                }
+                alive
+            });
+            if retried_expired {
+                fork_candidates.push(group_id.clone());
+            }
             !commits.is_empty()
         });
+        // Flag forks for groups where retried commits expired during periodic
+        // cleanup — this covers the case where drain_pending_commits is never
+        // called because no new commits succeed for the group.
+        for group_id in fork_candidates {
+            if !self.group_mesh.epoch_forks.contains_key(&group_id) {
+                self.flag_potential_epoch_fork(&group_id);
+            }
+        }
     }
 
     // ========================================================================
@@ -1530,6 +1555,7 @@ impl OfflineProtocol {
                             continue;
                         }
                     };
+                    let mut failed_members = Vec::new();
                     for member in &members {
                         if member == &self_id {
                             continue;
@@ -1545,18 +1571,21 @@ impl OfflineProtocol {
                                 error = %e,
                                 "Failed to send fork resolution commit to member"
                             );
+                            failed_members.push(member.clone());
                         }
                     }
 
                     info!(
                         group_id = %fork.group_id,
                         new_epoch = commit_msg.epoch,
+                        failed_count = failed_members.len(),
                         "Epoch fork resolution commit distributed"
                     );
 
                     self.emit_event(Event::group_epoch_fork_resolved(
                         fork.group_id.clone(),
                         commit_msg.epoch,
+                        failed_members,
                     ));
 
                     // Clean up the fork state

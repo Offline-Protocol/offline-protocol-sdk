@@ -3387,3 +3387,668 @@ fn test_key_update_commit_type_serialization() {
     assert_eq!(deserialized.commit_type, GroupCommitType::KeyUpdate);
     assert!(deserialized.affected_member.is_none());
 }
+
+// ========================================================================
+// EPOCH FORK DETECTION & RESOLUTION — RESILIENCE TESTS
+// ========================================================================
+
+#[test]
+fn test_epoch_fork_detected_via_periodic_cleanup_without_drain() {
+    // Validates fix for the "complete fork" scenario: when NO commits
+    // succeed for a group, drain_pending_commits is never called. Fork
+    // detection must also fire from cleanup_group_message_dedup.
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("Periodic Fork Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Insert expired pending commit with retry_count > 0 (fork signal)
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake-commit".to_string(),
+            buffered_at: past,
+            retry_count: 2,
+        });
+
+    // Do NOT call drain_pending_commits — call periodic cleanup instead
+    protocol.cleanup_group_message_dedup();
+
+    // Fork should be detected via the periodic cleanup path
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork should be detected during periodic cleanup when retried commits expire"
+    );
+
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::GroupEpochForkDetected { group_id: gid, .. } if gid == &group_id)
+        ),
+        "Should emit GroupEpochForkDetected during periodic cleanup"
+    );
+}
+
+#[test]
+fn test_epoch_fork_not_flagged_via_cleanup_for_never_retried() {
+    // Commits that expired with retry_count=0 during periodic cleanup
+    // should NOT trigger fork detection (likely just slow delivery).
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("No Fork Cleanup").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 0, // never retried
+        });
+
+    protocol.cleanup_group_message_dedup();
+
+    assert!(
+        !protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Never-retried expired commits should not trigger fork detection during cleanup"
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupEpochForkDetected { .. })),
+        "No fork event for never-retried expired commits"
+    );
+}
+
+#[test]
+fn test_epoch_fork_cleanup_does_not_duplicate_existing_fork() {
+    // If a fork is already tracked for a group, periodic cleanup should
+    // not overwrite it with a new detection.
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("No Dup Cleanup").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Pre-insert fork state
+    let original_detected_at = Instant::now() - StdDuration::from_secs(30);
+    protocol.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 42,
+            detected_at: original_detected_at,
+            resolution_attempted: false,
+        },
+    );
+
+    // Insert expired retried commit
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 3,
+        });
+
+    protocol.cleanup_group_message_dedup();
+
+    // Original fork state should be preserved
+    assert_eq!(protocol.group_mesh.epoch_forks[&group_id].local_epoch, 42);
+
+    // No new fork detection event should be emitted
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupEpochForkDetected { .. })),
+        "Should not emit duplicate fork detection event"
+    );
+}
+
+#[test]
+fn test_epoch_fork_resolution_includes_failed_members() {
+    // Verifies that GroupEpochForkResolved includes members we couldn't reach.
+    // Use a real MLS group but DON'T start the protocol — send_internal_message
+    // will fail for all members, simulating unreachable peers.
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let info = protocol.create_group("Failed Members Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Use a fake group_id that doesn't exist in MLS so refresh_group_members
+    // fails and falls back to the cache, preserving our injected members.
+    let fake_group_id = "fake_fork_failed_members".to_string();
+    protocol.group_mesh.members.insert(
+        fake_group_id.clone(),
+        vec![
+            "bob".to_string(),
+            "carol".to_string(),
+            "user123".to_string(),
+        ],
+    );
+
+    // Insert a fork for the REAL group_id (so update_keys succeeds) but
+    // use the fake_group_id for the fork tracking. We need update_keys to
+    // succeed, so instead test with the real group_id and simply don't start
+    // the protocol. The real group only has user123 from MLS perspective,
+    // so refresh_group_members returns only user123 and there's nobody to
+    // fail sending to. Instead, let's test the tracking differently:
+    // We use setup_alice_bob_group which gives us a 2-member group, then
+    // don't start the protocol for the resolution check.
+
+    // Clean approach: use the real group with injected extra fake members.
+    // refresh_group_members will overwrite to the real MLS membership,
+    // so we put the fork on the real group and inject fake members.
+    // Since refresh succeeds, members = MLS members = [user123].
+    // No other members → no sends → no failures. That won't test it.
+
+    // Best approach: put fork on a fake group_id so refresh fails and
+    // cache is used. update_keys for a nonexistent group will fail.
+    // That's the update_keys failure path, not what we want.
+
+    // Final approach: use a started alice+bob group, but stop the protocol
+    // so sends fail.
+    drop(protocol);
+
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Failed Members Fork Test");
+
+    // Alice's protocol is started but we can break sends by stopping it.
+    // Actually, send_internal_message uses the outbox. It won't fail
+    // for a started protocol. Instead, inject a fake third member that
+    // doesn't exist — sends to real members will succeed (go to outbox),
+    // but we can verify the event structure works.
+
+    // Simplest valid test: use fake group_id with cached members. The
+    // fork resolution will fail at update_keys (group not in MLS), which
+    // is the Err branch. To test failed_members in the Ok branch, we
+    // need update_keys to succeed. So use the real group_id. refresh
+    // will give [alice, bob]. Sends to bob will succeed (outbox). So
+    // failed_members will be empty. That tests the happy path.
+
+    // To get actual send failures: don't start the protocol.
+    drop(alice);
+
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice.initialize_mls(storage_a).unwrap();
+    bob.initialize_mls(storage_b).unwrap();
+    // Start ONLY for group creation, then we don't need it for sends
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    let group_info = alice.create_group("Fork Send Fail").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        alice_mls
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap();
+    }
+    alice.refresh_group_members(&group_id).unwrap();
+
+    // Stop alice so send_internal_message fails
+    let _ = alice.stop();
+
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+    alice.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 1,
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    alice.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    alice.check_epoch_forks();
+
+    // Fork should be resolved (key update succeeds even if sends fail)
+    assert!(
+        !alice.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork should be cleaned up after resolution attempt"
+    );
+
+    let events = events.lock().unwrap();
+    let resolved = events.iter().find(
+        |e| matches!(e, Event::GroupEpochForkResolved { group_id: gid, .. } if gid == &group_id),
+    );
+    assert!(resolved.is_some(), "Should emit GroupEpochForkResolved");
+
+    if let Some(Event::GroupEpochForkResolved { failed_members, .. }) = resolved {
+        // Bob should be in failed_members because protocol is stopped
+        assert!(
+            failed_members.contains(&"bob".to_string()),
+            "bob should be in failed_members when protocol is stopped"
+        );
+        // Alice (self) should NOT be in failed_members
+        assert!(
+            !failed_members.contains(&"alice".to_string()),
+            "self should not be in failed_members"
+        );
+    } else {
+        panic!("Expected GroupEpochForkResolved event");
+    }
+}
+
+#[test]
+fn test_epoch_fork_resolution_no_failed_members_when_all_succeed() {
+    // When the leader successfully sends to all members, failed_members should be empty.
+    let (mut protocol, events) = setup_started_with_events();
+    let info = protocol.create_group("All Succeed Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Solo group — no other members to send to
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+    protocol.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 1,
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    let events = events.lock().unwrap();
+    let resolved = events.iter().find(
+        |e| matches!(e, Event::GroupEpochForkResolved { group_id: gid, .. } if gid == &group_id),
+    );
+    assert!(resolved.is_some(), "Should emit resolved event");
+    if let Some(Event::GroupEpochForkResolved { failed_members, .. }) = resolved {
+        assert!(
+            failed_members.is_empty(),
+            "No failed members when all sends succeed"
+        );
+    }
+}
+
+#[test]
+fn test_epoch_fork_update_keys_failure_leaves_resolution_attempted() {
+    // When update_keys fails, resolution_attempted stays true (manual intervention needed).
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // Use a fake group_id that doesn't exist in MLS — update_keys will fail.
+    let fake_group_id = "group:nonexistent-for-update".to_string();
+    protocol.group_mesh.members.insert(
+        fake_group_id.clone(),
+        vec!["user123".to_string()], // self is leader
+    );
+
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+    protocol.group_mesh.epoch_forks.insert(
+        fake_group_id.clone(),
+        EpochForkState {
+            group_id: fake_group_id.clone(),
+            local_epoch: 1,
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    protocol.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    protocol.check_epoch_forks();
+
+    // Fork should still exist with resolution_attempted = true
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&fake_group_id),
+        "Fork should remain when update_keys fails"
+    );
+    assert!(
+        protocol.group_mesh.epoch_forks[&fake_group_id].resolution_attempted,
+        "resolution_attempted should be true after failed update_keys"
+    );
+
+    // No resolved event should be emitted
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupEpochForkResolved { .. })),
+        "Should not emit resolved event when update_keys fails"
+    );
+}
+
+#[test]
+fn test_epoch_fork_mls_unavailable_resets_resolution_attempted() {
+    // When MLS is completely unavailable during resolution, resolution_attempted
+    // should be reset to false so it can be retried on the next tick.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    // Deliberately do NOT initialize MLS — read_mls_guard will fail
+
+    let group_id = "group:no-mls".to_string();
+    protocol
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec!["user123".to_string()]);
+
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+    protocol.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 0,
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    // Fork should still exist with resolution_attempted = false (reset for retry)
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork should remain when MLS is unavailable"
+    );
+    assert!(
+        !protocol.group_mesh.epoch_forks[&group_id].resolution_attempted,
+        "resolution_attempted should be reset to false when MLS is unavailable"
+    );
+}
+
+#[test]
+fn test_epoch_fork_multiple_concurrent_groups() {
+    // Multiple groups can have independent forks detected and tracked.
+    let (mut protocol, events) = setup_with_events();
+    let info_a = protocol.create_group("Fork Group A").unwrap();
+    let info_b = protocol.create_group("Fork Group B").unwrap();
+    let group_a = info_a.group_id.as_str().to_string();
+    let group_b = info_b.group_id.as_str().to_string();
+
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+
+    // Insert expired retried commits for BOTH groups
+    for gid in [&group_a, &group_b] {
+        protocol
+            .group_mesh
+            .pending_commits
+            .entry(gid.clone())
+            .or_default()
+            .push_back(PendingCommit {
+                sender: "bob".to_string(),
+                data: "fake".to_string(),
+                buffered_at: past,
+                retry_count: 1,
+            });
+    }
+
+    // Trigger fork detection via periodic cleanup
+    protocol.cleanup_group_message_dedup();
+
+    // Both groups should have forks detected independently
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_a),
+        "Group A should have fork detected"
+    );
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_b),
+        "Group B should have fork detected"
+    );
+
+    let events = events.lock().unwrap();
+    let fork_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::GroupEpochForkDetected { .. }))
+        .collect();
+    assert_eq!(
+        fork_events.len(),
+        2,
+        "Should emit fork detection for both groups"
+    );
+}
+
+#[test]
+fn test_epoch_fork_multiple_groups_resolve_independently() {
+    // Forks in different groups resolve independently — resolving one
+    // should not affect the other.
+    let (mut protocol, events) = setup_with_events();
+    let info_a = protocol.create_group("Resolve A").unwrap();
+    let info_b = protocol.create_group("Resolve B").unwrap();
+    let group_a = info_a.group_id.as_str().to_string();
+    let group_b = info_b.group_id.as_str().to_string();
+
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+
+    // Group A: fork ready for resolution
+    protocol.group_mesh.epoch_forks.insert(
+        group_a.clone(),
+        EpochForkState {
+            group_id: group_a.clone(),
+            local_epoch: 1,
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    // Group B: fork not yet ready (detected just now)
+    protocol.group_mesh.epoch_forks.insert(
+        group_b.clone(),
+        EpochForkState {
+            group_id: group_b.clone(),
+            local_epoch: 2,
+            detected_at: Instant::now(),
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    // Group A should be resolved and cleaned up
+    assert!(
+        !protocol.group_mesh.epoch_forks.contains_key(&group_a),
+        "Group A fork should be resolved"
+    );
+
+    // Group B should still be pending (delay not elapsed)
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_b),
+        "Group B fork should still be pending"
+    );
+    assert!(
+        !protocol.group_mesh.epoch_forks[&group_b].resolution_attempted,
+        "Group B resolution should not have been attempted"
+    );
+
+    let events = events.lock().unwrap();
+    let resolved_count = events
+        .iter()
+        .filter(|e| matches!(e, Event::GroupEpochForkResolved { .. }))
+        .count();
+    assert_eq!(resolved_count, 1, "Only group A should have been resolved");
+}
+
+#[test]
+fn test_epoch_fork_stale_cleanup_removes_old_attempted_and_unattempted() {
+    // Both attempted and unattempted forks older than 5 minutes are cleaned up.
+    let (mut protocol, _events) = setup_with_events();
+
+    let very_old = Instant::now() - StdDuration::from_secs(400);
+
+    // Old fork with resolution_attempted = true
+    protocol.group_mesh.epoch_forks.insert(
+        "stale_attempted".to_string(),
+        EpochForkState {
+            group_id: "stale_attempted".to_string(),
+            local_epoch: 1,
+            detected_at: very_old,
+            resolution_attempted: true,
+        },
+    );
+
+    // Old fork with resolution_attempted = false
+    protocol.group_mesh.epoch_forks.insert(
+        "stale_unattempted".to_string(),
+        EpochForkState {
+            group_id: "stale_unattempted".to_string(),
+            local_epoch: 2,
+            detected_at: very_old,
+            resolution_attempted: false,
+        },
+    );
+
+    // Recent fork — should survive
+    protocol.group_mesh.epoch_forks.insert(
+        "recent_fork".to_string(),
+        EpochForkState {
+            group_id: "recent_fork".to_string(),
+            local_epoch: 3,
+            detected_at: Instant::now(),
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    assert!(
+        !protocol
+            .group_mesh
+            .epoch_forks
+            .contains_key("stale_attempted"),
+        "Old attempted fork should be cleaned up"
+    );
+    assert!(
+        !protocol
+            .group_mesh
+            .epoch_forks
+            .contains_key("stale_unattempted"),
+        "Old unattempted fork should be cleaned up"
+    );
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key("recent_fork"),
+        "Recent fork should survive cleanup"
+    );
+}
+
+#[test]
+fn test_epoch_fork_detection_with_mls_unavailable_logs_epoch_zero() {
+    // When MLS is not initialized, flag_potential_epoch_fork should
+    // still work — local_epoch falls back to 0 with a warning logged.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    // MLS NOT initialized
+
+    let group_id = "group:no-mls-fork".to_string();
+
+    // Insert expired retried commit
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 1,
+        });
+
+    // Should not panic — fork detection gracefully handles MLS unavailable
+    protocol.drain_pending_commits(&group_id);
+
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork should be detected even when MLS is unavailable"
+    );
+    assert_eq!(
+        protocol.group_mesh.epoch_forks[&group_id].local_epoch, 0,
+        "local_epoch should fall back to 0 when MLS is unavailable"
+    );
+}
+
+#[test]
+fn test_epoch_fork_periodic_cleanup_multiple_groups_mixed() {
+    // Periodic cleanup should only flag forks for groups with retried-expired
+    // commits, not groups with only never-retried expired commits.
+    let (mut protocol, events) = setup_with_events();
+    let info_fork = protocol.create_group("Will Fork").unwrap();
+    let info_nofork = protocol.create_group("No Fork").unwrap();
+    let group_fork = info_fork.group_id.as_str().to_string();
+    let group_nofork = info_nofork.group_id.as_str().to_string();
+
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+
+    // group_fork: retried expired commit → should flag fork
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_fork.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 2,
+        });
+
+    // group_nofork: never-retried expired commit → should NOT flag fork
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_nofork.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "carol".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 0,
+        });
+
+    protocol.cleanup_group_message_dedup();
+
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_fork),
+        "Group with retried expired commits should have fork detected"
+    );
+    assert!(
+        !protocol.group_mesh.epoch_forks.contains_key(&group_nofork),
+        "Group with only never-retried expired commits should not have fork"
+    );
+
+    let events = events.lock().unwrap();
+    let fork_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::GroupEpochForkDetected { .. }))
+        .collect();
+    assert_eq!(
+        fork_events.len(),
+        1,
+        "Only one fork event should be emitted"
+    );
+}
