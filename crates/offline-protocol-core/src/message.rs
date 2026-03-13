@@ -243,6 +243,14 @@ pub struct Message {
     ///
     /// When `Some`, the protocol layer validates that `sender` matches this value
     /// before processing security-sensitive control messages.
+    ///
+    /// # Security
+    ///
+    /// **Do not set this field from application code.** It must only be set by
+    /// authenticated transport layers (BLE, WiFi Direct, Internet relay) via
+    /// [`set_transport_peer_id`](Self::set_transport_peer_id). Setting it
+    /// incorrectly bypasses sender verification.
+    #[doc(hidden)]
     #[serde(skip)]
     pub transport_peer_id: Option<String>,
 }
@@ -328,6 +336,25 @@ impl Message {
     /// Deserializes a message from JSON.
     pub fn from_json(json: &str) -> crate::Result<Self> {
         serde_json::from_str(json).map_err(|e| crate::Error::DeserializationError(e.to_string()))
+    }
+
+    /// Sets the transport-verified peer identity.
+    ///
+    /// # Security
+    ///
+    /// This method must only be called by authenticated transport layers to bind
+    /// a message to the physical peer that delivered it. The protocol layer uses
+    /// this value to reject control messages where the claimed `sender` does not
+    /// match the transport-authenticated peer.
+    ///
+    /// **Never call this from application code.**
+    pub fn set_transport_peer_id(&mut self, peer_id: String) {
+        self.transport_peer_id = Some(peer_id);
+    }
+
+    /// Returns the transport-verified peer identity, if set.
+    pub fn transport_peer_id(&self) -> Option<&str> {
+        self.transport_peer_id.as_deref()
     }
 
     /// Serializes the message to binary (MessagePack-like JSON bytes).

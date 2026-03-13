@@ -182,6 +182,13 @@ const INTERNAL_PREFIXES: &[&str] = &[
 /// contact after restart.
 const MAX_TOFU_PEERS: usize = 1000;
 
+/// Minimum age (in milliseconds) a TOFU entry must have before it can be
+/// evicted by LRU. This prevents a cache-filling attack where an adversary
+/// rapidly registers many fake identities to evict legitimate pinned keys.
+///
+/// Set to 1 hour.
+const TOFU_MIN_EVICTION_AGE_MS: i64 = 3_600_000;
+
 /// Entry in the TOFU key store, pairing the peer's public key with a
 /// last-seen timestamp used for LRU eviction.
 #[derive(Clone, Debug)]
@@ -6397,11 +6404,31 @@ impl OfflineProtocol {
     // CONTROL MESSAGE SIGNING & VERIFICATION
     // ========================================================================
 
+    /// Builds a canonical signing payload using length-prefixed encoding.
+    ///
+    /// Each field is encoded as `<4-byte big-endian length><utf-8 bytes>`,
+    /// making the encoding unambiguous regardless of field content (no
+    /// delimiter-collision risk).
+    fn build_canonical_payload(message: &Message) -> Vec<u8> {
+        let fields: [&str; 4] = [
+            message.sender.as_str(),
+            &message.id.as_str(),
+            message.recipient.as_str(),
+            &message.content,
+        ];
+        let mut buf = Vec::with_capacity(fields.iter().map(|f| 4 + f.len()).sum());
+        for field in &fields {
+            buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        buf
+    }
+
     /// Signs a control message by adding an Ed25519 signature and the sender's
     /// public key to the message metadata.
     ///
-    /// If MLS is not initialized, the message is sent unsigned. The receiving
-    /// side uses TOFU (Trust-On-First-Use) to pin the public key.
+    /// If MLS is not initialized, the message is sent unsigned and a
+    /// `SecurityWarning` event is emitted so the application layer is aware.
     fn sign_control_message(&self, message: &mut Message) {
         let mls = match self.mls_manager.as_ref() {
             Some(m) => m,
@@ -6413,7 +6440,13 @@ impl OfflineProtocol {
         let manager = match mls.read() {
             Ok(guard) => guard,
             Err(e) => {
-                warn!(error = %e, "MLS lock poisoned — sending unsigned control message");
+                error!(error = %e, "MLS lock poisoned — cannot sign control message");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::security_warning(
+                        message.sender.as_str().to_string(),
+                        "Control message sent unsigned: MLS lock poisoned".to_string(),
+                    ));
+                }
                 return;
             }
         };
@@ -6421,20 +6454,27 @@ impl OfflineProtocol {
         let public_key = match manager.get_identity_public_key() {
             Ok(pk) => pk,
             Err(e) => {
-                warn!(error = %e, "Failed to get identity public key — sending unsigned control message");
+                error!(error = %e, "Failed to get identity public key — sending unsigned control message");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::security_warning(
+                        message.sender.as_str().to_string(),
+                        format!("Control message sent unsigned: {}", e),
+                    ));
+                }
                 return;
             }
         };
-        // Sign a canonical payload that includes message ID and recipient
-        // to prevent cross-recipient replay attacks.
-        let canonical = format!(
-            "{}:{}:{}:{}",
-            message.sender, message.id, message.recipient, message.content
-        );
-        let signature = match manager.sign_data(canonical.as_bytes()) {
+        let canonical = Self::build_canonical_payload(message);
+        let signature = match manager.sign_data(&canonical) {
             Ok(sig) => sig,
             Err(e) => {
-                warn!(error = %e, "Failed to sign control message — sending unsigned");
+                error!(error = %e, "Failed to sign control message — sending unsigned");
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::security_warning(
+                        message.sender.as_str().to_string(),
+                        format!("Control message sent unsigned: {}", e),
+                    ));
+                }
                 return;
             }
         };
@@ -6454,11 +6494,11 @@ impl OfflineProtocol {
     /// - `Ok(false)` — no signature present (legacy/unsigned message)
     /// - `Err(..)`   — signature invalid, key mismatch, or TOFU violation
     fn verify_control_message(&mut self, message: &Message) -> Result<bool> {
-        let sig_hex = match message.metadata.get(CTRL_SIG_META_KEY) {
+        let sig_b64 = match message.metadata.get(CTRL_SIG_META_KEY) {
             Some(s) => s,
             None => return Ok(false), // Unsigned — caller decides policy
         };
-        let pk_hex = match message.metadata.get(CTRL_PK_META_KEY) {
+        let pk_b64 = match message.metadata.get(CTRL_PK_META_KEY) {
             Some(s) => s,
             None => {
                 return Err(Error::Other(
@@ -6467,23 +6507,17 @@ impl OfflineProtocol {
             }
         };
 
-        let signature = base64_decode(sig_hex)
+        let signature = base64_decode(sig_b64)
             .map_err(|e| Error::Other(format!("Invalid control signature encoding: {}", e)))?;
-        let public_key = base64_decode(pk_hex)
+        let public_key = base64_decode(pk_b64)
             .map_err(|e| Error::Other(format!("Invalid control public key encoding: {}", e)))?;
 
-        // Verify Ed25519 signature over a canonical payload that includes
-        // message ID and recipient to prevent cross-recipient replay attacks.
-        let canonical = format!(
-            "{}:{}:{}:{}",
-            message.sender, message.id, message.recipient, message.content
-        );
-        let valid = offline_protocol_mls::MlsManager::verify_signature(
-            &public_key,
-            canonical.as_bytes(),
-            &signature,
-        )
-        .map_err(|e| Error::Other(format!("Signature verification error: {}", e)))?;
+        // Verify Ed25519 signature over a length-prefixed canonical payload
+        // that binds sender, message ID, recipient, and content.
+        let canonical = Self::build_canonical_payload(message);
+        let valid =
+            offline_protocol_mls::MlsManager::verify_signature(&public_key, &canonical, &signature)
+                .map_err(|e| Error::Other(format!("Signature verification error: {}", e)))?;
 
         if !valid {
             return Err(Error::Other(
@@ -6492,8 +6526,17 @@ impl OfflineProtocol {
         }
 
         // TOFU: check/pin the public key for this sender
-        let sender = message.sender.as_str();
+        self.tofu_check_or_pin(message.sender.as_str(), public_key)
+    }
+
+    /// Checks a verified public key against the TOFU store, or pins it on
+    /// first contact. Handles bounded-capacity eviction with a minimum age
+    /// threshold to resist cache-filling attacks.
+    ///
+    /// Returns `Ok(true)` on success, `Err(..)` on TOFU key mismatch.
+    fn tofu_check_or_pin(&mut self, sender: &str, public_key: Vec<u8>) -> Result<bool> {
         let now_ms = Utc::now().timestamp_millis();
+
         if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
             if entry.public_key != public_key {
                 warn!(
@@ -6516,14 +6559,39 @@ impl OfflineProtocol {
         } else {
             // First contact — pin the key (with bounded capacity, LRU eviction)
             if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
-                if let Some(evict_key) = self
+                // Only evict entries older than the minimum age to prevent a
+                // cache-filling attack where an adversary rapidly registers
+                // many fake identities to force eviction of legitimate peers.
+                let eviction_cutoff = now_ms - TOFU_MIN_EVICTION_AGE_MS;
+                let evict_key = self
                     .known_peer_public_keys
                     .iter()
+                    .filter(|(_, entry)| entry.last_seen_ms < eviction_cutoff)
                     .min_by_key(|(_, entry)| entry.last_seen_ms)
-                    .map(|(k, _)| k.clone())
-                {
-                    debug!(evicted_peer = %evict_key, "TOFU store full, evicting LRU entry");
-                    self.known_peer_public_keys.remove(&evict_key);
+                    .map(|(k, _)| k.clone());
+
+                match evict_key {
+                    Some(key) => {
+                        debug!(evicted_peer = %key, "TOFU store full, evicting LRU entry");
+                        self.known_peer_public_keys.remove(&key);
+                    }
+                    None => {
+                        warn!(
+                            sender = %sender,
+                            store_size = self.known_peer_public_keys.len(),
+                            "TOFU store full and no entry old enough to evict — \
+                             refusing to pin new peer (possible cache-filling attack)"
+                        );
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::security_warning(
+                                sender.to_string(),
+                                "TOFU store full, cannot pin new peer key".to_string(),
+                            ));
+                        }
+                        // Still accept the message (signature was valid) but
+                        // don't pin — the peer will be re-verified each time.
+                        return Ok(true);
+                    }
                 }
             }
             debug!(sender = %sender, "TOFU: pinning public key for new peer");
@@ -6544,8 +6612,8 @@ impl OfflineProtocol {
     /// transport identity is available (best-effort). Returns `false` if
     /// there is a mismatch.
     fn validate_transport_sender(&self, message: &Message) -> bool {
-        if let Some(ref transport_peer) = message.transport_peer_id {
-            if message.sender.as_str() != transport_peer.as_str() {
+        if let Some(transport_peer) = message.transport_peer_id() {
+            if message.sender.as_str() != transport_peer {
                 warn!(
                     claimed_sender = %message.sender,
                     transport_peer = %transport_peer,
@@ -13243,15 +13311,8 @@ pub(crate) mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_svc_prefixes_included_in_internal_prefixes() {
-        // Verify all SVC prefixes are covered, including the catch-all
-        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_MESSAGE_PREFIX));
-        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_QUERY));
-        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
-        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_REQUEST));
-        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_RESPONSE));
-    }
+    // NOTE: SVC prefix coverage is now verified by
+    // test_internal_prefixes_completeness above.
 
     #[test]
     fn test_is_internal_prefix() {
@@ -13276,7 +13337,7 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        msg.transport_peer_id = Some("alice".to_string());
+        msg.set_transport_peer_id("alice".to_string());
 
         assert!(protocol.validate_transport_sender(&msg));
     }
@@ -13291,7 +13352,7 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        msg.transport_peer_id = Some("eve".to_string());
+        msg.set_transport_peer_id("eve".to_string());
 
         assert!(!protocol.validate_transport_sender(&msg));
     }
@@ -13322,7 +13383,7 @@ pub(crate) mod tests {
             "sender123",
             &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
         );
-        msg.transport_peer_id = Some("eve".to_string());
+        msg.set_transport_peer_id("eve".to_string());
 
         // process_internal_message should consume (drop) the message
         let result = protocol.process_internal_message(&msg);
@@ -13372,38 +13433,25 @@ pub(crate) mod tests {
     fn test_tofu_store_bounded_capacity_with_lru_eviction() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
+        // Use timestamps old enough to be eviction-eligible (beyond the
+        // TOFU_MIN_EVICTION_AGE_MS threshold).
+        let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
+
         // Fill the TOFU store to capacity with ascending last_seen timestamps
         for i in 0..MAX_TOFU_PEERS {
             protocol.known_peer_public_keys.insert(
                 format!("peer_{}", i),
                 TofuEntry {
                     public_key: vec![i as u8; 32],
-                    last_seen_ms: i as i64, // peer_0 has oldest timestamp
+                    last_seen_ms: old_base + i as i64, // peer_0 has oldest timestamp
                 },
             );
         }
         assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
 
-        // Simulate what verify_control_message does when store is full:
-        // LRU eviction should remove the entry with the smallest last_seen_ms.
-        if protocol.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
-            if let Some(evict_key) = protocol
-                .known_peer_public_keys
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_seen_ms)
-                .map(|(k, _)| k.clone())
-            {
-                assert_eq!(evict_key, "peer_0", "Should evict the LRU entry");
-                protocol.known_peer_public_keys.remove(&evict_key);
-            }
-        }
-        protocol.known_peer_public_keys.insert(
-            "new_peer".to_string(),
-            TofuEntry {
-                public_key: vec![99u8; 32],
-                last_seen_ms: MAX_TOFU_PEERS as i64 + 1,
-            },
-        );
+        // tofu_check_or_pin should evict the oldest entry and add the new one.
+        let result = protocol.tofu_check_or_pin("new_peer", vec![99u8; 32]);
+        assert!(result.is_ok());
 
         // Size should still be at the cap
         assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
@@ -13417,6 +13465,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_tofu_eviction_refuses_when_all_entries_too_recent() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Fill with entries that are all recent (within the min eviction age).
+        let recent = Utc::now().timestamp_millis();
+        for i in 0..MAX_TOFU_PEERS {
+            protocol.known_peer_public_keys.insert(
+                format!("recent_peer_{}", i),
+                TofuEntry {
+                    public_key: vec![i as u8; 32],
+                    last_seen_ms: recent - i as i64, // all very recent
+                },
+            );
+        }
+        assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
+
+        // Attempt to pin a new peer — should succeed (signature was valid)
+        // but should NOT evict any entry or pin the new key.
+        let result = protocol.tofu_check_or_pin("attacker_peer", vec![42u8; 32]);
+        assert!(result.is_ok(), "Should accept message despite full store");
+        assert!(
+            !protocol
+                .known_peer_public_keys
+                .contains_key("attacker_peer"),
+            "Should not pin new peer when all entries are too recent to evict"
+        );
+        assert_eq!(
+            protocol.known_peer_public_keys.len(),
+            MAX_TOFU_PEERS,
+            "Store size should be unchanged"
+        );
+    }
+
+    #[test]
     fn test_transport_peer_id_not_serialized() {
         let mut msg = Message::new(
             UserId::new("alice").unwrap(),
@@ -13424,7 +13506,7 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        msg.transport_peer_id = Some("ble-device-42".to_string());
+        msg.set_transport_peer_id("ble-device-42".to_string());
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
@@ -13438,7 +13520,7 @@ pub(crate) mod tests {
 
         // Deserialize back — field should be None
         let deserialized: Message = serde_json::from_str(&json).unwrap();
-        assert!(deserialized.transport_peer_id.is_none());
+        assert!(deserialized.transport_peer_id().is_none());
     }
 
     #[test]
@@ -13537,33 +13619,38 @@ pub(crate) mod tests {
     fn test_tofu_lru_eviction_removes_oldest() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
+        // Use timestamps old enough to be eviction-eligible
+        let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
+
         // Insert 3 entries with different timestamps
         protocol.known_peer_public_keys.insert(
             "old_peer".to_string(),
             TofuEntry {
                 public_key: vec![1u8; 32],
-                last_seen_ms: 100,
+                last_seen_ms: old_base,
             },
         );
         protocol.known_peer_public_keys.insert(
             "medium_peer".to_string(),
             TofuEntry {
                 public_key: vec![2u8; 32],
-                last_seen_ms: 200,
+                last_seen_ms: old_base + 100,
             },
         );
         protocol.known_peer_public_keys.insert(
             "new_peer".to_string(),
             TofuEntry {
                 public_key: vec![3u8; 32],
-                last_seen_ms: 300,
+                last_seen_ms: old_base + 200,
             },
         );
 
-        // Find the LRU entry
+        // Find the LRU entry (among eviction-eligible ones)
+        let eviction_cutoff = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS;
         let lru = protocol
             .known_peer_public_keys
             .iter()
+            .filter(|(_, e)| e.last_seen_ms < eviction_cutoff)
             .min_by_key(|(_, e)| e.last_seen_ms)
             .map(|(k, _)| k.clone())
             .unwrap();
@@ -13575,9 +13662,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_canonical_signing_payload_format() {
-        // Verify the canonical payload format used for signing includes
-        // sender, message ID, recipient, and content.
+    fn test_canonical_signing_payload_is_length_prefixed() {
+        // Verify the canonical payload uses length-prefixed encoding, not
+        // delimiter-based, to prevent ambiguity from field contents.
         let msg = Message::new(
             UserId::new("alice").unwrap(),
             UserId::new("bob").unwrap(),
@@ -13585,19 +13672,100 @@ pub(crate) mod tests {
             "__CONN_REQ__payload",
         );
 
-        let canonical = format!(
-            "{}:{}:{}:{}",
-            msg.sender, msg.id, msg.recipient, msg.content
+        let canonical = OfflineProtocol::build_canonical_payload(&msg);
+
+        // Parse back: each field is <4-byte big-endian length><utf-8 bytes>
+        let mut cursor = 0usize;
+        let mut fields = Vec::new();
+        while cursor < canonical.len() {
+            assert!(cursor + 4 <= canonical.len(), "truncated length prefix");
+            let len =
+                u32::from_be_bytes(canonical[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            assert!(cursor + len <= canonical.len(), "truncated field data");
+            let field = std::str::from_utf8(&canonical[cursor..cursor + len]).unwrap();
+            fields.push(field.to_string());
+            cursor += len;
+        }
+
+        assert_eq!(fields.len(), 4, "canonical payload should have 4 fields");
+        assert_eq!(fields[0], "alice");
+        assert_eq!(fields[1], msg.id.as_str());
+        assert_eq!(fields[2], "bob");
+        assert_eq!(fields[3], "__CONN_REQ__payload");
+    }
+
+    #[test]
+    fn test_canonical_payload_no_collision_with_colon_in_sender() {
+        // Regression test: ensure that a sender containing a colon does NOT
+        // produce the same payload as a different sender/id split.
+        let msg_a = Message::new(
+            UserId::new("alice:extra").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "content",
         );
-        assert!(canonical.contains("alice"));
-        assert!(canonical.contains(&msg.id.as_str().to_string()));
-        assert!(canonical.contains("bob"));
-        assert!(canonical.contains("__CONN_REQ__payload"));
-        // Ensure the format has exactly the expected structure
-        let parts: Vec<&str> = canonical.splitn(4, ':').collect();
-        assert_eq!(parts.len(), 4);
-        assert_eq!(parts[0], "alice");
-        assert_eq!(parts[2], "bob");
-        assert_eq!(parts[3], "__CONN_REQ__payload");
+        let msg_b = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "content",
+        );
+
+        let payload_a = OfflineProtocol::build_canonical_payload(&msg_a);
+        let payload_b = OfflineProtocol::build_canonical_payload(&msg_b);
+
+        // Even if content and recipient match, different sender lengths
+        // produce different payloads.
+        assert_ne!(payload_a, payload_b);
+    }
+
+    #[test]
+    fn test_internal_prefixes_completeness() {
+        // Verify that every constant defined in `internal_prefixes` is
+        // registered in INTERNAL_PREFIXES. If a new prefix is added to the
+        // module but not to the array, this test fails.
+        let module_prefixes: Vec<&str> = vec![
+            internal_prefixes::KEY_PACKAGE,
+            internal_prefixes::WELCOME,
+            internal_prefixes::ENCRYPTED,
+            internal_prefixes::SESSION_CONFIRM_PROBE,
+            internal_prefixes::SESSION_CONFIRM_ACK,
+            internal_prefixes::CONN_REQUEST,
+            internal_prefixes::CONN_ACCEPT,
+            internal_prefixes::CONN_REJECT,
+            internal_prefixes::GROUP_CREATED,
+            internal_prefixes::GROUP_MSG,
+            internal_prefixes::GROUP_MEMBER_ADDED,
+            internal_prefixes::GROUP_MEMBER_REMOVED,
+            internal_prefixes::GROUP_INFO,
+            internal_prefixes::USER_GROUPS,
+            internal_prefixes::GROUP_ERROR,
+            internal_prefixes::GROUP_MLS_MSG,
+            internal_prefixes::GROUP_MLS_WELCOME,
+            internal_prefixes::GROUP_MLS_COMMIT,
+            internal_prefixes::GROUP_MLS_LEAVE,
+            internal_prefixes::GROUP_RELAY_REGISTER,
+            internal_prefixes::GROUP_RELAY_BROADCAST,
+            internal_prefixes::PRESENCE,
+            internal_prefixes::TYPING_INDICATOR,
+            internal_prefixes::READ_RECEIPT,
+        ];
+
+        for prefix in &module_prefixes {
+            assert!(
+                INTERNAL_PREFIXES.contains(prefix),
+                "internal_prefixes::{:?} is missing from INTERNAL_PREFIXES array — \
+                 this is a security gap that allows prefix injection for this message type",
+                prefix
+            );
+        }
+
+        // Also verify the SVC catch-all and explicit SVC prefixes
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_MESSAGE_PREFIX));
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_QUERY));
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_REQUEST));
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_RESPONSE));
     }
 }

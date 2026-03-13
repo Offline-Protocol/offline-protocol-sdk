@@ -201,7 +201,7 @@ impl BleTransport {
     ///   UUID, etc.). The protocol layer uses this value to verify that
     ///   `message.sender` matches the physical peer that delivered it.
     pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
-        message.transport_peer_id = Some(peer_id);
+        message.set_transport_peer_id(peer_id);
         let mut queue = self.receive_queue.lock().unwrap();
         queue.push_back(message);
     }
@@ -537,7 +537,7 @@ impl BleTransport {
     pub fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
         match self.process_fragment(&fragment_data) {
             Ok(Some(mut message)) => {
-                message.transport_peer_id = Some(peer_id);
+                message.set_transport_peer_id(peer_id);
                 let msg_id = message.id.clone();
                 let mut queue = self.receive_queue.lock().unwrap();
                 queue.push_back(message);

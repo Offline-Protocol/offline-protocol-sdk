@@ -207,7 +207,7 @@ impl InternetTransport {
     ///   this value to verify that `message.sender` matches the authenticated
     ///   peer.
     pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
-        message.transport_peer_id = Some(peer_id);
+        message.set_transport_peer_id(peer_id);
         let mut queue = self.receive_queue.lock().unwrap();
         queue.push_back(message);
     }
@@ -256,7 +256,7 @@ impl InternetTransport {
     pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
         match self.deserialize_message(&data) {
             Ok(mut message) => {
-                message.transport_peer_id = Some(peer_id);
+                message.set_transport_peer_id(peer_id);
                 let mut queue = self.receive_queue.lock().unwrap();
                 queue.push_back(message);
                 Ok(())
