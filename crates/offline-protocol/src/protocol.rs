@@ -445,12 +445,12 @@ pub(crate) fn lock_shared_state(
 }
 
 #[derive(Clone)]
-struct OutboxEntry {
-    message: Message,
-    attempt_count: u32,
-    first_sent_at: DateTime<Utc>,
-    last_sent_at: DateTime<Utc>,
-    last_transport: Option<TransportType>,
+pub(crate) struct OutboxEntry {
+    pub(crate) message: Message,
+    pub(crate) attempt_count: u32,
+    pub(crate) first_sent_at: DateTime<Utc>,
+    pub(crate) last_sent_at: DateTime<Utc>,
+    pub(crate) last_transport: Option<TransportType>,
 }
 
 #[derive(Clone)]
@@ -505,7 +505,7 @@ pub struct OfflineProtocol {
     pub(crate) shared_state: Arc<Mutex<SharedState>>,
 
     /// Messages awaiting delivery/acknowledgment (store-and-forward outbox).
-    outbox: HashMap<MessageId, OutboxEntry>,
+    pub(crate) outbox: HashMap<MessageId, OutboxEntry>,
 
     /// Dedicated outbox for file chunk messages, separate from the main outbox
     /// to prevent large file transfers from evicting regular messages.
@@ -607,9 +607,9 @@ pub struct OfflineProtocol {
     pub(crate) group_message_dedup: HashMap<String, Instant>,
 
     /// Buffer for out-of-order MLS commits that failed to decrypt.
-    /// Maps group_id -> list of pending commits awaiting retry.
+    /// Maps group_id -> deque of pending commits awaiting retry.
     /// When a commit succeeds for a group, buffered commits are drained and retried.
-    pub(crate) pending_commits: HashMap<String, Vec<PendingCommit>>,
+    pub(crate) pending_commits: HashMap<String, std::collections::VecDeque<PendingCommit>>,
 }
 
 impl OfflineProtocol {
