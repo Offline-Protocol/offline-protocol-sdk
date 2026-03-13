@@ -570,6 +570,25 @@ pub enum Event {
         succeeded_members: Vec<String>,
     },
 
+    /// An epoch fork was detected in a group — concurrent commits caused
+    /// members to diverge onto different MLS branches. The deterministic
+    /// leader will attempt automatic resolution via a key-update commit.
+    GroupEpochForkDetected {
+        /// MLS group identifier.
+        group_id: String,
+        /// Our local epoch when the fork was detected.
+        local_epoch: u64,
+    },
+
+    /// An epoch fork was successfully resolved by the leader issuing a
+    /// resync commit that re-established a canonical epoch.
+    GroupEpochForkResolved {
+        /// MLS group identifier.
+        group_id: String,
+        /// The new canonical epoch after resolution.
+        resolved_epoch: u64,
+    },
+
     // --- Service discovery ---
     /// A service was discovered on the mesh in response to a discovery query.
     ServiceDiscovered {
@@ -1113,6 +1132,22 @@ impl Event {
             group_id,
             failed_members,
             succeeded_members,
+        }
+    }
+
+    /// Creates a GroupEpochForkDetected event.
+    pub fn group_epoch_fork_detected(group_id: String, local_epoch: u64) -> Self {
+        Self::GroupEpochForkDetected {
+            group_id,
+            local_epoch,
+        }
+    }
+
+    /// Creates a GroupEpochForkResolved event.
+    pub fn group_epoch_fork_resolved(group_id: String, resolved_epoch: u64) -> Self {
+        Self::GroupEpochForkResolved {
+            group_id,
+            resolved_epoch,
         }
     }
 
@@ -1711,6 +1746,22 @@ impl fmt::Debug for Event {
                 .field("group_id", group_id)
                 .field("failed_count", &failed_members.len())
                 .field("succeeded_count", &succeeded_members.len())
+                .finish(),
+            Self::GroupEpochForkDetected {
+                group_id,
+                local_epoch,
+            } => f
+                .debug_struct("GroupEpochForkDetected")
+                .field("group_id", group_id)
+                .field("local_epoch", local_epoch)
+                .finish(),
+            Self::GroupEpochForkResolved {
+                group_id,
+                resolved_epoch,
+            } => f
+                .debug_struct("GroupEpochForkResolved")
+                .field("group_id", group_id)
+                .field("resolved_epoch", resolved_epoch)
                 .finish(),
             Self::DorsScoreUpdated { scores } => f
                 .debug_struct("DorsScoreUpdated")

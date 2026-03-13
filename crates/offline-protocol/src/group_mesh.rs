@@ -29,6 +29,14 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 pub(super) const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 pub(super) const PENDING_COMMIT_TTL_SECS: u64 = 120;
+/// Timeout before the next eligible member re-elects itself for a leave
+/// remove-commit when the original elected remover fails (30 seconds).
+pub(super) const LEAVE_ELECTION_TIMEOUT_SECS: u64 = 30;
+/// Delay after detecting a potential epoch fork before the leader issues a
+/// resync commit (10 seconds — gives time for buffered commits to drain).
+pub(super) const EPOCH_FORK_RESOLUTION_DELAY_SECS: u64 = 10;
+/// Maximum number of tracked epoch fork states to prevent unbounded growth.
+pub(super) const MAX_EPOCH_FORK_ENTRIES: usize = 32;
 
 /// Bundled state for group messaging.
 ///
@@ -58,6 +66,13 @@ pub(crate) struct GroupMeshState {
     /// Whether Internet transport was available on the last `process()` tick.
     /// Used for edge-detection: sync groups on 0→1 transition, clear on 1→0.
     pub(crate) internet_was_available: bool,
+
+    /// Pending leave elections awaiting a remove-commit from the elected member.
+    /// Key: "group_id:leaving_member".
+    pub(crate) pending_leave_elections: HashMap<String, PendingLeaveElection>,
+
+    /// Suspected epoch forks awaiting resolution. Key: group_id.
+    pub(crate) epoch_forks: HashMap<String, EpochForkState>,
 }
 
 /// Outcome of attempting to process an MLS Commit.
@@ -188,6 +203,40 @@ pub(crate) struct PendingCommit {
     pub(crate) data: String,
     /// When this pending commit was first buffered.
     pub(crate) buffered_at: Instant,
+}
+
+/// Tracks a leave election where we're waiting for the elected remover to
+/// issue a remove-commit. If the timeout expires and the member is still
+/// in the group, the next eligible member re-elects itself.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingLeaveElection {
+    /// Group the leave is for.
+    pub(crate) group_id: String,
+    /// User ID of the member who is leaving.
+    pub(crate) leaving_member: String,
+    /// Sorted list of remaining members at election time (excluding leaver).
+    pub(crate) remaining_members: Vec<String>,
+    /// When we received the leave notification.
+    pub(crate) received_at: Instant,
+}
+
+/// Tracks a suspected epoch fork for a group.
+///
+/// An epoch fork occurs when two members issue concurrent commits at the
+/// same epoch (e.g., two admins adding different members simultaneously).
+/// Members who accepted commit A are on one branch, those who accepted
+/// commit B are on another. Detected when buffered commits expire without
+/// resolution.
+#[derive(Debug, Clone)]
+pub(crate) struct EpochForkState {
+    /// Group with the suspected fork.
+    pub(crate) group_id: String,
+    /// Our local epoch when the fork was detected.
+    pub(crate) local_epoch: u64,
+    /// When the fork was first suspected.
+    pub(crate) detected_at: Instant,
+    /// Whether the leader has already attempted resolution.
+    pub(crate) resolution_attempted: bool,
 }
 
 impl OfflineProtocol {
@@ -500,7 +549,15 @@ impl OfflineProtocol {
                 (*member).clone(),
                 sender.to_string(),
             ));
+            // Clear any pending leave election for this member — the remove
+            // has been committed successfully.
+            let election_key = format!("{}:{}", payload.group_id, member);
+            self.group_mesh.pending_leave_elections.remove(&election_key);
         }
+
+        // If we had a suspected fork for this group and a commit just
+        // succeeded, the fork may have resolved — clear the tracking.
+        self.group_mesh.epoch_forks.remove(&payload.group_id);
 
         CommitOutcome::Success(payload.group_id)
     }
@@ -542,6 +599,8 @@ impl OfflineProtocol {
     /// double-buffering: this method owns the retry lifecycle and re-buffers
     /// only via `still_pending`, never through the core processing path.
     pub(crate) fn drain_pending_commits(&mut self, group_id: &str) {
+        let mut expired_count: usize = 0;
+
         // Limit iterations to avoid unbounded looping
         for _ in 0..MAX_PENDING_COMMITS_PER_GROUP {
             let pending = match self.group_mesh.pending_commits.get_mut(group_id) {
@@ -553,12 +612,13 @@ impl OfflineProtocol {
             let mut still_pending = VecDeque::new();
 
             for entry in pending {
-                // Drop expired entries
+                // Drop expired entries — track count for fork detection
                 if entry.buffered_at.elapsed() > StdDuration::from_secs(PENDING_COMMIT_TTL_SECS) {
                     debug!(
                         group_id = %group_id,
                         "Dropping expired pending commit"
                     );
+                    expired_count += 1;
                     continue;
                 }
                 match self.process_commit_core(&entry.sender, &entry.data) {
@@ -599,6 +659,63 @@ impl OfflineProtocol {
         {
             self.group_mesh.pending_commits.remove(group_id);
         }
+
+        // If commits expired without ever being resolved, this signals a
+        // potential epoch fork — two concurrent commits created divergent
+        // group states that can't be reconciled by simple reordering.
+        if expired_count > 0 && !self.group_mesh.epoch_forks.contains_key(group_id) {
+            self.flag_potential_epoch_fork(group_id);
+        }
+    }
+
+    /// Flags a group as having a potential epoch fork.
+    ///
+    /// Called when buffered commits expire without resolution, indicating
+    /// the group may have diverged due to concurrent commits.
+    fn flag_potential_epoch_fork(&mut self, group_id: &str) {
+        if self.group_mesh.epoch_forks.len() >= MAX_EPOCH_FORK_ENTRIES {
+            // Evict the oldest entry to prevent unbounded growth
+            if let Some(oldest_key) = self
+                .group_mesh
+                .epoch_forks
+                .values()
+                .min_by_key(|f| f.detected_at)
+                .map(|f| f.group_id.clone())
+            {
+                self.group_mesh.epoch_forks.remove(&oldest_key);
+            }
+        }
+
+        let local_epoch = self
+            .refresh_group_members(group_id)
+            .ok()
+            .and_then(|_| {
+                let mls_guard = self.read_mls_guard().ok()?;
+                let gid = offline_protocol_mls::GroupId::new(group_id);
+                mls_guard.get_group_info(&gid).ok().flatten().map(|i| i.epoch)
+            })
+            .unwrap_or(0);
+
+        warn!(
+            group_id = %group_id,
+            local_epoch = local_epoch,
+            "Potential epoch fork detected — buffered commits expired without resolution"
+        );
+
+        self.group_mesh.epoch_forks.insert(
+            group_id.to_string(),
+            EpochForkState {
+                group_id: group_id.to_string(),
+                local_epoch,
+                detected_at: Instant::now(),
+                resolution_attempted: false,
+            },
+        );
+
+        self.emit_event(Event::group_epoch_fork_detected(
+            group_id.to_string(),
+            local_epoch,
+        ));
     }
 
     /// Handles an incoming group leave notification.
@@ -671,12 +788,14 @@ impl OfflineProtocol {
 
         // Deterministic election: lexicographically-first remaining member
         // (excluding the leaver) issues the MLS remove-commit to advance epoch.
-        let should_remove = members
+        let mut remaining: Vec<String> = members
             .iter()
             .filter(|m| m.as_str() != sender)
-            .min()
-            .map(|first| first == &self_id)
-            .unwrap_or(false);
+            .cloned()
+            .collect();
+        remaining.sort();
+
+        let should_remove = remaining.first().map(|first| first == &self_id).unwrap_or(false);
 
         if should_remove {
             debug!(
@@ -694,6 +813,22 @@ impl OfflineProtocol {
                     "Failed to issue MLS remove-commit for leaving member"
                 );
             }
+            // Clear any pending election for this leave (we handled it)
+            let election_key = format!("{}:{}", payload.group_id, sender);
+            self.group_mesh.pending_leave_elections.remove(&election_key);
+        } else {
+            // We're not the elected remover — record the election so we can
+            // take over if the elected member fails to issue the commit in time.
+            let election_key = format!("{}:{}", payload.group_id, sender);
+            self.group_mesh.pending_leave_elections.insert(
+                election_key,
+                PendingLeaveElection {
+                    group_id: payload.group_id.clone(),
+                    leaving_member: sender.to_string(),
+                    remaining_members: remaining,
+                    received_at: Instant::now(),
+                },
+            );
         }
 
         // Do NOT emit GroupMemberRemoved here for non-elected nodes.
@@ -1266,6 +1401,239 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // EPOCH FORK RESOLUTION
+    // ========================================================================
+
+    /// Checks for pending epoch forks and attempts resolution.
+    ///
+    /// Called from the `process()` tick. After the resolution delay, the
+    /// deterministic leader (lex-first member) issues an `update_keys` commit
+    /// to re-establish a canonical epoch. Members on the same branch will
+    /// process the commit normally. Members on a different branch will fail
+    /// to process it, at which point they need a re-invite (the leader
+    /// emits `GroupEpochForkResolved` and the application layer can trigger
+    /// re-invites for unreachable members).
+    pub(crate) fn check_epoch_forks(&mut self) {
+        let delay = StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS);
+        let self_id = self.config.user_id.clone();
+
+        // Collect forks ready for resolution
+        let ready: Vec<EpochForkState> = self
+            .group_mesh
+            .epoch_forks
+            .values()
+            .filter(|f| !f.resolution_attempted && f.detected_at.elapsed() > delay)
+            .cloned()
+            .collect();
+
+        for fork in ready {
+            // Check if we're the leader for this group
+            let members = self
+                .refresh_group_members(&fork.group_id)
+                .ok()
+                .or_else(|| self.group_mesh.members.get(&fork.group_id).cloned())
+                .unwrap_or_default();
+
+            let mut sorted = members.clone();
+            sorted.sort();
+            let am_leader = sorted.first().map(|f| f == &self_id).unwrap_or(false);
+
+            // Mark as attempted regardless — only the leader acts, but all
+            // members should stop re-checking.
+            if let Some(state) = self.group_mesh.epoch_forks.get_mut(&fork.group_id) {
+                state.resolution_attempted = true;
+            }
+
+            if !am_leader {
+                continue;
+            }
+
+            info!(
+                group_id = %fork.group_id,
+                local_epoch = fork.local_epoch,
+                "Attempting epoch fork resolution as elected leader"
+            );
+
+            // Issue a key update commit to establish a canonical next epoch.
+            // Members on our branch will process this normally and advance.
+            // Members on a forked branch will fail — the app layer should
+            // handle re-inviting them.
+            // Acquire MLS lock, perform key update, and fully release the
+            // guard before touching any other &mut self state.
+            let update_result = {
+                if let Ok(guard) = self.read_mls_guard() {
+                    let gid = offline_protocol_mls::GroupId::new(&fork.group_id);
+                    let r = guard.update_keys(&gid);
+                    drop(guard);
+                    Some(r)
+                } else {
+                    None
+                }
+            };
+            // Guard is fully dropped here — safe to use &mut self.
+            let update_result = match update_result {
+                Some(r) => r,
+                None => {
+                    warn!(group_id = %fork.group_id, "MLS unavailable during epoch fork resolution");
+                    if let Some(state) = self.group_mesh.epoch_forks.get_mut(&fork.group_id) {
+                        state.resolution_attempted = false;
+                    }
+                    continue;
+                }
+            };
+
+            match update_result {
+                Ok(commit_msg) => {
+                    // Distribute the key-update commit to all members
+                    let commit_payload = GroupMlsCommitPayload {
+                        group_id: fork.group_id.clone(),
+                        commit_type: GroupCommitType::Remove, // Closest semantic — epoch advancement
+                        ciphertext: base64_encode(&commit_msg.ciphertext),
+                        epoch: commit_msg.epoch,
+                        affected_member: None, // Key update, not a membership change
+                    };
+                    let commit_content = match serde_json::to_string(&commit_payload) {
+                        Ok(json) => format!(
+                            "{}{}",
+                            internal_prefixes::GROUP_MLS_COMMIT,
+                            json
+                        ),
+                        Err(e) => {
+                            warn!(
+                                group_id = %fork.group_id,
+                                error = %e,
+                                "Failed to serialize fork resolution commit"
+                            );
+                            continue;
+                        }
+                    };
+                    for member in &members {
+                        if member == &self_id {
+                            continue;
+                        }
+                        if let Err(e) = self.send_internal_message(
+                            member,
+                            commit_content.clone(),
+                            MessagePriority::High,
+                        ) {
+                            warn!(
+                                group_id = %fork.group_id,
+                                member = %member,
+                                error = %e,
+                                "Failed to send fork resolution commit to member"
+                            );
+                        }
+                    }
+
+                    info!(
+                        group_id = %fork.group_id,
+                        new_epoch = commit_msg.epoch,
+                        "Epoch fork resolution commit distributed"
+                    );
+
+                    self.emit_event(Event::group_epoch_fork_resolved(
+                        fork.group_id.clone(),
+                        commit_msg.epoch,
+                    ));
+
+                    // Clean up the fork state
+                    self.group_mesh.epoch_forks.remove(&fork.group_id);
+                }
+                Err(e) => {
+                    warn!(
+                        group_id = %fork.group_id,
+                        error = %e,
+                        "Failed to issue key update for epoch fork resolution"
+                    );
+                    // Leave resolution_attempted = true — a persistent failure
+                    // means the group may need manual intervention.
+                }
+            }
+        }
+
+        // Clean up stale fork entries (older than 5 minutes)
+        let stale_threshold = StdDuration::from_secs(300);
+        self.group_mesh
+            .epoch_forks
+            .retain(|_, f| f.detected_at.elapsed() < stale_threshold);
+    }
+
+    // ========================================================================
+    // LEAVE ELECTION FALLBACK
+    // ========================================================================
+
+    /// Checks for timed-out leave elections and re-elects the next eligible
+    /// member to issue the MLS remove-commit.
+    ///
+    /// Called from the `process()` tick. If the originally elected remover
+    /// hasn't issued a commit within `LEAVE_ELECTION_TIMEOUT_SECS`, we check
+    /// whether the leaving member is still in the group (via MLS state). If
+    /// so, the next eligible member in the sorted remaining list takes over.
+    pub(crate) fn check_leave_election_timeouts(&mut self) {
+        let timeout = StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS);
+        let self_id = self.config.user_id.clone();
+
+        // Collect timed-out elections
+        let timed_out: Vec<PendingLeaveElection> = self
+            .group_mesh
+            .pending_leave_elections
+            .values()
+            .filter(|e| e.received_at.elapsed() > timeout)
+            .cloned()
+            .collect();
+
+        for election in timed_out {
+            let election_key = format!("{}:{}", election.group_id, election.leaving_member);
+
+            // Check if the leaving member is still in the group (MLS authoritative)
+            let still_member = self
+                .refresh_group_members(&election.group_id)
+                .ok()
+                .or_else(|| self.group_mesh.members.get(&election.group_id).cloned())
+                .map(|m| m.iter().any(|id| id == &election.leaving_member))
+                .unwrap_or(false);
+
+            if !still_member {
+                // Already removed — clean up
+                self.group_mesh.pending_leave_elections.remove(&election_key);
+                continue;
+            }
+
+            // Re-elect: walk the sorted remaining members. For each timeout
+            // interval that has passed, advance one position in the list.
+            // This staggers re-election so members don't all fire at once.
+            let elapsed_intervals = (election.received_at.elapsed().as_secs()
+                / LEAVE_ELECTION_TIMEOUT_SECS) as usize;
+            // Interval 0 = first member (original election), 1 = second, etc.
+            let candidate_idx = elapsed_intervals.min(election.remaining_members.len().saturating_sub(1));
+
+            if election.remaining_members.get(candidate_idx).map(|c| c == &self_id).unwrap_or(false) {
+                info!(
+                    group_id = %election.group_id,
+                    leaving_member = %election.leaving_member,
+                    attempt = candidate_idx + 1,
+                    "Re-elected to issue MLS remove-commit (prior elected member timed out)"
+                );
+                if let Err(e) = self.remove_from_group(&election.group_id, &election.leaving_member) {
+                    warn!(
+                        group_id = %election.group_id,
+                        leaving_member = %election.leaving_member,
+                        error = %e,
+                        "Failed to issue MLS remove-commit during re-election"
+                    );
+                    // Don't remove from pending — next tick will try again
+                    // or the next member in line will take over at the next interval.
+                } else {
+                    self.group_mesh.pending_leave_elections.remove(&election_key);
+                }
+            }
+            // If we're not the candidate at this interval, leave the election
+            // in place — either the current candidate will handle it, or the
+            // next interval will advance to us.
+        }
+    }
+
+    // ========================================================================
     // TRANSPORT-RESILIENT SYNC
     // ========================================================================
 
@@ -1293,13 +1661,21 @@ impl OfflineProtocol {
     }
 
     /// Re-registers all unsynced groups with the relay server.
+    ///
+    /// Refreshes each group's member list from MLS state before syncing so
+    /// that the relay receives authoritative membership, not a stale cache.
     fn sync_groups_to_relay(&mut self) {
         let group_ids: Vec<String> = self.group_mesh.members.keys().cloned().collect();
         for group_id in group_ids {
             if self.group_mesh.relay_synced.contains(&group_id) {
                 continue;
             }
-            if let Some(members) = self.group_mesh.members.get(&group_id).cloned() {
+            // Refresh from MLS to avoid syncing stale membership to relay
+            let members = self
+                .refresh_group_members(&group_id)
+                .ok()
+                .or_else(|| self.group_mesh.members.get(&group_id).cloned());
+            if let Some(members) = members {
                 let _ = self.try_relay_register_group(&group_id, None, &members);
             }
         }

@@ -6010,6 +6010,8 @@ impl OfflineProtocol {
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
         self.cleanup_group_message_dedup();
+        self.check_epoch_forks();
+        self.check_leave_election_timeouts();
         self.check_relay_group_sync();
         let stale_file_ids = self
             .file_transfer_manager
