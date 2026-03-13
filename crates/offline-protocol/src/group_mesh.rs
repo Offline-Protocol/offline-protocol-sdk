@@ -1490,6 +1490,19 @@ impl OfflineProtocol {
     /// to process it, at which point they need a re-invite (the leader
     /// emits `GroupEpochForkResolved` and the application layer can trigger
     /// re-invites for unreachable members).
+    ///
+    /// ## Stuck fork recovery
+    ///
+    /// If `update_keys` fails (e.g., the leader's MLS state is corrupted),
+    /// `resolution_attempted` is set to `true` and no further automatic
+    /// resolution is tried. The fork entry remains until the 5-minute stale
+    /// cleanup removes it, at which point the fork may be re-detected if
+    /// the underlying issue persists (creating a detect → fail → stale-cleanup
+    /// → re-detect cycle). This is intentional: a persistent `update_keys`
+    /// failure indicates the group likely needs manual intervention (e.g.,
+    /// re-creating the group or re-inviting all members). The application
+    /// layer should monitor `GroupEpochForkDetected` events and escalate if
+    /// the same group is repeatedly detected.
     pub(crate) fn check_epoch_forks(&mut self) {
         let delay = StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS);
         let self_id = self.config.user_id.clone();

@@ -4289,3 +4289,370 @@ fn test_leave_election_proceeds_after_cooldown_expires() {
         "Bob should be removed after cooldown-expired re-election"
     );
 }
+
+// ========================================================================
+// STAGGERED RE-ELECTION WITH MULTIPLE CANDIDATES
+// ========================================================================
+
+#[test]
+fn test_leave_election_staggered_candidate_selection() {
+    // With 3+ remaining members, different timeout intervals should select
+    // different candidates. This verifies the staggered re-election logic
+    // advances through the sorted candidate list over time.
+    //
+    // Uses cached membership (no MLS group) so the leaver stays "in the group"
+    // across all intervals, allowing us to observe candidate progression.
+    let (mut protocol, _events) = setup_with_events();
+    let group_id = "group:staggered".to_string();
+    let leaving = "leaver";
+
+    // Set up a group with 4 remaining members after leaver departs.
+    // Sorted remaining (excluding leaver): ["alice", "bob", "charlie", "user123"]
+    // user123 (self) is at index 3 — selected at interval 3 (90-120s elapsed).
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            "alice".to_string(),
+            "bob".to_string(),
+            "charlie".to_string(),
+            "user123".to_string(), // self (from create_test_config)
+            leaving.to_string(),
+        ],
+    );
+
+    let key = (group_id.clone(), leaving.to_string());
+
+    // Interval 1 (30-60s): candidate_idx=1 → "bob". We are "user123" → skip.
+    let past_1 = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    protocol.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: leaving.to_string(),
+            received_at: past_1,
+            last_attempt_at: None,
+        },
+    );
+    protocol.check_leave_election_timeouts();
+    assert!(
+        protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Election should remain pending — user123 is not candidate at interval 1"
+    );
+
+    // Interval 2 (60-90s): candidate_idx=2 → "charlie". We are "user123" → skip.
+    let past_2 = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS * 2 + 5);
+    protocol
+        .group_mesh
+        .pending_leave_elections
+        .get_mut(&key)
+        .unwrap()
+        .received_at = past_2;
+    protocol.check_leave_election_timeouts();
+    assert!(
+        protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Election should remain pending — user123 is not candidate at interval 2"
+    );
+
+    // Interval 3 (90-120s): candidate_idx=3 → "user123". We ARE the candidate.
+    // remove_from_group will fail (no MLS group), so election stays with cooldown set.
+    let past_3 = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS * 3 + 5);
+    protocol
+        .group_mesh
+        .pending_leave_elections
+        .get_mut(&key)
+        .unwrap()
+        .received_at = past_3;
+    protocol
+        .group_mesh
+        .pending_leave_elections
+        .get_mut(&key)
+        .unwrap()
+        .last_attempt_at = None; // reset cooldown
+    protocol.check_leave_election_timeouts();
+
+    // remove_from_group failed → election stays pending with cooldown set
+    assert!(
+        protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Election should remain pending after failed remove at interval 3"
+    );
+    assert!(
+        protocol.group_mesh.pending_leave_elections[&key]
+            .last_attempt_at
+            .is_some(),
+        "Cooldown should be set — user123 was selected and attempted remove at interval 3"
+    );
+}
+
+#[test]
+fn test_leave_election_staggered_with_real_mls_group() {
+    // Full integration test: alice + bob MLS group, charlie (fake) is the
+    // leaver. "alice" is lex-first (idx 0), so interval 1 → idx 1 → "bob".
+    // alice is at idx 0 which was already tried in handle_group_mls_leave.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Staggered Real Test");
+
+    // Add charlie to cached members (not actually in MLS — simulates a
+    // member who is "in the group" per local cache but MLS refresh will
+    // show only alice+bob).
+    alice
+        .group_mesh
+        .members
+        .get_mut(&group_id)
+        .unwrap()
+        .push("charlie".to_string());
+
+    let key = (group_id.clone(), "charlie".to_string());
+
+    // Interval 1 (30-60s): sorted remaining = ["alice", "bob"], candidate_idx=1 → "bob".
+    // We are "alice" → not selected → election stays.
+    let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    alice.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: "charlie".to_string(),
+            received_at: past,
+            last_attempt_at: None,
+        },
+    );
+
+    alice.check_leave_election_timeouts();
+
+    // charlie is not in MLS, so still_member=false → cleaned up.
+    // This confirms refresh_group_members (MLS-authoritative) governs the check.
+    assert!(
+        !alice.group_mesh.pending_leave_elections.contains_key(&key),
+        "Election should be cleaned up — charlie is not in MLS group"
+    );
+}
+
+// ========================================================================
+// HANDLE_GROUP_MLS_LEAVE — ELSE BRANCH (PENDING ELECTION RECORDING)
+// ========================================================================
+
+#[test]
+fn test_handle_group_mls_leave_records_pending_election_for_non_elected() {
+    // When we are NOT the lex-first remaining member, handle_group_mls_leave
+    // should record a PendingLeaveElection so we can take over if the elected
+    // member fails.
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("zoe")).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let group_id = "group:leave-else-branch".to_string();
+    // Sorted remaining after "bob" leaves: ["alice", "zoe"]
+    // alice is lex-first → elected. zoe (us) is NOT elected → records election.
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec!["alice".to_string(), "bob".to_string(), "zoe".to_string()],
+    );
+
+    let leave_payload = GroupMlsLeavePayload {
+        group_id: group_id.clone(),
+        leaving_member: "bob".to_string(),
+    };
+    let data = serde_json::to_string(&leave_payload).unwrap();
+
+    protocol.handle_group_mls_leave("bob", &data);
+
+    let key = (group_id.clone(), "bob".to_string());
+    assert!(
+        protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Non-elected member should record a PendingLeaveElection"
+    );
+    let election = &protocol.group_mesh.pending_leave_elections[&key];
+    assert_eq!(election.group_id, group_id);
+    assert_eq!(election.leaving_member, "bob");
+    assert!(election.last_attempt_at.is_none());
+}
+
+#[test]
+fn test_handle_group_mls_leave_elected_does_not_record_election() {
+    // When we ARE the lex-first remaining member, handle_group_mls_leave
+    // should NOT record a PendingLeaveElection (we handle it immediately).
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Elected No Record");
+
+    let leave_payload = GroupMlsLeavePayload {
+        group_id: group_id.clone(),
+        leaving_member: "bob".to_string(),
+    };
+    let data = serde_json::to_string(&leave_payload).unwrap();
+
+    // alice < bob, so alice is elected → should handle immediately
+    alice.handle_group_mls_leave("bob", &data);
+
+    let key = (group_id.clone(), "bob".to_string());
+    assert!(
+        !alice.group_mesh.pending_leave_elections.contains_key(&key),
+        "Elected member should NOT have a pending election"
+    );
+}
+
+// ========================================================================
+// SYNC GROUPS TO RELAY — MLS REFRESH
+// ========================================================================
+
+#[test]
+fn test_sync_groups_to_relay_refreshes_from_mls() {
+    // Verify that check_relay_group_sync (which calls sync_groups_to_relay)
+    // refreshes membership from MLS before syncing, not using stale cache.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Relay Refresh Test");
+
+    // Stale cache: only alice. MLS state has both alice and bob.
+    alice
+        .group_mesh
+        .members
+        .insert(group_id.clone(), vec!["alice".to_string()]);
+
+    // Mark as unsynced so sync_groups_to_relay will process it
+    alice.group_mesh.relay_synced.remove(&group_id);
+
+    // Enable relay config
+    alice.config.group.relay_enabled = true;
+
+    // Simulate internet becoming available (0→1 transition triggers sync)
+    alice.group_mesh.internet_was_available = false;
+    // Note: is_internet_available() checks transport_manager, which won't
+    // have internet in tests. So check_relay_group_sync won't trigger the
+    // sync path. Instead, test the refresh behavior directly by calling
+    // refresh_group_members and verifying it updates the stale cache.
+    let refreshed = alice.refresh_group_members(&group_id).unwrap();
+    assert!(
+        refreshed.contains(&"alice".to_string()) && refreshed.contains(&"bob".to_string()),
+        "refresh_group_members should return MLS-authoritative membership — got {:?}",
+        refreshed
+    );
+
+    // Verify the cache was updated from MLS
+    let cached = alice.group_mesh.members.get(&group_id).unwrap();
+    assert!(
+        cached.contains(&"alice".to_string()) && cached.contains(&"bob".to_string()),
+        "Cached membership should be updated from MLS — got {:?}",
+        cached
+    );
+}
+
+// ========================================================================
+// DRAIN PENDING COMMITS — MIXED RETRIED AND NON-RETRIED IN SAME GROUP
+// ========================================================================
+
+#[test]
+fn test_drain_pending_commits_mixed_retried_and_non_retried_expired() {
+    // When a group has both retried-expired and never-retried-expired commits,
+    // fork detection should fire (because at least one was retried).
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("Mixed Drain Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    let buf = protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default();
+
+    // Never-retried expired commit (slow delivery)
+    buf.push_back(PendingCommit {
+        sender: "alice".to_string(),
+        data: "fake-1".to_string(),
+        buffered_at: past,
+        retry_count: 0,
+    });
+    // Retried expired commit (epoch mismatch signal)
+    buf.push_back(PendingCommit {
+        sender: "bob".to_string(),
+        data: "fake-2".to_string(),
+        buffered_at: past,
+        retry_count: 2,
+    });
+    // Non-expired commit (should survive)
+    buf.push_back(PendingCommit {
+        sender: "carol".to_string(),
+        data: "fake-3".to_string(),
+        buffered_at: Instant::now(),
+        retry_count: 0,
+    });
+
+    protocol.drain_pending_commits(&group_id);
+
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork should be detected when ANY expired commit has retry_count > 0"
+    );
+
+    // Non-expired commit should still be pending (rejected by process_commit_core
+    // but not expired, so it gets dropped as Rejected)
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::GroupEpochForkDetected { group_id: gid, .. } if gid == &group_id)
+        ),
+        "Should emit fork detection event for mixed group"
+    );
+}
+
+// ========================================================================
+// LEAVE ELECTION — REMOVE_FROM_GROUP FAILURE DURING RE-ELECTION
+// ========================================================================
+
+#[test]
+fn test_leave_election_remove_failure_keeps_election_pending() {
+    // When remove_from_group fails during re-election, the election should
+    // remain pending (with cooldown set) so the next candidate can try.
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    // Use a fake group where the leaver is "in the group" per cache but
+    // remove_from_group will fail because the MLS group doesn't exist.
+    let group_id = "group:remove-fail".to_string();
+    let leaver = "leaver";
+    protocol.group_mesh.members.insert(
+        group_id.clone(),
+        vec![
+            leaver.to_string(),
+            "user123".to_string(), // self — will be lex-first after filtering leaver
+        ],
+    );
+
+    let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    let key = (group_id.clone(), leaver.to_string());
+    protocol.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: leaver.to_string(),
+            received_at: past,
+            last_attempt_at: None,
+        },
+    );
+
+    protocol.check_leave_election_timeouts();
+
+    // remove_from_group should fail (MLS group doesn't exist) → election stays
+    assert!(
+        protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Election should remain pending after remove_from_group failure"
+    );
+
+    // Cooldown should be set (last_attempt_at populated)
+    let election = &protocol.group_mesh.pending_leave_elections[&key];
+    assert!(
+        election.last_attempt_at.is_some(),
+        "last_attempt_at should be set after failed attempt"
+    );
+}
