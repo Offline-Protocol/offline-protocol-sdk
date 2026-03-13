@@ -13,6 +13,7 @@ pub mod constants;
 pub mod error;
 pub mod events;
 pub mod file_transfer;
+mod group_mesh;
 pub mod mls;
 pub mod mls_observability;
 pub mod protocol;
