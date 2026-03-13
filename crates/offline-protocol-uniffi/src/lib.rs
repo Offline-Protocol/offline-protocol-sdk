@@ -770,6 +770,7 @@ pub struct ProtocolConfig {
     pub pending_ttl_ms: u64,
     pub overflow_policy: OverflowPolicy,
     pub max_group_members: u32,
+    pub group_relay_enabled: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -807,6 +808,7 @@ impl From<ProtocolConfig> for CoreConfig {
             },
         };
         core_config.group.max_group_members = config.max_group_members as usize;
+        core_config.group.relay_enabled = config.group_relay_enabled;
         core_config
     }
 }
@@ -3135,23 +3137,23 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // MESH GROUP MESSAGING (MLS-encrypted, transport-agnostic)
+    // GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================
 
-    /// Create a new MLS mesh group.
-    pub fn create_mesh_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
+    /// Create a new MLS group.
+    pub fn create_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .create_mesh_group(&group_name)
+            .create_group(&group_name)
             .map(MlsGroupInfo::from)
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// Send an MLS-encrypted message to all group members via mesh.
-    pub fn send_mesh_group_message(
+    /// Send an MLS-encrypted message to all group members.
+    pub fn send_group_message(
         &self,
         group_id: String,
         content: String,
@@ -3174,8 +3176,8 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::SendFailed(e.to_string()))
     }
 
-    /// Invite a user to an MLS mesh group.
-    pub fn invite_to_mesh_group(
+    /// Invite a user to an MLS group.
+    pub fn invite_to_group(
         &self,
         group_id: String,
         invitee_user_id: String,
@@ -3189,8 +3191,8 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// Remove a member from an MLS mesh group.
-    pub fn remove_from_mesh_group(
+    /// Remove a member from an MLS group.
+    pub fn remove_from_group(
         &self,
         group_id: String,
         member_id: String,
@@ -3204,30 +3206,31 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// Leave an MLS mesh group.
-    pub fn leave_mesh_group(&self, group_id: String) -> Result<(), ProtocolError> {
+    /// Leave an MLS group.
+    pub fn leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .leave_mesh_group(&group_id)
+            .leave_group(&group_id)
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// List all MLS mesh groups (excluding 1:1 sessions).
-    pub fn list_mesh_groups(&self) -> Result<Vec<String>, ProtocolError> {
+    /// List all MLS groups (excluding 1:1 sessions).
+    pub fn list_groups(&self) -> Result<Vec<String>, ProtocolError> {
         let guard = self
             .inner
             .lock()
             .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
         guard
-            .list_mesh_groups()
+            .list_groups()
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
     // ========================================================================
-    // GROUP MANAGEMENT (RELAY SERVER API)
+    // GROUP MANAGEMENT (RELAY SERVER API) — DEPRECATED
+    // Use the canonical group APIs above instead.
     // ========================================================================
 
     /// Create a new group. Creator becomes admin.
@@ -3510,6 +3513,7 @@ mod tests {
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
+            group_relay_enabled: true,
         }
     }
 
@@ -3531,6 +3535,7 @@ mod tests {
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
+            group_relay_enabled: true,
         }
     }
 

@@ -129,20 +129,29 @@ pub struct ReliabilityConfig {
     pub dedup: DeduplicatorConfig,
 }
 
-/// Configuration for mesh group messaging.
+/// Configuration for group messaging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupConfig {
-    /// Maximum number of members allowed in a single mesh group.
+    /// Maximum number of members allowed in a single group.
     ///
-    /// Fan-out is O(N) — each group message sends N-1 individual messages.
-    /// This cap prevents unbounded groups from overwhelming the mesh.
+    /// Per-member fan-out is O(N) when using mesh transports.
+    /// This cap prevents unbounded groups from overwhelming the network.
     pub max_group_members: usize,
+
+    /// Whether to attempt relay server registration for groups.
+    ///
+    /// When `true` (default), groups are registered with the relay server
+    /// for optimized fan-out when Internet transport is available.
+    /// When `false`, groups always use per-member fan-out regardless of
+    /// transport.
+    pub relay_enabled: bool,
 }
 
 impl Default for GroupConfig {
     fn default() -> Self {
         Self {
             max_group_members: 256,
+            relay_enabled: true,
         }
     }
 }
@@ -419,15 +428,21 @@ impl ProtocolConfigBuilder {
         self
     }
 
-    /// Configures mesh group messaging settings.
+    /// Configures group messaging settings.
     pub fn group(mut self, config: GroupConfig) -> Self {
         self.config.group = config;
         self
     }
 
-    /// Sets the maximum number of members allowed in a single mesh group.
+    /// Sets the maximum number of members allowed in a single group.
     pub fn max_group_members(mut self, max: usize) -> Self {
         self.config.group.max_group_members = max;
+        self
+    }
+
+    /// Sets whether groups should attempt relay server registration.
+    pub fn group_relay_enabled(mut self, enabled: bool) -> Self {
+        self.config.group.relay_enabled = enabled;
         self
     }
 
@@ -668,6 +683,7 @@ mod tests {
         let config = ProtocolConfig::builder("test-app", "user123")
             .group(GroupConfig {
                 max_group_members: 128,
+                ..Default::default()
             })
             .build()
             .unwrap();

@@ -86,14 +86,18 @@ pub(crate) mod internal_prefixes {
     pub const USER_GROUPS: &str = "__USER_GROUPS__";
     /// Prefix for group error (relay).
     pub const GROUP_ERROR: &str = "__GROUP_ERROR__";
-    /// Prefix for MLS-encrypted group messages (mesh).
+    /// Prefix for MLS-encrypted group messages.
     pub const GROUP_MLS_MSG: &str = "__GRP_MLS_MSG__";
-    /// Prefix for MLS Welcome messages for group invites (mesh).
+    /// Prefix for MLS Welcome messages for group invites.
     pub const GROUP_MLS_WELCOME: &str = "__GRP_MLS_WELCOME__";
-    /// Prefix for MLS Commit messages for group membership changes (mesh).
+    /// Prefix for MLS Commit messages for group membership changes.
     pub const GROUP_MLS_COMMIT: &str = "__GRP_MLS_COMMIT__";
-    /// Prefix for group leave notifications (mesh).
+    /// Prefix for group leave notifications.
     pub const GROUP_MLS_LEAVE: &str = "__GRP_MLS_LEAVE__";
+    /// Prefix for relay group registration (SDK → relay server).
+    pub const GROUP_RELAY_REGISTER: &str = "__GRP_RELAY_REG__";
+    /// Prefix for relay group broadcast (SDK → relay server fan-out).
+    pub const GROUP_RELAY_BROADCAST: &str = "__GRP_RELAY_BCAST__";
 }
 
 /// Retry interval for persisting session confirmation after a transient storage error.
@@ -485,7 +489,7 @@ pub struct OfflineProtocol {
     pub(crate) config: ProtocolConfig,
 
     /// Transport manager (manages all transports with DORS).
-    transport_manager: TransportManager,
+    pub(crate) transport_manager: TransportManager,
 
     /// Path selector for routing (includes relay scoring logic).
     #[allow(dead_code)]
@@ -5469,15 +5473,28 @@ impl OfflineProtocol {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MSG) {
             if let Ok(payload) = serde_json::from_str::<GroupMessageReceivedPayload>(data) {
                 info!(group_id = %payload.group_id, message_id = %payload.message_id, "Group message received");
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::group_message_received(
-                        payload.group_id,
-                        payload.sender,
-                        payload.content,
-                        payload.timestamp,
-                        payload.message_id,
+                // If we have local MLS state for this group, route through MLS decryption
+                if self.group_mesh.members.contains_key(&payload.group_id) {
+                    self.handle_relay_group_message_with_mls(
+                        &payload.group_id,
+                        &payload.sender,
+                        &payload.content,
+                        &payload.timestamp,
+                        &payload.message_id,
                         payload.reply_to_msg,
-                    ));
+                    );
+                } else {
+                    // Legacy relay-only group — emit raw content
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::group_message_received(
+                            payload.group_id,
+                            payload.sender,
+                            payload.content,
+                            payload.timestamp,
+                            payload.message_id,
+                            payload.reply_to_msg,
+                        ));
+                    }
                 }
             } else {
                 warn!("Failed to parse GroupMessageReceived payload");
@@ -5488,6 +5505,12 @@ impl OfflineProtocol {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MEMBER_ADDED) {
             if let Ok(payload) = serde_json::from_str::<GroupMemberAddedPayload>(data) {
                 info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member added");
+                // Reconcile local member cache if we have MLS state for this group
+                if let Some(members) = self.group_mesh.members.get_mut(&payload.group_id) {
+                    if !members.contains(&payload.user_id) {
+                        members.push(payload.user_id.clone());
+                    }
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_member_added(
                         payload.group_id,
@@ -5504,6 +5527,10 @@ impl OfflineProtocol {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MEMBER_REMOVED) {
             if let Ok(payload) = serde_json::from_str::<GroupMemberRemovedPayload>(data) {
                 info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member removed");
+                // Reconcile local member cache if we have MLS state for this group
+                if let Some(members) = self.group_mesh.members.get_mut(&payload.group_id) {
+                    members.retain(|m| m != &payload.user_id);
+                }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_member_removed(
                         payload.group_id,
@@ -5929,7 +5956,7 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // MESH GROUP MESSAGING (MLS-encrypted, transport-agnostic)
+    // GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================
 
     /// Emits a protocol event to all registered handlers.
@@ -5955,9 +5982,7 @@ impl OfflineProtocol {
 
     /// Returns a reference to the MLS manager Arc (test-only).
     #[cfg(test)]
-    pub(crate) fn mls_manager_for_testing(
-        &self,
-    ) -> &Arc<RwLock<offline_protocol_mls::MlsManager>> {
+    pub(crate) fn mls_manager_for_testing(&self) -> &Arc<RwLock<offline_protocol_mls::MlsManager>> {
         self.mls_manager
             .as_ref()
             .expect("MLS not initialized in test")
@@ -5978,12 +6003,14 @@ impl OfflineProtocol {
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
+    /// Also checks for Internet availability transitions to sync groups with relay.
     pub(crate) fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
         self.cleanup_group_message_dedup();
+        self.check_relay_group_sync();
         let stale_file_ids = self
             .file_transfer_manager
             .cleanup_stale_transfers(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));

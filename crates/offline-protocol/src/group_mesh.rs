@@ -1,13 +1,19 @@
-//! Mesh group messaging — MLS-encrypted, transport-agnostic group operations.
+//! Group messaging — MLS-encrypted, transport-agnostic group operations.
 //!
 //! This module implements group creation, member invite/remove/leave,
 //! encrypted message fan-out, commit distribution, and pending commit
-//! buffering for out-of-order delivery over mesh networks.
+//! buffering for out-of-order delivery.
+//!
+//! Groups are transport-agnostic: messages route through whichever transport
+//! DORS selects (BLE, WiFi Direct, or Internet). When Internet is available
+//! and a relay server supports it, the protocol can send a single relay
+//! broadcast instead of O(N) per-member fan-out.
 
 use crate::protocol::{base64_decode, base64_encode, internal_prefixes, OfflineProtocol};
 use crate::{Error, Event, Result};
 use chrono::Utc;
 use offline_protocol_core::{Message, MessageId, MessagePriority};
+use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration as StdDuration, Instant};
@@ -24,10 +30,11 @@ const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 const PENDING_COMMIT_TTL_SECS: u64 = 120;
 
-/// Bundled state for mesh group messaging.
+/// Bundled state for group messaging.
 ///
-/// Groups together the cached member lists, dedup table, and pending commit
-/// buffer so that `OfflineProtocol` doesn't carry these as individual fields.
+/// Groups together the cached member lists, dedup table, pending commit
+/// buffer, and relay sync tracking so that `OfflineProtocol` doesn't carry
+/// these as individual fields.
 #[derive(Default)]
 pub(crate) struct GroupMeshState {
     /// Cached group membership lists for fan-out without holding MLS lock.
@@ -42,6 +49,15 @@ pub(crate) struct GroupMeshState {
     /// Maps group_id -> deque of pending commits awaiting retry.
     /// When a commit succeeds for a group, buffered commits are drained and retried.
     pub(crate) pending_commits: HashMap<String, VecDeque<PendingCommit>>,
+
+    /// Group IDs that have been successfully registered with the relay server.
+    /// Cleared when Internet transport disconnects so that groups are re-synced
+    /// when connectivity returns.
+    pub(crate) relay_synced: HashSet<String>,
+
+    /// Whether Internet transport was available on the last `process()` tick.
+    /// Used for edge-detection: sync groups on 0→1 transition, clear on 1→0.
+    pub(crate) internet_was_available: bool,
 }
 
 /// Outcome of attempting to process an MLS Commit.
@@ -121,6 +137,44 @@ pub(crate) struct GroupMlsLeavePayload {
     pub(crate) leaving_member: String,
 }
 
+// --- Relay optimization payloads ---
+
+/// Payload for registering/updating a group with the relay server.
+///
+/// Sent as a `__GRP_RELAY_REG__`-prefixed internal message to the user's
+/// own ID via Internet transport.  The relay server intercepts the prefix
+/// and records the group → member mapping so it can perform server-side
+/// fan-out for future `__GRP_RELAY_BCAST__` messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RelayGroupRegistrationPayload {
+    /// MLS group identifier.
+    pub(crate) group_id: String,
+    /// Human-readable group name (for display/search on relay).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group_name: Option<String>,
+    /// Current member user IDs.
+    pub(crate) members: Vec<String>,
+}
+
+/// Payload for a relay-broadcast of an MLS-encrypted group message.
+///
+/// Sent as a `__GRP_RELAY_BCAST__`-prefixed internal message to the user's
+/// own ID via Internet transport.  The relay server looks up the group
+/// membership, wraps the ciphertext in individual `__GRP_MLS_MSG__`
+/// messages, and delivers to each member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RelayGroupBroadcastPayload {
+    /// MLS group identifier.
+    pub(crate) group_id: String,
+    /// Base64-encoded MLS ciphertext.
+    pub(crate) ciphertext: String,
+    /// MLS epoch at which the message was encrypted.
+    pub(crate) epoch: u64,
+    /// Optional reply-to message ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reply_to: Option<String>,
+}
+
 /// A commit that arrived out-of-order and is waiting to be processed.
 ///
 /// In mesh networks, messages can arrive out of order. If a Commit arrives
@@ -161,7 +215,9 @@ impl OfflineProtocol {
         // Mark as seen BEFORE attempting decode/decrypt to prevent replay
         // amplification: an adversary replaying the same message (even with a bad
         // epoch) should only trigger one MLS crypto operation.
-        self.group_mesh.message_dedup.insert(dedup_key, Instant::now());
+        self.group_mesh
+            .message_dedup
+            .insert(dedup_key, Instant::now());
         if self.group_mesh.message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
             self.cleanup_group_message_dedup();
         }
@@ -402,7 +458,8 @@ impl OfflineProtocol {
         // Refresh cache and compute actual membership delta
         let _ = self.refresh_group_members(&payload.group_id);
         let members_after: HashSet<String> = self
-            .group_mesh.members
+            .group_mesh
+            .members
             .get(&payload.group_id)
             .map(|m| m.iter().cloned().collect())
             .unwrap_or_default();
@@ -456,7 +513,8 @@ impl OfflineProtocol {
             buffered_at: Instant::now(),
         };
         let buf = self
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .entry(group_id.to_string())
             .or_default();
         if buf.len() < MAX_PENDING_COMMITS_PER_GROUP {
@@ -519,7 +577,8 @@ impl OfflineProtocol {
 
             // Re-buffer commits that still failed
             if !still_pending.is_empty() {
-                self.group_mesh.pending_commits
+                self.group_mesh
+                    .pending_commits
                     .entry(group_id.to_string())
                     .or_default()
                     .extend(still_pending);
@@ -533,7 +592,8 @@ impl OfflineProtocol {
 
         // Clean up empty entries
         if self
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .get(group_id)
             .map_or(true, |v| v.is_empty())
         {
@@ -658,41 +718,50 @@ impl OfflineProtocol {
             .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
         let members = info.members.clone();
         drop(mls_guard);
-        self.group_mesh.members
+        self.group_mesh
+            .members
             .insert(group_id.to_string(), members.clone());
         Ok(members)
     }
 
-    /// Creates a new MLS group for mesh messaging.
+    /// Creates a new MLS group.
     ///
     /// The group is created locally via MLS. Members can be invited with
     /// `invite_to_group()`. Messages sent via `send_group_message()` are
-    /// MLS-encrypted and fan-out via DORS to each member individually.
-    pub fn create_mesh_group(
-        &mut self,
-        group_name: &str,
-    ) -> Result<offline_protocol_mls::GroupInfo> {
+    /// MLS-encrypted and route through whichever transport DORS selects.
+    /// If Internet is available the group is also registered with the
+    /// relay server for optimized fan-out.
+    pub fn create_group(&mut self, group_name: &str) -> Result<offline_protocol_mls::GroupInfo> {
         let mls_guard = self.read_mls_guard()?;
         let group_info = mls_guard.create_group(group_name)?;
         let group_id = group_info.group_id.as_str().to_string();
         let members = group_info.members.clone();
         drop(mls_guard);
 
-        self.group_mesh.members.insert(group_id.clone(), members);
+        self.group_mesh
+            .members
+            .insert(group_id.clone(), members.clone());
 
-        self.emit_event(Event::group_created(group_id, group_name.to_string()));
+        self.emit_event(Event::group_created(
+            group_id.clone(),
+            group_name.to_string(),
+        ));
+
+        // Best-effort relay registration
+        let _ = self.try_relay_register_group(&group_id, Some(group_name), &members);
 
         Ok(group_info)
     }
 
-    /// Invites a user to an MLS mesh group.
+    /// Invites a user to an MLS group.
     ///
     /// Requires the invitee's key package to be available in `pending_key_packages`.
     /// Sends a Welcome to the invitee and a Commit to all existing members.
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
         // Check group member cap before adding
         let current_count = self
-            .group_mesh.members
+            .group_mesh
+            .members
             .get(group_id)
             .map(|m| m.len())
             .or_else(|| {
@@ -792,11 +861,14 @@ impl OfflineProtocol {
             self_id,
         ));
 
-        info!(group_id = %group_id, invitee = %invitee_user_id, "Invited member to mesh group");
+        // Sync membership update to relay
+        let _ = self.try_relay_register_group(group_id, None, &members);
+
+        info!(group_id = %group_id, invitee = %invitee_user_id, "Invited member to group");
         Ok(())
     }
 
-    /// Removes a member from an MLS mesh group.
+    /// Removes a member from an MLS group.
     ///
     /// Sends a Commit to all remaining members.
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
@@ -845,11 +917,14 @@ impl OfflineProtocol {
             self_id,
         ));
 
-        info!(group_id = %group_id, member = %member_id, "Removed member from mesh group");
+        // Sync membership update to relay
+        let _ = self.try_relay_register_group(group_id, None, &members);
+
+        info!(group_id = %group_id, member = %member_id, "Removed member from group");
         Ok(())
     }
 
-    /// Leaves an MLS mesh group.
+    /// Leaves an MLS group.
     ///
     /// Notifies remaining members and then removes local group state.
     /// Note: The MLS layer does not support self-removal Commits, so remaining
@@ -862,10 +937,11 @@ impl OfflineProtocol {
     /// the caller receives an error so the leave can be retried. This prevents
     /// orphaned membership where the leaver is gone locally but peers never
     /// learn about the departure.
-    pub fn leave_mesh_group(&mut self, group_id: &str) -> Result<()> {
+    pub fn leave_group(&mut self, group_id: &str) -> Result<()> {
         // Get members before leaving
         let members = self
-            .group_mesh.members
+            .group_mesh
+            .members
             .get(group_id)
             .cloned()
             .or_else(|| self.refresh_group_members(group_id).ok())
@@ -923,17 +999,19 @@ impl OfflineProtocol {
         mls_guard.leave_group(&gid)?;
         drop(mls_guard);
 
-        // Remove from cache
+        // Remove from caches
         self.group_mesh.members.remove(group_id);
+        self.group_mesh.relay_synced.remove(group_id);
 
-        info!(group_id = %group_id, "Left mesh group");
+        info!(group_id = %group_id, "Left group");
         Ok(())
     }
 
-    /// Sends a message to all members of an MLS mesh group.
+    /// Sends a message to all members of an MLS group.
     ///
-    /// The message is MLS-encrypted once, then fan-out as individual
-    /// point-to-point messages via `send_internal_message()`. Each member's
+    /// If Internet transport is available and relay-enabled, sends a single
+    /// relay broadcast (`__GRP_RELAY_BCAST__`). Otherwise falls back to
+    /// per-member fan-out via `send_internal_message()` where each member's
     /// delivery goes through the full DORS/ACK/retry stack independently.
     pub fn send_group_message(
         &mut self,
@@ -967,7 +1045,8 @@ impl OfflineProtocol {
 
         // Update cache if it was a miss
         if !self.group_mesh.members.contains_key(group_id) {
-            self.group_mesh.members
+            self.group_mesh
+                .members
                 .insert(group_id.to_string(), members.clone());
         }
 
@@ -975,6 +1054,24 @@ impl OfflineProtocol {
         let epoch = encrypted.epoch;
 
         let self_id = self.config.user_id.clone();
+
+        // --- Attempt relay broadcast first ---
+        // If Internet is the primary transport and the group is registered,
+        // a single relay broadcast is O(1) instead of O(N) individual sends.
+        if self.group_mesh.relay_synced.contains(group_id) {
+            if let Ok(mid) =
+                self.try_relay_broadcast(group_id, &ciphertext_b64, epoch, reply_to_msg)
+            {
+                let member_count = members.iter().filter(|m| m.as_str() != self_id).count() as u32;
+                self.emit_event(Event::group_message_sent(
+                    group_id.to_string(),
+                    vec![mid.as_str().to_string()],
+                    member_count,
+                ));
+                return Ok(vec![mid]);
+            }
+            // Relay broadcast failed — fall through to per-member fan-out
+        }
 
         // Build the internal message payload with reply_to as a proper field
         let msg_payload = GroupMlsMessagePayload {
@@ -990,7 +1087,7 @@ impl OfflineProtocol {
                 .map_err(|e| Error::Other(format!("Serialize group message: {}", e)))?
         );
 
-        // Fan-out to each member
+        // Per-member fan-out (mesh or DORS-selected transport)
         let mut message_ids = Vec::new();
         let mut failed_members = Vec::new();
         let mut succeeded_members = Vec::new();
@@ -1049,8 +1146,8 @@ impl OfflineProtocol {
         Ok(message_ids)
     }
 
-    /// Lists all MLS mesh groups (excluding 1:1 sessions).
-    pub fn list_mesh_groups(&self) -> Result<Vec<String>> {
+    /// Lists all MLS groups (excluding 1:1 sessions).
+    pub fn list_groups(&self) -> Result<Vec<String>> {
         let mls_guard = self.read_mls_guard()?;
         let groups = mls_guard.list_groups()?;
         Ok(groups.into_iter().map(|g| g.as_str().to_string()).collect())
@@ -1059,7 +1156,8 @@ impl OfflineProtocol {
     /// Cleans up expired group message dedup entries and enforces size cap.
     pub(crate) fn cleanup_group_message_dedup(&mut self) {
         let cutoff = Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS);
-        self.group_mesh.message_dedup
+        self.group_mesh
+            .message_dedup
             .retain(|_, seen_at| *seen_at > cutoff);
         // If still over cap after TTL cleanup, drop oldest entries using O(N) selection
         let len = self.group_mesh.message_dedup.len();
@@ -1080,6 +1178,234 @@ impl OfflineProtocol {
             !commits.is_empty()
         });
     }
+
+    // ========================================================================
+    // RELAY OPTIMIZATION
+    // ========================================================================
+
+    /// Attempts to register (or update) a group with the relay server.
+    ///
+    /// Sends a `__GRP_RELAY_REG__` message to the user's own ID via Internet
+    /// transport. The relay server intercepts the prefix and records the
+    /// group membership for server-side fan-out.
+    ///
+    /// Fire-and-forget: returns `Ok(true)` if sent, `Ok(false)` if Internet
+    /// is unavailable, `Err` on serialization failure.
+    fn try_relay_register_group(
+        &mut self,
+        group_id: &str,
+        group_name: Option<&str>,
+        members: &[String],
+    ) -> Result<bool> {
+        if !self.config.group.relay_enabled || !self.is_internet_available() {
+            return Ok(false);
+        }
+
+        let payload = RelayGroupRegistrationPayload {
+            group_id: group_id.to_string(),
+            group_name: group_name.map(|s| s.to_string()),
+            members: members.to_vec(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_RELAY_REGISTER,
+            serde_json::to_string(&payload)
+                .map_err(|e| Error::Other(format!("Serialize relay registration: {}", e)))?
+        );
+
+        // Send to self — the relay server intercepts messages with this prefix
+        let self_id = self.config.user_id.clone();
+        match self.send_internal_message(&self_id, content, MessagePriority::Medium) {
+            Ok(_) => {
+                self.group_mesh.relay_synced.insert(group_id.to_string());
+                debug!(group_id = %group_id, "Registered group with relay server");
+                Ok(true)
+            }
+            Err(e) => {
+                debug!(group_id = %group_id, error = %e, "Failed to register group with relay");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Attempts to send a group message via relay broadcast.
+    ///
+    /// Sends a single `__GRP_RELAY_BCAST__` message to the user's own ID.
+    /// The relay server fans it out to all registered group members as
+    /// individual `__GRP_MLS_MSG__` messages.
+    ///
+    /// Returns the broadcast `MessageId` on success, or an error if the
+    /// relay is unreachable.
+    fn try_relay_broadcast(
+        &mut self,
+        group_id: &str,
+        ciphertext_b64: &str,
+        epoch: u64,
+        reply_to: Option<&str>,
+    ) -> Result<MessageId> {
+        let payload = RelayGroupBroadcastPayload {
+            group_id: group_id.to_string(),
+            ciphertext: ciphertext_b64.to_string(),
+            epoch,
+            reply_to: reply_to.map(|s| s.to_string()),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_RELAY_BROADCAST,
+            serde_json::to_string(&payload)
+                .map_err(|e| Error::Other(format!("Serialize relay broadcast: {}", e)))?
+        );
+
+        let self_id = self.config.user_id.clone();
+        let mid = self.send_internal_message(&self_id, content, MessagePriority::Medium)?;
+        debug!(group_id = %group_id, "Sent group message via relay broadcast");
+        Ok(mid)
+    }
+
+    /// Returns `true` if the Internet transport is currently available.
+    fn is_internet_available(&self) -> bool {
+        self.transport_manager
+            .get_available_transports()
+            .contains_key(&TransportType::Internet)
+    }
+
+    // ========================================================================
+    // TRANSPORT-RESILIENT SYNC
+    // ========================================================================
+
+    /// Checks for Internet availability transitions and syncs group state.
+    ///
+    /// Called from the `process()` tick. On a 0→1 transition (Internet just
+    /// became available), all unsynced groups are registered with the relay.
+    /// On a 1→0 transition (Internet lost), relay sync flags are cleared so
+    /// groups are re-registered when connectivity returns.
+    pub(crate) fn check_relay_group_sync(&mut self) {
+        if !self.config.group.relay_enabled {
+            return;
+        }
+        let internet_available = self.is_internet_available();
+        let was_available = self.group_mesh.internet_was_available;
+        self.group_mesh.internet_was_available = internet_available;
+
+        if internet_available && !was_available {
+            // Internet just became available — sync all groups
+            self.sync_groups_to_relay();
+        } else if !internet_available && was_available {
+            // Internet just went down — clear sync state
+            self.group_mesh.relay_synced.clear();
+        }
+    }
+
+    /// Re-registers all unsynced groups with the relay server.
+    fn sync_groups_to_relay(&mut self) {
+        let group_ids: Vec<String> = self.group_mesh.members.keys().cloned().collect();
+        for group_id in group_ids {
+            if self.group_mesh.relay_synced.contains(&group_id) {
+                continue;
+            }
+            if let Some(members) = self.group_mesh.members.get(&group_id).cloned() {
+                let _ = self.try_relay_register_group(&group_id, None, &members);
+            }
+        }
+    }
+
+    // ========================================================================
+    // RELAY INBOUND — MLS-AWARE ROUTING
+    // ========================================================================
+
+    /// Handles an inbound relay group message by routing through MLS decryption
+    /// when the group has local MLS state.
+    ///
+    /// Called from `process_internal_message` when a `__GROUP_MSG__` arrives
+    /// from the relay server for a group we have MLS state for. If MLS
+    /// decryption fails or the content is not ciphertext, falls back to
+    /// emitting the raw content.
+    pub(crate) fn handle_relay_group_message_with_mls(
+        &mut self,
+        group_id: &str,
+        sender: &str,
+        content: &str,
+        timestamp: &str,
+        message_id: &str,
+        reply_to_msg: Option<String>,
+    ) {
+        // Attempt base64 decode — if it fails, the content is plaintext (legacy)
+        let ciphertext_bytes = match base64_decode(content) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // Not ciphertext — emit as plaintext
+                self.emit_event(Event::group_message_received(
+                    group_id.to_string(),
+                    sender.to_string(),
+                    content.to_string(),
+                    timestamp.to_string(),
+                    message_id.to_string(),
+                    reply_to_msg,
+                ));
+                return;
+            }
+        };
+
+        // Try MLS decryption
+        let plaintext = {
+            let mls_guard = match self.read_mls_guard() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    // MLS unavailable — emit raw content
+                    self.emit_event(Event::group_message_received(
+                        group_id.to_string(),
+                        sender.to_string(),
+                        content.to_string(),
+                        timestamp.to_string(),
+                        message_id.to_string(),
+                        reply_to_msg,
+                    ));
+                    return;
+                }
+            };
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let encrypted = offline_protocol_mls::EncryptedMessage {
+                group_id: gid,
+                message_type: offline_protocol_mls::MlsMessageType::Application,
+                epoch: 0, // Relay doesn't carry epoch — MLS infers from ciphertext
+                ciphertext: ciphertext_bytes,
+                sender_id: sender.to_string(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+            };
+            match mls_guard.decrypt_from_group(&encrypted) {
+                Ok(Some(pt)) => Some(pt),
+                _ => None,
+            }
+        };
+
+        match plaintext {
+            Some(pt) => {
+                let text = String::from_utf8_lossy(&pt).to_string();
+                self.emit_event(Event::group_message_received(
+                    group_id.to_string(),
+                    sender.to_string(),
+                    text,
+                    timestamp.to_string(),
+                    message_id.to_string(),
+                    reply_to_msg,
+                ));
+            }
+            None => {
+                warn!(
+                    group_id = %group_id,
+                    "Failed to decrypt relay group message via MLS, emitting raw"
+                );
+                self.emit_event(Event::group_message_received(
+                    group_id.to_string(),
+                    sender.to_string(),
+                    content.to_string(),
+                    timestamp.to_string(),
+                    message_id.to_string(),
+                    reply_to_msg,
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1095,7 +1421,7 @@ mod tests {
     fn test_group_mls_create_mesh_group_requires_mls() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         // Without MLS initialization, create_mesh_group should fail
-        let result = protocol.create_mesh_group("Test Group");
+        let result = protocol.create_group("Test Group");
         assert!(result.is_err());
         assert!(
             result
@@ -1112,30 +1438,33 @@ mod tests {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage).unwrap();
 
-        let group_info = protocol.create_mesh_group("Test Group").unwrap();
+        let group_info = protocol.create_group("Test Group").unwrap();
         assert_eq!(group_info.name, Some("Test Group".to_string()));
         assert!(group_info.group_id.as_str().starts_with("group:"));
         assert!(group_info.members.contains(&"user123".to_string()));
 
         // Verify group is cached
-        let cached = protocol.group_mesh.members.get(group_info.group_id.as_str());
+        let cached = protocol
+            .group_mesh
+            .members
+            .get(group_info.group_id.as_str());
         assert!(cached.is_some());
         assert!(cached.unwrap().contains(&"user123".to_string()));
     }
 
     #[test]
-    fn test_group_mls_list_mesh_groups() {
+    fn test_group_mls_list_groups() {
         let storage = Arc::new(crate::mls::InMemoryStorage::default());
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage).unwrap();
 
         // Initially no groups
-        let groups = protocol.list_mesh_groups().unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert!(groups.is_empty());
 
         // Create a group
-        let info = protocol.create_mesh_group("My Group").unwrap();
-        let groups = protocol.list_mesh_groups().unwrap();
+        let info = protocol.create_group("My Group").unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0], info.group_id.as_str());
     }
@@ -1166,7 +1495,7 @@ mod tests {
         protocol.start().unwrap();
 
         // Create group (only self is a member)
-        let info = protocol.create_mesh_group("Solo Group").unwrap();
+        let info = protocol.create_group("Solo Group").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Sending in a solo group should succeed but produce no message IDs
@@ -1178,20 +1507,20 @@ mod tests {
     }
 
     #[test]
-    fn test_group_mls_leave_mesh_group() {
+    fn test_group_mls_leave_group() {
         let storage = Arc::new(crate::mls::InMemoryStorage::default());
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Leave Test").unwrap();
+        let info = protocol.create_group("Leave Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Verify group exists in cache
         assert!(protocol.group_mesh.members.contains_key(&group_id));
 
         // Leave the group
-        protocol.leave_mesh_group(&group_id).unwrap();
+        protocol.leave_group(&group_id).unwrap();
 
         // Verify group removed from cache
         assert!(!protocol.group_mesh.members.contains_key(&group_id));
@@ -1203,7 +1532,7 @@ mod tests {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage).unwrap();
 
-        let info = protocol.create_mesh_group("Invite Test").unwrap();
+        let info = protocol.create_group("Invite Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Inviting without key package should fail
@@ -1222,7 +1551,8 @@ mod tests {
         // Insert dedup entry using message ID as key
         let key = "msg-001".to_string();
         protocol
-            .group_mesh.message_dedup
+            .group_mesh
+            .message_dedup
             .insert(key.clone(), Instant::now());
         assert!(protocol.group_mesh.message_dedup.contains_key(&key));
 
@@ -1307,7 +1637,7 @@ mod tests {
         });
 
         // Create a group first so refresh_group_members can find it
-        let info = protocol.create_mesh_group("Commit Test").unwrap();
+        let info = protocol.create_group("Commit Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Simulate receiving a commit "add" message with empty ciphertext.
@@ -1353,7 +1683,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
 
         // Create group
-        let info = protocol.create_mesh_group("Refresh Test").unwrap();
+        let info = protocol.create_group("Refresh Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // refresh_group_members should populate cache
@@ -1375,7 +1705,7 @@ mod tests {
             events_clone.lock().unwrap().push(event);
         });
 
-        protocol.create_mesh_group("Event Test").unwrap();
+        protocol.create_group("Event Test").unwrap();
 
         let events = events.lock().unwrap();
         let created_event = events
@@ -1547,7 +1877,7 @@ mod tests {
         bob.start().unwrap();
 
         // Alice creates a group
-        let group_info = alice.create_mesh_group("Integration Test Group").unwrap();
+        let group_info = alice.create_group("Integration Test Group").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         // Bob generates a key package
@@ -1634,7 +1964,7 @@ mod tests {
         protocol.start().unwrap();
 
         // Create group and pre-populate cache with multiple members
-        let info = protocol.create_mesh_group("Multi-Member Group").unwrap();
+        let info = protocol.create_group("Multi-Member Group").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Manually set the member cache to include more members
@@ -1681,7 +2011,8 @@ mod tests {
         let count = MAX_GROUP_MESSAGE_DEDUP_ENTRIES + 100;
         for i in 0..count {
             protocol
-                .group_mesh.message_dedup
+                .group_mesh
+                .message_dedup
                 .insert(format!("msg-{:06}", i), Instant::now());
         }
         assert_eq!(protocol.group_mesh.message_dedup.len(), count);
@@ -1749,9 +2080,9 @@ mod tests {
         protocol.start().unwrap();
 
         // Create and leave a group
-        let info = protocol.create_mesh_group("Leave Test").unwrap();
+        let info = protocol.create_group("Leave Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
-        protocol.leave_mesh_group(&group_id).unwrap();
+        protocol.leave_group(&group_id).unwrap();
 
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         let events_clone = events.clone();
@@ -1852,7 +2183,7 @@ mod tests {
         bob.start().unwrap();
 
         // Alice creates group, Bob joins
-        let group_info = alice.create_mesh_group("Dedup Test Group").unwrap();
+        let group_info = alice.create_group("Dedup Test Group").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
@@ -2111,7 +2442,7 @@ mod tests {
         protocol.start().unwrap();
 
         // Create a group
-        let info = protocol.create_mesh_group("Remove Test").unwrap();
+        let info = protocol.create_group("Remove Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Try to remove a non-existent member — MLS should error
@@ -2235,7 +2566,7 @@ mod tests {
         // for all members because the protocol is not running, simulating
         // total delivery failure.
 
-        let info = protocol.create_mesh_group("Partial Failure Group").unwrap();
+        let info = protocol.create_group("Partial Failure Group").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Populate cache with multiple members
@@ -2352,7 +2683,7 @@ mod tests {
         protocol.start().unwrap();
 
         // Create a group so MLS is available for the group_id
-        let info = protocol.create_mesh_group("Dedup Test").unwrap();
+        let info = protocol.create_group("Dedup Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Build a group message with bad ciphertext (will fail decryption)
@@ -2411,18 +2742,19 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         // Note: protocol NOT started — send_internal_message will fail with NotStarted
 
-        let info = protocol.create_mesh_group("Leave Fail Test").unwrap();
+        let info = protocol.create_group("Leave Fail Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Inject a fake member so there are recipients
         protocol
-            .group_mesh.members
+            .group_mesh
+            .members
             .get_mut(&group_id)
             .unwrap()
             .push("bob".to_string());
 
         // Attempt to leave — all sends should fail because protocol isn't started
-        let result = protocol.leave_mesh_group(&group_id);
+        let result = protocol.leave_group(&group_id);
         assert!(
             result.is_err(),
             "Leave should fail when all notifications fail"
@@ -2436,7 +2768,7 @@ mod tests {
         );
 
         // Verify local MLS state is still intact (group still exists)
-        let groups = protocol.list_mesh_groups().unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert!(
             groups.contains(&group_id),
             "Group should still exist locally after failed leave"
@@ -2456,15 +2788,15 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Leave OK Test").unwrap();
+        let info = protocol.create_group("Leave OK Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Solo group (only self) — no recipients, leave should succeed directly
-        let result = protocol.leave_mesh_group(&group_id);
+        let result = protocol.leave_group(&group_id);
         assert!(result.is_ok(), "Leave with no other members should succeed");
 
         // Verify local state was cleaned up
-        let groups = protocol.list_mesh_groups().unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert!(
             !groups.contains(&group_id),
             "Group should be removed after successful leave"
@@ -2501,7 +2833,8 @@ mod tests {
         };
 
         protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .entry(group_id.clone())
             .or_default()
             .push_back(pending);
@@ -2512,7 +2845,12 @@ mod tests {
             "Failed commit should be buffered"
         );
         assert_eq!(
-            protocol.group_mesh.pending_commits.get(&group_id).unwrap().len(),
+            protocol
+                .group_mesh
+                .pending_commits
+                .get(&group_id)
+                .unwrap()
+                .len(),
             1,
             "Exactly one commit should be buffered"
         );
@@ -2559,7 +2897,8 @@ mod tests {
             buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
         };
         protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .entry(group_id.clone())
             .or_default()
             .push_back(expired);
@@ -2571,7 +2910,8 @@ mod tests {
             buffered_at: Instant::now(),
         };
         protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .entry(group_id.clone())
             .or_default()
             .push_back(recent);
@@ -2592,7 +2932,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("No Buffer Test").unwrap();
+        let info = protocol.create_group("No Buffer Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Empty ciphertext — this is a malformed commit, not an ordering issue
@@ -2619,7 +2959,12 @@ mod tests {
         // Empty ciphertext should NOT be buffered (it's not an ordering issue)
         assert!(
             !protocol.group_mesh.pending_commits.contains_key(&group_id)
-                || protocol.group_mesh.pending_commits.get(&group_id).unwrap().is_empty(),
+                || protocol
+                    .group_mesh
+                    .pending_commits
+                    .get(&group_id)
+                    .unwrap()
+                    .is_empty(),
             "Empty ciphertext commits must not be buffered"
         );
     }
@@ -2631,16 +2976,16 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Double Leave").unwrap();
+        let info = protocol.create_group("Double Leave").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // First leave should succeed
-        let result = protocol.leave_mesh_group(&group_id);
+        let result = protocol.leave_group(&group_id);
         assert!(result.is_ok());
 
         // Second leave is idempotent — MLS delete_group silently succeeds when
         // the group doesn't exist, and there are no members to notify.
-        let result = protocol.leave_mesh_group(&group_id);
+        let result = protocol.leave_group(&group_id);
         assert!(
             result.is_ok(),
             "Double leave should be idempotent (no error)"
@@ -2648,7 +2993,7 @@ mod tests {
 
         // Verify state is clean
         assert!(!protocol.group_mesh.members.contains_key(&group_id));
-        let groups = protocol.list_mesh_groups().unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert!(!groups.contains(&group_id));
     }
 
@@ -2659,7 +3004,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Cap Test").unwrap();
+        let info = protocol.create_group("Cap Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         let max_members = protocol.config.group.max_group_members;
@@ -2667,7 +3012,8 @@ mod tests {
         // Simulate a group at max_group_members by injecting fake members into cache
         let fake_members: Vec<String> = (0..max_members).map(|i| format!("member-{}", i)).collect();
         protocol
-            .group_mesh.members
+            .group_mesh
+            .members
             .insert(group_id.clone(), fake_members);
 
         // Attempting to invite should fail with the cap error
@@ -2690,7 +3036,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Custom Cap Test").unwrap();
+        let info = protocol.create_group("Custom Cap Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Simulate 3 members (at the custom cap)
@@ -2721,7 +3067,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Below Cap Test").unwrap();
+        let info = protocol.create_group("Below Cap Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // 2 members — below the cap of 3
@@ -2752,7 +3098,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Solo Only").unwrap();
+        let info = protocol.create_group("Solo Only").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         let result = protocol.invite_to_group(&group_id, "alice");
@@ -2774,7 +3120,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Large Cap Test").unwrap();
+        let info = protocol.create_group("Large Cap Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         let result = protocol.invite_to_group(&group_id, "alice");
@@ -2798,7 +3144,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Large Content Test").unwrap();
+        let info = protocol.create_group("Large Content Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // 1 MB plaintext — previously would have been rejected by MAX_GROUP_CONTENT_LENGTH (512 KB)
@@ -2820,7 +3166,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Very Large Test").unwrap();
+        let info = protocol.create_group("Very Large Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // 2 MB plaintext
@@ -2846,7 +3192,7 @@ mod tests {
         let group_id = "group:drain-test".to_string();
 
         // Create a group so MLS is aware of it
-        let info = protocol.create_mesh_group("Drain Test").unwrap();
+        let info = protocol.create_group("Drain Test").unwrap();
         let real_group_id = info.group_id.as_str().to_string();
 
         // Manually insert pending commits with garbage ciphertext.
@@ -2884,7 +3230,8 @@ mod tests {
         protocol.drain_pending_commits(&real_group_id);
 
         let remaining = protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .get(&real_group_id)
             .map(|v| v.len())
             .unwrap_or(0);
@@ -2902,7 +3249,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Drain Expiry Test").unwrap();
+        let info = protocol.create_group("Drain Expiry Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Insert an expired pending commit
@@ -2944,7 +3291,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Buffer Test").unwrap();
+        let info = protocol.create_group("Buffer Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // No pending commits initially
@@ -2976,7 +3323,8 @@ mod tests {
 
         // Garbage ciphertext → Deserialization error → permanent rejection, not buffered
         let buffered = protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .get(&group_id)
             .map(|b| b.len())
             .unwrap_or(0);
@@ -3075,7 +3423,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Capped Group").unwrap();
+        let info = protocol.create_group("Capped Group").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Manually set member cache to 2 members (at cap)
@@ -3120,7 +3468,7 @@ mod tests {
         });
 
         // Alice creates a group
-        let group_info = alice.create_mesh_group("Invite E2E Test").unwrap();
+        let group_info = alice.create_group("Invite E2E Test").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         // Bob generates a key package
@@ -3184,7 +3532,7 @@ mod tests {
         bob.start().unwrap();
 
         // Alice creates a group
-        let group_info = alice.create_mesh_group("Join E2E Test").unwrap();
+        let group_info = alice.create_group("Join E2E Test").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         // Bob generates key package, Alice stores it
@@ -3224,7 +3572,9 @@ mod tests {
         // The send_internal_message call would have placed it in Alice's outbox.
         let welcome_sent = alice.outbox_messages().any(|msg| {
             msg.recipient.as_str() == "bob"
-                && msg.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+                && msg
+                    .content
+                    .starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         });
         assert!(
             welcome_sent,
@@ -3250,7 +3600,7 @@ mod tests {
         bob.start().unwrap();
 
         // Alice creates a group and adds Bob directly at MLS layer first
-        let group_info = alice.create_mesh_group("Commit Fan-out Test").unwrap();
+        let group_info = alice.create_group("Commit Fan-out Test").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
@@ -3300,7 +3650,9 @@ mod tests {
         // Verify a Welcome was sent to Carol
         let welcome_to_carol = alice.outbox_messages().any(|msg| {
             msg.recipient.as_str() == "carol"
-                && msg.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+                && msg
+                    .content
+                    .starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         });
         assert!(
             welcome_to_carol,
@@ -3325,7 +3677,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Expiry Test").unwrap();
+        let info = protocol.create_group("Expiry Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Insert an expired key package for bob
@@ -3366,7 +3718,7 @@ mod tests {
         alice.initialize_mls(storage_a).unwrap();
         alice.start().unwrap();
 
-        let info = alice.create_mesh_group("Cap Enforcement").unwrap();
+        let info = alice.create_group("Cap Enforcement").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Generate a real key package for bob
@@ -3408,7 +3760,7 @@ mod tests {
         bob.start().unwrap();
 
         // Alice creates group, adds Bob at MLS layer
-        let group_info = alice.create_mesh_group("Remove Real Test").unwrap();
+        let group_info = alice.create_group("Remove Real Test").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
@@ -3478,7 +3830,7 @@ mod tests {
         alice.initialize_mls(storage_a).unwrap();
         alice.start().unwrap();
 
-        let group_info = alice.create_mesh_group("Multi Invite Test").unwrap();
+        let group_info = alice.create_group("Multi Invite Test").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         // Generate key packages for bob and carol
@@ -3557,7 +3909,8 @@ mod tests {
         // GroupNotFound is permanent → should NOT be buffered
         assert!(
             !protocol
-                .group_mesh.pending_commits
+                .group_mesh
+                .pending_commits
                 .contains_key("group:does-not-exist"),
             "Commit for unknown group must be rejected, not buffered"
         );
@@ -3573,7 +3926,7 @@ mod tests {
         protocol.start().unwrap();
 
         // Create a group so the group_id exists
-        let info = protocol.create_mesh_group("Deser Test").unwrap();
+        let info = protocol.create_group("Deser Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // This is valid base64 but garbage MLS bytes — deserialization will fail
@@ -3605,7 +3958,8 @@ mod tests {
         // as permanent. If the error comes back as Decryption (process_message
         // failed), it's retriable. Either way, verify the buffer is bounded.
         let buffered = protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .get(&group_id)
             .map(|b| b.len())
             .unwrap_or(0);
@@ -3631,24 +3985,24 @@ mod tests {
         });
 
         // Create two independent groups
-        let info_a = protocol.create_mesh_group("Group Alpha").unwrap();
-        let info_b = protocol.create_mesh_group("Group Beta").unwrap();
+        let info_a = protocol.create_group("Group Alpha").unwrap();
+        let info_b = protocol.create_group("Group Beta").unwrap();
         let group_a = info_a.group_id.as_str().to_string();
         let group_b = info_b.group_id.as_str().to_string();
 
         assert_ne!(group_a, group_b);
 
         // Both should be listed
-        let groups = protocol.list_mesh_groups().unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert!(groups.contains(&group_a));
         assert!(groups.contains(&group_b));
         assert_eq!(groups.len(), 2);
 
         // Leave group A
-        protocol.leave_mesh_group(&group_a).unwrap();
+        protocol.leave_group(&group_a).unwrap();
 
         // Group B should still exist and be functional
-        let groups = protocol.list_mesh_groups().unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert!(!groups.contains(&group_a));
         assert!(groups.contains(&group_b));
 
@@ -3675,7 +4029,7 @@ mod tests {
         alice.initialize_mls(storage_a).unwrap();
         alice.start().unwrap();
 
-        let info = alice.create_mesh_group("Tiny Group").unwrap();
+        let info = alice.create_group("Tiny Group").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Alice is already member 1. Add Bob as member 2 (at capacity).
@@ -3722,7 +4076,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Reply Test").unwrap();
+        let info = protocol.create_group("Reply Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Populate cache with another member
@@ -3732,12 +4086,8 @@ mod tests {
         );
 
         // Send with reply_to
-        let result = protocol.send_group_message(
-            &group_id,
-            "replying here",
-            None,
-            Some("msg-original-123"),
-        );
+        let result =
+            protocol.send_group_message(&group_id, "replying here", None, Some("msg-original-123"));
         assert!(result.is_ok());
         let msg_ids = result.unwrap();
         assert_eq!(msg_ids.len(), 1, "Should send to bob only");
@@ -3756,15 +4106,15 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Solo Leave").unwrap();
+        let info = protocol.create_group("Solo Leave").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Should succeed — no other members to notify
-        protocol.leave_mesh_group(&group_id).unwrap();
+        protocol.leave_group(&group_id).unwrap();
         assert!(!protocol.group_mesh.members.contains_key(&group_id));
 
         // Group should no longer be listed
-        let groups = protocol.list_mesh_groups().unwrap();
+        let groups = protocol.list_groups().unwrap();
         assert!(!groups.contains(&group_id));
     }
 
@@ -3781,7 +4131,7 @@ mod tests {
         bob.start().unwrap();
 
         // Alice creates group, Bob joins
-        let group_info = alice.create_mesh_group("Multi Msg Test").unwrap();
+        let group_info = alice.create_group("Multi Msg Test").unwrap();
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
@@ -3814,9 +4164,7 @@ mod tests {
         let enc1 = {
             let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
-            alice_mls
-                .encrypt_for_group(&gid, b"First message")
-                .unwrap()
+            alice_mls.encrypt_for_group(&gid, b"First message").unwrap()
         };
         let enc2 = {
             let alice_mls = alice.mls_manager_for_testing().read().unwrap();
@@ -3867,7 +4215,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let info = protocol.create_mesh_group("Expired KP Test").unwrap();
+        let info = protocol.create_group("Expired KP Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         use crate::protocol::ReceivedKeyPackage;
@@ -3928,7 +4276,8 @@ mod tests {
             buffered_at: Instant::now(),
         });
         protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .insert(group_id.clone(), buf);
 
         // drain_pending_commits without MLS — all should be rejected (no MLS guard),
@@ -3937,7 +4286,8 @@ mod tests {
 
         // Buffer should be empty or cleaned up (all rejected since MLS is not initialized)
         let remaining = protocol
-            .group_mesh.pending_commits
+            .group_mesh
+            .pending_commits
             .get(&group_id)
             .map(|b| b.len())
             .unwrap_or(0);
@@ -3963,7 +4313,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         // NOT started — all sends will fail with NotStarted
 
-        let info = protocol.create_mesh_group("Failure Event Test").unwrap();
+        let info = protocol.create_group("Failure Event Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
         // Populate cache with multiple members
@@ -4013,7 +4363,11 @@ mod tests {
                 failed_members.contains(&"carol".to_string()),
                 "carol should be in failed_members"
             );
-            assert_eq!(failed_members.len(), 2, "Should have exactly 2 failed members");
+            assert_eq!(
+                failed_members.len(),
+                2,
+                "Should have exactly 2 failed members"
+            );
             // No successes
             assert!(
                 succeeded_members.is_empty(),
