@@ -3260,13 +3260,14 @@ fn test_leave_election_cleared_when_member_already_removed() {
     // "bob" was never added to this MLS group, so refresh_group_members
     // won't find him — simulates a member that was already removed.
     let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
-    let key = leave_election_key(&group_id, "bob");
+    let key = (group_id.clone(), "bob".to_string());
     protocol.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
             leaving_member: "bob".to_string(),
             received_at: past,
+            last_attempt_at: None,
         },
     );
 
@@ -3289,13 +3290,14 @@ fn test_leave_election_timeout_re_elects_self() {
     // After filtering out the leaver ("bob"), remaining = ["alice"].
     // alice is lex-first → candidate at interval 0 → should attempt remove.
     let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
-    let key = leave_election_key(&group_id, "bob");
+    let key = (group_id.clone(), "bob".to_string());
     alice.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
             leaving_member: "bob".to_string(),
             received_at: past,
+            last_attempt_at: None,
         },
     );
 
@@ -3322,13 +3324,14 @@ fn test_leave_election_not_triggered_before_timeout() {
     let group_id = info.group_id.as_str().to_string();
 
     // Insert a pending election that hasn't timed out yet
-    let key = leave_election_key(&group_id, "bob");
+    let key = (group_id.clone(), "bob".to_string());
     protocol.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
             leaving_member: "bob".to_string(),
             received_at: Instant::now(), // just now — well within timeout
+            last_attempt_at: None,
         },
     );
 
@@ -3341,15 +3344,6 @@ fn test_leave_election_not_triggered_before_timeout() {
             .pending_leave_elections
             .contains_key(&key),
         "Election should remain pending before timeout"
-    );
-}
-
-#[test]
-fn test_leave_election_key_helper() {
-    assert_eq!(leave_election_key("group1", "alice"), "group1:alice");
-    assert_eq!(
-        leave_election_key("my-group-id", "user:123"),
-        "my-group-id:user:123"
     );
 }
 
@@ -3527,75 +3521,14 @@ fn test_epoch_fork_cleanup_does_not_duplicate_existing_fork() {
 #[test]
 fn test_epoch_fork_resolution_includes_failed_members() {
     // Verifies that GroupEpochForkResolved includes members we couldn't reach.
-    // Use a real MLS group but DON'T start the protocol — send_internal_message
-    // will fail for all members, simulating unreachable peers.
-    let storage = Arc::new(crate::mls::InMemoryStorage::default());
-    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-    protocol.initialize_mls(storage).unwrap();
-
-    let info = protocol.create_group("Failed Members Test").unwrap();
-    let group_id = info.group_id.as_str().to_string();
-
-    // Use a fake group_id that doesn't exist in MLS so refresh_group_members
-    // fails and falls back to the cache, preserving our injected members.
-    let fake_group_id = "fake_fork_failed_members".to_string();
-    protocol.group_mesh.members.insert(
-        fake_group_id.clone(),
-        vec![
-            "bob".to_string(),
-            "carol".to_string(),
-            "user123".to_string(),
-        ],
-    );
-
-    // Insert a fork for the REAL group_id (so update_keys succeeds) but
-    // use the fake_group_id for the fork tracking. We need update_keys to
-    // succeed, so instead test with the real group_id and simply don't start
-    // the protocol. The real group only has user123 from MLS perspective,
-    // so refresh_group_members returns only user123 and there's nobody to
-    // fail sending to. Instead, let's test the tracking differently:
-    // We use setup_alice_bob_group which gives us a 2-member group, then
-    // don't start the protocol for the resolution check.
-
-    // Clean approach: use the real group with injected extra fake members.
-    // refresh_group_members will overwrite to the real MLS membership,
-    // so we put the fork on the real group and inject fake members.
-    // Since refresh succeeds, members = MLS members = [user123].
-    // No other members → no sends → no failures. That won't test it.
-
-    // Best approach: put fork on a fake group_id so refresh fails and
-    // cache is used. update_keys for a nonexistent group will fail.
-    // That's the update_keys failure path, not what we want.
-
-    // Final approach: use a started alice+bob group, but stop the protocol
-    // so sends fail.
-    drop(protocol);
-
-    let (mut alice, _bob, group_id) = setup_alice_bob_group("Failed Members Fork Test");
-
-    // Alice's protocol is started but we can break sends by stopping it.
-    // Actually, send_internal_message uses the outbox. It won't fail
-    // for a started protocol. Instead, inject a fake third member that
-    // doesn't exist — sends to real members will succeed (go to outbox),
-    // but we can verify the event structure works.
-
-    // Simplest valid test: use fake group_id with cached members. The
-    // fork resolution will fail at update_keys (group not in MLS), which
-    // is the Err branch. To test failed_members in the Ok branch, we
-    // need update_keys to succeed. So use the real group_id. refresh
-    // will give [alice, bob]. Sends to bob will succeed (outbox). So
-    // failed_members will be empty. That tests the happy path.
-
-    // To get actual send failures: don't start the protocol.
-    drop(alice);
-
+    // Strategy: create a real alice+bob MLS group, then stop alice's protocol
+    // so send_internal_message fails for bob, populating failed_members.
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
     let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
     alice.initialize_mls(storage_a).unwrap();
     bob.initialize_mls(storage_b).unwrap();
-    // Start ONLY for group creation, then we don't need it for sends
     alice.start().unwrap();
     bob.start().unwrap();
 
@@ -3615,7 +3548,7 @@ fn test_epoch_fork_resolution_includes_failed_members() {
     }
     alice.refresh_group_members(&group_id).unwrap();
 
-    // Stop alice so send_internal_message fails
+    // Stop alice so send_internal_message fails for bob
     let _ = alice.stop();
 
     let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
@@ -4006,13 +3939,14 @@ fn test_pending_leave_elections_size_cap_eviction() {
     for i in 0..MAX_PENDING_LEAVE_ELECTIONS {
         let gid = format!("group_{}", i);
         let member = format!("member_{}", i);
-        let key = leave_election_key(&gid, &member);
+        let key = (gid.clone(), member.clone());
         protocol.group_mesh.pending_leave_elections.insert(
             key,
             PendingLeaveElection {
                 group_id: gid,
                 leaving_member: member,
                 received_at: Instant::now(),
+                last_attempt_at: None,
             },
         );
     }
@@ -4050,7 +3984,7 @@ fn test_pending_leave_elections_size_cap_eviction() {
         "Pending leave elections should not exceed MAX_PENDING_LEAVE_ELECTIONS"
     );
     // The new election should exist
-    let new_key = leave_election_key(&new_group, new_leaver);
+    let new_key = (new_group.clone(), new_leaver.to_string());
     assert!(
         protocol
             .group_mesh
@@ -4068,13 +4002,14 @@ fn test_leave_election_circuit_breaker_max_lifetime() {
 
     // Insert an election that has exceeded max lifetime
     let very_old = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_MAX_LIFETIME_SECS + 10);
-    let key = leave_election_key(&group_id, leaving_member);
+    let key = (group_id.clone(), leaving_member.to_string());
     protocol.group_mesh.pending_leave_elections.insert(
         key.clone(),
         PendingLeaveElection {
             group_id: group_id.clone(),
             leaving_member: leaving_member.to_string(),
             received_at: very_old,
+            last_attempt_at: None,
         },
     );
 
@@ -4103,7 +4038,7 @@ fn test_leave_election_circuit_breaker_max_lifetime() {
 fn test_non_key_update_commit_does_not_clear_fork_state() {
     // A successful Add or Remove commit should NOT clear fork state.
     // Only KeyUpdate commits (the resolution mechanism) clear it.
-    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Fork Preserve Test");
+    let (mut alice, bob, group_id) = setup_alice_bob_group("Fork Preserve Test");
 
     // Insert a fork state for this group
     alice.group_mesh.epoch_forks.insert(
@@ -4148,7 +4083,7 @@ fn test_non_key_update_commit_does_not_clear_fork_state() {
 #[test]
 fn test_key_update_commit_clears_fork_state() {
     // Verify that a KeyUpdate commit DOES clear fork state (the complement test).
-    let (mut alice, mut bob, group_id) = setup_alice_bob_group("Fork Clear KU Test");
+    let (mut alice, bob, group_id) = setup_alice_bob_group("Fork Clear KU Test");
 
     alice.group_mesh.epoch_forks.insert(
         group_id.clone(),
@@ -4279,5 +4214,78 @@ fn test_epoch_fork_periodic_cleanup_multiple_groups_mixed() {
         fork_events.len(),
         1,
         "Only one fork event should be emitted"
+    );
+}
+
+#[test]
+fn test_leave_election_cooldown_prevents_per_tick_spam() {
+    // Verifies that after a failed remove attempt, the cooldown prevents
+    // repeated MLS operations on every process tick.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Cooldown Test");
+
+    // Set up an election for bob that has timed out
+    let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    let key = (group_id.clone(), "bob".to_string());
+
+    // Simulate a recent failed attempt by setting last_attempt_at to just now
+    alice.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: "bob".to_string(),
+            received_at: past,
+            last_attempt_at: Some(Instant::now()), // just attempted
+        },
+    );
+
+    // Bob is still in the group, but the cooldown should prevent another attempt
+    alice.check_leave_election_timeouts();
+
+    // Election should still be pending (cooldown hasn't elapsed)
+    assert!(
+        alice.group_mesh.pending_leave_elections.contains_key(&key),
+        "Election should remain pending during cooldown"
+    );
+    // Bob should still be in the group (no remove attempted)
+    let members = alice.refresh_group_members(&group_id).unwrap();
+    assert!(
+        members.contains(&"bob".to_string()),
+        "Bob should still be in group — cooldown should prevent remove attempt"
+    );
+}
+
+#[test]
+fn test_leave_election_proceeds_after_cooldown_expires() {
+    // Verifies that once the cooldown expires, the re-election proceeds.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Cooldown Expiry Test");
+
+    let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    let key = (group_id.clone(), "bob".to_string());
+
+    // Set last_attempt_at to well beyond the cooldown window
+    let old_attempt =
+        Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_ATTEMPT_COOLDOWN_SECS + 5);
+    alice.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: "bob".to_string(),
+            received_at: past,
+            last_attempt_at: Some(old_attempt),
+        },
+    );
+
+    alice.check_leave_election_timeouts();
+
+    // Remove should succeed → election cleared
+    assert!(
+        !alice.group_mesh.pending_leave_elections.contains_key(&key),
+        "Election should be cleared after successful remove (cooldown expired)"
+    );
+    // Bob should be removed
+    let members = alice.refresh_group_members(&group_id).unwrap();
+    assert!(
+        !members.contains(&"bob".to_string()),
+        "Bob should be removed after cooldown-expired re-election"
     );
 }

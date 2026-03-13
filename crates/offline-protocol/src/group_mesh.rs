@@ -43,11 +43,9 @@ pub(super) const MAX_PENDING_LEAVE_ELECTIONS: usize = 64;
 /// After this, the election is cleaned up regardless of whether the member
 /// was removed — prevents infinite retry loops when all candidates fail.
 pub(super) const LEAVE_ELECTION_MAX_LIFETIME_SECS: u64 = 300;
-
-/// Builds a deterministic key for leave election tracking: "group_id:member_id".
-pub(crate) fn leave_election_key(group_id: &str, member_id: &str) -> String {
-    format!("{}:{}", group_id, member_id)
-}
+/// Minimum cooldown between re-election attempts for the same leave election
+/// to prevent spamming MLS operations on every process tick (5 seconds).
+pub(super) const LEAVE_ELECTION_ATTEMPT_COOLDOWN_SECS: u64 = 5;
 
 /// Bundled state for group messaging.
 ///
@@ -79,8 +77,9 @@ pub(crate) struct GroupMeshState {
     pub(crate) internet_was_available: bool,
 
     /// Pending leave elections awaiting a remove-commit from the elected member.
-    /// Key: "group_id:leaving_member".
-    pub(crate) pending_leave_elections: HashMap<String, PendingLeaveElection>,
+    /// Key: (group_id, leaving_member_id) — uses a tuple to avoid ambiguity
+    /// from string concatenation when IDs contain separator characters.
+    pub(crate) pending_leave_elections: HashMap<(String, String), PendingLeaveElection>,
 
     /// Suspected epoch forks awaiting resolution. Key: group_id.
     pub(crate) epoch_forks: HashMap<String, EpochForkState>,
@@ -234,6 +233,10 @@ pub(crate) struct PendingLeaveElection {
     pub(crate) leaving_member: String,
     /// When we received the leave notification.
     pub(crate) received_at: Instant,
+    /// When we last attempted to issue a remove-commit for this election.
+    /// Used as a cooldown to prevent spamming MLS operations on every
+    /// process tick when the current candidate fails repeatedly.
+    pub(crate) last_attempt_at: Option<Instant>,
 }
 
 /// Tracks a suspected epoch fork for a group.
@@ -568,8 +571,9 @@ impl OfflineProtocol {
             ));
             // Clear any pending leave election for this member — the remove
             // has been committed successfully.
-            let key = leave_election_key(&payload.group_id, member);
-            self.group_mesh.pending_leave_elections.remove(&key);
+            self.group_mesh
+                .pending_leave_elections
+                .remove(&(payload.group_id.clone(), member.to_string()));
         }
 
         // Only clear fork tracking when a KeyUpdate commit succeeds — these
@@ -855,7 +859,7 @@ impl OfflineProtocol {
                 );
             }
             // Clear any pending election for this leave (we handled it)
-            let key = leave_election_key(&payload.group_id, sender);
+            let key = (payload.group_id.clone(), sender.to_string());
             self.group_mesh.pending_leave_elections.remove(&key);
         } else {
             // We're not the elected remover — record the election so we can
@@ -865,20 +869,21 @@ impl OfflineProtocol {
                 if let Some(oldest_key) = self
                     .group_mesh
                     .pending_leave_elections
-                    .values()
-                    .min_by_key(|e| e.received_at)
-                    .map(|e| leave_election_key(&e.group_id, &e.leaving_member))
+                    .iter()
+                    .min_by_key(|(_, e)| e.received_at)
+                    .map(|(k, _)| k.clone())
                 {
                     self.group_mesh.pending_leave_elections.remove(&oldest_key);
                 }
             }
-            let key = leave_election_key(&payload.group_id, sender);
+            let key = (payload.group_id.clone(), sender.to_string());
             self.group_mesh.pending_leave_elections.insert(
                 key,
                 PendingLeaveElection {
                     group_id: payload.group_id.clone(),
                     leaving_member: sender.to_string(),
                     received_at: Instant::now(),
+                    last_attempt_at: None,
                 },
             );
         }
@@ -1530,6 +1535,12 @@ impl OfflineProtocol {
             // Members on our branch will process this normally and advance.
             // Members on a forked branch will fail — the app layer should
             // handle re-inviting them.
+            //
+            // NOTE: We use `read_mls_guard` (RwLock read lock) even though
+            // `update_keys` mutates MLS state. This is correct because
+            // `MlsManager` uses interior mutability (internal Mutex on the
+            // group store), so a read guard is sufficient for all operations.
+            //
             // Acquire MLS lock, perform key update, and fully release the
             // guard before touching any other &mut self state.
             let update_result = {
@@ -1644,20 +1655,19 @@ impl OfflineProtocol {
     pub(crate) fn check_leave_election_timeouts(&mut self) {
         let timeout = StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS);
         let max_lifetime = StdDuration::from_secs(LEAVE_ELECTION_MAX_LIFETIME_SECS);
+        let attempt_cooldown = StdDuration::from_secs(LEAVE_ELECTION_ATTEMPT_COOLDOWN_SECS);
         let self_id = self.config.user_id.clone();
 
-        // Collect timed-out elections
-        let timed_out: Vec<PendingLeaveElection> = self
+        // Collect timed-out elections (keys + values) for processing.
+        let timed_out: Vec<((String, String), PendingLeaveElection)> = self
             .group_mesh
             .pending_leave_elections
-            .values()
-            .filter(|e| e.received_at.elapsed() > timeout)
-            .cloned()
+            .iter()
+            .filter(|(_, e)| e.received_at.elapsed() > timeout)
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        for election in timed_out {
-            let election_key = leave_election_key(&election.group_id, &election.leaving_member);
-
+        for (election_key, election) in timed_out {
             // Circuit breaker: abandon the election after max lifetime to
             // prevent infinite per-tick retry loops when all candidates fail.
             if election.received_at.elapsed() > max_lifetime {
@@ -1704,9 +1714,11 @@ impl OfflineProtocol {
             // Re-elect: walk the sorted remaining members. For each timeout
             // interval that has passed, advance one position in the list.
             // This staggers re-election so members don't all fire at once.
+            // Interval 1 = first fallback (idx 0), interval 2 = second (idx 1), etc.
+            // The original elected member (lex-first) already had their shot
+            // during handle_group_mls_leave; this path only fires after timeout.
             let elapsed_intervals =
                 (election.received_at.elapsed().as_secs() / LEAVE_ELECTION_TIMEOUT_SECS) as usize;
-            // Interval 0 = first member (original election), 1 = second, etc.
             let candidate_idx = elapsed_intervals.min(remaining.len().saturating_sub(1));
 
             if remaining
@@ -1714,12 +1726,30 @@ impl OfflineProtocol {
                 .map(|c| c == &self_id)
                 .unwrap_or(false)
             {
+                // Rate-limit: skip if we already attempted within the cooldown window.
+                if let Some(last) = election.last_attempt_at {
+                    if last.elapsed() < attempt_cooldown {
+                        continue;
+                    }
+                }
+
                 info!(
                     group_id = %election.group_id,
                     leaving_member = %election.leaving_member,
                     attempt = candidate_idx + 1,
                     "Re-elected to issue MLS remove-commit (prior elected member timed out)"
                 );
+
+                // Record the attempt timestamp before trying, so the cooldown
+                // applies even on failure.
+                if let Some(state) = self
+                    .group_mesh
+                    .pending_leave_elections
+                    .get_mut(&election_key)
+                {
+                    state.last_attempt_at = Some(Instant::now());
+                }
+
                 if let Err(e) = self.remove_from_group(&election.group_id, &election.leaving_member)
                 {
                     warn!(
@@ -1728,8 +1758,8 @@ impl OfflineProtocol {
                         error = %e,
                         "Failed to issue MLS remove-commit during re-election"
                     );
-                    // Don't remove from pending — next tick will try again
-                    // or the next member in line will take over at the next interval.
+                    // Don't remove from pending — cooldown will prevent spam,
+                    // next interval will advance to the next candidate.
                 } else {
                     self.group_mesh
                         .pending_leave_elections
