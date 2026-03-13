@@ -190,12 +190,16 @@ impl BleTransport {
         queue.push_back(message);
     }
 
-    /// Called when a message is received from a peer whose transport-level
-    /// identity is known (e.g. the BLE device ID / MAC address of the
-    /// connected peripheral).
+    /// Like [`on_message_received`](Self::on_message_received), but attaches a
+    /// transport-verified `peer_id` to the message.
     ///
-    /// The `peer_id` is attached to the message so the protocol layer can
-    /// verify that `message.sender` matches the physical peer.
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, BLE device
+    ///   UUID, etc.). The protocol layer uses this value to verify that
+    ///   `message.sender` matches the physical peer that delivered it.
     pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
         message.transport_peer_id = Some(peer_id);
         let mut queue = self.receive_queue.lock().unwrap();
@@ -522,14 +526,23 @@ impl BleTransport {
 
     /// Like [`on_fragment_received`](Self::on_fragment_received), but attaches a
     /// transport-verified `peer_id` to the reassembled message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, BLE device
+    ///   UUID, etc.). The protocol layer uses this value to verify that
+    ///   `message.sender` matches the physical peer that delivered it.
     pub fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
         match self.process_fragment(&fragment_data) {
             Ok(Some(mut message)) => {
                 message.transport_peer_id = Some(peer_id);
+                let msg_id = message.id.clone();
                 let mut queue = self.receive_queue.lock().unwrap();
-                queue.push_back(message.clone());
+                queue.push_back(message);
                 tracing::debug!(
-                    message_id = %message.id,
+                    message_id = %msg_id,
                     "Complete message assembled from fragments (with peer identity)"
                 );
                 Ok(())

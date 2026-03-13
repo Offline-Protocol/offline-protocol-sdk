@@ -168,6 +168,16 @@ const INTERNAL_PREFIXES: &[&str] = &[
 /// Maximum number of TOFU-pinned peer public keys to retain.
 const MAX_TOFU_PEERS: usize = 1000;
 
+/// Entry in the TOFU key store, pairing the peer's public key with a
+/// last-seen timestamp used for LRU eviction.
+#[derive(Clone, Debug)]
+struct TofuEntry {
+    public_key: Vec<u8>,
+    /// Milliseconds since epoch (UTC) when we last verified a signed message
+    /// from this peer.
+    last_seen_ms: i64,
+}
+
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeyPackagePayload {
@@ -691,7 +701,8 @@ pub struct OfflineProtocol {
     /// The first signed control message from a peer pins their public key here.
     /// Subsequent messages from the same peer must present the same key;
     /// a mismatch triggers a security warning and the message is dropped.
-    known_peer_public_keys: HashMap<String, Vec<u8>>,
+    /// Entries track a last-seen timestamp for LRU eviction when the store is full.
+    known_peer_public_keys: HashMap<String, TofuEntry>,
 }
 
 impl OfflineProtocol {
@@ -5195,7 +5206,23 @@ impl OfflineProtocol {
                     // Signed and verified — proceed
                 }
                 Ok(false) => {
-                    // Unsigned (legacy) — log but allow for backward compatibility
+                    // Unsigned (legacy) — but if the sender already has a TOFU-pinned
+                    // key, reject: a known-signed peer going unsigned is a suspicious
+                    // downgrade that could indicate an impersonation attempt.
+                    if self.known_peer_public_keys.contains_key(sender) {
+                        warn!(
+                            sender = %sender,
+                            message_id = %message.id,
+                            "Dropping unsigned control message from TOFU-pinned peer (signature downgrade)"
+                        );
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::security_warning(
+                                sender.to_string(),
+                                "Unsigned control message from peer with pinned key (possible downgrade attack)".to_string(),
+                            ));
+                        }
+                        return Some(InternalMessageResult::Consumed);
+                    }
                     debug!(
                         sender = %sender,
                         message_id = %message.id,
@@ -6384,7 +6411,10 @@ impl OfflineProtocol {
                 return;
             }
         };
-        let signature = match manager.sign_data(message.content.as_bytes()) {
+        // Sign a canonical payload that includes message ID and recipient
+        // to prevent cross-recipient replay attacks.
+        let canonical = format!("{}:{}:{}", message.id, message.recipient, message.content);
+        let signature = match manager.sign_data(canonical.as_bytes()) {
             Ok(sig) => sig,
             Err(e) => {
                 warn!(error = %e, "Failed to sign control message — sending unsigned");
@@ -6425,10 +6455,12 @@ impl OfflineProtocol {
         let public_key = base64_decode(pk_hex)
             .map_err(|e| Error::Other(format!("Invalid control public key encoding: {}", e)))?;
 
-        // Verify Ed25519 signature over the content
+        // Verify Ed25519 signature over a canonical payload that includes
+        // message ID and recipient to prevent cross-recipient replay attacks.
+        let canonical = format!("{}:{}:{}", message.id, message.recipient, message.content);
         let valid = offline_protocol_mls::MlsManager::verify_signature(
             &public_key,
-            message.content.as_bytes(),
+            canonical.as_bytes(),
             &signature,
         )
         .map_err(|e| Error::Other(format!("Signature verification error: {}", e)))?;
@@ -6441,8 +6473,9 @@ impl OfflineProtocol {
 
         // TOFU: check/pin the public key for this sender
         let sender = message.sender.as_str();
-        if let Some(known_pk) = self.known_peer_public_keys.get(sender) {
-            if *known_pk != public_key {
+        let now_ms = Utc::now().timestamp_millis();
+        if let Some(entry) = self.known_peer_public_keys.get(sender) {
+            if entry.public_key != public_key {
                 warn!(
                     sender = %sender,
                     "TOFU key mismatch: peer presented a different public key"
@@ -6458,20 +6491,31 @@ impl OfflineProtocol {
                     sender
                 )));
             }
+            // Update last-seen timestamp for LRU tracking
+            if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
+                entry.last_seen_ms = now_ms;
+            }
         } else {
-            // First contact — pin the key (with bounded capacity)
+            // First contact — pin the key (with bounded capacity, LRU eviction)
             if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
-                // Evict an arbitrary entry to stay within bounds.
-                // In a production system this would be LRU; here we remove the first
-                // key returned by the iterator which is effectively random for HashMap.
-                if let Some(evict_key) = self.known_peer_public_keys.keys().next().cloned() {
-                    debug!(evicted_peer = %evict_key, "TOFU store full, evicting oldest entry");
+                if let Some(evict_key) = self
+                    .known_peer_public_keys
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.last_seen_ms)
+                    .map(|(k, _)| k.clone())
+                {
+                    debug!(evicted_peer = %evict_key, "TOFU store full, evicting LRU entry");
                     self.known_peer_public_keys.remove(&evict_key);
                 }
             }
             debug!(sender = %sender, "TOFU: pinning public key for new peer");
-            self.known_peer_public_keys
-                .insert(sender.to_string(), public_key);
+            self.known_peer_public_keys.insert(
+                sender.to_string(),
+                TofuEntry {
+                    public_key,
+                    last_seen_ms: now_ms,
+                },
+            );
         }
 
         Ok(true)
@@ -13273,50 +13317,82 @@ pub(crate) mod tests {
 
         // Pin a key for "alice"
         let fake_pk = vec![1u8; 32];
-        protocol
-            .known_peer_public_keys
-            .insert("alice".to_string(), fake_pk.clone());
+        protocol.known_peer_public_keys.insert(
+            "alice".to_string(),
+            TofuEntry {
+                public_key: fake_pk.clone(),
+                last_seen_ms: 1000,
+            },
+        );
 
         // Verify same key passes TOFU check
         assert_eq!(
-            protocol.known_peer_public_keys.get("alice").unwrap(),
-            &fake_pk
+            protocol
+                .known_peer_public_keys
+                .get("alice")
+                .unwrap()
+                .public_key,
+            fake_pk
         );
 
         // A different key should be detected
         let different_pk = vec![2u8; 32];
         assert_ne!(
-            protocol.known_peer_public_keys.get("alice").unwrap(),
-            &different_pk,
+            protocol
+                .known_peer_public_keys
+                .get("alice")
+                .unwrap()
+                .public_key,
+            different_pk,
         );
     }
 
     #[test]
-    fn test_tofu_store_bounded_capacity() {
+    fn test_tofu_store_bounded_capacity_with_lru_eviction() {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-        // Fill the TOFU store to capacity
+        // Fill the TOFU store to capacity with ascending last_seen timestamps
         for i in 0..MAX_TOFU_PEERS {
-            protocol
-                .known_peer_public_keys
-                .insert(format!("peer_{}", i), vec![i as u8; 32]);
+            protocol.known_peer_public_keys.insert(
+                format!("peer_{}", i),
+                TofuEntry {
+                    public_key: vec![i as u8; 32],
+                    last_seen_ms: i as i64, // peer_0 has oldest timestamp
+                },
+            );
         }
         assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
 
         // Simulate what verify_control_message does when store is full:
-        // it should evict one entry before inserting
+        // LRU eviction should remove the entry with the smallest last_seen_ms.
         if protocol.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
-            if let Some(evict_key) = protocol.known_peer_public_keys.keys().next().cloned() {
+            if let Some(evict_key) = protocol
+                .known_peer_public_keys
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen_ms)
+                .map(|(k, _)| k.clone())
+            {
+                assert_eq!(evict_key, "peer_0", "Should evict the LRU entry");
                 protocol.known_peer_public_keys.remove(&evict_key);
             }
         }
-        protocol
-            .known_peer_public_keys
-            .insert("new_peer".to_string(), vec![99u8; 32]);
+        protocol.known_peer_public_keys.insert(
+            "new_peer".to_string(),
+            TofuEntry {
+                public_key: vec![99u8; 32],
+                last_seen_ms: MAX_TOFU_PEERS as i64 + 1,
+            },
+        );
 
         // Size should still be at the cap
         assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
         assert!(protocol.known_peer_public_keys.contains_key("new_peer"));
+        assert!(
+            !protocol.known_peer_public_keys.contains_key("peer_0"),
+            "LRU entry should have been evicted"
+        );
+        // peer_1 should still be present (it wasn't the LRU)
+        assert!(protocol.known_peer_public_keys.contains_key("peer_1"));
     }
 
     #[test]
@@ -13342,5 +13418,160 @@ pub(crate) mod tests {
         // Deserialize back — field should be None
         let deserialized: Message = serde_json::from_str(&json).unwrap();
         assert!(deserialized.transport_peer_id.is_none());
+    }
+
+    #[test]
+    fn test_unsigned_control_message_rejected_when_tofu_pinned() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Pin a key for "alice" (simulating a prior signed exchange)
+        protocol.known_peer_public_keys.insert(
+            "alice".to_string(),
+            TofuEntry {
+                public_key: vec![1u8; 32],
+                last_seen_ms: 1000,
+            },
+        );
+
+        // Create an unsigned control message from "alice"
+        let msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        // No __ctrl_sig / __ctrl_pk metadata → unsigned
+
+        // Should be rejected because alice has a TOFU-pinned key
+        let result = protocol.process_internal_message(&msg);
+        assert!(
+            matches!(result, Some(InternalMessageResult::Consumed)),
+            "Unsigned control message from TOFU-pinned peer should be dropped"
+        );
+    }
+
+    #[test]
+    fn test_unsigned_control_message_allowed_from_unknown_peer() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // No TOFU entry for "bob"
+        assert!(!protocol.known_peer_public_keys.contains_key("bob"));
+
+        // Create an unsigned control message from "bob"
+        let msg = pending_test_message(
+            "bob",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+
+        // Should be allowed through (legacy peer, no TOFU key pinned)
+        let result = protocol.process_internal_message(&msg);
+        // CONN_REQUEST handler will attempt to parse the payload — it won't
+        // return None (it will be Consumed by the handler or by parsing logic).
+        // The key point is that it was NOT rejected by the security gate.
+        assert!(
+            result.is_some(),
+            "Unsigned control message from unknown peer should pass the security gate"
+        );
+    }
+
+    #[test]
+    fn test_verify_control_message_tofu_violation() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // We need MLS initialized for signing. Since we can't easily init MLS
+        // in unit tests, we test the verify path directly by constructing a
+        // message with valid-looking but mismatched TOFU state.
+
+        // Pin a key for "alice"
+        let pinned_pk = vec![1u8; 32];
+        protocol.known_peer_public_keys.insert(
+            "alice".to_string(),
+            TofuEntry {
+                public_key: pinned_pk,
+                last_seen_ms: 1000,
+            },
+        );
+
+        // Create a message with a different public key in metadata
+        let different_pk = vec![2u8; 32];
+        let mut msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        // Put a fake signature and the different public key
+        msg.metadata
+            .insert(CTRL_SIG_META_KEY.to_string(), base64_encode(&vec![0u8; 64]));
+        msg.metadata
+            .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&different_pk));
+
+        // verify_control_message should fail because the signature won't verify
+        // (we used a fake signature), OR it would fail on TOFU mismatch.
+        // Either way it should be an error.
+        let result = protocol.verify_control_message(&msg);
+        assert!(
+            result.is_err(),
+            "Should reject: bad signature or TOFU mismatch"
+        );
+    }
+
+    #[test]
+    fn test_tofu_lru_eviction_removes_oldest() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Insert 3 entries with different timestamps
+        protocol.known_peer_public_keys.insert(
+            "old_peer".to_string(),
+            TofuEntry {
+                public_key: vec![1u8; 32],
+                last_seen_ms: 100,
+            },
+        );
+        protocol.known_peer_public_keys.insert(
+            "medium_peer".to_string(),
+            TofuEntry {
+                public_key: vec![2u8; 32],
+                last_seen_ms: 200,
+            },
+        );
+        protocol.known_peer_public_keys.insert(
+            "new_peer".to_string(),
+            TofuEntry {
+                public_key: vec![3u8; 32],
+                last_seen_ms: 300,
+            },
+        );
+
+        // Find the LRU entry
+        let lru = protocol
+            .known_peer_public_keys
+            .iter()
+            .min_by_key(|(_, e)| e.last_seen_ms)
+            .map(|(k, _)| k.clone())
+            .unwrap();
+
+        assert_eq!(
+            lru, "old_peer",
+            "LRU eviction should target the oldest entry"
+        );
+    }
+
+    #[test]
+    fn test_canonical_signing_payload_format() {
+        // Verify the canonical payload format used for signing includes
+        // message ID and recipient, not just content.
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "__CONN_REQ__payload",
+        );
+
+        let canonical = format!("{}:{}:{}", msg.id, msg.recipient, msg.content);
+        assert!(canonical.contains(&msg.id.as_str().to_string()));
+        assert!(canonical.contains("bob"));
+        assert!(canonical.contains("__CONN_REQ__payload"));
+        // Ensure the format has exactly the expected structure
+        let parts: Vec<&str> = canonical.splitn(3, ':').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1], "bob");
+        assert_eq!(parts[2], "__CONN_REQ__payload");
     }
 }

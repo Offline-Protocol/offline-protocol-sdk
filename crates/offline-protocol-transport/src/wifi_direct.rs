@@ -148,8 +148,16 @@ impl WifiDirectTransport {
         queue.push_back(message);
     }
 
-    /// Called when a message is received from a peer whose transport-level
-    /// identity is known (e.g. Wi-Fi Direct MAC address).
+    /// Like [`on_message_received`](Self::on_message_received), but attaches a
+    /// transport-verified `peer_id` to the message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, IP, etc.).
+    ///   The protocol layer uses this value to verify that `message.sender`
+    ///   matches the physical peer that delivered it.
     pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
         message.transport_peer_id = Some(peer_id);
         let mut queue = self.receive_queue.lock().unwrap();
@@ -204,6 +212,14 @@ impl WifiDirectTransport {
 
     /// Like [`on_data_received`](Self::on_data_received), but attaches a
     /// transport-verified `peer_id` to the deserialized message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, IP, etc.).
+    ///   The protocol layer uses this value to verify that `message.sender`
+    ///   matches the physical peer that delivered it.
     pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
         match self.deserialize_message(&data) {
             Ok(mut message) => {
