@@ -63,6 +63,12 @@ dictionary MlsEncryptedMessage {
     u64 timestamp_ms;
 };
 
+// Result of adding a member to an MLS group
+dictionary MlsAddMemberResult {
+    MlsWelcomeMessage welcome;
+    MlsEncryptedMessage commit;
+};
+
 // Group information
 dictionary MlsGroupInfo {
     string group_id;
@@ -344,6 +350,8 @@ dictionary ProtocolConfig {
     u64 max_pending_global;
     u64 pending_ttl_ms;
     OverflowPolicy overflow_policy;
+    u32 max_group_members = 256;
+    boolean group_relay_enabled = true;
 };
 
 // Extended protocol configuration with all options
@@ -669,9 +677,9 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     MlsGroupInfo mls_create_group(string group_name);
     
-    // Add a member to a group (returns Welcome to send to new member)
+    // Add a member to a group (returns Welcome for invitee + Commit for existing members)
     [Throws=ProtocolError]
-    MlsWelcomeMessage mls_add_group_member(string group_id, sequence<u8> member_key_package);
+    MlsAddMemberResult mls_add_group_member(string group_id, sequence<u8> member_key_package);
     
     // Remove a member from a group
     [Throws=ProtocolError]
@@ -766,58 +774,33 @@ interface OfflineProtocol {
     string clear_typing(string conversation_id);
     
     // ========================================================================
-    // GROUP MANAGEMENT (RELAY SERVER API)
+    // GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================
-    
-    // Create a new group. Creator becomes admin.
-    // Returns JSON string to send via WebSocket relay.
+
+    // Create a new MLS group
     [Throws=ProtocolError]
-    string group_create(string name);
-    
-    // Send encrypted message to a group. Content must be pre-encrypted by client.
-    // Returns JSON string to send via WebSocket relay.
+    MlsGroupInfo create_group(string group_name);
+
+    // Send an MLS-encrypted message to all group members
     [Throws=ProtocolError]
-    string group_send_message(string group_id, string content, string? reply_to_msg);
-    
-    // Add member to group. Admin only.
-    // Returns JSON string to send via WebSocket relay.
+    sequence<string> send_group_message(string group_id, string content, MessagePriority? priority, string? reply_to_msg);
+
+    // Invite a user to an MLS group
     [Throws=ProtocolError]
-    string group_add_member(string group_id, string username);
-    
-    // Remove member from group. Admin only, or user can remove themselves.
-    // Returns JSON string to send via WebSocket relay.
+    void invite_to_group(string group_id, string invitee_user_id);
+
+    // Remove a member from an MLS group
     [Throws=ProtocolError]
-    string group_remove_member(string group_id, string username);
-    
-    // Set member as admin. Admin only.
-    // Returns JSON string to send via WebSocket relay.
+    void remove_from_group(string group_id, string member_id);
+
+    // Leave an MLS group
     [Throws=ProtocolError]
-    string group_set_admin(string group_id, string username);
-    
-    // Remove admin role from member. Admin only.
-    // Returns JSON string to send via WebSocket relay.
+    void leave_group(string group_id);
+
+    // List all MLS groups (excluding 1:1 sessions)
     [Throws=ProtocolError]
-    string group_remove_admin(string group_id, string username);
-    
-    // Leave a group.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string group_leave(string group_id);
-    
-    // Delete a group. Admin only.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string group_delete(string group_id);
-    
-    // Get group information.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string group_get_info(string group_id);
-    
-    // Get all groups the user is a member of.
-    // Returns JSON string to send via WebSocket relay.
-    [Throws=ProtocolError]
-    string group_get_user_groups();
+    sequence<string> list_groups();
+
 };
 
 // Standalone mesh services interface

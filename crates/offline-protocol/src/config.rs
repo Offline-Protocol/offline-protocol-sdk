@@ -129,6 +129,33 @@ pub struct ReliabilityConfig {
     pub dedup: DeduplicatorConfig,
 }
 
+/// Configuration for group messaging.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupConfig {
+    /// Maximum number of members allowed in a single group.
+    ///
+    /// Per-member fan-out is O(N) when using mesh transports.
+    /// This cap prevents unbounded groups from overwhelming the network.
+    pub max_group_members: usize,
+
+    /// Whether to attempt relay server registration for groups.
+    ///
+    /// When `true` (default), groups are registered with the relay server
+    /// for optimized fan-out when Internet transport is available.
+    /// When `false`, groups always use per-member fan-out regardless of
+    /// transport.
+    pub relay_enabled: bool,
+}
+
+impl Default for GroupConfig {
+    fn default() -> Self {
+        Self {
+            max_group_members: 256,
+            relay_enabled: true,
+        }
+    }
+}
+
 /// Main configuration for the Offline Protocol.
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
@@ -158,6 +185,9 @@ pub struct ProtocolConfig {
 
     /// Initial TTL (Time-To-Live) for messages.
     pub initial_ttl: u8,
+
+    /// Mesh group messaging configuration.
+    pub group: GroupConfig,
 }
 
 impl ProtocolConfig {
@@ -178,6 +208,7 @@ impl ProtocolConfig {
             reliability: ReliabilityConfig::default(),
             encryption: EncryptionConfig::default(),
             initial_ttl: DEFAULT_INITIAL_TTL,
+            group: GroupConfig::default(),
         }
     }
 
@@ -275,6 +306,12 @@ impl ProtocolConfig {
         if self.encryption.pending_queue.pending_ttl_ms == 0 {
             return Err(crate::Error::InvalidConfiguration(
                 "encryption.pending_queue.pending_ttl_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if self.group.max_group_members == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "group.max_group_members must be greater than 0".to_string(),
             ));
         }
 
@@ -388,6 +425,24 @@ impl ProtocolConfigBuilder {
     /// Configures pending encrypted message queue bounds and overflow behavior.
     pub fn pending_queue(mut self, config: PendingQueueConfig) -> Self {
         self.config.encryption.pending_queue = config;
+        self
+    }
+
+    /// Configures group messaging settings.
+    pub fn group(mut self, config: GroupConfig) -> Self {
+        self.config.group = config;
+        self
+    }
+
+    /// Sets the maximum number of members allowed in a single group.
+    pub fn max_group_members(mut self, max: usize) -> Self {
+        self.config.group.max_group_members = max;
+        self
+    }
+
+    /// Sets whether groups should attempt relay server registration.
+    pub fn group_relay_enabled(mut self, enabled: bool) -> Self {
+        self.config.group.relay_enabled = enabled;
         self
     }
 
@@ -586,5 +641,60 @@ mod tests {
         config.encryption.pending_queue.max_pending_per_peer = 100;
         config.encryption.pending_queue.max_pending_global = 99;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_group_config_default() {
+        let group = GroupConfig::default();
+        assert_eq!(group.max_group_members, 256);
+    }
+
+    #[test]
+    fn test_config_has_default_group_config() {
+        let config = ProtocolConfig::new("test-app", "user123");
+        assert_eq!(config.group.max_group_members, 256);
+    }
+
+    #[test]
+    fn test_config_validation_zero_max_group_members() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.group.max_group_members = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validation_positive_max_group_members() {
+        let mut config = ProtocolConfig::new("test-app", "user123");
+        config.group.max_group_members = 1;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_builder_max_group_members() {
+        let config = ProtocolConfig::builder("test-app", "user123")
+            .max_group_members(50)
+            .build()
+            .unwrap();
+        assert_eq!(config.group.max_group_members, 50);
+    }
+
+    #[test]
+    fn test_config_builder_group_config() {
+        let config = ProtocolConfig::builder("test-app", "user123")
+            .group(GroupConfig {
+                max_group_members: 128,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        assert_eq!(config.group.max_group_members, 128);
+    }
+
+    #[test]
+    fn test_config_builder_zero_max_group_members_rejected() {
+        let result = ProtocolConfig::builder("test-app", "user123")
+            .max_group_members(0)
+            .build();
+        assert!(result.is_err());
     }
 }

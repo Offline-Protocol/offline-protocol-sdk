@@ -11,7 +11,7 @@ use crate::constants::{
     BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES, BLE_MAX_FRAGMENT_COUNT,
     BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC, FRAGMENT_VERSION,
 };
-use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
+use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
@@ -108,7 +108,7 @@ pub struct BleTransport {
     /// Platform callback invoked when new fragments are available to send.
     /// Called from `send()` after enqueueing — the platform layer should
     /// respond by calling `get_next_fragment()` and performing the BLE write.
-    on_fragments_available: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    on_fragments_available: SharedCallback,
 }
 
 impl BleTransport {

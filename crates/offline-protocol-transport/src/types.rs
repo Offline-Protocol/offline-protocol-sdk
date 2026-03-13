@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::{Arc, Mutex};
+
+/// Thread-safe, optional callback shared between transport implementations (BLE, Wi-Fi Direct).
+pub type SharedCallback = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 
 /// Types of transports available in the Offline Protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

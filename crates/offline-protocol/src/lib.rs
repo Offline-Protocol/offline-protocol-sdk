@@ -13,13 +13,16 @@ pub mod constants;
 pub mod error;
 pub mod events;
 pub mod file_transfer;
+mod group_mesh;
 pub mod mls;
 pub mod mls_observability;
 pub mod protocol;
 pub mod transport_manager;
 pub mod visualization;
 
-pub use config::{EncryptionConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig};
+pub use config::{
+    EncryptionConfig, GroupConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig,
+};
 pub use error::{Error, EstablishmentState, Result, SessionStateError};
 pub use events::{
     DecryptionFailureCode, DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event,
@@ -34,6 +37,8 @@ pub use visualization::{
 
 #[cfg(test)]
 mod dors_integration_tests;
+#[cfg(test)]
+mod group_mesh_tests;
 
 // Re-export reliability types for configuration
 pub use offline_protocol_reliability::{

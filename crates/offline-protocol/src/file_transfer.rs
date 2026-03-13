@@ -501,6 +501,7 @@ pub struct OutboundTransferState {
 }
 
 impl OutboundTransferState {
+    /// Creates a new outbound transfer state with the given chunks and window size.
     pub fn new(chunks: Vec<FileChunk>, max_in_flight: usize) -> Self {
         Self {
             chunks,
@@ -537,14 +538,17 @@ impl OutboundTransferState {
         self.in_flight.remove(&chunk_index);
     }
 
+    /// Returns the total number of chunks in this transfer.
     pub fn total_chunks(&self) -> u32 {
         self.chunks.len() as u32
     }
 
+    /// Returns the number of chunks that have been acknowledged.
     pub fn acked_count(&self) -> u32 {
         self.acked.len() as u32
     }
 
+    /// Returns `true` when all chunks have been acknowledged.
     pub fn is_fully_acked(&self) -> bool {
         self.acked.len() == self.chunks.len()
     }

@@ -179,7 +179,7 @@ impl MlsManager {
             .credential
             .read()
             .map_err(|_| MlsError::NotInitialized)?;
-        guard.clone().ok_or_else(|| MlsError::NotInitialized)
+        guard.clone().ok_or(MlsError::NotInitialized)
     }
 
     /// Gets a signer for MLS operations, using the in-memory cache.
@@ -445,11 +445,16 @@ impl MlsManager {
     }
 
     /// Adds a member to a group.
+    ///
+    /// Returns a tuple of (WelcomeMessage, EncryptedMessage) where the
+    /// WelcomeMessage should be sent to the invitee and the EncryptedMessage
+    /// (Commit) should be distributed to all existing group members so they
+    /// can advance their MLS epoch.
     pub fn add_group_member(
         &self,
         group_id: &GroupId,
         member_key_package: &[u8],
-    ) -> Result<WelcomeMessage> {
+    ) -> Result<(WelcomeMessage, EncryptedMessage)> {
         let key_package = KeyPackageIn::tls_deserialize_exact(member_key_package)
             .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?
             .validate(self.provider.crypto(), ProtocolVersion::Mls10)
@@ -461,7 +466,7 @@ impl MlsManager {
             .ok_or_else(|| MlsError::GroupNotFound(group_id.to_string()))?;
 
         let signature_keys = self.get_signer()?;
-        let (_commit, welcome) =
+        let (commit, welcome) =
             self.group_manager
                 .add_member(&mut group, key_package, &signature_keys)?;
 
@@ -471,16 +476,33 @@ impl MlsManager {
             .tls_serialize_detached()
             .map_err(|e| MlsError::Serialization(e.to_string()))?;
 
+        let commit_bytes = commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Serialization(e.to_string()))?;
+
         // Include group name in welcome for the invitee
         let group_name = self.load_group_metadata(group_id)?.and_then(|m| m.name);
 
-        Ok(WelcomeMessage {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+
+        let welcome_msg = WelcomeMessage {
             group_id: group_id.clone(),
             welcome_data: welcome_bytes,
             inviter_id: self.user_id.clone(),
             group_name,
-            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
-        })
+            timestamp_ms: now_ms,
+        };
+
+        let commit_msg = EncryptedMessage {
+            group_id: group_id.clone(),
+            message_type: MlsMessageType::Commit,
+            epoch: group.epoch().as_u64(),
+            ciphertext: commit_bytes,
+            sender_id: self.user_id.clone(),
+            timestamp_ms: now_ms,
+        };
+
+        Ok((welcome_msg, commit_msg))
     }
 
     /// Removes a member from a group.

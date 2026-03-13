@@ -4,7 +4,7 @@
 //! This is primarily for Android devices and offers faster data transfer than BLE.
 
 // Constants are defined but not used in Rust code (used in native Android code)
-use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
+use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -68,7 +68,7 @@ pub struct WifiDirectTransport {
     /// Platform-specific handle (opaque pointer to Android WifiP2pManager)
     platform_handle: Arc<Mutex<Option<usize>>>,
     /// Platform callback invoked when new messages are available to send.
-    on_messages_available: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    on_messages_available: SharedCallback,
 }
 
 impl WifiDirectTransport {

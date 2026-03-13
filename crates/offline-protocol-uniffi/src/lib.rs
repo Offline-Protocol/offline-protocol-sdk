@@ -547,6 +547,17 @@ impl From<MlsEncryptedMessage> for CoreEncryptedMessage {
     }
 }
 
+/// Result of adding a member to an MLS group.
+///
+/// Contains both the Welcome message (to be sent to the invitee) and the
+/// Commit message (to be distributed to all existing group members so they
+/// can advance their MLS epoch).
+#[derive(Debug, Clone)]
+pub struct MlsAddMemberResult {
+    pub welcome: MlsWelcomeMessage,
+    pub commit: MlsEncryptedMessage,
+}
+
 /// Group information
 #[derive(Debug, Clone)]
 pub struct MlsGroupInfo {
@@ -758,6 +769,8 @@ pub struct ProtocolConfig {
     pub max_pending_global: u64,
     pub pending_ttl_ms: u64,
     pub overflow_policy: OverflowPolicy,
+    pub max_group_members: u32,
+    pub group_relay_enabled: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -794,6 +807,8 @@ impl From<ProtocolConfig> for CoreConfig {
                 OverflowPolicy::DropNewest => CoreOverflowPolicy::DropNewest,
             },
         };
+        core_config.group.max_group_members = config.max_group_members as usize;
+        core_config.group.relay_enabled = config.group_relay_enabled;
         core_config
     }
 }
@@ -2053,6 +2068,7 @@ impl OfflineProtocol {
 
     /// Processes a received file chunk (manual path, for platforms handling
     /// their own chunk routing outside the protocol receive loop).
+    #[allow(clippy::too_many_arguments)]
     pub fn process_file_chunk(
         &self,
         file_id: String,
@@ -2831,19 +2847,25 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
-    /// Add a member to a group
+    /// Add a member to a group.
+    ///
+    /// Returns both the Welcome (for the invitee) and the Commit (to distribute
+    /// to existing members so they advance their MLS epoch).
     pub fn mls_add_group_member(
         &self,
         group_id: String,
         member_key_package: Vec<u8>,
-    ) -> Result<MlsWelcomeMessage, ProtocolError> {
+    ) -> Result<MlsAddMemberResult, ProtocolError> {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
             .map_err(|_| ProtocolError::Other("MLS manager lock poisoned".to_string()))?;
         guard
             .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
-            .map(MlsWelcomeMessage::from)
+            .map(|(welcome, commit)| MlsAddMemberResult {
+                welcome: MlsWelcomeMessage::from(welcome),
+                commit: MlsEncryptedMessage::from(commit),
+            })
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
@@ -3115,150 +3137,95 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // GROUP MANAGEMENT (RELAY SERVER API)
+    // GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================
 
-    /// Create a new group. Creator becomes admin.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_create(&self, name: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "CreateGroup",
-            "name": name
-        });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize CreateGroup: {}", e)))
+    /// Create a new MLS group.
+    pub fn create_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .create_group(&group_name)
+            .map(MlsGroupInfo::from)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// Send encrypted message to a group. Content must be pre-encrypted by client.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_send_message(
+    /// Send an MLS-encrypted message to all group members.
+    pub fn send_group_message(
         &self,
         group_id: String,
         content: String,
+        priority: Option<MessagePriority>,
         reply_to_msg: Option<String>,
-    ) -> Result<String, ProtocolError> {
-        let mut payload = serde_json::json!({
-            "type": "SendGroupMessage",
-            "group_id": group_id,
-            "content": content
+    ) -> Result<Vec<String>, ProtocolError> {
+        let core_priority = priority.map(|p| match p {
+            MessagePriority::Low => CorePriority::Low,
+            MessagePriority::Medium => CorePriority::Medium,
+            MessagePriority::High => CorePriority::High,
+            MessagePriority::Critical => CorePriority::Critical,
         });
-
-        if let Some(reply_to) = reply_to_msg {
-            payload["reply_to_msg"] = serde_json::Value::String(reply_to);
-        }
-
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::Other(format!("Failed to serialize SendGroupMessage: {}", e))
-        })
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .send_group_message(&group_id, &content, core_priority, reply_to_msg.as_deref())
+            .map(|ids| ids.into_iter().map(|id| id.as_str().to_string()).collect())
+            .map_err(|e| ProtocolError::SendFailed(e.to_string()))
     }
 
-    /// Add member to group. Admin only.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_add_member(
+    /// Invite a user to an MLS group.
+    pub fn invite_to_group(
         &self,
         group_id: String,
-        username: String,
-    ) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "AddGroupMember",
-            "group_id": group_id,
-            "username": username
-        });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize AddGroupMember: {}", e)))
+        invitee_user_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .invite_to_group(&group_id, &invitee_user_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// Remove member from group. Admin only, or user can remove themselves.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_remove_member(
+    /// Remove a member from an MLS group.
+    pub fn remove_from_group(
         &self,
         group_id: String,
-        username: String,
-    ) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "RemoveGroupMember",
-            "group_id": group_id,
-            "username": username
-        });
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::Other(format!("Failed to serialize RemoveGroupMember: {}", e))
-        })
+        member_id: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .remove_from_group(&group_id, &member_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// Set member as admin. Admin only.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_set_admin(
-        &self,
-        group_id: String,
-        username: String,
-    ) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "SetGroupAdmin",
-            "group_id": group_id,
-            "username": username
-        });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize SetGroupAdmin: {}", e)))
+    /// Leave an MLS group.
+    pub fn leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .leave_group(&group_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
-    /// Remove admin role from member. Admin only.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_remove_admin(
-        &self,
-        group_id: String,
-        username: String,
-    ) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "RemoveGroupAdmin",
-            "group_id": group_id,
-            "username": username
-        });
-        serde_json::to_string(&payload).map_err(|e| {
-            ProtocolError::Other(format!("Failed to serialize RemoveGroupAdmin: {}", e))
-        })
-    }
-
-    /// Leave a group.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_leave(&self, group_id: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "LeaveGroup",
-            "group_id": group_id
-        });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize LeaveGroup: {}", e)))
-    }
-
-    /// Delete a group. Admin only.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_delete(&self, group_id: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "DeleteGroup",
-            "group_id": group_id
-        });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize DeleteGroup: {}", e)))
-    }
-
-    /// Get group information.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_get_info(&self, group_id: String) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "GetGroupInfo",
-            "group_id": group_id
-        });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize GetGroupInfo: {}", e)))
-    }
-
-    /// Get all groups the user is a member of.
-    /// Returns JSON string to send via WebSocket relay.
-    pub fn group_get_user_groups(&self) -> Result<String, ProtocolError> {
-        let payload = serde_json::json!({
-            "type": "GetUserGroups"
-        });
-        serde_json::to_string(&payload)
-            .map_err(|e| ProtocolError::Other(format!("Failed to serialize GetUserGroups: {}", e)))
+    /// List all MLS groups (excluding 1:1 sessions).
+    pub fn list_groups(&self) -> Result<Vec<String>, ProtocolError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard
+            .list_groups()
+            .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 }
 
@@ -3397,6 +3364,8 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
+            max_group_members: 256,
+            group_relay_enabled: true,
         }
     }
 
@@ -3417,6 +3386,8 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
+            max_group_members: 256,
+            group_relay_enabled: true,
         }
     }
 
