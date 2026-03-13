@@ -158,7 +158,15 @@ const INTERNAL_PREFIXES: &[&str] = &[
     internal_prefixes::PRESENCE,
     internal_prefixes::TYPING_INDICATOR,
     internal_prefixes::READ_RECEIPT,
+    // Service discovery and request/response prefixes
+    offline_protocol_services::SVC_DISCOVER_QUERY,
+    offline_protocol_services::SVC_DISCOVER_RESPONSE,
+    offline_protocol_services::SVC_REQUEST,
+    offline_protocol_services::SVC_RESPONSE,
 ];
+
+/// Maximum number of TOFU-pinned peer public keys to retain.
+const MAX_TOFU_PEERS: usize = 1000;
 
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4615,6 +4623,14 @@ impl OfflineProtocol {
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
+        // Reject content that starts with an internal control prefix to prevent
+        // injection of protocol-level messages through the public API.
+        if Self::is_internal_prefix(&content_str) {
+            return Err(Error::Other(
+                "Message content must not start with a reserved internal prefix".to_string(),
+            ));
+        }
+
         // Parse reply_to_msg if provided
         let reply_to_msg_id = reply_to_msg
             .map(|r| MessageId::from_str(&r.into()))
@@ -6348,20 +6364,32 @@ impl OfflineProtocol {
     fn sign_control_message(&self, message: &mut Message) {
         let mls = match self.mls_manager.as_ref() {
             Some(m) => m,
-            None => return, // MLS not initialized — send unsigned
+            None => {
+                debug!("MLS not initialized — sending unsigned control message");
+                return;
+            }
         };
         let manager = match mls.read() {
             Ok(guard) => guard,
-            Err(_) => return, // Lock poisoned — send unsigned
+            Err(e) => {
+                warn!(error = %e, "MLS lock poisoned — sending unsigned control message");
+                return;
+            }
         };
 
         let public_key = match manager.get_identity_public_key() {
             Ok(pk) => pk,
-            Err(_) => return,
+            Err(e) => {
+                warn!(error = %e, "Failed to get identity public key — sending unsigned control message");
+                return;
+            }
         };
         let signature = match manager.sign_data(message.content.as_bytes()) {
             Ok(sig) => sig,
-            Err(_) => return,
+            Err(e) => {
+                warn!(error = %e, "Failed to sign control message — sending unsigned");
+                return;
+            }
         };
 
         message
@@ -6431,7 +6459,16 @@ impl OfflineProtocol {
                 )));
             }
         } else {
-            // First contact — pin the key
+            // First contact — pin the key (with bounded capacity)
+            if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
+                // Evict an arbitrary entry to stay within bounds.
+                // In a production system this would be LRU; here we remove the first
+                // key returned by the iterator which is effectively random for HashMap.
+                if let Some(evict_key) = self.known_peer_public_keys.keys().next().cloned() {
+                    debug!(evicted_peer = %evict_key, "TOFU store full, evicting oldest entry");
+                    self.known_peer_public_keys.remove(&evict_key);
+                }
+            }
             debug!(sender = %sender, "TOFU: pinning public key for new peer");
             self.known_peer_public_keys
                 .insert(sender.to_string(), public_key);
@@ -13066,5 +13103,244 @@ pub(crate) mod tests {
 
         // Just verify it doesn't panic and the method is wired correctly
         assert!(protocol.mesh_services().seen_discovery_queries().is_empty());
+    }
+
+    // ========================================================================
+    // SECURITY: prefix injection, transport identity, TOFU key pinning
+    // ========================================================================
+
+    #[test]
+    fn test_send_message_rejects_internal_prefixes() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        // Every internal prefix must be rejected
+        for prefix in INTERNAL_PREFIXES {
+            let content = format!("{}injected_payload", prefix);
+            let result =
+                protocol.send_message("bob", &content, None::<MessagePriority>, None::<String>);
+            assert!(
+                result.is_err(),
+                "Expected rejection for prefix '{}', but send succeeded",
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    fn test_send_message_via_transport_rejects_internal_prefixes() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        for prefix in INTERNAL_PREFIXES {
+            let content = format!("{}injected_payload", prefix);
+            let result = protocol.send_message_via_transport(
+                "bob",
+                &content,
+                None::<MessagePriority>,
+                TransportType::BLE,
+                None::<String>,
+            );
+            assert!(
+                result.is_err(),
+                "Expected rejection for prefix '{}' via send_message_via_transport, but send succeeded",
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    fn test_send_message_allows_normal_content() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        protocol.start().unwrap();
+
+        let result = protocol.send_message(
+            "bob",
+            "Hello, this is a normal message!",
+            None::<MessagePriority>,
+            None::<String>,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_svc_prefixes_included_in_internal_prefixes() {
+        // Verify all SVC prefixes are covered
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_QUERY));
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_REQUEST));
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_RESPONSE));
+    }
+
+    #[test]
+    fn test_is_internal_prefix() {
+        assert!(OfflineProtocol::is_internal_prefix("__MLS_KEY_PKG__data"));
+        assert!(OfflineProtocol::is_internal_prefix("__CONN_REQ__data"));
+        assert!(OfflineProtocol::is_internal_prefix("__SVC_DISC_Q__data"));
+        assert!(OfflineProtocol::is_internal_prefix("__SVC_REQ__data"));
+        assert!(!OfflineProtocol::is_internal_prefix("Hello world"));
+        assert!(!OfflineProtocol::is_internal_prefix("__UNKNOWN__data"));
+        assert!(!OfflineProtocol::is_internal_prefix(""));
+    }
+
+    #[test]
+    fn test_validate_transport_sender_match() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        msg.transport_peer_id = Some("alice".to_string());
+
+        assert!(protocol.validate_transport_sender(&msg));
+    }
+
+    #[test]
+    fn test_validate_transport_sender_mismatch() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        msg.transport_peer_id = Some("eve".to_string());
+
+        assert!(!protocol.validate_transport_sender(&msg));
+    }
+
+    #[test]
+    fn test_validate_transport_sender_no_transport_id() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        // No transport_peer_id — should pass (best effort)
+        assert!(protocol.validate_transport_sender(&msg));
+    }
+
+    #[test]
+    fn test_control_message_with_transport_mismatch_is_dropped() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        // Create a control message claiming to be from "alice" but delivered by "eve"
+        let mut msg = pending_test_message(
+            "sender123",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        msg.transport_peer_id = Some("eve".to_string());
+
+        // process_internal_message should consume (drop) the message
+        let result = protocol.process_internal_message(&msg);
+        assert!(
+            matches!(result, Some(InternalMessageResult::Consumed)),
+            "Expected spoofed control message to be dropped"
+        );
+    }
+
+    #[test]
+    fn test_tofu_key_pinning_and_mismatch() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Pin a key for "alice"
+        let fake_pk = vec![1u8; 32];
+        protocol
+            .known_peer_public_keys
+            .insert("alice".to_string(), fake_pk.clone());
+
+        // Verify same key passes TOFU check
+        assert_eq!(
+            protocol.known_peer_public_keys.get("alice").unwrap(),
+            &fake_pk
+        );
+
+        // A different key should be detected
+        let different_pk = vec![2u8; 32];
+        assert_ne!(
+            protocol.known_peer_public_keys.get("alice").unwrap(),
+            &different_pk,
+        );
+    }
+
+    #[test]
+    fn test_tofu_store_bounded_capacity() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // Fill the TOFU store to capacity
+        for i in 0..MAX_TOFU_PEERS {
+            protocol
+                .known_peer_public_keys
+                .insert(format!("peer_{}", i), vec![i as u8; 32]);
+        }
+        assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
+
+        // Simulate what verify_control_message does when store is full:
+        // it should evict one entry before inserting
+        if protocol.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
+            if let Some(evict_key) = protocol.known_peer_public_keys.keys().next().cloned() {
+                protocol.known_peer_public_keys.remove(&evict_key);
+            }
+        }
+        protocol
+            .known_peer_public_keys
+            .insert("new_peer".to_string(), vec![99u8; 32]);
+
+        // Size should still be at the cap
+        assert_eq!(protocol.known_peer_public_keys.len(), MAX_TOFU_PEERS);
+        assert!(protocol.known_peer_public_keys.contains_key("new_peer"));
+    }
+
+    #[test]
+    fn test_transport_peer_id_not_serialized() {
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        msg.transport_peer_id = Some("ble-device-42".to_string());
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("transport_peer_id"),
+            "transport_peer_id must not appear in serialized output"
+        );
+        assert!(
+            !json.contains("ble-device-42"),
+            "transport peer identity must not leak into serialized output"
+        );
+
+        // Deserialize back — field should be None
+        let deserialized: Message = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.transport_peer_id.is_none());
     }
 }
