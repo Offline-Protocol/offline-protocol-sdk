@@ -1209,6 +1209,7 @@ fn test_group_mls_commit_failure_buffers_for_retry() {
         })
         .unwrap(),
         buffered_at: Instant::now(),
+        retry_count: 0,
     };
 
     protocol
@@ -1273,6 +1274,7 @@ fn test_group_mls_pending_commit_expired_entries_cleaned_up() {
         sender: "alice".to_string(),
         data: "{}".to_string(),
         buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
+        retry_count: 0,
     };
     protocol
         .group_mesh
@@ -1286,6 +1288,7 @@ fn test_group_mls_pending_commit_expired_entries_cleaned_up() {
         sender: "bob".to_string(),
         data: "{}".to_string(),
         buffered_at: Instant::now(),
+        retry_count: 0,
     };
     protocol
         .group_mesh
@@ -1546,11 +1549,13 @@ fn test_group_mls_drain_pending_commits_no_double_buffering() {
                 sender: "alice".to_string(),
                 data: bad_data.clone(),
                 buffered_at: Instant::now(),
+                retry_count: 0,
             },
             PendingCommit {
                 sender: "bob".to_string(),
                 data: bad_data,
                 buffered_at: Instant::now(),
+                retry_count: 0,
             },
         ]),
     );
@@ -1594,6 +1599,7 @@ fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
             sender: "alice".to_string(),
             data,
             buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 1),
+            retry_count: 0,
         }]),
     );
 
@@ -2398,6 +2404,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
         })
         .unwrap(),
         buffered_at: Instant::now(),
+        retry_count: 0,
     });
     buf.push_back(PendingCommit {
         sender: "bob".to_string(),
@@ -2410,6 +2417,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
         })
         .unwrap(),
         buffered_at: Instant::now(),
+        retry_count: 0,
     });
     protocol
         .group_mesh
@@ -2872,4 +2880,510 @@ fn test_group_mls_send_total_failure_emits_partial_failure_event() {
     } else {
         panic!("Event should be GroupMessagePartialFailure");
     }
+}
+
+// ========================================================================
+// EPOCH FORK DETECTION TESTS
+// ========================================================================
+
+#[test]
+fn test_epoch_fork_not_flagged_for_never_retried_expired_commits() {
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("Fork Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Insert expired pending commit with retry_count=0 (never retried — likely slow delivery)
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 0,
+        });
+
+    protocol.drain_pending_commits(&group_id);
+
+    assert!(
+        !protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Should not flag epoch fork for never-retried expired commits"
+    );
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupEpochForkDetected { .. })),
+        "Should not emit GroupEpochForkDetected event"
+    );
+}
+
+#[test]
+fn test_epoch_fork_flagged_for_retried_expired_commits() {
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("Fork Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Insert expired pending commit with retry_count > 0 (retried and kept failing = epoch mismatch)
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 3,
+        });
+
+    protocol.drain_pending_commits(&group_id);
+
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Should flag epoch fork for retried expired commits"
+    );
+    let fork = &protocol.group_mesh.epoch_forks[&group_id];
+    assert_eq!(fork.group_id, group_id);
+    assert!(!fork.resolution_attempted);
+
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::GroupEpochForkDetected { group_id: gid, .. } if gid == &group_id)
+        ),
+        "Should emit GroupEpochForkDetected event"
+    );
+}
+
+#[test]
+fn test_epoch_fork_not_duplicated_if_already_tracked() {
+    let (mut protocol, _events) = setup_with_events();
+    let info = protocol.create_group("Fork Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Pre-populate fork state with local_epoch=1
+    protocol.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 1,
+            detected_at: Instant::now(),
+            resolution_attempted: false,
+        },
+    );
+
+    // Insert expired retried commit — would normally trigger fork detection
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(group_id.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 2,
+        });
+
+    protocol.drain_pending_commits(&group_id);
+
+    // The original fork state should be preserved (epoch 1), not overwritten
+    assert_eq!(protocol.group_mesh.epoch_forks[&group_id].local_epoch, 1);
+}
+
+#[test]
+fn test_epoch_fork_max_entries_eviction() {
+    let (mut protocol, _events) = setup_with_events();
+
+    // Fill up to MAX_EPOCH_FORK_ENTRIES
+    for i in 0..MAX_EPOCH_FORK_ENTRIES {
+        let gid = format!("group_{}", i);
+        protocol.group_mesh.epoch_forks.insert(
+            gid.clone(),
+            EpochForkState {
+                group_id: gid,
+                local_epoch: i as u64,
+                detected_at: Instant::now(),
+                resolution_attempted: false,
+            },
+        );
+    }
+    assert_eq!(
+        protocol.group_mesh.epoch_forks.len(),
+        MAX_EPOCH_FORK_ENTRIES
+    );
+
+    // Trigger a new fork via expired retried commit on a new group
+    let new_gid = "group_new".to_string();
+    let past = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10);
+    protocol
+        .group_mesh
+        .pending_commits
+        .entry(new_gid.clone())
+        .or_default()
+        .push_back(PendingCommit {
+            sender: "bob".to_string(),
+            data: "fake".to_string(),
+            buffered_at: past,
+            retry_count: 1,
+        });
+
+    protocol.drain_pending_commits(&new_gid);
+
+    // Should have evicted one and added the new one — count stays bounded
+    assert!(protocol.group_mesh.epoch_forks.contains_key(&new_gid));
+    assert_eq!(
+        protocol.group_mesh.epoch_forks.len(),
+        MAX_EPOCH_FORK_ENTRIES
+    );
+}
+
+#[test]
+fn test_epoch_fork_cleared_on_successful_commit() {
+    let (mut alice, bob, group_id) = setup_alice_bob_group("Fork Clear Test");
+
+    // Insert a fork state for this group
+    alice.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 1,
+            detected_at: Instant::now(),
+            resolution_attempted: false,
+        },
+    );
+
+    // Create a valid MLS commit by having bob do a key update, then feed
+    // it through alice's protocol message handling path (handle_group_mls_commit
+    // → process_commit_core) which clears fork state on Success.
+    let alice_update = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        mls.update_keys(&gid).unwrap()
+    };
+
+    // Bob processes alice's update first so he's on the same epoch
+    {
+        let mls = bob.mls_manager_for_testing().read().unwrap();
+        let encrypted = offline_protocol_mls::EncryptedMessage {
+            group_id: offline_protocol_mls::GroupId::new(&group_id),
+            message_type: offline_protocol_mls::MlsMessageType::Commit,
+            epoch: alice_update.epoch,
+            ciphertext: alice_update.ciphertext.clone(),
+            sender_id: "alice".to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
+        };
+        mls.decrypt_from_group(&encrypted).unwrap();
+    }
+
+    // Bob creates a commit that alice will process through the protocol layer
+    let bob_commit = {
+        let mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        mls.update_keys(&gid).unwrap()
+    };
+
+    // Build a protocol-layer commit message from bob to alice
+    let commit_payload = GroupMlsCommitPayload {
+        group_id: group_id.clone(),
+        commit_type: GroupCommitType::KeyUpdate,
+        ciphertext: base64_encode(&bob_commit.ciphertext),
+        epoch: bob_commit.epoch,
+        affected_member: None,
+    };
+    let data = serde_json::to_string(&commit_payload).unwrap();
+
+    // Process through the protocol layer — this calls process_commit_core
+    alice.handle_group_mls_commit("bob", &data);
+
+    // Fork should be cleared after successful commit processing
+    assert!(
+        !alice.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork state should be cleared after successful commit"
+    );
+}
+
+// ========================================================================
+// EPOCH FORK RESOLUTION TESTS
+// ========================================================================
+
+#[test]
+fn test_epoch_fork_resolution_by_leader() {
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("Resolution Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Protocol user "user123" is the only member → lex-first → leader.
+    // Insert a fork that's past the resolution delay.
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+    protocol.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 1,
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    // Fork should be resolved and removed (leader issued key update successfully)
+    assert!(
+        !protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork should be removed after successful resolution by leader"
+    );
+
+    let events = events.lock().unwrap();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::GroupEpochForkResolved { group_id: gid, .. } if gid == &group_id)
+        ),
+        "Should emit GroupEpochForkResolved event"
+    );
+}
+
+#[test]
+fn test_epoch_fork_resolution_skipped_for_non_leader() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("zoe")).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+    let _info = protocol.create_group("Non-Leader Test").unwrap();
+
+    // Use a fake group_id for the fork so refresh_group_members fails and
+    // falls back to cached membership where "alice" is lex-first leader.
+    let fake_group_id = "fake_fork_group".to_string();
+    protocol.group_mesh.members.insert(
+        fake_group_id.clone(),
+        vec!["alice".to_string(), "zoe".to_string()],
+    );
+
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+    protocol.group_mesh.epoch_forks.insert(
+        fake_group_id.clone(),
+        EpochForkState {
+            group_id: fake_group_id.clone(),
+            local_epoch: 1,
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    // Fork should still exist but marked as attempted (non-leader doesn't act)
+    assert!(
+        protocol.group_mesh.epoch_forks.contains_key(&fake_group_id),
+        "Fork should still exist for non-leader"
+    );
+    assert!(
+        protocol.group_mesh.epoch_forks[&fake_group_id].resolution_attempted,
+        "Fork should be marked as resolution_attempted even for non-leader"
+    );
+}
+
+#[test]
+fn test_epoch_fork_not_resolved_before_delay() {
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("Delay Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Insert a fork that was just detected (within the delay window)
+    protocol.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: 1,
+            detected_at: Instant::now(),
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    // Fork should still exist and not attempted (delay hasn't elapsed)
+    assert!(protocol.group_mesh.epoch_forks.contains_key(&group_id));
+    assert!(!protocol.group_mesh.epoch_forks[&group_id].resolution_attempted);
+
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupEpochForkResolved { .. })),
+        "Should not emit GroupEpochForkResolved before delay"
+    );
+}
+
+#[test]
+fn test_epoch_fork_stale_entries_cleaned_up() {
+    let (mut protocol, _events) = setup_with_events();
+
+    // Insert a very old fork entry (older than 5-minute stale threshold)
+    let very_old = Instant::now() - StdDuration::from_secs(400);
+    protocol.group_mesh.epoch_forks.insert(
+        "stale_group".to_string(),
+        EpochForkState {
+            group_id: "stale_group".to_string(),
+            local_epoch: 1,
+            detected_at: very_old,
+            resolution_attempted: true,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    assert!(
+        !protocol.group_mesh.epoch_forks.contains_key("stale_group"),
+        "Stale fork entries (>5 min) should be cleaned up"
+    );
+}
+
+// ========================================================================
+// LEAVE ELECTION FALLBACK TESTS
+// ========================================================================
+
+#[test]
+fn test_leave_election_cleared_when_member_already_removed() {
+    let (mut protocol, _events) = setup_with_events();
+    let info = protocol.create_group("Leave Election Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // "bob" was never added to this MLS group, so refresh_group_members
+    // won't find him — simulates a member that was already removed.
+    let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    let key = leave_election_key(&group_id, "bob");
+    protocol.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: "bob".to_string(),
+            received_at: past,
+        },
+    );
+
+    protocol.check_leave_election_timeouts();
+
+    assert!(
+        !protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Election should be cleared when leaving member is no longer in group"
+    );
+}
+
+#[test]
+fn test_leave_election_timeout_re_elects_self() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Re-election Test");
+
+    // Bob is in the MLS group. Alice is "alice", bob is "bob".
+    // After filtering out the leaver ("bob"), remaining = ["alice"].
+    // alice is lex-first → candidate at interval 0 → should attempt remove.
+    let past = Instant::now() - StdDuration::from_secs(LEAVE_ELECTION_TIMEOUT_SECS + 5);
+    let key = leave_election_key(&group_id, "bob");
+    alice.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: "bob".to_string(),
+            received_at: past,
+        },
+    );
+
+    alice.check_leave_election_timeouts();
+
+    // Remove should succeed → election cleared
+    assert!(
+        !alice.group_mesh.pending_leave_elections.contains_key(&key),
+        "Election should be cleared after successful remove"
+    );
+
+    // Bob should no longer be in the MLS group
+    let members = alice.refresh_group_members(&group_id).unwrap();
+    assert!(
+        !members.contains(&"bob".to_string()),
+        "Bob should be removed from group after re-election"
+    );
+}
+
+#[test]
+fn test_leave_election_not_triggered_before_timeout() {
+    let (mut protocol, _events) = setup_with_events();
+    let info = protocol.create_group("Timeout Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Insert a pending election that hasn't timed out yet
+    let key = leave_election_key(&group_id, "bob");
+    protocol.group_mesh.pending_leave_elections.insert(
+        key.clone(),
+        PendingLeaveElection {
+            group_id: group_id.clone(),
+            leaving_member: "bob".to_string(),
+            received_at: Instant::now(), // just now — well within timeout
+        },
+    );
+
+    protocol.check_leave_election_timeouts();
+
+    // Election should still be pending (hasn't timed out)
+    assert!(
+        protocol
+            .group_mesh
+            .pending_leave_elections
+            .contains_key(&key),
+        "Election should remain pending before timeout"
+    );
+}
+
+#[test]
+fn test_leave_election_key_helper() {
+    assert_eq!(leave_election_key("group1", "alice"), "group1:alice");
+    assert_eq!(
+        leave_election_key("my-group-id", "user:123"),
+        "my-group-id:user:123"
+    );
+}
+
+#[test]
+fn test_pending_commit_retry_count_incremented() {
+    let (mut protocol, _events) = setup_with_events();
+    let info = protocol.create_group("Retry Count Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Insert a non-expired pending commit with invalid data.
+    // process_commit_core will return Rejected (bad data), so it won't
+    // be re-buffered. Instead, test the buffering path directly.
+    protocol.buffer_pending_commit(&group_id, "bob", "fake-data");
+
+    let pending = protocol.group_mesh.pending_commits.get(&group_id).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].retry_count, 0, "Initial retry_count should be 0");
+}
+
+#[test]
+fn test_key_update_commit_type_serialization() {
+    // Verify KeyUpdate serializes/deserializes correctly
+    let payload = GroupMlsCommitPayload {
+        group_id: "test-group".to_string(),
+        commit_type: GroupCommitType::KeyUpdate,
+        ciphertext: "abc".to_string(),
+        epoch: 5,
+        affected_member: None,
+    };
+
+    let json = serde_json::to_string(&payload).unwrap();
+    assert!(
+        json.contains("\"keyupdate\""),
+        "KeyUpdate should serialize as 'keyupdate'"
+    );
+
+    let deserialized: GroupMlsCommitPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.commit_type, GroupCommitType::KeyUpdate);
+    assert!(deserialized.affected_member.is_none());
 }

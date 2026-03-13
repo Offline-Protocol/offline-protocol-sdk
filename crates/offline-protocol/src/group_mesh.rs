@@ -38,6 +38,11 @@ pub(super) const EPOCH_FORK_RESOLUTION_DELAY_SECS: u64 = 10;
 /// Maximum number of tracked epoch fork states to prevent unbounded growth.
 pub(super) const MAX_EPOCH_FORK_ENTRIES: usize = 32;
 
+/// Builds a deterministic key for leave election tracking: "group_id:member_id".
+pub(crate) fn leave_election_key(group_id: &str, member_id: &str) -> String {
+    format!("{}:{}", group_id, member_id)
+}
+
 /// Bundled state for group messaging.
 ///
 /// Groups together the cached member lists, dedup table, pending commit
@@ -125,6 +130,9 @@ pub(crate) enum GroupCommitType {
     Add,
     /// A member was removed from the group.
     Remove,
+    /// A key update commit (epoch advancement without membership change).
+    /// Used for epoch fork resolution.
+    KeyUpdate,
 }
 
 /// Payload for MLS Commit messages (membership changes) sent via mesh.
@@ -203,6 +211,10 @@ pub(crate) struct PendingCommit {
     pub(crate) data: String,
     /// When this pending commit was first buffered.
     pub(crate) buffered_at: Instant,
+    /// Number of times this commit has been retried and still failed.
+    /// A commit that expires with `retry_count > 0` is a strong signal
+    /// of epoch mismatch (true fork), not just slow delivery.
+    pub(crate) retry_count: u32,
 }
 
 /// Tracks a leave election where we're waiting for the elected remover to
@@ -214,8 +226,6 @@ pub(crate) struct PendingLeaveElection {
     pub(crate) group_id: String,
     /// User ID of the member who is leaving.
     pub(crate) leaving_member: String,
-    /// Sorted list of remaining members at election time (excluding leaver).
-    pub(crate) remaining_members: Vec<String>,
     /// When we received the leave notification.
     pub(crate) received_at: Instant,
 }
@@ -522,6 +532,7 @@ impl OfflineProtocol {
             let valid = match payload.commit_type {
                 GroupCommitType::Add => actual_added.contains(claimed),
                 GroupCommitType::Remove => actual_removed.contains(claimed),
+                GroupCommitType::KeyUpdate => true, // No membership change expected
             };
             if !valid && (!actual_added.is_empty() || !actual_removed.is_empty()) {
                 error!(
@@ -551,8 +562,8 @@ impl OfflineProtocol {
             ));
             // Clear any pending leave election for this member — the remove
             // has been committed successfully.
-            let election_key = format!("{}:{}", payload.group_id, member);
-            self.group_mesh.pending_leave_elections.remove(&election_key);
+            let key = leave_election_key(&payload.group_id, member);
+            self.group_mesh.pending_leave_elections.remove(&key);
         }
 
         // If we had a suspected fork for this group and a commit just
@@ -568,6 +579,7 @@ impl OfflineProtocol {
             sender: sender.to_string(),
             data: data.to_string(),
             buffered_at: Instant::now(),
+            retry_count: 0,
         };
         let buf = self
             .group_mesh
@@ -599,7 +611,10 @@ impl OfflineProtocol {
     /// double-buffering: this method owns the retry lifecycle and re-buffers
     /// only via `still_pending`, never through the core processing path.
     pub(crate) fn drain_pending_commits(&mut self, group_id: &str) {
-        let mut expired_count: usize = 0;
+        // Track commits that were retried at least once and still expired —
+        // these are strong evidence of epoch mismatch (true fork), not just
+        // slow delivery from the mesh network.
+        let mut retried_expired_count: usize = 0;
 
         // Limit iterations to avoid unbounded looping
         for _ in 0..MAX_PENDING_COMMITS_PER_GROUP {
@@ -612,13 +627,16 @@ impl OfflineProtocol {
             let mut still_pending = VecDeque::new();
 
             for entry in pending {
-                // Drop expired entries — track count for fork detection
+                // Drop expired entries — only count retried ones for fork detection
                 if entry.buffered_at.elapsed() > StdDuration::from_secs(PENDING_COMMIT_TTL_SECS) {
                     debug!(
                         group_id = %group_id,
+                        retry_count = entry.retry_count,
                         "Dropping expired pending commit"
                     );
-                    expired_count += 1;
+                    if entry.retry_count > 0 {
+                        retried_expired_count += 1;
+                    }
                     continue;
                 }
                 match self.process_commit_core(&entry.sender, &entry.data) {
@@ -626,7 +644,9 @@ impl OfflineProtocol {
                         any_succeeded = true;
                     }
                     CommitOutcome::Retriable(_) => {
-                        // Still out-of-order — keep for next pass
+                        // Still out-of-order — keep for next pass with incremented retry count
+                        let mut entry = entry;
+                        entry.retry_count += 1;
                         still_pending.push_back(entry);
                     }
                     CommitOutcome::Rejected => {
@@ -660,10 +680,11 @@ impl OfflineProtocol {
             self.group_mesh.pending_commits.remove(group_id);
         }
 
-        // If commits expired without ever being resolved, this signals a
-        // potential epoch fork — two concurrent commits created divergent
-        // group states that can't be reconciled by simple reordering.
-        if expired_count > 0 && !self.group_mesh.epoch_forks.contains_key(group_id) {
+        // If commits that were retried (and kept failing) expired, this is a
+        // strong signal of epoch fork — the commits were valid but for a
+        // different epoch branch. Commits that expired without any retries
+        // are more likely just slow mesh delivery and are not flagged.
+        if retried_expired_count > 0 && !self.group_mesh.epoch_forks.contains_key(group_id) {
             self.flag_potential_epoch_fork(group_id);
         }
     }
@@ -692,7 +713,11 @@ impl OfflineProtocol {
             .and_then(|_| {
                 let mls_guard = self.read_mls_guard().ok()?;
                 let gid = offline_protocol_mls::GroupId::new(group_id);
-                mls_guard.get_group_info(&gid).ok().flatten().map(|i| i.epoch)
+                mls_guard
+                    .get_group_info(&gid)
+                    .ok()
+                    .flatten()
+                    .map(|i| i.epoch)
             })
             .unwrap_or(0);
 
@@ -795,7 +820,10 @@ impl OfflineProtocol {
             .collect();
         remaining.sort();
 
-        let should_remove = remaining.first().map(|first| first == &self_id).unwrap_or(false);
+        let should_remove = remaining
+            .first()
+            .map(|first| first == &self_id)
+            .unwrap_or(false);
 
         if should_remove {
             debug!(
@@ -814,18 +842,17 @@ impl OfflineProtocol {
                 );
             }
             // Clear any pending election for this leave (we handled it)
-            let election_key = format!("{}:{}", payload.group_id, sender);
-            self.group_mesh.pending_leave_elections.remove(&election_key);
+            let key = leave_election_key(&payload.group_id, sender);
+            self.group_mesh.pending_leave_elections.remove(&key);
         } else {
             // We're not the elected remover — record the election so we can
             // take over if the elected member fails to issue the commit in time.
-            let election_key = format!("{}:{}", payload.group_id, sender);
+            let key = leave_election_key(&payload.group_id, sender);
             self.group_mesh.pending_leave_elections.insert(
-                election_key,
+                key,
                 PendingLeaveElection {
                     group_id: payload.group_id.clone(),
                     leaving_member: sender.to_string(),
-                    remaining_members: remaining,
                     received_at: Instant::now(),
                 },
             );
@@ -1487,17 +1514,13 @@ impl OfflineProtocol {
                     // Distribute the key-update commit to all members
                     let commit_payload = GroupMlsCommitPayload {
                         group_id: fork.group_id.clone(),
-                        commit_type: GroupCommitType::Remove, // Closest semantic — epoch advancement
+                        commit_type: GroupCommitType::KeyUpdate,
                         ciphertext: base64_encode(&commit_msg.ciphertext),
                         epoch: commit_msg.epoch,
-                        affected_member: None, // Key update, not a membership change
+                        affected_member: None,
                     };
                     let commit_content = match serde_json::to_string(&commit_payload) {
-                        Ok(json) => format!(
-                            "{}{}",
-                            internal_prefixes::GROUP_MLS_COMMIT,
-                            json
-                        ),
+                        Ok(json) => format!("{}{}", internal_prefixes::GROUP_MLS_COMMIT, json),
                         Err(e) => {
                             warn!(
                                 group_id = %fork.group_id,
@@ -1583,38 +1606,58 @@ impl OfflineProtocol {
             .collect();
 
         for election in timed_out {
-            let election_key = format!("{}:{}", election.group_id, election.leaving_member);
+            let election_key = leave_election_key(&election.group_id, &election.leaving_member);
 
-            // Check if the leaving member is still in the group (MLS authoritative)
-            let still_member = self
+            // Refresh membership from MLS (authoritative) to avoid using
+            // stale election-time lists where members may have since left.
+            let current_members = self
                 .refresh_group_members(&election.group_id)
                 .ok()
                 .or_else(|| self.group_mesh.members.get(&election.group_id).cloned())
-                .map(|m| m.iter().any(|id| id == &election.leaving_member))
-                .unwrap_or(false);
+                .unwrap_or_default();
+
+            let still_member = current_members
+                .iter()
+                .any(|id| id == &election.leaving_member);
 
             if !still_member {
                 // Already removed — clean up
-                self.group_mesh.pending_leave_elections.remove(&election_key);
+                self.group_mesh
+                    .pending_leave_elections
+                    .remove(&election_key);
                 continue;
             }
+
+            // Use current membership for candidate selection, not the stale
+            // election-time list — members may have left since the election.
+            let mut remaining: Vec<String> = current_members
+                .iter()
+                .filter(|m| m.as_str() != election.leaving_member)
+                .cloned()
+                .collect();
+            remaining.sort();
 
             // Re-elect: walk the sorted remaining members. For each timeout
             // interval that has passed, advance one position in the list.
             // This staggers re-election so members don't all fire at once.
-            let elapsed_intervals = (election.received_at.elapsed().as_secs()
-                / LEAVE_ELECTION_TIMEOUT_SECS) as usize;
+            let elapsed_intervals =
+                (election.received_at.elapsed().as_secs() / LEAVE_ELECTION_TIMEOUT_SECS) as usize;
             // Interval 0 = first member (original election), 1 = second, etc.
-            let candidate_idx = elapsed_intervals.min(election.remaining_members.len().saturating_sub(1));
+            let candidate_idx = elapsed_intervals.min(remaining.len().saturating_sub(1));
 
-            if election.remaining_members.get(candidate_idx).map(|c| c == &self_id).unwrap_or(false) {
+            if remaining
+                .get(candidate_idx)
+                .map(|c| c == &self_id)
+                .unwrap_or(false)
+            {
                 info!(
                     group_id = %election.group_id,
                     leaving_member = %election.leaving_member,
                     attempt = candidate_idx + 1,
                     "Re-elected to issue MLS remove-commit (prior elected member timed out)"
                 );
-                if let Err(e) = self.remove_from_group(&election.group_id, &election.leaving_member) {
+                if let Err(e) = self.remove_from_group(&election.group_id, &election.leaving_member)
+                {
                     warn!(
                         group_id = %election.group_id,
                         leaving_member = %election.leaving_member,
@@ -1624,7 +1667,9 @@ impl OfflineProtocol {
                     // Don't remove from pending — next tick will try again
                     // or the next member in line will take over at the next interval.
                 } else {
-                    self.group_mesh.pending_leave_elections.remove(&election_key);
+                    self.group_mesh
+                        .pending_leave_elections
+                        .remove(&election_key);
                 }
             }
             // If we're not the candidate at this interval, leave the election
