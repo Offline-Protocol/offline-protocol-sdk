@@ -9,7 +9,8 @@
 use offline_protocol::{
     EstablishmentState as CoreEstablishmentState, Event as CoreEvent, NetworkVisualizer,
     OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
-    PendingQueueConfig as CorePendingQueueConfig, ProtocolConfig as CoreConfig,
+    PendingQueueConfig as CorePendingQueueConfig, PresenceStatus as CorePresenceStatus,
+    ProtocolConfig as CoreConfig,
 };
 use offline_protocol_core::{
     ContentType as CoreContentType, MediaMetadata as CoreMediaMetadata,
@@ -297,6 +298,24 @@ impl From<MessagePriority> for CorePriority {
             MessagePriority::Medium => CorePriority::Medium,
             MessagePriority::High => CorePriority::High,
             MessagePriority::Critical => CorePriority::Critical,
+        }
+    }
+}
+
+/// Presence status for a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceStatus {
+    Online,
+    Away,
+    Offline,
+}
+
+impl From<PresenceStatus> for CorePresenceStatus {
+    fn from(status: PresenceStatus) -> Self {
+        match status {
+            PresenceStatus::Online => CorePresenceStatus::Online,
+            PresenceStatus::Away => CorePresenceStatus::Away,
+            PresenceStatus::Offline => CorePresenceStatus::Offline,
         }
     }
 }
@@ -3058,15 +3077,14 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Send a presence update to a peer via the protocol (routed through DORS).
-    /// Status should be "online", "away", or "offline".
     pub fn send_presence_update(
         &self,
         recipient: String,
-        status: String,
+        status: PresenceStatus,
     ) -> Result<String, ProtocolError> {
         let mut protocol = self.inner.lock().unwrap();
         let message_id = protocol
-            .send_presence_update(&recipient, &status)
+            .send_presence_update(&recipient, status.into())
             .map_err(ProtocolError::from)?;
         Ok(message_id.as_str())
     }

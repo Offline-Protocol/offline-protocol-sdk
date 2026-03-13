@@ -8,6 +8,18 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// Presence status for a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceStatus {
+    /// Peer is online and available.
+    Online,
+    /// Peer is away / idle.
+    Away,
+    /// Peer is explicitly offline.
+    Offline,
+}
+
 /// Event callback type for handling protocol events.
 pub type EventCallback = Arc<dyn Fn(Event) + Send + Sync>;
 
@@ -648,8 +660,8 @@ pub enum Event {
     PresenceUpdated {
         /// Peer whose presence changed.
         peer_id: String,
-        /// Presence status (e.g. "online", "away", "offline").
-        status: String,
+        /// Presence status.
+        status: PresenceStatus,
         /// Timestamp of the update (Unix ms).
         timestamp: i64,
     },
@@ -1083,7 +1095,7 @@ impl Event {
     }
 
     /// Creates a PresenceUpdated event.
-    pub fn presence_updated(peer_id: String, status: String, timestamp: i64) -> Self {
+    pub fn presence_updated(peer_id: String, status: PresenceStatus, timestamp: i64) -> Self {
         Self::PresenceUpdated {
             peer_id,
             status,
@@ -1857,13 +1869,13 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::TypingIndicatorReceived {
                 sender: _,
-                conversation_id,
+                conversation_id: _,
                 is_typing,
                 timestamp,
             } => f
                 .debug_struct("TypingIndicatorReceived")
                 .field("sender", &"[REDACTED]")
-                .field("conversation_id", conversation_id)
+                .field("conversation_id", &"[REDACTED]")
                 .field("is_typing", is_typing)
                 .field("timestamp", timestamp)
                 .finish(),

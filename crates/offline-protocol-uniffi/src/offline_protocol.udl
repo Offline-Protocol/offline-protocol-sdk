@@ -112,6 +112,13 @@ enum MessagePriority {
     "Critical",
 };
 
+// Presence status
+enum PresenceStatus {
+    "Online",
+    "Away",
+    "Offline",
+};
+
 // Transport types
 enum TransportType {
     "Internet",
@@ -744,10 +751,9 @@ interface OfflineProtocol {
     // ========================================================================
 
     // Send a presence update to a peer via the protocol (routed through DORS).
-    // Status should be "online", "away", or "offline".
     // Returns the message ID.
     [Throws=ProtocolError]
-    string send_presence_update(string recipient, string status);
+    string send_presence_update(string recipient, PresenceStatus status);
 
     // Send a typing indicator to a peer via the protocol (routed through DORS).
     // For direct messages, conversation_id should be the recipient's username.
