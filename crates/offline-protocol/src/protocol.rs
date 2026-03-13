@@ -126,6 +126,40 @@ const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 const MAX_KNOWN_PEERS: usize = 1000;
 
+/// Metadata key for the Ed25519 signature over the control message content (base64).
+const CTRL_SIG_META_KEY: &str = "__ctrl_sig";
+/// Metadata key for the sender's Ed25519 public key (base64, 32 bytes raw).
+const CTRL_PK_META_KEY: &str = "__ctrl_pk";
+
+/// All internal message prefixes used for control messages.
+/// Used to reject user-sent messages that start with these prefixes.
+const INTERNAL_PREFIXES: &[&str] = &[
+    internal_prefixes::KEY_PACKAGE,
+    internal_prefixes::WELCOME,
+    internal_prefixes::ENCRYPTED,
+    internal_prefixes::SESSION_CONFIRM_PROBE,
+    internal_prefixes::SESSION_CONFIRM_ACK,
+    internal_prefixes::CONN_REQUEST,
+    internal_prefixes::CONN_ACCEPT,
+    internal_prefixes::CONN_REJECT,
+    internal_prefixes::GROUP_CREATED,
+    internal_prefixes::GROUP_MSG,
+    internal_prefixes::GROUP_MEMBER_ADDED,
+    internal_prefixes::GROUP_MEMBER_REMOVED,
+    internal_prefixes::GROUP_INFO,
+    internal_prefixes::USER_GROUPS,
+    internal_prefixes::GROUP_ERROR,
+    internal_prefixes::GROUP_MLS_MSG,
+    internal_prefixes::GROUP_MLS_WELCOME,
+    internal_prefixes::GROUP_MLS_COMMIT,
+    internal_prefixes::GROUP_MLS_LEAVE,
+    internal_prefixes::GROUP_RELAY_REGISTER,
+    internal_prefixes::GROUP_RELAY_BROADCAST,
+    internal_prefixes::PRESENCE,
+    internal_prefixes::TYPING_INDICATOR,
+    internal_prefixes::READ_RECEIPT,
+];
+
 /// Payload for key package exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeyPackagePayload {
@@ -643,6 +677,13 @@ pub struct OfflineProtocol {
 
     /// Bundled state for mesh group messaging (member cache, dedup, pending commits).
     pub(crate) group_mesh: crate::group_mesh::GroupMeshState,
+
+    /// TOFU (Trust-On-First-Use) key store for peer Ed25519 public keys.
+    ///
+    /// The first signed control message from a peer pins their public key here.
+    /// Subsequent messages from the same peer must present the same key;
+    /// a mismatch triggers a security warning and the message is dropped.
+    known_peer_public_keys: HashMap<String, Vec<u8>>,
 }
 
 impl OfflineProtocol {
@@ -706,6 +747,7 @@ impl OfflineProtocol {
             outbound_media_windows: HashMap::new(),
             mesh_services: MeshServices::new(),
             group_mesh: crate::group_mesh::GroupMeshState::default(),
+            known_peer_public_keys: HashMap::new(),
             config,
         })
     }
@@ -1300,7 +1342,8 @@ impl OfflineProtocol {
             }
         }
 
-        let message = self.create_message(recipient, content, Some(priority), None)?;
+        let mut message = self.create_message(recipient, content, Some(priority), None)?;
+        self.sign_control_message(&mut message);
         let message_id = message.id.clone();
 
         if self.deduplicator.is_duplicate(&message_id) {
@@ -1370,6 +1413,14 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
+
+        // Reject content that starts with an internal control prefix to prevent
+        // injection of protocol-level messages through the public API.
+        if Self::is_internal_prefix(&content_str) {
+            return Err(Error::Other(
+                "Message content must not start with a reserved internal prefix".to_string(),
+            ));
+        }
 
         // Parse reply_to_msg if provided
         let reply_to_msg_id = reply_to_msg
@@ -2081,7 +2132,9 @@ impl OfflineProtocol {
         let serialized =
             serde_json::to_string(welcome).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::WELCOME, serialized);
-        let message = self.create_message(recipient, content, Some(MessagePriority::High), None)?;
+        let mut message =
+            self.create_message(recipient, content, Some(MessagePriority::High), None)?;
+        self.sign_control_message(&mut message);
         let group_id = welcome.group_id.as_str().to_string();
 
         self.upsert_welcome_lifecycle(recipient, &group_id, message, "welcome_created")?;
@@ -4185,7 +4238,9 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::KEY_PACKAGE, serialized);
 
-        let message = self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
+        let mut message =
+            self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
+        self.sign_control_message(&mut message);
 
         match self.transport_manager.send(&message) {
             Ok(()) => {
@@ -5092,6 +5147,63 @@ impl OfflineProtocol {
     ) -> Option<InternalMessageResult> {
         let content = &message.content;
         let sender = message.sender.as_str();
+
+        // --- Security gate: validate sender identity and control message signature ---
+        //
+        // 1. If the transport layer provided a peer identity, verify it matches the
+        //    claimed sender. This prevents a BLE/WiFi/Internet peer from spoofing
+        //    another user's identity.
+        //
+        // 2. Verify the Ed25519 control message signature (if present). This binds
+        //    the message to the sender's cryptographic identity via TOFU.
+        if Self::is_internal_prefix(content) {
+            // Transport-level identity check
+            if !self.validate_transport_sender(message) {
+                warn!(
+                    sender = %sender,
+                    message_id = %message.id,
+                    "Dropping control message: sender/transport identity mismatch"
+                );
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::security_warning(
+                        sender.to_string(),
+                        "Control message sender does not match transport peer identity".to_string(),
+                    ));
+                }
+                return Some(InternalMessageResult::Consumed);
+            }
+
+            // Cryptographic signature check
+            match self.verify_control_message(message) {
+                Ok(true) => {
+                    // Signed and verified — proceed
+                }
+                Ok(false) => {
+                    // Unsigned (legacy) — log but allow for backward compatibility
+                    debug!(
+                        sender = %sender,
+                        message_id = %message.id,
+                        "Received unsigned control message (legacy peer)"
+                    );
+                }
+                Err(err) => {
+                    // Signature invalid or TOFU violation — drop
+                    warn!(
+                        sender = %sender,
+                        message_id = %message.id,
+                        error = %err,
+                        "Dropping control message: signature verification failed"
+                    );
+                    if let Ok(state) = lock_shared_state(&self.shared_state) {
+                        state.emit_event(Event::security_warning(
+                            sender.to_string(),
+                            format!("Control message rejected: {}", err),
+                        ));
+                    }
+                    return Some(InternalMessageResult::Consumed);
+                }
+            }
+        }
 
         // Handle key package messages
         if let Some(data) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
@@ -6222,6 +6334,134 @@ impl OfflineProtocol {
             .ok_or_else(|| Error::Other("MLS not initialized".to_string()))?;
         mls.read()
             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))
+    }
+
+    // ========================================================================
+    // CONTROL MESSAGE SIGNING & VERIFICATION
+    // ========================================================================
+
+    /// Signs a control message by adding an Ed25519 signature and the sender's
+    /// public key to the message metadata.
+    ///
+    /// If MLS is not initialized, the message is sent unsigned. The receiving
+    /// side uses TOFU (Trust-On-First-Use) to pin the public key.
+    fn sign_control_message(&self, message: &mut Message) {
+        let mls = match self.mls_manager.as_ref() {
+            Some(m) => m,
+            None => return, // MLS not initialized — send unsigned
+        };
+        let manager = match mls.read() {
+            Ok(guard) => guard,
+            Err(_) => return, // Lock poisoned — send unsigned
+        };
+
+        let public_key = match manager.get_identity_public_key() {
+            Ok(pk) => pk,
+            Err(_) => return,
+        };
+        let signature = match manager.sign_data(message.content.as_bytes()) {
+            Ok(sig) => sig,
+            Err(_) => return,
+        };
+
+        message
+            .metadata
+            .insert(CTRL_SIG_META_KEY.to_string(), base64_encode(&signature));
+        message
+            .metadata
+            .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&public_key));
+    }
+
+    /// Verifies a control message's Ed25519 signature from metadata.
+    ///
+    /// Returns:
+    /// - `Ok(true)`  — valid signature, TOFU key check passed
+    /// - `Ok(false)` — no signature present (legacy/unsigned message)
+    /// - `Err(..)`   — signature invalid, key mismatch, or TOFU violation
+    fn verify_control_message(&mut self, message: &Message) -> Result<bool> {
+        let sig_hex = match message.metadata.get(CTRL_SIG_META_KEY) {
+            Some(s) => s,
+            None => return Ok(false), // Unsigned — caller decides policy
+        };
+        let pk_hex = match message.metadata.get(CTRL_PK_META_KEY) {
+            Some(s) => s,
+            None => {
+                return Err(Error::Other(
+                    "Control message has signature but missing public key".to_string(),
+                ));
+            }
+        };
+
+        let signature = base64_decode(sig_hex)
+            .map_err(|e| Error::Other(format!("Invalid control signature encoding: {}", e)))?;
+        let public_key = base64_decode(pk_hex)
+            .map_err(|e| Error::Other(format!("Invalid control public key encoding: {}", e)))?;
+
+        // Verify Ed25519 signature over the content
+        let valid = offline_protocol_mls::MlsManager::verify_signature(
+            &public_key,
+            message.content.as_bytes(),
+            &signature,
+        )
+        .map_err(|e| Error::Other(format!("Signature verification error: {}", e)))?;
+
+        if !valid {
+            return Err(Error::Other(
+                "Control message signature verification failed".to_string(),
+            ));
+        }
+
+        // TOFU: check/pin the public key for this sender
+        let sender = message.sender.as_str();
+        if let Some(known_pk) = self.known_peer_public_keys.get(sender) {
+            if *known_pk != public_key {
+                warn!(
+                    sender = %sender,
+                    "TOFU key mismatch: peer presented a different public key"
+                );
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::security_warning(
+                        sender.to_string(),
+                        "Public key changed for known peer (possible impersonation)".to_string(),
+                    ));
+                }
+                return Err(Error::Other(format!(
+                    "TOFU key mismatch for peer '{}'",
+                    sender
+                )));
+            }
+        } else {
+            // First contact — pin the key
+            debug!(sender = %sender, "TOFU: pinning public key for new peer");
+            self.known_peer_public_keys
+                .insert(sender.to_string(), public_key);
+        }
+
+        Ok(true)
+    }
+
+    /// Validates that the claimed `message.sender` matches the transport-level
+    /// peer identity, if available. Returns `true` if validated or if no
+    /// transport identity is available (best-effort). Returns `false` if
+    /// there is a mismatch.
+    fn validate_transport_sender(&self, message: &Message) -> bool {
+        if let Some(ref transport_peer) = message.transport_peer_id {
+            if message.sender.as_str() != transport_peer.as_str() {
+                warn!(
+                    claimed_sender = %message.sender,
+                    transport_peer = %transport_peer,
+                    message_id = %message.id,
+                    "Sender identity mismatch: claimed sender does not match transport peer"
+                );
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Returns `true` if the message content starts with any internal prefix.
+    fn is_internal_prefix(content: &str) -> bool {
+        INTERNAL_PREFIXES.iter().any(|p| content.starts_with(p))
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.

@@ -234,6 +234,17 @@ pub struct Message {
     /// ID of the message this is replying to (optional).
     #[serde(default)]
     pub reply_to_msg: Option<MessageId>,
+
+    /// Transport-verified peer identity.
+    ///
+    /// Set by the transport layer when a message is received, binding the message
+    /// to the physical peer that delivered it. This field is **never serialized**
+    /// over the wire — it exists only in-process to prevent sender spoofing.
+    ///
+    /// When `Some`, the protocol layer validates that `sender` matches this value
+    /// before processing security-sensitive control messages.
+    #[serde(skip)]
+    pub transport_peer_id: Option<String>,
 }
 
 fn default_requires_ack() -> bool {
@@ -272,6 +283,7 @@ impl Message {
             metadata: HashMap::new(),
             requires_ack: true,
             reply_to_msg: None,
+            transport_peer_id: None,
         }
     }
 
@@ -437,6 +449,7 @@ impl MessageBuilder {
             metadata: self.metadata,
             requires_ack: self.requires_ack,
             reply_to_msg: self.reply_to_msg,
+            transport_peer_id: None,
         }
     }
 }

@@ -195,6 +195,14 @@ impl InternetTransport {
         queue.push_back(message);
     }
 
+    /// Called when a message is received and the relay server has authenticated
+    /// the sending peer (e.g. via WebSocket session token).
+    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
+        message.transport_peer_id = Some(peer_id);
+        let mut queue = self.receive_queue.lock().unwrap();
+        queue.push_back(message);
+    }
+
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
         serde_json::to_vec(message).map_err(|e| {
@@ -222,6 +230,23 @@ impl InternetTransport {
             Err(e) => {
                 tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
                 Ok(()) // Don't fail - just drop bad data
+            }
+        }
+    }
+
+    /// Like [`on_data_received`](Self::on_data_received), but attaches a
+    /// transport-verified `peer_id` to the deserialized message.
+    pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        match self.deserialize_message(&data) {
+            Ok(mut message) => {
+                message.transport_peer_id = Some(peer_id);
+                let mut queue = self.receive_queue.lock().unwrap();
+                queue.push_back(message);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
+                Ok(())
             }
         }
     }

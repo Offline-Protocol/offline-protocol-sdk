@@ -148,6 +148,14 @@ impl WifiDirectTransport {
         queue.push_back(message);
     }
 
+    /// Called when a message is received from a peer whose transport-level
+    /// identity is known (e.g. Wi-Fi Direct MAC address).
+    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
+        message.transport_peer_id = Some(peer_id);
+        let mut queue = self.receive_queue.lock().unwrap();
+        queue.push_back(message);
+    }
+
     /// Gets all discovered peers.
     pub fn get_peers(&self) -> Vec<WifiDirectPeer> {
         let peers = self.peers.lock().unwrap();
@@ -190,6 +198,23 @@ impl WifiDirectTransport {
             Err(e) => {
                 tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
                 Ok(()) // Don't fail - just drop bad data
+            }
+        }
+    }
+
+    /// Like [`on_data_received`](Self::on_data_received), but attaches a
+    /// transport-verified `peer_id` to the deserialized message.
+    pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        match self.deserialize_message(&data) {
+            Ok(mut message) => {
+                message.transport_peer_id = Some(peer_id);
+                let mut queue = self.receive_queue.lock().unwrap();
+                queue.push_back(message);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
+                Ok(())
             }
         }
     }

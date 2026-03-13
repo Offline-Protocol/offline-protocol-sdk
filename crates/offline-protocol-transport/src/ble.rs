@@ -190,6 +190,18 @@ impl BleTransport {
         queue.push_back(message);
     }
 
+    /// Called when a message is received from a peer whose transport-level
+    /// identity is known (e.g. the BLE device ID / MAC address of the
+    /// connected peripheral).
+    ///
+    /// The `peer_id` is attached to the message so the protocol layer can
+    /// verify that `message.sender` matches the physical peer.
+    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
+        message.transport_peer_id = Some(peer_id);
+        let mut queue = self.receive_queue.lock().unwrap();
+        queue.push_back(message);
+    }
+
     /// Called when connection status changes.
     pub fn on_status_changed(&self, status: TransportStatus) {
         *self.status.lock().unwrap() = status;
@@ -502,6 +514,31 @@ impl BleTransport {
             }
             Err(e) => {
                 // Log error but don't fail - just drop bad fragment
+                tracing::warn!(error = %e, "Error processing fragment, dropping bad fragment");
+                Ok(())
+            }
+        }
+    }
+
+    /// Like [`on_fragment_received`](Self::on_fragment_received), but attaches a
+    /// transport-verified `peer_id` to the reassembled message.
+    pub fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
+        match self.process_fragment(&fragment_data) {
+            Ok(Some(mut message)) => {
+                message.transport_peer_id = Some(peer_id);
+                let mut queue = self.receive_queue.lock().unwrap();
+                queue.push_back(message.clone());
+                tracing::debug!(
+                    message_id = %message.id,
+                    "Complete message assembled from fragments (with peer identity)"
+                );
+                Ok(())
+            }
+            Ok(None) => {
+                tracing::debug!("Fragment received, more needed for complete message");
+                Ok(())
+            }
+            Err(e) => {
                 tracing::warn!(error = %e, "Error processing fragment, dropping bad fragment");
                 Ok(())
             }
