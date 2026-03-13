@@ -133,6 +133,11 @@ const CTRL_PK_META_KEY: &str = "__ctrl_pk";
 
 /// All internal message prefixes used for control messages.
 /// Used to reject user-sent messages that start with these prefixes.
+///
+/// **Maintenance note:** When adding a new control message prefix (in
+/// `internal_prefixes` or `offline-protocol-services`), it MUST be registered
+/// here. The `SVC_MESSAGE_PREFIX` catch-all covers future `__SVC_*` prefixes
+/// automatically, but non-SVC prefixes require an explicit entry.
 const INTERNAL_PREFIXES: &[&str] = &[
     internal_prefixes::KEY_PACKAGE,
     internal_prefixes::WELCOME,
@@ -158,7 +163,11 @@ const INTERNAL_PREFIXES: &[&str] = &[
     internal_prefixes::PRESENCE,
     internal_prefixes::TYPING_INDICATOR,
     internal_prefixes::READ_RECEIPT,
-    // Service discovery and request/response prefixes
+    // Service discovery and request/response prefixes.
+    // NOTE: individual SVC prefixes are listed explicitly so that new service
+    // prefixes added in offline-protocol-services must be registered here too.
+    // The catch-all `SVC_MESSAGE_PREFIX` ("__SVC_") covers any future additions.
+    offline_protocol_services::SVC_MESSAGE_PREFIX,
     offline_protocol_services::SVC_DISCOVER_QUERY,
     offline_protocol_services::SVC_DISCOVER_RESPONSE,
     offline_protocol_services::SVC_REQUEST,
@@ -166,6 +175,11 @@ const INTERNAL_PREFIXES: &[&str] = &[
 ];
 
 /// Maximum number of TOFU-pinned peer public keys to retain.
+///
+/// NOTE: The TOFU store is currently in-memory only — all pinned keys are lost
+/// on process restart. Persisting this store (e.g. via `MlsStorage`) is a
+/// future hardening item. Until then, peers are re-pinned on first signed
+/// contact after restart.
 const MAX_TOFU_PEERS: usize = 1000;
 
 /// Entry in the TOFU key store, pairing the peer's public key with a
@@ -6413,7 +6427,10 @@ impl OfflineProtocol {
         };
         // Sign a canonical payload that includes message ID and recipient
         // to prevent cross-recipient replay attacks.
-        let canonical = format!("{}:{}:{}", message.id, message.recipient, message.content);
+        let canonical = format!(
+            "{}:{}:{}:{}",
+            message.sender, message.id, message.recipient, message.content
+        );
         let signature = match manager.sign_data(canonical.as_bytes()) {
             Ok(sig) => sig,
             Err(e) => {
@@ -6457,7 +6474,10 @@ impl OfflineProtocol {
 
         // Verify Ed25519 signature over a canonical payload that includes
         // message ID and recipient to prevent cross-recipient replay attacks.
-        let canonical = format!("{}:{}:{}", message.id, message.recipient, message.content);
+        let canonical = format!(
+            "{}:{}:{}:{}",
+            message.sender, message.id, message.recipient, message.content
+        );
         let valid = offline_protocol_mls::MlsManager::verify_signature(
             &public_key,
             canonical.as_bytes(),
@@ -6474,7 +6494,7 @@ impl OfflineProtocol {
         // TOFU: check/pin the public key for this sender
         let sender = message.sender.as_str();
         let now_ms = Utc::now().timestamp_millis();
-        if let Some(entry) = self.known_peer_public_keys.get(sender) {
+        if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
             if entry.public_key != public_key {
                 warn!(
                     sender = %sender,
@@ -6492,9 +6512,7 @@ impl OfflineProtocol {
                 )));
             }
             // Update last-seen timestamp for LRU tracking
-            if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
-                entry.last_seen_ms = now_ms;
-            }
+            entry.last_seen_ms = now_ms;
         } else {
             // First contact — pin the key (with bounded capacity, LRU eviction)
             if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
@@ -13227,7 +13245,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_svc_prefixes_included_in_internal_prefixes() {
-        // Verify all SVC prefixes are covered
+        // Verify all SVC prefixes are covered, including the catch-all
+        assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_MESSAGE_PREFIX));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_QUERY));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_REQUEST));
@@ -13240,6 +13259,8 @@ pub(crate) mod tests {
         assert!(OfflineProtocol::is_internal_prefix("__CONN_REQ__data"));
         assert!(OfflineProtocol::is_internal_prefix("__SVC_DISC_Q__data"));
         assert!(OfflineProtocol::is_internal_prefix("__SVC_REQ__data"));
+        // Catch-all SVC prefix covers future service message types
+        assert!(OfflineProtocol::is_internal_prefix("__SVC_NEW_THING__data"));
         assert!(!OfflineProtocol::is_internal_prefix("Hello world"));
         assert!(!OfflineProtocol::is_internal_prefix("__UNKNOWN__data"));
         assert!(!OfflineProtocol::is_internal_prefix(""));
@@ -13556,7 +13577,7 @@ pub(crate) mod tests {
     #[test]
     fn test_canonical_signing_payload_format() {
         // Verify the canonical payload format used for signing includes
-        // message ID and recipient, not just content.
+        // sender, message ID, recipient, and content.
         let msg = Message::new(
             UserId::new("alice").unwrap(),
             UserId::new("bob").unwrap(),
@@ -13564,14 +13585,19 @@ pub(crate) mod tests {
             "__CONN_REQ__payload",
         );
 
-        let canonical = format!("{}:{}:{}", msg.id, msg.recipient, msg.content);
+        let canonical = format!(
+            "{}:{}:{}:{}",
+            msg.sender, msg.id, msg.recipient, msg.content
+        );
+        assert!(canonical.contains("alice"));
         assert!(canonical.contains(&msg.id.as_str().to_string()));
         assert!(canonical.contains("bob"));
         assert!(canonical.contains("__CONN_REQ__payload"));
         // Ensure the format has exactly the expected structure
-        let parts: Vec<&str> = canonical.splitn(3, ':').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[1], "bob");
-        assert_eq!(parts[2], "__CONN_REQ__payload");
+        let parts: Vec<&str> = canonical.splitn(4, ':').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "alice");
+        assert_eq!(parts[2], "bob");
+        assert_eq!(parts[3], "__CONN_REQ__payload");
     }
 }
