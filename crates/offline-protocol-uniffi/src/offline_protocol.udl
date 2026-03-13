@@ -740,35 +740,54 @@ interface OfflineProtocol {
     boolean verify_signature(sequence<u8> public_key, sequence<u8> data, sequence<u8> signature);
     
     // ========================================================================
-    // PRESENCE AND KEY MANAGEMENT (RELAY SERVER API)
+    // PRESENCE, TYPING INDICATORS, AND READ RECEIPTS
     // ========================================================================
-    
-    // Check if a user is online.
+
+    // Send a presence update to a peer via the protocol (routed through DORS).
+    // Status should be "online", "away", or "offline".
+    // Returns the message ID.
+    [Throws=ProtocolError]
+    string send_presence_update(string recipient, string status);
+
+    // Send a typing indicator to a peer via the protocol (routed through DORS).
+    // For direct messages, conversation_id should be the recipient's username.
+    // For group chats, conversation_id should be the group_id.
+    // Returns the message ID.
+    [Throws=ProtocolError]
+    string send_typing_indicator(string recipient, string conversation_id, boolean is_typing);
+
+    // Send a read receipt to a peer via the protocol (routed through DORS).
+    // Indicates that the given messages have been read.
+    // Returns the message ID.
+    [Throws=ProtocolError]
+    string send_read_receipt(string recipient, sequence<string> message_ids);
+
+    // ========================================================================
+    // RELAY SERVER API (JSON payload formatters for WebSocket relay)
+    // ========================================================================
+
+    // Check if a user is online via relay server.
     // Returns JSON string to send via WebSocket relay.
     [Throws=ProtocolError]
     string check_presence(string username);
-    
+
     // Request prekey bundle for a user to establish encrypted communication.
     // Returns JSON string to send via WebSocket relay.
     [Throws=ProtocolError]
     string request_prekey_bundle(string username);
-    
+
     // Upload identity key and prekeys for Signal Protocol.
     // Returns JSON string to send via WebSocket relay.
     // Parameters are JSON strings that will be parsed and included in the payload.
     [Throws=ProtocolError]
     string upload_keys(string identity_key, string signed_prekey_json, string one_time_prekeys_json);
-    
-    // Set typing indicator in a conversation.
-    // For direct messages, conversation_id should be the recipient's username.
-    // For group chats, conversation_id should be the group_id.
+
+    // Set typing indicator via relay server (JSON payload formatter).
     // Returns JSON string to send via WebSocket relay.
     [Throws=ProtocolError]
     string set_typing(string conversation_id);
-    
-    // Clear typing indicator in a conversation.
-    // For direct messages, conversation_id should be the recipient's username.
-    // For group chats, conversation_id should be the group_id.
+
+    // Clear typing indicator via relay server (JSON payload formatter).
     // Returns JSON string to send via WebSocket relay.
     [Throws=ProtocolError]
     string clear_typing(string conversation_id);

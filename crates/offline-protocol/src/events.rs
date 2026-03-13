@@ -643,6 +643,39 @@ pub enum Event {
         provider_peer_id: String,
     },
 
+    // --- Presence, typing, and read receipts ---
+    /// A peer's presence status was updated.
+    PresenceUpdated {
+        /// Peer whose presence changed.
+        peer_id: String,
+        /// Presence status (e.g. "online", "away", "offline").
+        status: String,
+        /// Timestamp of the update (Unix ms).
+        timestamp: i64,
+    },
+
+    /// A typing indicator was received from a peer.
+    TypingIndicatorReceived {
+        /// User who is typing (or stopped typing).
+        sender: String,
+        /// Conversation identifier (recipient username for DMs, group_id for groups).
+        conversation_id: String,
+        /// Whether the user is currently typing.
+        is_typing: bool,
+        /// Timestamp of the indicator (Unix ms).
+        timestamp: i64,
+    },
+
+    /// A read receipt was received from a peer.
+    ReadReceiptReceived {
+        /// User who read the messages.
+        sender: String,
+        /// IDs of the messages that were read.
+        message_ids: Vec<String>,
+        /// Timestamp when the messages were read (Unix ms).
+        timestamp: i64,
+    },
+
     // --- DORS observability (OFF-258) ---
     /// DORS scored all available transports for this decision cycle.
     DorsScoreUpdated {
@@ -1047,6 +1080,39 @@ impl Event {
     /// Creates a ConnectionRejected event.
     pub fn connection_rejected(rejected_by: String) -> Self {
         Self::ConnectionRejected { rejected_by }
+    }
+
+    /// Creates a PresenceUpdated event.
+    pub fn presence_updated(peer_id: String, status: String, timestamp: i64) -> Self {
+        Self::PresenceUpdated {
+            peer_id,
+            status,
+            timestamp,
+        }
+    }
+
+    /// Creates a TypingIndicatorReceived event.
+    pub fn typing_indicator_received(
+        sender: String,
+        conversation_id: String,
+        is_typing: bool,
+        timestamp: i64,
+    ) -> Self {
+        Self::TypingIndicatorReceived {
+            sender,
+            conversation_id,
+            is_typing,
+            timestamp,
+        }
+    }
+
+    /// Creates a ReadReceiptReceived event.
+    pub fn read_receipt_received(sender: String, message_ids: Vec<String>, timestamp: i64) -> Self {
+        Self::ReadReceiptReceived {
+            sender,
+            message_ids,
+            timestamp,
+        }
     }
 
     /// Creates a GroupCreated event.
@@ -1778,6 +1844,38 @@ impl fmt::Debug for Event {
                 .field("group_id", group_id)
                 .field("resolved_epoch", resolved_epoch)
                 .field("failed_members", failed_members)
+                .finish(),
+            Self::PresenceUpdated {
+                peer_id: _,
+                status,
+                timestamp,
+            } => f
+                .debug_struct("PresenceUpdated")
+                .field("peer_id", &"[REDACTED]")
+                .field("status", status)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::TypingIndicatorReceived {
+                sender: _,
+                conversation_id,
+                is_typing,
+                timestamp,
+            } => f
+                .debug_struct("TypingIndicatorReceived")
+                .field("sender", &"[REDACTED]")
+                .field("conversation_id", conversation_id)
+                .field("is_typing", is_typing)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::ReadReceiptReceived {
+                sender: _,
+                message_ids,
+                timestamp,
+            } => f
+                .debug_struct("ReadReceiptReceived")
+                .field("sender", &"[REDACTED]")
+                .field("message_count", &message_ids.len())
+                .field("timestamp", timestamp)
                 .finish(),
             Self::DorsScoreUpdated { scores } => f
                 .debug_struct("DorsScoreUpdated")
