@@ -3,13 +3,13 @@
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
 use crate::events::DecryptionFailureCode;
 use crate::file_transfer::{FileChunk, FileTransferManager, OutboundTransferState};
+use crate::group_mesh::PendingCommit;
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsEventRateLimiter,
     MlsOperationContext, NoopMlsEventEmitter,
 };
-use crate::group_mesh::PendingCommit;
 use crate::{
     Error, EstablishmentState, Event, EventCallback, ProtocolConfig, Result, SessionStateError,
     TransportManager,
@@ -4945,7 +4945,10 @@ impl OfflineProtocol {
     /// Returns `Some(InternalMessageResult::Decrypted(plaintext))` if the message was
     /// encrypted and successfully decrypted.
     /// Returns `None` if the message is not an internal message.
-    pub(crate) fn process_internal_message(&mut self, message: &Message) -> Option<InternalMessageResult> {
+    pub(crate) fn process_internal_message(
+        &mut self,
+        message: &Message,
+    ) -> Option<InternalMessageResult> {
         let content = &message.content;
         let sender = message.sender.as_str();
 
@@ -5955,7 +5958,6 @@ impl OfflineProtocol {
         mls.read()
             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))
     }
-
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
     pub(crate) fn cleanup_expired_entries(&mut self) {
@@ -11943,5 +11945,4 @@ pub(crate) mod tests {
         // Just verify it doesn't panic and the method is wired correctly
         assert!(protocol.mesh_services().seen_discovery_queries().is_empty());
     }
-
 }

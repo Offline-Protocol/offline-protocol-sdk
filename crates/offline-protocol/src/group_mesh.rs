@@ -25,6 +25,20 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 const PENDING_COMMIT_TTL_SECS: u64 = 120;
+
+/// Outcome of attempting to process an MLS Commit.
+enum CommitOutcome {
+    /// Successfully processed; contains the group ID.
+    Success(String),
+    /// MLS decryption failed transiently (e.g., out-of-order delivery);
+    /// the commit may succeed after a prior commit advances the epoch.
+    /// Contains the group ID for buffering.
+    Retriable(String),
+    /// Permanently failed (parse error, bad ciphertext, MLS unavailable);
+    /// should not be retried.
+    Rejected,
+}
+
 // --- Group (mesh/MLS) payloads ---
 
 /// Payload for MLS-encrypted group messages sent via mesh.
@@ -263,22 +277,28 @@ impl OfflineProtocol {
     /// the commit is buffered for deferred retry. When a subsequent commit for the
     /// same group succeeds, buffered commits are drained and retried.
     pub(crate) fn handle_group_mls_commit(&mut self, sender: &str, data: &str) {
-        if let Some(group_id) = self.try_process_commit(sender, data) {
-            // Success — drain any buffered commits for this group
-            self.drain_pending_commits(&group_id);
+        match self.process_commit_core(sender, data) {
+            CommitOutcome::Success(group_id) => {
+                self.drain_pending_commits(&group_id);
+            }
+            CommitOutcome::Retriable(group_id) => {
+                self.buffer_pending_commit(&group_id, sender, data);
+            }
+            CommitOutcome::Rejected => {}
         }
     }
 
-    /// Attempts to process a single MLS Commit. Returns the group ID on success.
+    /// Core commit processing logic. Returns an outcome indicating success,
+    /// retriable failure, or permanent rejection.
     ///
-    /// On failure, buffers the commit for later retry unless the payload is
-    /// unparseable or the ciphertext is invalid.
-    fn try_process_commit(&mut self, sender: &str, data: &str) -> Option<String> {
+    /// Does **not** buffer on failure — callers decide whether to buffer based
+    /// on the returned outcome.
+    fn process_commit_core(&mut self, sender: &str, data: &str) -> CommitOutcome {
         let payload = match serde_json::from_str::<GroupMlsCommitPayload>(data) {
             Ok(p) => p,
             Err(_) => {
                 warn!(sender = %sender, "Failed to parse GroupMlsCommit payload");
-                return None;
+                return CommitOutcome::Rejected;
             }
         };
 
@@ -293,14 +313,14 @@ impl OfflineProtocol {
                 group_id = %payload.group_id,
                 "Received Commit with empty ciphertext, cannot advance MLS epoch"
             );
-            return None;
+            return CommitOutcome::Rejected;
         }
 
         let ciphertext_bytes = match base64_decode(&payload.ciphertext) {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "Failed to decode commit ciphertext");
-                return None;
+                return CommitOutcome::Rejected;
             }
         };
 
@@ -308,7 +328,7 @@ impl OfflineProtocol {
             Ok(guard) => guard,
             Err(e) => {
                 warn!(group_id = %payload.group_id, error = %e, "MLS unavailable, dropping group commit");
-                return None;
+                return CommitOutcome::Rejected;
             }
         };
 
@@ -338,7 +358,7 @@ impl OfflineProtocol {
                     group_id = %payload.group_id,
                     epoch = payload.epoch,
                     error = %e,
-                    "Failed to process group commit — buffering for deferred retry"
+                    "Failed to process group commit"
                 );
                 false
             }
@@ -346,32 +366,7 @@ impl OfflineProtocol {
         drop(mls_guard);
 
         if !mls_ok {
-            // Buffer for retry — the commit may have arrived before a prior commit
-            let pending = PendingCommit {
-                sender: sender.to_string(),
-                data: data.to_string(),
-                buffered_at: Instant::now(),
-            };
-            let buf = self
-                .pending_commits
-                .entry(payload.group_id.clone())
-                .or_default();
-            if buf.len() < MAX_PENDING_COMMITS_PER_GROUP {
-                buf.push(pending);
-                debug!(
-                    group_id = %payload.group_id,
-                    buffered_count = buf.len(),
-                    "Buffered out-of-order commit for deferred retry"
-                );
-            } else {
-                warn!(
-                    group_id = %payload.group_id,
-                    "Pending commit buffer full, dropping oldest"
-                );
-                buf.remove(0);
-                buf.push(pending);
-            }
-            return None;
+            return CommitOutcome::Retriable(payload.group_id);
         }
 
         // Refresh cache and compute actual membership delta
@@ -422,12 +417,44 @@ impl OfflineProtocol {
             }
         }
 
-        Some(payload.group_id)
+        CommitOutcome::Success(payload.group_id)
+    }
+
+    /// Buffers a failed commit for deferred retry.
+    fn buffer_pending_commit(&mut self, group_id: &str, sender: &str, data: &str) {
+        let pending = PendingCommit {
+            sender: sender.to_string(),
+            data: data.to_string(),
+            buffered_at: Instant::now(),
+        };
+        let buf = self
+            .pending_commits
+            .entry(group_id.to_string())
+            .or_default();
+        if buf.len() < MAX_PENDING_COMMITS_PER_GROUP {
+            buf.push(pending);
+            debug!(
+                group_id = %group_id,
+                buffered_count = buf.len(),
+                "Buffered out-of-order commit for deferred retry"
+            );
+        } else {
+            warn!(
+                group_id = %group_id,
+                "Pending commit buffer full, dropping oldest"
+            );
+            buf.remove(0);
+            buf.push(pending);
+        }
     }
 
     /// Drains and retries buffered pending commits for a group after a
     /// successful commit advanced the epoch. Each successful retry triggers
     /// another drain pass (at most `MAX_PENDING_COMMITS_PER_GROUP` iterations).
+    ///
+    /// Uses `process_commit_core` (not `handle_group_mls_commit`) to avoid
+    /// double-buffering: this method owns the retry lifecycle and re-buffers
+    /// only via `still_pending`, never through the core processing path.
     fn drain_pending_commits(&mut self, group_id: &str) {
         // Limit iterations to avoid unbounded looping
         for _ in 0..MAX_PENDING_COMMITS_PER_GROUP {
@@ -448,13 +475,17 @@ impl OfflineProtocol {
                     );
                     continue;
                 }
-                if self
-                    .try_process_commit(&entry.sender, &entry.data)
-                    .is_some()
-                {
-                    any_succeeded = true;
-                } else {
-                    still_pending.push(entry);
+                match self.process_commit_core(&entry.sender, &entry.data) {
+                    CommitOutcome::Success(_) => {
+                        any_succeeded = true;
+                    }
+                    CommitOutcome::Retriable(_) => {
+                        // Still out-of-order — keep for next pass
+                        still_pending.push(entry);
+                    }
+                    CommitOutcome::Rejected => {
+                        // Permanently bad — drop silently
+                    }
                 }
             }
 
@@ -639,14 +670,12 @@ impl OfflineProtocol {
             .get(group_id)
             .map(|m| m.len())
             .or_else(|| {
-                self.read_mls_guard()
-                    .ok()
-                    .and_then(|g| {
-                        g.get_group_info(&offline_protocol_mls::GroupId::new(group_id))
-                            .ok()
-                            .flatten()
-                            .map(|info| info.members.len())
-                    })
+                self.read_mls_guard().ok().and_then(|g| {
+                    g.get_group_info(&offline_protocol_mls::GroupId::new(group_id))
+                        .ok()
+                        .flatten()
+                        .map(|info| info.members.len())
+                })
             })
             .unwrap_or(0);
         let max_members = self.config.group.max_group_members;
@@ -2632,9 +2661,7 @@ mod tests {
         let max_members = protocol.config.group.max_group_members;
 
         // Simulate a group at max_group_members by injecting fake members into cache
-        let fake_members: Vec<String> = (0..max_members)
-            .map(|i| format!("member-{}", i))
-            .collect();
+        let fake_members: Vec<String> = (0..max_members).map(|i| format!("member-{}", i)).collect();
         protocol
             .group_members
             .insert(group_id.clone(), fake_members);
@@ -2795,7 +2822,266 @@ mod tests {
         // 2 MB plaintext
         let content = "B".repeat(2 * 1_048_576);
         let result = protocol.send_group_message(&group_id, &content, None, None);
-        assert!(result.is_ok(), "2 MB content should not be rejected at send");
+        assert!(
+            result.is_ok(),
+            "2 MB content should not be rejected at send"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_drain_pending_commits_no_double_buffering() {
+        // Verifies that drain_pending_commits does NOT produce duplicate
+        // entries when a commit fails during retry. Before the fix,
+        // try_process_commit would buffer the entry AND the drain loop
+        // would re-buffer it via still_pending.
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let group_id = "group:drain-test".to_string();
+
+        // Create a group so MLS is aware of it
+        let info = protocol.create_mesh_group("Drain Test").unwrap();
+        let real_group_id = info.group_id.as_str().to_string();
+
+        // Manually insert a pending commit that will fail MLS processing
+        // (bad ciphertext, but valid base64 — so it's retriable, not rejected)
+        let bad_commit = GroupMlsCommitPayload {
+            group_id: real_group_id.clone(),
+            commit_type: GroupCommitType::Add,
+            ciphertext: base64_encode(b"not-a-real-mls-commit"),
+            epoch: 99,
+            affected_member: Some("carol".to_string()),
+        };
+        let bad_data = serde_json::to_string(&bad_commit).unwrap();
+
+        protocol.pending_commits.insert(
+            real_group_id.clone(),
+            vec![
+                PendingCommit {
+                    sender: "alice".to_string(),
+                    data: bad_data.clone(),
+                    buffered_at: Instant::now(),
+                },
+                PendingCommit {
+                    sender: "bob".to_string(),
+                    data: bad_data,
+                    buffered_at: Instant::now(),
+                },
+            ],
+        );
+
+        // Run drain — both commits will fail (bad MLS data) and should be
+        // re-buffered exactly once each, not duplicated.
+        protocol.drain_pending_commits(&real_group_id);
+
+        let remaining = protocol
+            .pending_commits
+            .get(&real_group_id)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        assert_eq!(
+            remaining, 2,
+            "Expected exactly 2 pending commits after drain (no duplication), got {}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Drain Expiry Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Insert an expired pending commit
+        let bad_commit = GroupMlsCommitPayload {
+            group_id: group_id.clone(),
+            commit_type: GroupCommitType::Add,
+            ciphertext: base64_encode(b"stale-commit"),
+            epoch: 1,
+            affected_member: Some("carol".to_string()),
+        };
+        let data = serde_json::to_string(&bad_commit).unwrap();
+
+        protocol.pending_commits.insert(
+            group_id.clone(),
+            vec![PendingCommit {
+                sender: "alice".to_string(),
+                data,
+                buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 1),
+            }],
+        );
+
+        // Drain should drop expired entry
+        protocol.drain_pending_commits(&group_id);
+
+        assert!(
+            !protocol.pending_commits.contains_key(&group_id),
+            "Expired pending commit should be dropped and entry cleaned up"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_handle_commit_buffers_on_mls_failure() {
+        // Verifies that handle_group_mls_commit buffers a retriable commit
+        // when MLS decryption fails (e.g., out-of-order delivery).
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Buffer Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // No pending commits initially
+        assert!(protocol.pending_commits.is_empty());
+
+        // Simulate receiving a commit with valid structure but bad MLS data
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: group_id.clone(),
+            commit_type: GroupCommitType::Add,
+            ciphertext: base64_encode(b"fake-but-decodable-commit"),
+            epoch: 42,
+            affected_member: Some("carol".to_string()),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+        // The commit should have been buffered for retry
+        let buffered = protocol.pending_commits.get(&group_id);
+        assert!(
+            buffered.is_some(),
+            "Failed commit should be buffered for retry"
+        );
+        assert_eq!(
+            buffered.unwrap().len(),
+            1,
+            "Exactly one commit should be buffered"
+        );
+        assert_eq!(buffered.unwrap()[0].sender, "alice");
+    }
+
+    #[test]
+    fn test_group_mls_commit_rejected_not_buffered() {
+        // Verifies that permanently rejected commits (parse errors, empty
+        // ciphertext, oversized payloads) are NOT buffered.
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Empty ciphertext — should be rejected, not buffered
+        let commit_payload = GroupMlsCommitPayload {
+            group_id: "group:reject-test".to_string(),
+            commit_type: GroupCommitType::Add,
+            ciphertext: String::new(),
+            epoch: 1,
+            affected_member: Some("carol".to_string()),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_COMMIT,
+            serde_json::to_string(&commit_payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        protocol.process_internal_message(&message);
+        assert!(
+            protocol.pending_commits.is_empty(),
+            "Rejected commits (empty ciphertext) should not be buffered"
+        );
+
+        // Malformed JSON — should also not be buffered
+        let bad_content = format!("{}{{invalid json", internal_prefixes::GROUP_MLS_COMMIT);
+        let bad_message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &bad_content,
+        );
+
+        protocol.process_internal_message(&bad_message);
+        assert!(
+            protocol.pending_commits.is_empty(),
+            "Rejected commits (bad JSON) should not be buffered"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_buffer_pending_commit_respects_cap() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let group_id = "group:cap-test".to_string();
+
+        // Fill the buffer to capacity
+        for i in 0..MAX_PENDING_COMMITS_PER_GROUP {
+            protocol.buffer_pending_commit(
+                &group_id,
+                &format!("sender-{}", i),
+                &format!("data-{}", i),
+            );
+        }
+        assert_eq!(
+            protocol.pending_commits[&group_id].len(),
+            MAX_PENDING_COMMITS_PER_GROUP
+        );
+
+        // One more should evict the oldest
+        protocol.buffer_pending_commit(&group_id, "sender-new", "data-new");
+        let buf = &protocol.pending_commits[&group_id];
+        assert_eq!(buf.len(), MAX_PENDING_COMMITS_PER_GROUP);
+        // The oldest (sender-0) should have been evicted
+        assert_eq!(buf[0].sender, "sender-1");
+        assert_eq!(buf[buf.len() - 1].sender, "sender-new");
+    }
+
+    #[test]
+    fn test_group_mls_invite_respects_max_group_members() {
+        let mut config = create_test_config();
+        config.group.max_group_members = 2;
+
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Capped Group").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Manually set member cache to 2 members (at cap)
+        protocol.group_members.insert(
+            group_id.clone(),
+            vec!["user123".to_string(), "alice".to_string()],
+        );
+
+        // Invite should fail due to cap
+        let result = protocol.invite_to_group(&group_id, "bob");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cannot exceed"),
+            "Error should mention the group member limit"
+        );
     }
 }
-
