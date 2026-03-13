@@ -801,51 +801,6 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     sequence<string> list_groups();
 
-    // ========================================================================
-    // GROUP MANAGEMENT (RELAY SERVER API) — DEPRECATED
-    // Use the canonical group APIs above instead. These JSON serializer
-    // helpers will be removed in a future release.
-    // ========================================================================
-
-    // [Deprecated] Create a new group via relay.
-    [Throws=ProtocolError]
-    string group_create(string name);
-
-    // [Deprecated] Send message to a group via relay.
-    [Throws=ProtocolError]
-    string group_send_message(string group_id, string content, string? reply_to_msg);
-
-    // [Deprecated] Add member to group via relay.
-    [Throws=ProtocolError]
-    string group_add_member(string group_id, string username);
-
-    // [Deprecated] Remove member from group via relay.
-    [Throws=ProtocolError]
-    string group_remove_member(string group_id, string username);
-
-    // [Deprecated] Set member as admin via relay.
-    [Throws=ProtocolError]
-    string group_set_admin(string group_id, string username);
-
-    // [Deprecated] Remove admin role via relay.
-    [Throws=ProtocolError]
-    string group_remove_admin(string group_id, string username);
-
-    // [Deprecated] Leave a group via relay.
-    [Throws=ProtocolError]
-    string group_leave(string group_id);
-
-    // [Deprecated] Delete a group via relay.
-    [Throws=ProtocolError]
-    string group_delete(string group_id);
-
-    // [Deprecated] Get group information via relay.
-    [Throws=ProtocolError]
-    string group_get_info(string group_id);
-
-    // [Deprecated] Get user's groups via relay.
-    [Throws=ProtocolError]
-    string group_get_user_groups();
 };
 
 // Standalone mesh services interface

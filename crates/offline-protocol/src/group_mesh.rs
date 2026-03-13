@@ -696,17 +696,13 @@ impl OfflineProtocol {
             }
         }
 
-        // Only emit the leave event if we didn't already emit via remove_from_group.
-        // Note: we skip refresh_group_members here because the leaver hasn't been
-        // removed from MLS yet — only the elected node issues the remove-commit.
-        // The cache will be updated when we process the elected node's commit.
-        if !should_remove {
-            self.emit_event(Event::group_member_removed(
-                payload.group_id,
-                payload.leaving_member.clone(),
-                payload.leaving_member,
-            ));
-        }
+        // Do NOT emit GroupMemberRemoved here for non-elected nodes.
+        // The elected node issues an MLS remove-commit which all members
+        // (including us) will process via `handle_group_mls_commit` →
+        // `process_commit_core`, which emits the event based on the actual
+        // MLS membership delta. Emitting here would cause a duplicate event
+        // because we'd emit once now (premature, before MLS state changes)
+        // and once when the commit arrives.
     }
 
     /// Refreshes the cached member list for a group from MlsManager.
@@ -1364,10 +1360,13 @@ impl OfflineProtocol {
                 }
             };
             let gid = offline_protocol_mls::GroupId::new(group_id);
+            // The epoch field is not used by MLS for decryption — OpenMLS
+            // determines the epoch from the ciphertext header itself. We pass
+            // 0 here because the relay protocol does not carry epoch metadata.
             let encrypted = offline_protocol_mls::EncryptedMessage {
                 group_id: gid,
                 message_type: offline_protocol_mls::MlsMessageType::Application,
-                epoch: 0, // Relay doesn't carry epoch — MLS infers from ciphertext
+                epoch: 0,
                 ciphertext: ciphertext_bytes,
                 sender_id: sender.to_string(),
                 timestamp_ms: chrono::Utc::now().timestamp_millis() as u64,
@@ -1414,6 +1413,7 @@ mod tests {
     use crate::protocol::tests::{create_test_config, create_test_config_for_user};
     use crate::protocol::InternalMessageResult;
     use offline_protocol_core::{AppId, UserId};
+    use offline_protocol_transport::Transport;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -1584,7 +1584,10 @@ mod tests {
             events_clone.lock().unwrap().push(event);
         });
 
-        // Pre-populate group member cache
+        // Pre-populate group member cache.
+        // "alice" < "bob" < "user123" lexicographically.
+        // When "alice" leaves, "bob" is elected (lex-first remaining).
+        // We are "user123", so we are NOT elected.
         protocol.group_mesh.members.insert(
             "group:test-123".to_string(),
             vec![
@@ -1594,7 +1597,7 @@ mod tests {
             ],
         );
 
-        // Simulate receiving a leave message
+        // Simulate receiving a leave message from alice
         let leave_payload = GroupMlsLeavePayload {
             group_id: "group:test-123".to_string(),
             leaving_member: "alice".to_string(),
@@ -1614,13 +1617,17 @@ mod tests {
         let result = protocol.process_internal_message(&message);
         assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
-        // Check that GroupMemberRemoved event was emitted
+        // Non-elected nodes do NOT emit GroupMemberRemoved immediately.
+        // The event will be emitted when the elected node's MLS commit arrives
+        // and is processed via handle_group_mls_commit → process_commit_core.
         let events = events.lock().unwrap();
-        let leave_event = events.iter().find(|e| {
-            matches!(e, Event::GroupMemberRemoved { group_id, user_id, .. }
-                if group_id == "group:test-123" && user_id == "alice")
-        });
-        assert!(leave_event.is_some(), "Expected GroupMemberRemoved event");
+        let leave_event = events
+            .iter()
+            .find(|e| matches!(e, Event::GroupMemberRemoved { .. }));
+        assert!(
+            leave_event.is_none(),
+            "Non-elected node should not emit premature GroupMemberRemoved"
+        );
     }
 
     #[test]
@@ -2362,15 +2369,15 @@ mod tests {
         assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
         // Since "alice" < "user123", alice should be elected, not us.
-        // We should still emit GroupMemberRemoved because we're not the remover.
+        // Non-elected nodes do NOT emit GroupMemberRemoved — the event
+        // comes later when the elected node's commit is processed.
         let events = events.lock().unwrap();
-        let remove_event = events.iter().find(|e| {
-            matches!(e, Event::GroupMemberRemoved { group_id: gid, user_id, removed_by }
-                if gid == &group_id && user_id == "bob" && removed_by == "bob")
-        });
+        let remove_event = events
+            .iter()
+            .find(|e| matches!(e, Event::GroupMemberRemoved { .. }));
         assert!(
-            remove_event.is_some(),
-            "Expected GroupMemberRemoved event for non-elected node"
+            remove_event.is_none(),
+            "Non-elected node should not emit premature GroupMemberRemoved"
         );
     }
 
@@ -3189,7 +3196,7 @@ mod tests {
         protocol.initialize_mls(storage).unwrap();
         protocol.start().unwrap();
 
-        let group_id = "group:drain-test".to_string();
+        let _group_id = "group:drain-test".to_string();
 
         // Create a group so MLS is aware of it
         let info = protocol.create_group("Drain Test").unwrap();
@@ -4295,6 +4302,437 @@ mod tests {
             remaining, 0,
             "All pending commits should be rejected when MLS is unavailable"
         );
+    }
+
+    // ====================================================================
+    // RELAY PATH TESTS
+    // ====================================================================
+
+    #[test]
+    fn test_relay_sync_on_internet_available_transition() {
+        // Verifies that when Internet becomes available (0→1 transition),
+        // unsynced groups are registered with the relay server.
+        use offline_protocol_transport::mock::MockTransport;
+
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        // Create a group (relay registration will fail — no Internet yet)
+        let info = protocol.create_group("Relay Sync Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Group should NOT be relay-synced (no Internet)
+        assert!(
+            !protocol.group_mesh.relay_synced.contains(&group_id),
+            "Group should not be relay-synced without Internet"
+        );
+        assert!(!protocol.group_mesh.internet_was_available);
+
+        // Add Internet transport
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+
+        // Trigger the 0→1 transition via check_relay_group_sync
+        protocol.check_relay_group_sync();
+
+        // Internet should now be tracked as available
+        assert!(protocol.group_mesh.internet_was_available);
+
+        // Group should be relay-synced (registration message sent to self)
+        assert!(
+            protocol.group_mesh.relay_synced.contains(&group_id),
+            "Group should be relay-synced after Internet becomes available"
+        );
+    }
+
+    #[test]
+    fn test_relay_sync_cleared_on_internet_lost() {
+        // Verifies that when Internet goes down (1→0 transition),
+        // relay sync state is cleared so groups re-register on reconnect.
+        use offline_protocol_transport::mock::MockTransport;
+
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        // Add Internet transport and start
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        // Create group — should be relay-synced since Internet is available
+        let info = protocol.create_group("Relay Lost Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Mark Internet as seen (simulate a prior check)
+        protocol.group_mesh.internet_was_available = true;
+        protocol.group_mesh.relay_synced.insert(group_id.clone());
+
+        // Remove Internet transport to simulate connectivity loss
+        protocol
+            .transport_manager_mut()
+            .remove_transport(TransportType::Internet);
+
+        // Trigger the 1→0 transition
+        protocol.check_relay_group_sync();
+
+        assert!(!protocol.group_mesh.internet_was_available);
+        assert!(
+            protocol.group_mesh.relay_synced.is_empty(),
+            "Relay sync state should be cleared when Internet is lost"
+        );
+    }
+
+    #[test]
+    fn test_relay_sync_disabled_config() {
+        // Verifies that relay sync is a no-op when relay_enabled is false.
+        use offline_protocol_transport::mock::MockTransport;
+
+        let mut config = create_test_config();
+        config.group.relay_enabled = false;
+
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        // Create group — should NOT be relay-synced since relay is disabled
+        let info = protocol.create_group("No Relay Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+        assert!(
+            !protocol.group_mesh.relay_synced.contains(&group_id),
+            "Group should not be relay-synced when relay is disabled"
+        );
+
+        // check_relay_group_sync should be a no-op
+        protocol.check_relay_group_sync();
+        assert!(!protocol.group_mesh.internet_was_available);
+    }
+
+    #[test]
+    fn test_relay_broadcast_used_when_synced() {
+        // Verifies that send_group_message uses relay broadcast (single message)
+        // instead of per-member fan-out when the group is relay-synced.
+        use offline_protocol_transport::mock::MockTransport;
+
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        // Add Internet transport
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        // Create a group with multiple members
+        let info = protocol.create_group("Relay Broadcast Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+        protocol.group_mesh.members.insert(
+            group_id.clone(),
+            vec![
+                "user123".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+                "dave".to_string(),
+            ],
+        );
+
+        // Mark group as relay-synced
+        protocol.group_mesh.relay_synced.insert(group_id.clone());
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Send a group message — should use relay broadcast (1 message) not fan-out (3 messages)
+        let msg_ids = protocol
+            .send_group_message(&group_id, "hello relay", None, None)
+            .unwrap();
+
+        // Relay broadcast returns a single message ID (the broadcast message)
+        assert_eq!(
+            msg_ids.len(),
+            1,
+            "Relay broadcast should return exactly 1 message ID"
+        );
+
+        // GroupMessageSent event should reflect all members
+        let events = events.lock().unwrap();
+        let sent_event = events.iter().find(|e| {
+            matches!(e, Event::GroupMessageSent { group_id: gid, member_count, .. }
+                if gid == &group_id && *member_count == 3)
+        });
+        assert!(
+            sent_event.is_some(),
+            "Expected GroupMessageSent with member_count=3 (bob, carol, dave)"
+        );
+    }
+
+    #[test]
+    fn test_relay_broadcast_fallback_to_fanout() {
+        // Verifies that when the group is NOT relay-synced, send_group_message
+        // falls back to per-member fan-out even when Internet is available.
+        use offline_protocol_transport::mock::MockTransport;
+
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        let info = protocol.create_group("Fanout Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+        protocol.group_mesh.members.insert(
+            group_id.clone(),
+            vec![
+                "user123".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+            ],
+        );
+
+        // Do NOT mark as relay-synced — force per-member fan-out
+        protocol.group_mesh.relay_synced.remove(&group_id);
+
+        let msg_ids = protocol
+            .send_group_message(&group_id, "hello fanout", None, None)
+            .unwrap();
+
+        // Per-member fan-out: one message per member (bob, carol)
+        assert_eq!(
+            msg_ids.len(),
+            2,
+            "Fan-out should return one message ID per member"
+        );
+    }
+
+    #[test]
+    fn test_handle_relay_group_message_plaintext_passthrough() {
+        // Verifies that handle_relay_group_message_with_mls emits plaintext
+        // content as-is when the content is not valid base64.
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        // Pre-populate member cache so the group is known
+        protocol.group_mesh.members.insert(
+            "group:relay-plain".to_string(),
+            vec!["user123".to_string(), "alice".to_string()],
+        );
+
+        // Plaintext content (not valid base64) should pass through
+        protocol.handle_relay_group_message_with_mls(
+            "group:relay-plain",
+            "alice",
+            "Hello world! This is not base64",
+            "2026-03-13T00:00:00Z",
+            "msg-relay-001",
+            None,
+        );
+
+        let events = events.lock().unwrap();
+        let received = events.iter().find(|e| {
+            matches!(e, Event::GroupMessageReceived { group_id, content, sender, .. }
+                if group_id == "group:relay-plain"
+                    && content == "Hello world! This is not base64"
+                    && sender == "alice")
+        });
+        assert!(
+            received.is_some(),
+            "Plaintext relay message should be emitted as-is"
+        );
+    }
+
+    #[test]
+    fn test_handle_relay_group_message_mls_decrypt() {
+        // Verifies that handle_relay_group_message_with_mls decrypts MLS
+        // ciphertext when the group has local MLS state.
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+        let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        alice.initialize_mls(storage_a).unwrap();
+        bob.initialize_mls(storage_b).unwrap();
+        alice.start().unwrap();
+        bob.start().unwrap();
+
+        // Alice creates group, Bob joins
+        let group_info = alice.create_group("Relay MLS Test").unwrap();
+        let group_id = group_info.group_id.as_str().to_string();
+
+        let bob_kp = {
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+            bob_mls.generate_key_package().unwrap()
+        };
+        let (welcome, _commit) = {
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+            let gid = offline_protocol_mls::GroupId::new(&group_id);
+            alice_mls
+                .add_group_member(&gid, &bob_kp.key_package_data)
+                .unwrap()
+        };
+        {
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+            bob_mls.join_group(&welcome).unwrap();
+        }
+
+        // Alice encrypts a message
+        let encrypted = {
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+            let gid = offline_protocol_mls::GroupId::new(&group_id);
+            alice_mls
+                .encrypt_for_group(&gid, b"Relay decrypted!")
+                .unwrap()
+        };
+        let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
+
+        // Set up Bob's event capture
+        let bob_events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let bob_events_clone = bob_events.clone();
+        bob.on_event(move |event| {
+            bob_events_clone.lock().unwrap().push(event);
+        });
+
+        // Route through relay path
+        bob.handle_relay_group_message_with_mls(
+            &group_id,
+            "alice",
+            &ciphertext_b64,
+            "2026-03-13T00:00:00Z",
+            "msg-relay-mls-001",
+            None,
+        );
+
+        // Verify decrypted content
+        let events = bob_events.lock().unwrap();
+        let received = events.iter().find(|e| {
+            matches!(e, Event::GroupMessageReceived { group_id: gid, content, .. }
+                if gid == &group_id && content == "Relay decrypted!")
+        });
+        assert!(
+            received.is_some(),
+            "Relay MLS message should be decrypted and emitted"
+        );
+    }
+
+    #[test]
+    fn test_handle_relay_group_message_mls_unavailable_emits_raw() {
+        // Verifies that when MLS is not initialized, relay group messages
+        // are emitted as raw content (base64 string) rather than being dropped.
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        // Deliberately NOT initializing MLS
+        protocol.start().unwrap();
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        let raw_content = base64_encode(b"some ciphertext");
+        protocol.handle_relay_group_message_with_mls(
+            "group:no-mls",
+            "alice",
+            &raw_content,
+            "2026-03-13T00:00:00Z",
+            "msg-relay-no-mls",
+            None,
+        );
+
+        // Should emit the raw base64 content since MLS is unavailable
+        let events = events.lock().unwrap();
+        let received = events.iter().find(|e| {
+            matches!(e, Event::GroupMessageReceived { group_id, content, .. }
+                if group_id == "group:no-mls" && content == &raw_content)
+        });
+        assert!(
+            received.is_some(),
+            "Should emit raw content when MLS is unavailable"
+        );
+    }
+
+    #[test]
+    fn test_relay_register_group_on_create() {
+        // Verifies that creating a group with Internet available automatically
+        // registers it with the relay.
+        use offline_protocol_transport::mock::MockTransport;
+
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+        protocol.start().unwrap();
+
+        let info = protocol.create_group("Auto Register Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        assert!(
+            protocol.group_mesh.relay_synced.contains(&group_id),
+            "Group should be relay-synced after creation with Internet available"
+        );
+    }
+
+    #[test]
+    fn test_is_internet_available() {
+        use offline_protocol_transport::mock::MockTransport;
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+
+        // No Internet transport → not available
+        assert!(!protocol.is_internet_available());
+
+        // Add Internet transport
+        let mut internet = MockTransport::new(TransportType::Internet);
+        internet.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::Internet, Box::new(internet));
+
+        // Now available
+        assert!(protocol.is_internet_available());
+
+        // Remove it
+        protocol
+            .transport_manager_mut()
+            .remove_transport(TransportType::Internet);
+        assert!(!protocol.is_internet_available());
     }
 
     #[test]
