@@ -9,7 +9,7 @@ use crate::{Error, Event, Result};
 use chrono::Utc;
 use offline_protocol_core::{Message, MessageId, MessagePriority};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -23,6 +23,26 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 const PENDING_COMMIT_TTL_SECS: u64 = 120;
+
+/// Bundled state for mesh group messaging.
+///
+/// Groups together the cached member lists, dedup table, and pending commit
+/// buffer so that `OfflineProtocol` doesn't carry these as individual fields.
+#[derive(Default)]
+pub(crate) struct GroupMeshState {
+    /// Cached group membership lists for fan-out without holding MLS lock.
+    /// Maps group_id -> list of member user IDs.
+    pub(crate) members: HashMap<String, Vec<String>>,
+
+    /// Deduplication cache for group messages received via multiple paths.
+    /// Key: message ID, Value: when first seen.
+    pub(crate) message_dedup: HashMap<String, Instant>,
+
+    /// Buffer for out-of-order MLS commits that failed to decrypt.
+    /// Maps group_id -> deque of pending commits awaiting retry.
+    /// When a commit succeeds for a group, buffered commits are drained and retried.
+    pub(crate) pending_commits: HashMap<String, VecDeque<PendingCommit>>,
+}
 
 /// Outcome of attempting to process an MLS Commit.
 enum CommitOutcome {
@@ -129,7 +149,7 @@ impl OfflineProtocol {
 
         // Dedup check using the unique message ID
         let dedup_key = message.id.as_str().to_string();
-        if self.group_message_dedup.contains_key(&dedup_key) {
+        if self.group_mesh.message_dedup.contains_key(&dedup_key) {
             debug!(
                 group_id = %payload.group_id,
                 msg_id = %dedup_key,
@@ -141,8 +161,8 @@ impl OfflineProtocol {
         // Mark as seen BEFORE attempting decode/decrypt to prevent replay
         // amplification: an adversary replaying the same message (even with a bad
         // epoch) should only trigger one MLS crypto operation.
-        self.group_message_dedup.insert(dedup_key, Instant::now());
-        if self.group_message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+        self.group_mesh.message_dedup.insert(dedup_key, Instant::now());
+        if self.group_mesh.message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
             self.cleanup_group_message_dedup();
         }
 
@@ -253,7 +273,7 @@ impl OfflineProtocol {
 
         if let Some(members) = join_result {
             let group_id = payload.group_id.clone();
-            self.group_members.insert(group_id.clone(), members);
+            self.group_mesh.members.insert(group_id.clone(), members);
             self.emit_event(Event::group_member_added(
                 group_id,
                 self.config.user_id.clone(),
@@ -382,7 +402,7 @@ impl OfflineProtocol {
         // Refresh cache and compute actual membership delta
         let _ = self.refresh_group_members(&payload.group_id);
         let members_after: HashSet<String> = self
-            .group_members
+            .group_mesh.members
             .get(&payload.group_id)
             .map(|m| m.iter().cloned().collect())
             .unwrap_or_default();
@@ -436,7 +456,7 @@ impl OfflineProtocol {
             buffered_at: Instant::now(),
         };
         let buf = self
-            .pending_commits
+            .group_mesh.pending_commits
             .entry(group_id.to_string())
             .or_default();
         if buf.len() < MAX_PENDING_COMMITS_PER_GROUP {
@@ -466,7 +486,7 @@ impl OfflineProtocol {
     fn drain_pending_commits(&mut self, group_id: &str) {
         // Limit iterations to avoid unbounded looping
         for _ in 0..MAX_PENDING_COMMITS_PER_GROUP {
-            let pending = match self.pending_commits.get_mut(group_id) {
+            let pending = match self.group_mesh.pending_commits.get_mut(group_id) {
                 Some(buf) if !buf.is_empty() => std::mem::take(buf),
                 _ => break,
             };
@@ -499,7 +519,7 @@ impl OfflineProtocol {
 
             // Re-buffer commits that still failed
             if !still_pending.is_empty() {
-                self.pending_commits
+                self.group_mesh.pending_commits
                     .entry(group_id.to_string())
                     .or_default()
                     .extend(still_pending);
@@ -513,11 +533,11 @@ impl OfflineProtocol {
 
         // Clean up empty entries
         if self
-            .pending_commits
+            .group_mesh.pending_commits
             .get(group_id)
             .map_or(true, |v| v.is_empty())
         {
-            self.pending_commits.remove(group_id);
+            self.group_mesh.pending_commits.remove(group_id);
         }
     }
 
@@ -571,7 +591,7 @@ impl OfflineProtocol {
         let members = self
             .refresh_group_members(&payload.group_id)
             .ok()
-            .or_else(|| self.group_members.get(&payload.group_id).cloned())
+            .or_else(|| self.group_mesh.members.get(&payload.group_id).cloned())
             .unwrap_or_default();
 
         if !members.iter().any(|m| m == sender) {
@@ -616,9 +636,11 @@ impl OfflineProtocol {
             }
         }
 
-        // Only emit the leave event if we didn't already emit via remove_from_group
+        // Only emit the leave event if we didn't already emit via remove_from_group.
+        // Note: we skip refresh_group_members here because the leaver hasn't been
+        // removed from MLS yet — only the elected node issues the remove-commit.
+        // The cache will be updated when we process the elected node's commit.
         if !should_remove {
-            let _ = self.refresh_group_members(&payload.group_id);
             self.emit_event(Event::group_member_removed(
                 payload.group_id,
                 payload.leaving_member.clone(),
@@ -636,7 +658,7 @@ impl OfflineProtocol {
             .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
         let members = info.members.clone();
         drop(mls_guard);
-        self.group_members
+        self.group_mesh.members
             .insert(group_id.to_string(), members.clone());
         Ok(members)
     }
@@ -656,7 +678,7 @@ impl OfflineProtocol {
         let members = group_info.members.clone();
         drop(mls_guard);
 
-        self.group_members.insert(group_id.clone(), members);
+        self.group_mesh.members.insert(group_id.clone(), members);
 
         self.emit_event(Event::group_created(group_id, group_name.to_string()));
 
@@ -670,7 +692,7 @@ impl OfflineProtocol {
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
         // Check group member cap before adding
         let current_count = self
-            .group_members
+            .group_mesh.members
             .get(group_id)
             .map(|m| m.len())
             .or_else(|| {
@@ -843,7 +865,7 @@ impl OfflineProtocol {
     pub fn leave_mesh_group(&mut self, group_id: &str) -> Result<()> {
         // Get members before leaving
         let members = self
-            .group_members
+            .group_mesh.members
             .get(group_id)
             .cloned()
             .or_else(|| self.refresh_group_members(group_id).ok())
@@ -902,7 +924,7 @@ impl OfflineProtocol {
         drop(mls_guard);
 
         // Remove from cache
-        self.group_members.remove(group_id);
+        self.group_mesh.members.remove(group_id);
 
         info!(group_id = %group_id, "Left mesh group");
         Ok(())
@@ -931,7 +953,7 @@ impl OfflineProtocol {
         };
 
         // Read member list from cache, falling back to MLS on cache miss.
-        let members = match self.group_members.get(group_id) {
+        let members = match self.group_mesh.members.get(group_id) {
             Some(m) => m.clone(),
             None => {
                 let mls_guard = self.read_mls_guard()?;
@@ -944,8 +966,8 @@ impl OfflineProtocol {
         };
 
         // Update cache if it was a miss
-        if !self.group_members.contains_key(group_id) {
-            self.group_members
+        if !self.group_mesh.members.contains_key(group_id) {
+            self.group_mesh.members
                 .insert(group_id.to_string(), members.clone());
         }
 
@@ -1037,23 +1059,23 @@ impl OfflineProtocol {
     /// Cleans up expired group message dedup entries and enforces size cap.
     pub(crate) fn cleanup_group_message_dedup(&mut self) {
         let cutoff = Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS);
-        self.group_message_dedup
+        self.group_mesh.message_dedup
             .retain(|_, seen_at| *seen_at > cutoff);
         // If still over cap after TTL cleanup, drop oldest entries using O(N) selection
-        let len = self.group_message_dedup.len();
+        let len = self.group_mesh.message_dedup.len();
         if len > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
-            let mut entries: Vec<_> = self.group_message_dedup.drain().collect();
+            let mut entries: Vec<_> = self.group_mesh.message_dedup.drain().collect();
             // Partition so the newest MAX entries are in [..MAX]
             entries.select_nth_unstable_by_key(MAX_GROUP_MESSAGE_DEDUP_ENTRIES, |(_, ts)| {
                 std::cmp::Reverse(*ts)
             });
             entries.truncate(MAX_GROUP_MESSAGE_DEDUP_ENTRIES);
-            self.group_message_dedup = entries.into_iter().collect();
+            self.group_mesh.message_dedup = entries.into_iter().collect();
         }
 
         // Expire stale pending commits
         let commit_cutoff = Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS);
-        self.pending_commits.retain(|_, commits| {
+        self.group_mesh.pending_commits.retain(|_, commits| {
             commits.retain(|c| c.buffered_at > commit_cutoff);
             !commits.is_empty()
         });
@@ -1096,7 +1118,7 @@ mod tests {
         assert!(group_info.members.contains(&"user123".to_string()));
 
         // Verify group is cached
-        let cached = protocol.group_members.get(group_info.group_id.as_str());
+        let cached = protocol.group_mesh.members.get(group_info.group_id.as_str());
         assert!(cached.is_some());
         assert!(cached.unwrap().contains(&"user123".to_string()));
     }
@@ -1166,13 +1188,13 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // Verify group exists in cache
-        assert!(protocol.group_members.contains_key(&group_id));
+        assert!(protocol.group_mesh.members.contains_key(&group_id));
 
         // Leave the group
         protocol.leave_mesh_group(&group_id).unwrap();
 
         // Verify group removed from cache
-        assert!(!protocol.group_members.contains_key(&group_id));
+        assert!(!protocol.group_mesh.members.contains_key(&group_id));
     }
 
     #[test]
@@ -1200,23 +1222,23 @@ mod tests {
         // Insert dedup entry using message ID as key
         let key = "msg-001".to_string();
         protocol
-            .group_message_dedup
+            .group_mesh.message_dedup
             .insert(key.clone(), Instant::now());
-        assert!(protocol.group_message_dedup.contains_key(&key));
+        assert!(protocol.group_mesh.message_dedup.contains_key(&key));
 
         // Cleanup should keep recent entries
         protocol.cleanup_group_message_dedup();
-        assert!(protocol.group_message_dedup.contains_key(&key));
+        assert!(protocol.group_mesh.message_dedup.contains_key(&key));
 
         // Insert old entry and verify cleanup removes it
         let old_key = "msg-002".to_string();
-        protocol.group_message_dedup.insert(
+        protocol.group_mesh.message_dedup.insert(
             old_key.clone(),
             Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS + 1),
         );
         protocol.cleanup_group_message_dedup();
-        assert!(!protocol.group_message_dedup.contains_key(&old_key));
-        assert!(protocol.group_message_dedup.contains_key(&key));
+        assert!(!protocol.group_mesh.message_dedup.contains_key(&old_key));
+        assert!(protocol.group_mesh.message_dedup.contains_key(&key));
     }
 
     #[test]
@@ -1233,7 +1255,7 @@ mod tests {
         });
 
         // Pre-populate group member cache
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             "group:test-123".to_string(),
             vec![
                 "user123".to_string(),
@@ -1335,10 +1357,10 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // refresh_group_members should populate cache
-        protocol.group_members.clear();
+        protocol.group_mesh.members.clear();
         let members = protocol.refresh_group_members(&group_id).unwrap();
         assert!(members.contains(&"user123".to_string()));
-        assert!(protocol.group_members.contains_key(&group_id));
+        assert!(protocol.group_mesh.members.contains_key(&group_id));
     }
 
     #[test]
@@ -1367,15 +1389,15 @@ mod tests {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
         // Add an expired dedup entry
-        protocol.group_message_dedup.insert(
+        protocol.group_mesh.message_dedup.insert(
             "msg-expired-001".to_string(),
             Instant::now() - StdDuration::from_secs(GROUP_MESSAGE_DEDUP_TTL_SECS + 1),
         );
-        assert_eq!(protocol.group_message_dedup.len(), 1);
+        assert_eq!(protocol.group_mesh.message_dedup.len(), 1);
 
         // cleanup_expired_entries should clean it up
         protocol.cleanup_expired_entries();
-        assert!(protocol.group_message_dedup.is_empty());
+        assert!(protocol.group_mesh.message_dedup.is_empty());
     }
 
     #[test]
@@ -1551,7 +1573,7 @@ mod tests {
 
         // Update member caches
         alice.refresh_group_members(&group_id).unwrap();
-        bob.group_members.insert(
+        bob.group_mesh.members.insert(
             group_id.clone(),
             vec!["alice".to_string(), "bob".to_string()],
         );
@@ -1616,7 +1638,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // Manually set the member cache to include more members
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec![
                 "user123".to_string(), // self
@@ -1659,15 +1681,15 @@ mod tests {
         let count = MAX_GROUP_MESSAGE_DEDUP_ENTRIES + 100;
         for i in 0..count {
             protocol
-                .group_message_dedup
+                .group_mesh.message_dedup
                 .insert(format!("msg-{:06}", i), Instant::now());
         }
-        assert_eq!(protocol.group_message_dedup.len(), count);
+        assert_eq!(protocol.group_mesh.message_dedup.len(), count);
 
         // Cleanup should enforce the cap
         protocol.cleanup_group_message_dedup();
         assert!(
-            protocol.group_message_dedup.len() <= MAX_GROUP_MESSAGE_DEDUP_ENTRIES,
+            protocol.group_mesh.message_dedup.len() <= MAX_GROUP_MESSAGE_DEDUP_ENTRIES,
             "Dedup cache should be capped at {}",
             MAX_GROUP_MESSAGE_DEDUP_ENTRIES
         );
@@ -1848,7 +1870,7 @@ mod tests {
             let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.join_group(&welcome).unwrap();
         }
-        bob.group_members.insert(
+        bob.group_mesh.members.insert(
             group_id.clone(),
             vec!["alice".to_string(), "bob".to_string()],
         );
@@ -1921,7 +1943,7 @@ mod tests {
         });
 
         // Pre-populate group member cache — "eve" is NOT in the group
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             "group:nonmember-test".to_string(),
             vec!["user123".to_string(), "alice".to_string()],
         );
@@ -1973,7 +1995,7 @@ mod tests {
         // "alice" < "bob" < "user123" lexicographically.
         // When "bob" leaves, "alice" should be elected (lex-first remaining).
         // Since we are "user123", we should NOT be elected.
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec![
                 "alice".to_string(),
@@ -2034,7 +2056,7 @@ mod tests {
 
         // Members: "user123" < "zzz" lexicographically.
         // When "zzz" leaves, "user123" is the lex-first remaining → we should be elected.
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec!["user123".to_string(), "zzz".to_string()],
         );
@@ -2217,7 +2239,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // Populate cache with multiple members
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec![
                 "user123".to_string(),
@@ -2357,7 +2379,7 @@ mod tests {
         // Process the message — decryption will fail but dedup should be recorded
         let _ = protocol.process_internal_message(&message);
         assert!(
-            protocol.group_message_dedup.contains_key(&msg_id),
+            protocol.group_mesh.message_dedup.contains_key(&msg_id),
             "Dedup entry must be inserted even when decryption fails"
         );
 
@@ -2394,7 +2416,7 @@ mod tests {
 
         // Inject a fake member so there are recipients
         protocol
-            .group_members
+            .group_mesh.members
             .get_mut(&group_id)
             .unwrap()
             .push("bob".to_string());
@@ -2422,7 +2444,7 @@ mod tests {
 
         // Verify cache is still intact
         assert!(
-            protocol.group_members.contains_key(&group_id),
+            protocol.group_mesh.members.contains_key(&group_id),
             "Group member cache should be preserved after failed leave"
         );
     }
@@ -2448,7 +2470,7 @@ mod tests {
             "Group should be removed after successful leave"
         );
         assert!(
-            !protocol.group_members.contains_key(&group_id),
+            !protocol.group_mesh.members.contains_key(&group_id),
             "Cache should be cleared after successful leave"
         );
     }
@@ -2479,18 +2501,18 @@ mod tests {
         };
 
         protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .entry(group_id.clone())
             .or_default()
             .push_back(pending);
 
         // Verify commit was buffered
         assert!(
-            protocol.pending_commits.contains_key(&group_id),
+            protocol.group_mesh.pending_commits.contains_key(&group_id),
             "Failed commit should be buffered"
         );
         assert_eq!(
-            protocol.pending_commits.get(&group_id).unwrap().len(),
+            protocol.group_mesh.pending_commits.get(&group_id).unwrap().len(),
             1,
             "Exactly one commit should be buffered"
         );
@@ -2517,7 +2539,7 @@ mod tests {
         }
 
         // Buffer should be capped at MAX_PENDING_COMMITS_PER_GROUP
-        let buffered = protocol.pending_commits.get(&group_id).unwrap();
+        let buffered = protocol.group_mesh.pending_commits.get(&group_id).unwrap();
         assert_eq!(
             buffered.len(),
             MAX_PENDING_COMMITS_PER_GROUP,
@@ -2537,7 +2559,7 @@ mod tests {
             buffered_at: Instant::now() - StdDuration::from_secs(PENDING_COMMIT_TTL_SECS + 10),
         };
         protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .entry(group_id.clone())
             .or_default()
             .push_back(expired);
@@ -2549,7 +2571,7 @@ mod tests {
             buffered_at: Instant::now(),
         };
         protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .entry(group_id.clone())
             .or_default()
             .push_back(recent);
@@ -2558,7 +2580,7 @@ mod tests {
         protocol.cleanup_group_message_dedup();
 
         // Expired entry should be removed, recent one retained
-        let buf = protocol.pending_commits.get(&group_id).unwrap();
+        let buf = protocol.group_mesh.pending_commits.get(&group_id).unwrap();
         assert_eq!(buf.len(), 1, "Only recent pending commit should survive");
         assert_eq!(buf[0].sender, "bob");
     }
@@ -2596,8 +2618,8 @@ mod tests {
 
         // Empty ciphertext should NOT be buffered (it's not an ordering issue)
         assert!(
-            !protocol.pending_commits.contains_key(&group_id)
-                || protocol.pending_commits.get(&group_id).unwrap().is_empty(),
+            !protocol.group_mesh.pending_commits.contains_key(&group_id)
+                || protocol.group_mesh.pending_commits.get(&group_id).unwrap().is_empty(),
             "Empty ciphertext commits must not be buffered"
         );
     }
@@ -2625,7 +2647,7 @@ mod tests {
         );
 
         // Verify state is clean
-        assert!(!protocol.group_members.contains_key(&group_id));
+        assert!(!protocol.group_mesh.members.contains_key(&group_id));
         let groups = protocol.list_mesh_groups().unwrap();
         assert!(!groups.contains(&group_id));
     }
@@ -2645,7 +2667,7 @@ mod tests {
         // Simulate a group at max_group_members by injecting fake members into cache
         let fake_members: Vec<String> = (0..max_members).map(|i| format!("member-{}", i)).collect();
         protocol
-            .group_members
+            .group_mesh.members
             .insert(group_id.clone(), fake_members);
 
         // Attempting to invite should fail with the cap error
@@ -2672,7 +2694,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // Simulate 3 members (at the custom cap)
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec![
                 "user123".to_string(),
@@ -2703,7 +2725,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // 2 members — below the cap of 3
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec!["user123".to_string(), "alice".to_string()],
         );
@@ -2841,7 +2863,7 @@ mod tests {
         };
         let bad_data = serde_json::to_string(&bad_commit).unwrap();
 
-        protocol.pending_commits.insert(
+        protocol.group_mesh.pending_commits.insert(
             real_group_id.clone(),
             VecDeque::from(vec![
                 PendingCommit {
@@ -2862,7 +2884,7 @@ mod tests {
         protocol.drain_pending_commits(&real_group_id);
 
         let remaining = protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .get(&real_group_id)
             .map(|v| v.len())
             .unwrap_or(0);
@@ -2893,7 +2915,7 @@ mod tests {
         };
         let data = serde_json::to_string(&bad_commit).unwrap();
 
-        protocol.pending_commits.insert(
+        protocol.group_mesh.pending_commits.insert(
             group_id.clone(),
             VecDeque::from(vec![PendingCommit {
                 sender: "alice".to_string(),
@@ -2906,7 +2928,7 @@ mod tests {
         protocol.drain_pending_commits(&group_id);
 
         assert!(
-            !protocol.pending_commits.contains_key(&group_id),
+            !protocol.group_mesh.pending_commits.contains_key(&group_id),
             "Expired pending commit should be dropped and entry cleaned up"
         );
     }
@@ -2926,7 +2948,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // No pending commits initially
-        assert!(protocol.pending_commits.is_empty());
+        assert!(protocol.group_mesh.pending_commits.is_empty());
 
         // Simulate receiving a commit with valid base64 but garbage MLS bytes.
         // This fails at MLS deserialization → permanent rejection, not buffered.
@@ -2954,7 +2976,7 @@ mod tests {
 
         // Garbage ciphertext → Deserialization error → permanent rejection, not buffered
         let buffered = protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .get(&group_id)
             .map(|b| b.len())
             .unwrap_or(0);
@@ -2995,7 +3017,7 @@ mod tests {
 
         protocol.process_internal_message(&message);
         assert!(
-            protocol.pending_commits.is_empty(),
+            protocol.group_mesh.pending_commits.is_empty(),
             "Rejected commits (empty ciphertext) should not be buffered"
         );
 
@@ -3010,7 +3032,7 @@ mod tests {
 
         protocol.process_internal_message(&bad_message);
         assert!(
-            protocol.pending_commits.is_empty(),
+            protocol.group_mesh.pending_commits.is_empty(),
             "Rejected commits (bad JSON) should not be buffered"
         );
     }
@@ -3030,13 +3052,13 @@ mod tests {
             );
         }
         assert_eq!(
-            protocol.pending_commits[&group_id].len(),
+            protocol.group_mesh.pending_commits[&group_id].len(),
             MAX_PENDING_COMMITS_PER_GROUP
         );
 
         // One more should evict the oldest
         protocol.buffer_pending_commit(&group_id, "sender-new", "data-new");
-        let buf = &protocol.pending_commits[&group_id];
+        let buf = &protocol.group_mesh.pending_commits[&group_id];
         assert_eq!(buf.len(), MAX_PENDING_COMMITS_PER_GROUP);
         // The oldest (sender-0) should have been evicted
         assert_eq!(buf[0].sender, "sender-1");
@@ -3057,7 +3079,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // Manually set member cache to 2 members (at cap)
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec!["user123".to_string(), "alice".to_string()],
         );
@@ -3138,7 +3160,7 @@ mod tests {
         );
 
         // Verify Alice's member cache was updated
-        let cached = alice.group_members.get(&group_id).unwrap();
+        let cached = alice.group_mesh.members.get(&group_id).unwrap();
         assert!(
             cached.contains(&"bob".to_string()),
             "Bob should be in Alice's member cache after invite"
@@ -3403,7 +3425,7 @@ mod tests {
         alice.refresh_group_members(&group_id).unwrap();
 
         // Verify bob is in the group
-        let members_before = alice.group_members.get(&group_id).unwrap();
+        let members_before = alice.group_mesh.members.get(&group_id).unwrap();
         assert!(
             members_before.contains(&"bob".to_string()),
             "Bob should be in group before removal"
@@ -3428,7 +3450,7 @@ mod tests {
         );
 
         // Verify bob is no longer in the cached member list
-        let members_after = alice.group_members.get(&group_id).unwrap();
+        let members_after = alice.group_mesh.members.get(&group_id).unwrap();
         assert!(
             !members_after.contains(&"bob".to_string()),
             "Bob should be removed from member cache"
@@ -3480,7 +3502,7 @@ mod tests {
         alice.invite_to_group(&group_id, "bob").unwrap();
 
         // Verify Bob was added
-        let members = alice.group_members.get(&group_id).unwrap();
+        let members = alice.group_mesh.members.get(&group_id).unwrap();
         assert!(members.contains(&"bob".to_string()));
 
         // Store Carol's key package and invite
@@ -3494,7 +3516,7 @@ mod tests {
         alice.invite_to_group(&group_id, "carol").unwrap();
 
         // Verify both are in the group
-        let members = alice.group_members.get(&group_id).unwrap();
+        let members = alice.group_mesh.members.get(&group_id).unwrap();
         assert!(members.contains(&"bob".to_string()));
         assert!(members.contains(&"carol".to_string()));
         assert!(members.contains(&"alice".to_string()));
@@ -3535,7 +3557,7 @@ mod tests {
         // GroupNotFound is permanent → should NOT be buffered
         assert!(
             !protocol
-                .pending_commits
+                .group_mesh.pending_commits
                 .contains_key("group:does-not-exist"),
             "Commit for unknown group must be rejected, not buffered"
         );
@@ -3583,7 +3605,7 @@ mod tests {
         // as permanent. If the error comes back as Decryption (process_message
         // failed), it's retriable. Either way, verify the buffer is bounded.
         let buffered = protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .get(&group_id)
             .map(|b| b.len())
             .unwrap_or(0);
@@ -3704,7 +3726,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // Populate cache with another member
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec!["user123".to_string(), "bob".to_string()],
         );
@@ -3739,7 +3761,7 @@ mod tests {
 
         // Should succeed — no other members to notify
         protocol.leave_mesh_group(&group_id).unwrap();
-        assert!(!protocol.group_members.contains_key(&group_id));
+        assert!(!protocol.group_mesh.members.contains_key(&group_id));
 
         // Group should no longer be listed
         let groups = protocol.list_mesh_groups().unwrap();
@@ -3777,7 +3799,7 @@ mod tests {
             let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.join_group(&welcome).unwrap();
         }
-        bob.group_members.insert(
+        bob.group_mesh.members.insert(
             group_id.clone(),
             vec!["alice".to_string(), "bob".to_string()],
         );
@@ -3906,7 +3928,7 @@ mod tests {
             buffered_at: Instant::now(),
         });
         protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .insert(group_id.clone(), buf);
 
         // drain_pending_commits without MLS — all should be rejected (no MLS guard),
@@ -3915,7 +3937,7 @@ mod tests {
 
         // Buffer should be empty or cleaned up (all rejected since MLS is not initialized)
         let remaining = protocol
-            .pending_commits
+            .group_mesh.pending_commits
             .get(&group_id)
             .map(|b| b.len())
             .unwrap_or(0);
@@ -3945,7 +3967,7 @@ mod tests {
         let group_id = info.group_id.as_str().to_string();
 
         // Populate cache with multiple members
-        protocol.group_members.insert(
+        protocol.group_mesh.members.insert(
             group_id.clone(),
             vec![
                 "user123".to_string(),

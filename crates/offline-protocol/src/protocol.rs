@@ -3,7 +3,6 @@
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
 use crate::events::DecryptionFailureCode;
 use crate::file_transfer::{FileChunk, FileTransferManager, OutboundTransferState};
-use crate::group_mesh::PendingCommit;
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
 use crate::mls_observability::{
@@ -598,18 +597,8 @@ pub struct OfflineProtocol {
     /// Mesh service registry and handler (extracted crate).
     mesh_services: MeshServices,
 
-    /// Cached group membership lists for fan-out without holding MLS lock.
-    /// Maps group_id -> list of member user IDs.
-    pub(crate) group_members: HashMap<String, Vec<String>>,
-
-    /// Deduplication cache for group messages received via multiple paths.
-    /// Key: message ID, Value: when first seen.
-    pub(crate) group_message_dedup: HashMap<String, Instant>,
-
-    /// Buffer for out-of-order MLS commits that failed to decrypt.
-    /// Maps group_id -> deque of pending commits awaiting retry.
-    /// When a commit succeeds for a group, buffered commits are drained and retried.
-    pub(crate) pending_commits: HashMap<String, std::collections::VecDeque<PendingCommit>>,
+    /// Bundled state for mesh group messaging (member cache, dedup, pending commits).
+    pub(crate) group_mesh: crate::group_mesh::GroupMeshState,
 }
 
 impl OfflineProtocol {
@@ -672,9 +661,7 @@ impl OfflineProtocol {
             outbound_media_chunks: HashMap::new(),
             outbound_media_windows: HashMap::new(),
             mesh_services: MeshServices::new(),
-            group_members: HashMap::new(),
-            group_message_dedup: HashMap::new(),
-            pending_commits: HashMap::new(),
+            group_mesh: crate::group_mesh::GroupMeshState::default(),
             config,
         })
     }
