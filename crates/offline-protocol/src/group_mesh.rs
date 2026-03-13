@@ -25,14 +25,6 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 const MAX_PENDING_COMMITS_PER_GROUP: usize = 8;
 /// TTL for buffered pending commits (2 minutes).
 const PENDING_COMMIT_TTL_SECS: u64 = 120;
-/// Maximum plaintext content size for outgoing group messages (512 KB).
-/// After MLS encryption + base64, the wire payload must stay within
-/// `MAX_BASE64_PAYLOAD_SIZE` (1 MB). 512 KB plaintext leaves headroom for MLS
-/// framing overhead and the base64 expansion (~33%).
-pub(super) const MAX_GROUP_CONTENT_LENGTH: usize = 524_288;
-/// Maximum number of members allowed in a single mesh group.
-const MAX_GROUP_MEMBERS: usize = 256;
-
 // --- Group (mesh/MLS) payloads ---
 
 /// Payload for MLS-encrypted group messages sent via mesh.
@@ -657,10 +649,11 @@ impl OfflineProtocol {
                     })
             })
             .unwrap_or(0);
-        if current_count >= MAX_GROUP_MEMBERS {
+        let max_members = self.config.group.max_group_members;
+        if current_count >= max_members {
             return Err(Error::Other(format!(
                 "Group has {} members, cannot exceed {} limit",
-                current_count, MAX_GROUP_MEMBERS
+                current_count, max_members
             )));
         }
 
@@ -898,14 +891,6 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<&str>,
     ) -> Result<Vec<MessageId>> {
-        if content.len() > MAX_GROUP_CONTENT_LENGTH {
-            return Err(Error::Other(format!(
-                "Group message content too large: {} bytes exceeds {} limit",
-                content.len(),
-                MAX_GROUP_CONTENT_LENGTH
-            )));
-        }
-
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
         // Encrypt and read member list while holding &mut self to ensure
@@ -2635,41 +2620,6 @@ mod tests {
     }
 
     #[test]
-    fn test_group_mls_send_message_content_too_large() {
-        let storage = Arc::new(crate::mls::InMemoryStorage::default());
-        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
-        protocol.initialize_mls(storage).unwrap();
-        protocol.start().unwrap();
-
-        let info = protocol.create_mesh_group("Large Content Test").unwrap();
-        let group_id = info.group_id.as_str().to_string();
-
-        // Content at the limit should not be rejected by the size guard
-        // (it may still fail at MLS encrypt, but the size check passes)
-        let at_limit = "A".repeat(MAX_GROUP_CONTENT_LENGTH);
-        let result = protocol.send_group_message(&group_id, &at_limit, None, None);
-        // This will succeed (solo group returns Ok([])) or fail for MLS reasons,
-        // but NOT for the "content too large" reason
-        if let Err(ref e) = result {
-            assert!(
-                !e.to_string().contains("too large"),
-                "Content at limit should not be rejected as too large"
-            );
-        }
-
-        // Content over the limit must be rejected
-        let oversized = "A".repeat(MAX_GROUP_CONTENT_LENGTH + 1);
-        let result = protocol.send_group_message(&group_id, &oversized, None, None);
-        assert!(result.is_err(), "Oversized content should be rejected");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("too large"),
-            "Error should mention 'too large', got: {}",
-            err_msg
-        );
-    }
-
-    #[test]
     fn test_group_mls_invite_exceeds_max_members() {
         let storage = Arc::new(crate::mls::InMemoryStorage::default());
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -2679,8 +2629,10 @@ mod tests {
         let info = protocol.create_mesh_group("Cap Test").unwrap();
         let group_id = info.group_id.as_str().to_string();
 
-        // Simulate a group at MAX_GROUP_MEMBERS by injecting fake members into cache
-        let fake_members: Vec<String> = (0..MAX_GROUP_MEMBERS)
+        let max_members = protocol.config.group.max_group_members;
+
+        // Simulate a group at max_group_members by injecting fake members into cache
+        let fake_members: Vec<String> = (0..max_members)
             .map(|i| format!("member-{}", i))
             .collect();
         protocol
@@ -2696,6 +2648,154 @@ mod tests {
             "Error should mention cap, got: {}",
             err_msg
         );
+    }
+
+    #[test]
+    fn test_group_mls_invite_custom_max_members() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut config = create_test_config();
+        config.group.max_group_members = 3; // small cap for testing
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Custom Cap Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Simulate 3 members (at the custom cap)
+        protocol.group_members.insert(
+            group_id.clone(),
+            vec![
+                "user123".to_string(),
+                "alice".to_string(),
+                "bob".to_string(),
+            ],
+        );
+
+        // Should be rejected — at the cap
+        let result = protocol.invite_to_group(&group_id, "carol");
+        assert!(result.is_err(), "Should reject invite when at custom cap");
+        assert!(result.unwrap_err().to_string().contains("cannot exceed 3"));
+    }
+
+    #[test]
+    fn test_group_mls_invite_below_custom_cap_allowed() {
+        // With max_group_members = 3, a group with 2 members should still accept invites.
+        // The invite will fail at the key-package stage (no key package), but the
+        // member cap check should NOT be the reason.
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut config = create_test_config();
+        config.group.max_group_members = 3;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Below Cap Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // 2 members — below the cap of 3
+        protocol.group_members.insert(
+            group_id.clone(),
+            vec!["user123".to_string(), "alice".to_string()],
+        );
+
+        let result = protocol.invite_to_group(&group_id, "bob");
+        // Should fail for missing key package, NOT for cap
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No key package"),
+            "Should fail for missing key package, not cap. Got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_group_mls_invite_max_members_1_blocks_any_invite() {
+        // Edge case: max_group_members = 1 means the group creator is the
+        // only member allowed — any invite should be rejected.
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut config = create_test_config();
+        config.group.max_group_members = 1;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Solo Only").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        let result = protocol.invite_to_group(&group_id, "alice");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cannot exceed 1"),
+            "max_group_members=1 should block all invites"
+        );
+    }
+
+    #[test]
+    fn test_group_mls_invite_large_max_members_not_rejected() {
+        // With a very large cap, the member count check should pass.
+        // The invite will fail for other reasons (no key package).
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut config = create_test_config();
+        config.group.max_group_members = 10_000;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Large Cap Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        let result = protocol.invite_to_group(&group_id, "alice");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            !err_msg.contains("cannot exceed"),
+            "Large cap should not trigger member limit. Got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_group_mls_send_large_content_no_send_side_limit() {
+        // Verify there is no send-side content length limit.
+        // A large plaintext should be accepted by send_group_message (the
+        // MLS encrypt or transport may fail, but the error should NOT be
+        // about content being "too large").
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Large Content Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // 1 MB plaintext — previously would have been rejected by MAX_GROUP_CONTENT_LENGTH (512 KB)
+        let large_content = "A".repeat(1_048_576);
+        let result = protocol.send_group_message(&group_id, &large_content, None, None);
+
+        // Solo group → Ok([]) since there's no one to send to, proving
+        // the size check is gone
+        assert!(result.is_ok(), "Large content should not be rejected");
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_group_mls_send_very_large_content_solo_group() {
+        // Even very large payloads should pass the send path for solo groups.
+        // The transport layer (not the group module) handles size limits.
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        protocol.start().unwrap();
+
+        let info = protocol.create_mesh_group("Very Large Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // 2 MB plaintext
+        let content = "B".repeat(2 * 1_048_576);
+        let result = protocol.send_group_message(&group_id, &content, None, None);
+        assert!(result.is_ok(), "2 MB content should not be rejected at send");
     }
 }
 

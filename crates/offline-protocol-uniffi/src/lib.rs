@@ -769,6 +769,7 @@ pub struct ProtocolConfig {
     pub max_pending_global: u64,
     pub pending_ttl_ms: u64,
     pub overflow_policy: OverflowPolicy,
+    pub max_group_members: u32,
 }
 
 /// Extended protocol configuration with all options
@@ -805,6 +806,7 @@ impl From<ProtocolConfig> for CoreConfig {
                 OverflowPolicy::DropNewest => CoreOverflowPolicy::DropNewest,
             },
         };
+        core_config.group.max_group_members = config.max_group_members as usize;
         core_config
     }
 }
@@ -3507,6 +3509,7 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
+            max_group_members: 256,
         }
     }
 
@@ -3527,6 +3530,7 @@ mod tests {
             max_pending_global: 4096,
             pending_ttl_ms: 120_000,
             overflow_policy: OverflowPolicy::DropOldest,
+            max_group_members: 256,
         }
     }
 

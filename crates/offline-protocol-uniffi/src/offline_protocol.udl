@@ -350,6 +350,7 @@ dictionary ProtocolConfig {
     u64 max_pending_global;
     u64 pending_ttl_ms;
     OverflowPolicy overflow_policy;
+    u32 max_group_members;
 };
 
 // Extended protocol configuration with all options
