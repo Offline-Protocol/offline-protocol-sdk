@@ -41,9 +41,7 @@ fn setup_with_events() -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>) {
 
 /// Creates a two-party (Alice + Bob) setup with MLS groups in sync.
 /// Returns (alice, bob, group_id).
-fn setup_alice_bob_group(
-    group_name: &str,
-) -> (OfflineProtocol, OfflineProtocol, String) {
+fn setup_alice_bob_group(group_name: &str) -> (OfflineProtocol, OfflineProtocol, String) {
     let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
     let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
     let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
@@ -1693,11 +1691,7 @@ fn test_group_mls_buffer_pending_commit_respects_cap() {
 
     // Fill the buffer to capacity
     for i in 0..MAX_PENDING_COMMITS_PER_GROUP {
-        protocol.buffer_pending_commit(
-            &group_id,
-            &format!("sender-{}", i),
-            &format!("data-{}", i),
-        );
+        protocol.buffer_pending_commit(&group_id, &format!("sender-{}", i), &format!("data-{}", i));
     }
     assert_eq!(
         protocol.group_mesh.pending_commits[&group_id].len(),
