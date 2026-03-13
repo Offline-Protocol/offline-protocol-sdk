@@ -131,6 +131,13 @@ const CTRL_SIG_META_KEY: &str = "__ctrl_sig";
 /// Metadata key for the sender's Ed25519 public key (base64, 32 bytes raw).
 const CTRL_PK_META_KEY: &str = "__ctrl_pk";
 
+/// Domain separator prepended to the canonical signing payload.
+///
+/// Prevents cross-context signature reuse: a signature produced for control
+/// messages cannot be replayed in a future protocol extension that reuses the
+/// same MLS identity key but with a different domain separator.
+const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
+
 /// All internal message prefixes used for control messages.
 /// Used to reject user-sent messages that start with these prefixes.
 ///
@@ -5212,12 +5219,10 @@ impl OfflineProtocol {
                     message_id = %message.id,
                     "Dropping control message: sender/transport identity mismatch"
                 );
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::security_warning(
-                        sender.to_string(),
-                        "Control message sender does not match transport peer identity".to_string(),
-                    ));
-                }
+                self.emit_security_warning(
+                    sender,
+                    "Control message sender does not match transport peer identity",
+                );
                 return Some(InternalMessageResult::Consumed);
             }
 
@@ -5236,12 +5241,10 @@ impl OfflineProtocol {
                             message_id = %message.id,
                             "Dropping unsigned control message from TOFU-pinned peer (signature downgrade)"
                         );
-                        if let Ok(state) = lock_shared_state(&self.shared_state) {
-                            state.emit_event(Event::security_warning(
-                                sender.to_string(),
-                                "Unsigned control message from peer with pinned key (possible downgrade attack)".to_string(),
-                            ));
-                        }
+                        self.emit_security_warning(
+                            sender,
+                            "Unsigned control message from peer with pinned key (possible downgrade attack)",
+                        );
                         return Some(InternalMessageResult::Consumed);
                     }
                     debug!(
@@ -5258,12 +5261,10 @@ impl OfflineProtocol {
                         error = %err,
                         "Dropping control message: signature verification failed"
                     );
-                    if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::security_warning(
-                            sender.to_string(),
-                            format!("Control message rejected: {}", err),
-                        ));
-                    }
+                    self.emit_security_warning(
+                        sender,
+                        format!("Control message rejected: {}", err),
+                    );
                     return Some(InternalMessageResult::Consumed);
                 }
             }
@@ -6416,7 +6417,10 @@ impl OfflineProtocol {
             message.recipient.as_str(),
             &message.content,
         ];
-        let mut buf = Vec::with_capacity(fields.iter().map(|f| 4 + f.len()).sum());
+        let mut buf = Vec::with_capacity(
+            CTRL_SIGN_DOMAIN.len() + fields.iter().map(|f| 4 + f.len()).sum::<usize>(),
+        );
+        buf.extend_from_slice(CTRL_SIGN_DOMAIN);
         for field in &fields {
             buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
             buf.extend_from_slice(field.as_bytes());
@@ -6441,12 +6445,10 @@ impl OfflineProtocol {
             Ok(guard) => guard,
             Err(e) => {
                 error!(error = %e, "MLS lock poisoned — cannot sign control message");
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::security_warning(
-                        message.sender.as_str().to_string(),
-                        "Control message sent unsigned: MLS lock poisoned".to_string(),
-                    ));
-                }
+                self.emit_security_warning(
+                    message.sender.as_str(),
+                    "Control message sent unsigned: MLS lock poisoned",
+                );
                 return;
             }
         };
@@ -6455,12 +6457,10 @@ impl OfflineProtocol {
             Ok(pk) => pk,
             Err(e) => {
                 error!(error = %e, "Failed to get identity public key — sending unsigned control message");
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::security_warning(
-                        message.sender.as_str().to_string(),
-                        format!("Control message sent unsigned: {}", e),
-                    ));
-                }
+                self.emit_security_warning(
+                    message.sender.as_str(),
+                    format!("Control message sent unsigned: {}", e),
+                );
                 return;
             }
         };
@@ -6469,12 +6469,10 @@ impl OfflineProtocol {
             Ok(sig) => sig,
             Err(e) => {
                 error!(error = %e, "Failed to sign control message — sending unsigned");
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::security_warning(
-                        message.sender.as_str().to_string(),
-                        format!("Control message sent unsigned: {}", e),
-                    ));
-                }
+                self.emit_security_warning(
+                    message.sender.as_str(),
+                    format!("Control message sent unsigned: {}", e),
+                );
                 return;
             }
         };
@@ -6543,12 +6541,10 @@ impl OfflineProtocol {
                     sender = %sender,
                     "TOFU key mismatch: peer presented a different public key"
                 );
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::security_warning(
-                        sender.to_string(),
-                        "Public key changed for known peer (possible impersonation)".to_string(),
-                    ));
-                }
+                self.emit_security_warning(
+                    sender,
+                    "Public key changed for known peer (possible impersonation)",
+                );
                 return Err(Error::Other(format!(
                     "TOFU key mismatch for peer '{}'",
                     sender
@@ -6582,12 +6578,10 @@ impl OfflineProtocol {
                             "TOFU store full and no entry old enough to evict — \
                              refusing to pin new peer (possible cache-filling attack)"
                         );
-                        if let Ok(state) = lock_shared_state(&self.shared_state) {
-                            state.emit_event(Event::security_warning(
-                                sender.to_string(),
-                                "TOFU store full, cannot pin new peer key".to_string(),
-                            ));
-                        }
+                        self.emit_security_warning(
+                            sender,
+                            "TOFU store full, cannot pin new peer key",
+                        );
                         // Still accept the message (signature was valid) but
                         // don't pin — the peer will be re-verified each time.
                         return Ok(true);
@@ -6624,6 +6618,11 @@ impl OfflineProtocol {
             }
         }
         true
+    }
+
+    /// Emits a `SecurityWarning` event for the given peer.
+    fn emit_security_warning(&self, peer_id: &str, reason: impl Into<String>) {
+        self.emit_event(Event::security_warning(peer_id.to_string(), reason.into()));
     }
 
     /// Returns `true` if the message content starts with any internal prefix.
@@ -13663,8 +13662,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_canonical_signing_payload_is_length_prefixed() {
-        // Verify the canonical payload uses length-prefixed encoding, not
-        // delimiter-based, to prevent ambiguity from field contents.
+        // Verify the canonical payload uses a domain separator followed by
+        // length-prefixed encoding to prevent ambiguity and cross-context reuse.
         let msg = Message::new(
             UserId::new("alice").unwrap(),
             UserId::new("bob").unwrap(),
@@ -13674,8 +13673,14 @@ pub(crate) mod tests {
 
         let canonical = OfflineProtocol::build_canonical_payload(&msg);
 
-        // Parse back: each field is <4-byte big-endian length><utf-8 bytes>
-        let mut cursor = 0usize;
+        // Payload must start with the domain separator
+        assert!(
+            canonical.starts_with(CTRL_SIGN_DOMAIN),
+            "canonical payload must start with domain separator"
+        );
+
+        // Parse fields after the domain separator
+        let mut cursor = CTRL_SIGN_DOMAIN.len();
         let mut fields = Vec::new();
         while cursor < canonical.len() {
             assert!(cursor + 4 <= canonical.len(), "truncated length prefix");
@@ -13714,6 +13719,10 @@ pub(crate) mod tests {
 
         let payload_a = OfflineProtocol::build_canonical_payload(&msg_a);
         let payload_b = OfflineProtocol::build_canonical_payload(&msg_b);
+
+        // Both must start with domain separator
+        assert!(payload_a.starts_with(CTRL_SIGN_DOMAIN));
+        assert!(payload_b.starts_with(CTRL_SIGN_DOMAIN));
 
         // Even if content and recipient match, different sender lengths
         // produce different payloads.
@@ -13767,5 +13776,176 @@ pub(crate) mod tests {
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_REQUEST));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_RESPONSE));
+    }
+
+    // ========================================================================
+    // SECURITY: end-to-end signing round-trip and edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_sign_and_verify_control_message_roundtrip() {
+        let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        // Create a control message from "alice"
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+
+        // Sign it
+        protocol.sign_control_message(&mut msg);
+
+        // Must have signature and public key metadata
+        assert!(
+            msg.metadata.contains_key(CTRL_SIG_META_KEY),
+            "Signed message must contain signature metadata"
+        );
+        assert!(
+            msg.metadata.contains_key(CTRL_PK_META_KEY),
+            "Signed message must contain public key metadata"
+        );
+
+        // Verify it — should succeed and TOFU-pin alice's key
+        let result = protocol.verify_control_message(&msg);
+        assert!(
+            matches!(result, Ok(true)),
+            "Round-trip sign+verify must succeed, got: {:?}",
+            result
+        );
+
+        // Verify again — TOFU-pinned key should match
+        let result2 = protocol.verify_control_message(&msg);
+        assert!(
+            matches!(result2, Ok(true)),
+            "Second verify with same key must succeed"
+        );
+    }
+
+    #[test]
+    fn test_sign_and_verify_rejects_tampered_content() {
+        let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!(
+                "{}{{\"data\":\"original\"}}",
+                internal_prefixes::CONN_REQUEST
+            ),
+        );
+
+        protocol.sign_control_message(&mut msg);
+
+        // Tamper with the content after signing
+        msg.content = format!(
+            "{}{{\"data\":\"tampered\"}}",
+            internal_prefixes::CONN_REQUEST
+        );
+
+        // Verification must fail — signature no longer matches content
+        let result = protocol.verify_control_message(&msg);
+        assert!(result.is_err(), "Tampered content must fail verification");
+    }
+
+    #[test]
+    fn test_sign_control_message_without_mls_sends_unsigned() {
+        // No MLS initialization — sign_control_message should gracefully no-op
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("user123").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+
+        protocol.sign_control_message(&mut msg);
+
+        assert!(
+            !msg.metadata.contains_key(CTRL_SIG_META_KEY),
+            "Without MLS, message must remain unsigned"
+        );
+        assert!(
+            !msg.metadata.contains_key(CTRL_PK_META_KEY),
+            "Without MLS, message must not have public key metadata"
+        );
+    }
+
+    #[test]
+    fn test_verify_control_message_malformed_base64_signature() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        msg.metadata.insert(
+            CTRL_SIG_META_KEY.to_string(),
+            "!!!not-valid-base64!!!".to_string(),
+        );
+        msg.metadata
+            .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&vec![1u8; 32]));
+
+        let result = protocol.verify_control_message(&msg);
+        assert!(
+            result.is_err(),
+            "Malformed base64 signature must be rejected"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid control signature encoding"),
+            "Error should mention invalid encoding, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_verify_control_message_empty_signature() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        // Empty signature (0 bytes) — Ed25519 expects 64 bytes
+        msg.metadata
+            .insert(CTRL_SIG_META_KEY.to_string(), base64_encode(&[]));
+        msg.metadata
+            .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&vec![1u8; 32]));
+
+        let result = protocol.verify_control_message(&msg);
+        assert!(result.is_err(), "Empty signature must be rejected");
+    }
+
+    #[test]
+    fn test_verify_control_message_signature_without_public_key() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        // Has signature but no public key
+        msg.metadata
+            .insert(CTRL_SIG_META_KEY.to_string(), base64_encode(&vec![0u8; 64]));
+
+        let result = protocol.verify_control_message(&msg);
+        assert!(
+            result.is_err(),
+            "Signature without public key must be rejected"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("missing public key"),
+            "Error should mention missing public key, got: {}",
+            err_msg
+        );
     }
 }

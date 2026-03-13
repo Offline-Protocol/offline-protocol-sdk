@@ -246,13 +246,12 @@ pub struct Message {
     ///
     /// # Security
     ///
-    /// **Do not set this field from application code.** It must only be set by
-    /// authenticated transport layers (BLE, WiFi Direct, Internet relay) via
-    /// [`set_transport_peer_id`](Self::set_transport_peer_id). Setting it
-    /// incorrectly bypasses sender verification.
-    #[doc(hidden)]
+    /// This field is private to prevent application code from bypassing sender
+    /// verification. Use [`set_transport_peer_id`](Self::set_transport_peer_id)
+    /// (transport layers only) and [`transport_peer_id`](Self::transport_peer_id)
+    /// to interact with it.
     #[serde(skip)]
-    pub transport_peer_id: Option<String>,
+    transport_peer_id: Option<String>,
 }
 
 fn default_requires_ack() -> bool {
@@ -348,6 +347,7 @@ impl Message {
     /// match the transport-authenticated peer.
     ///
     /// **Never call this from application code.**
+    #[doc(hidden)]
     pub fn set_transport_peer_id(&mut self, peer_id: String) {
         self.transport_peer_id = Some(peer_id);
     }
