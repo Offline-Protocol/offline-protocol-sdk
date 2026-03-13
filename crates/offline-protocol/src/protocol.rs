@@ -4730,7 +4730,10 @@ impl OfflineProtocol {
     // PRESENCE, TYPING INDICATORS, AND READ RECEIPTS
     // ========================================================================
 
-    /// Sends a presence update to a peer.
+    /// Sends a presence update to a single peer (unicast).
+    ///
+    /// This sends to one recipient at a time. To broadcast presence to multiple
+    /// peers, the caller must invoke this method once per peer.
     ///
     /// # Arguments
     ///
@@ -4741,6 +4744,10 @@ impl OfflineProtocol {
         recipient: &str,
         status: PresenceStatus,
     ) -> Result<MessageId> {
+        if recipient.is_empty() {
+            return Err(Error::Other("recipient must not be empty".to_string()));
+        }
+
         let payload = PresencePayload {
             status,
             timestamp_ms: Utc::now().timestamp_millis(),
@@ -4768,6 +4775,9 @@ impl OfflineProtocol {
         conversation_id: &str,
         is_typing: bool,
     ) -> Result<MessageId> {
+        if recipient.is_empty() {
+            return Err(Error::Other("recipient must not be empty".to_string()));
+        }
         if conversation_id.is_empty() {
             return Err(Error::Other(
                 "conversation_id must not be empty".to_string(),
@@ -4800,6 +4810,9 @@ impl OfflineProtocol {
         recipient: &str,
         message_ids: Vec<String>,
     ) -> Result<MessageId> {
+        if recipient.is_empty() {
+            return Err(Error::Other("recipient must not be empty".to_string()));
+        }
         if message_ids.is_empty() {
             return Err(Error::Other("message_ids must not be empty".to_string()));
         }
@@ -8045,6 +8058,149 @@ pub(crate) mod tests {
         let payload = ReadReceiptPayload {
             message_ids: ids,
             timestamp_ms: 12345,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::READ_RECEIPT,
+            serde_json::to_string(&payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_send_presence_update_empty_recipient() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.send_presence_update("", PresenceStatus::Online);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_send_typing_indicator_empty_recipient() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.send_typing_indicator("", "convo", true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_send_read_receipt_empty_recipient() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.send_read_receipt("", vec!["msg-1".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_send_presence_update_away_status() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.send_presence_update("bob", PresenceStatus::Away);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_send_presence_update_offline_status() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+        protocol.start().unwrap();
+
+        let result = protocol.send_presence_update("bob", PresenceStatus::Offline);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_process_internal_message_typing_negative_timestamp() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let payload = TypingIndicatorPayload {
+            conversation_id: "bob".to_string(),
+            is_typing: true,
+            timestamp_ms: -1,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::TYPING_INDICATOR,
+            serde_json::to_string(&payload).unwrap()
+        );
+        let message = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            &content,
+        );
+
+        let result = protocol.process_internal_message(&message);
+        assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_process_internal_message_read_receipt_negative_timestamp() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_handle = Arc::clone(&events);
+
+        protocol.on_event(move |event| {
+            events_handle.lock().unwrap().push(event);
+        });
+
+        let payload = ReadReceiptPayload {
+            message_ids: vec!["msg-1".to_string()],
+            timestamp_ms: -1,
         };
         let content = format!(
             "{}{}",
