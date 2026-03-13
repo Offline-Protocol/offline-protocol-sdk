@@ -408,7 +408,7 @@ pub enum ProtocolState {
 }
 
 /// Shared state protected by mutex.
-pub(crate) struct SharedState {
+struct SharedState {
     /// Current protocol state.
     state: ProtocolState,
 
@@ -428,7 +428,7 @@ impl SharedState {
         }
     }
 
-    pub(crate) fn emit_event(&self, event: Event) {
+    fn emit_event(&self, event: Event) {
         for handler in &self.event_handlers {
             handler(event.clone());
         }
@@ -436,7 +436,7 @@ impl SharedState {
 }
 
 /// Helper function to lock a mutex and convert poison errors to protocol errors.
-pub(crate) fn lock_shared_state(
+fn lock_shared_state(
     state: &Arc<Mutex<SharedState>>,
 ) -> std::result::Result<std::sync::MutexGuard<'_, SharedState>, Error> {
     state
@@ -445,12 +445,12 @@ pub(crate) fn lock_shared_state(
 }
 
 #[derive(Clone)]
-pub(crate) struct OutboxEntry {
-    pub(crate) message: Message,
-    pub(crate) attempt_count: u32,
-    pub(crate) first_sent_at: DateTime<Utc>,
-    pub(crate) last_sent_at: DateTime<Utc>,
-    pub(crate) last_transport: Option<TransportType>,
+struct OutboxEntry {
+    message: Message,
+    attempt_count: u32,
+    first_sent_at: DateTime<Utc>,
+    last_sent_at: DateTime<Utc>,
+    last_transport: Option<TransportType>,
 }
 
 #[derive(Clone)]
@@ -502,17 +502,17 @@ pub struct OfflineProtocol {
     deduplicator: Deduplicator,
 
     /// Shared mutable state.
-    pub(crate) shared_state: Arc<Mutex<SharedState>>,
+    shared_state: Arc<Mutex<SharedState>>,
 
     /// Messages awaiting delivery/acknowledgment (store-and-forward outbox).
-    pub(crate) outbox: HashMap<MessageId, OutboxEntry>,
+    outbox: HashMap<MessageId, OutboxEntry>,
 
     /// Dedicated outbox for file chunk messages, separate from the main outbox
     /// to prevent large file transfers from evicting regular messages.
     media_outbox: HashMap<MessageId, OutboxEntry>,
 
     /// MLS manager for end-to-end encryption.
-    pub(crate) mls_manager: Option<Arc<RwLock<MlsManager>>>,
+    mls_manager: Option<Arc<RwLock<MlsManager>>>,
 
     /// Pending messages waiting for session establishment (recipient -> messages).
     pending_encrypted_messages: HashMap<String, Vec<PendingMessage>>,
@@ -5944,6 +5944,37 @@ impl OfflineProtocol {
     // ========================================================================
     // MESH GROUP MESSAGING (MLS-encrypted, transport-agnostic)
     // ========================================================================
+
+    /// Emits a protocol event to all registered handlers.
+    ///
+    /// Silently no-ops if the shared state lock is poisoned.
+    pub(crate) fn emit_event(&self, event: Event) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(event);
+        }
+    }
+
+    /// Returns an iterator over outbox messages (test-only).
+    #[cfg(test)]
+    pub(crate) fn outbox_messages(&self) -> impl Iterator<Item = &Message> {
+        self.outbox.values().map(|e| &e.message)
+    }
+
+    /// Clears all outbox entries (test-only).
+    #[cfg(test)]
+    pub(crate) fn clear_outbox(&mut self) {
+        self.outbox.clear();
+    }
+
+    /// Returns a reference to the MLS manager Arc (test-only).
+    #[cfg(test)]
+    pub(crate) fn mls_manager_for_testing(
+        &self,
+    ) -> &Arc<RwLock<offline_protocol_mls::MlsManager>> {
+        self.mls_manager
+            .as_ref()
+            .expect("MLS not initialized in test")
+    }
 
     /// Acquires a read guard on the MLS manager.
     ///

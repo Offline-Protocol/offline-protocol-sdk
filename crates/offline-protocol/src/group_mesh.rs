@@ -4,9 +4,7 @@
 //! encrypted message fan-out, commit distribution, and pending commit
 //! buffering for out-of-order delivery over mesh networks.
 
-use crate::protocol::{
-    base64_decode, base64_encode, internal_prefixes, lock_shared_state, OfflineProtocol,
-};
+use crate::protocol::{base64_decode, base64_encode, internal_prefixes, OfflineProtocol};
 use crate::{Error, Event, Result};
 use chrono::Utc;
 use offline_protocol_core::{Message, MessageId, MessagePriority};
@@ -198,16 +196,14 @@ impl OfflineProtocol {
             let msg_id = message.id.as_str().to_string();
             let timestamp = chrono::Utc::now().to_rfc3339();
             info!(group_id = %payload.group_id, "Decrypted mesh group message");
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::group_message_received(
-                    payload.group_id,
-                    sender.to_string(),
-                    text,
-                    timestamp,
-                    msg_id,
-                    payload.reply_to,
-                ));
-            }
+            self.emit_event(Event::group_message_received(
+                payload.group_id,
+                sender.to_string(),
+                text,
+                timestamp,
+                msg_id,
+                payload.reply_to,
+            ));
         }
     }
 
@@ -258,13 +254,11 @@ impl OfflineProtocol {
         if let Some(members) = join_result {
             let group_id = payload.group_id.clone();
             self.group_members.insert(group_id.clone(), members);
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::group_member_added(
-                    group_id,
-                    self.config.user_id.clone(),
-                    sender.to_string(),
-                ));
-            }
+            self.emit_event(Event::group_member_added(
+                group_id,
+                self.config.user_id.clone(),
+                sender.to_string(),
+            ));
         }
     }
 
@@ -416,21 +410,19 @@ impl OfflineProtocol {
         }
 
         // Emit events based on actual MLS membership changes, not claimed affected_member
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
-            for member in &actual_added {
-                state.emit_event(Event::group_member_added(
-                    payload.group_id.clone(),
-                    (*member).clone(),
-                    sender.to_string(),
-                ));
-            }
-            for member in &actual_removed {
-                state.emit_event(Event::group_member_removed(
-                    payload.group_id.clone(),
-                    (*member).clone(),
-                    sender.to_string(),
-                ));
-            }
+        for member in &actual_added {
+            self.emit_event(Event::group_member_added(
+                payload.group_id.clone(),
+                (*member).clone(),
+                sender.to_string(),
+            ));
+        }
+        for member in &actual_removed {
+            self.emit_event(Event::group_member_removed(
+                payload.group_id.clone(),
+                (*member).clone(),
+                sender.to_string(),
+            ));
         }
 
         CommitOutcome::Success(payload.group_id)
@@ -627,13 +619,11 @@ impl OfflineProtocol {
         // Only emit the leave event if we didn't already emit via remove_from_group
         if !should_remove {
             let _ = self.refresh_group_members(&payload.group_id);
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::group_member_removed(
-                    payload.group_id,
-                    payload.leaving_member.clone(),
-                    payload.leaving_member,
-                ));
-            }
+            self.emit_event(Event::group_member_removed(
+                payload.group_id,
+                payload.leaving_member.clone(),
+                payload.leaving_member,
+            ));
         }
     }
 
@@ -668,9 +658,7 @@ impl OfflineProtocol {
 
         self.group_members.insert(group_id.clone(), members);
 
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
-            state.emit_event(Event::group_created(group_id, group_name.to_string()));
-        }
+        self.emit_event(Event::group_created(group_id, group_name.to_string()));
 
         Ok(group_info)
     }
@@ -776,13 +764,11 @@ impl OfflineProtocol {
             }
         }
 
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
-            state.emit_event(Event::group_member_added(
-                group_id.to_string(),
-                invitee_user_id.to_string(),
-                self_id,
-            ));
-        }
+        self.emit_event(Event::group_member_added(
+            group_id.to_string(),
+            invitee_user_id.to_string(),
+            self_id,
+        ));
 
         info!(group_id = %group_id, invitee = %invitee_user_id, "Invited member to mesh group");
         Ok(())
@@ -831,13 +817,11 @@ impl OfflineProtocol {
             }
         }
 
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
-            state.emit_event(Event::group_member_removed(
-                group_id.to_string(),
-                member_id.to_string(),
-                self_id,
-            ));
-        }
+        self.emit_event(Event::group_member_removed(
+            group_id.to_string(),
+            member_id.to_string(),
+            self_id,
+        ));
 
         info!(group_id = %group_id, member = %member_id, "Removed member from mesh group");
         Ok(())
@@ -1017,31 +1001,27 @@ impl OfflineProtocol {
         // a solo-group scenario (which legitimately returns Ok(vec![])).
         let had_recipients = members.iter().any(|m| m != &self_id);
         if had_recipients && message_ids.is_empty() {
-            if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::group_message_partial_failure(
-                    group_id.to_string(),
-                    failed_members,
-                    succeeded_members,
-                ));
-            }
+            self.emit_event(Event::group_message_partial_failure(
+                group_id.to_string(),
+                failed_members,
+                succeeded_members,
+            ));
             return Err(Error::Other("All group message sends failed".to_string()));
         }
 
         // Emit appropriate event
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
-            if failed_members.is_empty() {
-                state.emit_event(Event::group_message_sent(
-                    group_id.to_string(),
-                    message_ids.iter().map(|m| m.as_str().to_string()).collect(),
-                    member_count,
-                ));
-            } else {
-                state.emit_event(Event::group_message_partial_failure(
-                    group_id.to_string(),
-                    failed_members,
-                    succeeded_members,
-                ));
-            }
+        if failed_members.is_empty() {
+            self.emit_event(Event::group_message_sent(
+                group_id.to_string(),
+                message_ids.iter().map(|m| m.as_str().to_string()).collect(),
+                member_count,
+            ));
+        } else {
+            self.emit_event(Event::group_message_partial_failure(
+                group_id.to_string(),
+                failed_members,
+                succeeded_members,
+            ));
         }
 
         Ok(message_ids)
@@ -1550,13 +1530,13 @@ mod tests {
 
         // Bob generates a key package
         let bob_kp = {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.generate_key_package().unwrap()
         };
 
         // Alice adds Bob to the group at the MLS layer directly
         let (welcome, _commit) = {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls
                 .add_group_member(&gid, &bob_kp.key_package_data)
@@ -1565,7 +1545,7 @@ mod tests {
 
         // Bob joins the group via the Welcome
         {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.join_group(&welcome).unwrap();
         }
 
@@ -1585,7 +1565,7 @@ mod tests {
 
         // Alice encrypts a message via MLS and constructs the wire payload
         let encrypted = {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls.encrypt_for_group(&gid, b"Hello group!").unwrap()
         };
@@ -1854,18 +1834,18 @@ mod tests {
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.generate_key_package().unwrap()
         };
         let (welcome, _commit) = {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls
                 .add_group_member(&gid, &bob_kp.key_package_data)
                 .unwrap()
         };
         {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.join_group(&welcome).unwrap();
         }
         bob.group_members.insert(
@@ -1882,7 +1862,7 @@ mod tests {
 
         // Alice encrypts a message
         let encrypted = {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls.encrypt_for_group(&gid, b"Hello dedup!").unwrap()
         };
@@ -3123,7 +3103,7 @@ mod tests {
 
         // Bob generates a key package
         let bob_kp = {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.generate_key_package().unwrap()
         };
 
@@ -3187,7 +3167,7 @@ mod tests {
 
         // Bob generates key package, Alice stores it
         let bob_kp = {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.generate_key_package().unwrap()
         };
         use crate::protocol::ReceivedKeyPackage;
@@ -3220,12 +3200,9 @@ mod tests {
         // Alternative approach: verify Alice's outbox contains the Welcome message
         // by checking that a message with GROUP_MLS_WELCOME prefix was sent to bob.
         // The send_internal_message call would have placed it in Alice's outbox.
-        let welcome_sent = alice.outbox.values().any(|entry| {
-            entry.message.recipient.as_str() == "bob"
-                && entry
-                    .message
-                    .content
-                    .starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        let welcome_sent = alice.outbox_messages().any(|msg| {
+            msg.recipient.as_str() == "bob"
+                && msg.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         });
         assert!(
             welcome_sent,
@@ -3255,11 +3232,11 @@ mod tests {
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.generate_key_package().unwrap()
         };
         {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls
                 .add_group_member(&gid, &bob_kp.key_package_data)
@@ -3283,18 +3260,15 @@ mod tests {
         );
 
         // Clear outbox before invite so we can see what invite_to_group sends
-        alice.outbox.clear();
+        alice.clear_outbox();
 
         // Alice invites Carol
         alice.invite_to_group(&group_id, "carol").unwrap();
 
         // Verify a Commit was sent to Bob (existing member, not self, not invitee)
-        let commit_to_bob = alice.outbox.values().any(|entry| {
-            entry.message.recipient.as_str() == "bob"
-                && entry
-                    .message
-                    .content
-                    .starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        let commit_to_bob = alice.outbox_messages().any(|msg| {
+            msg.recipient.as_str() == "bob"
+                && msg.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
         });
         assert!(
             commit_to_bob,
@@ -3302,12 +3276,9 @@ mod tests {
         );
 
         // Verify a Welcome was sent to Carol
-        let welcome_to_carol = alice.outbox.values().any(|entry| {
-            entry.message.recipient.as_str() == "carol"
-                && entry
-                    .message
-                    .content
-                    .starts_with(internal_prefixes::GROUP_MLS_WELCOME)
+        let welcome_to_carol = alice.outbox_messages().any(|msg| {
+            msg.recipient.as_str() == "carol"
+                && msg.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME)
         });
         assert!(
             welcome_to_carol,
@@ -3315,12 +3286,9 @@ mod tests {
         );
 
         // Verify NO commit was sent to Carol (she gets the Welcome, not the Commit)
-        let commit_to_carol = alice.outbox.values().any(|entry| {
-            entry.message.recipient.as_str() == "carol"
-                && entry
-                    .message
-                    .content
-                    .starts_with(internal_prefixes::GROUP_MLS_COMMIT)
+        let commit_to_carol = alice.outbox_messages().any(|msg| {
+            msg.recipient.as_str() == "carol"
+                && msg.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT)
         });
         assert!(
             !commit_to_carol,
@@ -3422,11 +3390,11 @@ mod tests {
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.generate_key_package().unwrap()
         };
         {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls
                 .add_group_member(&gid, &bob_kp.key_package_data)
@@ -3449,7 +3417,7 @@ mod tests {
         });
 
         // Clear outbox to see what remove sends
-        alice.outbox.clear();
+        alice.clear_outbox();
 
         // Alice removes Bob
         let result = alice.remove_from_group(&group_id, "bob");
@@ -3795,18 +3763,18 @@ mod tests {
         let group_id = group_info.group_id.as_str().to_string();
 
         let bob_kp = {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.generate_key_package().unwrap()
         };
         let (welcome, _commit) = {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls
                 .add_group_member(&gid, &bob_kp.key_package_data)
                 .unwrap()
         };
         {
-            let bob_mls = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            let bob_mls = bob.mls_manager_for_testing().read().unwrap();
             bob_mls.join_group(&welcome).unwrap();
         }
         bob.group_members.insert(
@@ -3822,14 +3790,14 @@ mod tests {
 
         // Alice sends two distinct messages
         let enc1 = {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls
                 .encrypt_for_group(&gid, b"First message")
                 .unwrap()
         };
         let enc2 = {
-            let alice_mls = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            let alice_mls = alice.mls_manager_for_testing().read().unwrap();
             let gid = offline_protocol_mls::GroupId::new(&group_id);
             alice_mls
                 .encrypt_for_group(&gid, b"Second message")
@@ -3955,5 +3923,82 @@ mod tests {
             remaining, 0,
             "All pending commits should be rejected when MLS is unavailable"
         );
+    }
+
+    #[test]
+    fn test_group_mls_send_total_failure_emits_partial_failure_event() {
+        // Verifies that when all group message sends fail, a
+        // GroupMessagePartialFailure event is emitted with the correct
+        // failed_members and empty succeeded_members.
+        //
+        // Note: True *partial* failure (some members succeed, some fail)
+        // requires transport-level failures that are difficult to simulate
+        // in unit tests. The partial failure code path uses the same event
+        // type, so verifying the total failure case also validates the
+        // event structure and member list accuracy.
+        let storage = Arc::new(crate::mls::InMemoryStorage::default());
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.initialize_mls(storage).unwrap();
+        // NOT started — all sends will fail with NotStarted
+
+        let info = protocol.create_mesh_group("Failure Event Test").unwrap();
+        let group_id = info.group_id.as_str().to_string();
+
+        // Populate cache with multiple members
+        protocol.group_members.insert(
+            group_id.clone(),
+            vec![
+                "user123".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+            ],
+        );
+
+        let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+        protocol.on_event(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        let result = protocol.send_group_message(&group_id, "hello", None, None);
+        assert!(result.is_err(), "Total send failure should return Err");
+
+        // Verify GroupMessagePartialFailure event was emitted with correct members
+        let events = events.lock().unwrap();
+        let failure_event = events.iter().find(|e| {
+            matches!(
+                e,
+                Event::GroupMessagePartialFailure { group_id: gid, .. } if gid == &group_id
+            )
+        });
+        assert!(
+            failure_event.is_some(),
+            "Expected GroupMessagePartialFailure event on total failure"
+        );
+
+        if let Some(Event::GroupMessagePartialFailure {
+            failed_members,
+            succeeded_members,
+            ..
+        }) = failure_event
+        {
+            // All sends failed — both recipients should be in failed_members
+            assert!(
+                failed_members.contains(&"bob".to_string()),
+                "bob should be in failed_members"
+            );
+            assert!(
+                failed_members.contains(&"carol".to_string()),
+                "carol should be in failed_members"
+            );
+            assert_eq!(failed_members.len(), 2, "Should have exactly 2 failed members");
+            // No successes
+            assert!(
+                succeeded_members.is_empty(),
+                "succeeded_members should be empty on total failure"
+            );
+        } else {
+            panic!("Event should be GroupMessagePartialFailure");
+        }
     }
 }
