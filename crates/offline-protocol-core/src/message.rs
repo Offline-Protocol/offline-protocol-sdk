@@ -341,18 +341,24 @@ impl Message {
     ///
     /// # Security
     ///
-    /// This method must only be called by authenticated transport layers to bind
-    /// a message to the physical peer that delivered it. The protocol layer uses
-    /// this value to reject control messages where the claimed `sender` does not
-    /// match the transport-authenticated peer.
+    /// This method must only be called by transport layer implementations
+    /// (e.g., `BleTransport::on_message_received_from`) to bind a message to
+    /// the physical peer that delivered it. The protocol layer uses this value
+    /// to reject control messages where the claimed `sender` does not match the
+    /// transport-authenticated peer.
     ///
-    /// **Never call this from application code.**
+    /// This method is `pub` because transport implementations live in a
+    /// separate crate (`offline-protocol-transport`). It is **not** exposed
+    /// through UniFFI bindings, and the underlying field is private +
+    /// `#[serde(skip)]`, so application code cannot set it via deserialization
+    /// or direct field access.
+    ///
+    /// **Do not call from application code or expose via FFI.**
     ///
     /// # Errors
     ///
     /// Returns an error if `peer_id` is empty, since an empty transport peer
     /// identity cannot meaningfully authenticate a sender.
-    #[doc(hidden)]
     pub fn set_transport_peer_id(&mut self, peer_id: String) -> crate::Result<()> {
         if peer_id.is_empty() {
             return Err(crate::Error::InvalidMessage(

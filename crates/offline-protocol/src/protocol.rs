@@ -182,54 +182,34 @@ const INTERNAL_PREFIXES: &[&str] = &[
     offline_protocol_services::SVC_RESPONSE,
 ];
 
-/// Control-plane prefixes that require signature verification and TOFU
-/// enforcement in the security gate. Data-plane prefixes like `__MLS_ENC__`
-/// are deliberately excluded because they are MLS-encrypted (MLS provides
-/// its own authentication) and are sent via `send_message`, not
-/// `send_internal_message`, so they are never signed outbound.
+/// Data-plane prefixes that are **excluded** from the security gate.
 ///
-/// **Maintenance note:** Only add prefixes here that are sent via
-/// `send_internal_message` (which calls `sign_control_message`). Data-plane
-/// messages that rely on MLS for authentication must NOT be listed here,
-/// or they will be rejected as "unsigned" once the sender's key is
-/// TOFU-pinned from a prior signed control message.
-const SECURITY_GATED_PREFIXES: &[&str] = &[
-    internal_prefixes::KEY_PACKAGE,
-    internal_prefixes::WELCOME,
-    internal_prefixes::SESSION_CONFIRM_PROBE,
-    internal_prefixes::SESSION_CONFIRM_ACK,
-    internal_prefixes::CONN_REQUEST,
-    internal_prefixes::CONN_ACCEPT,
-    internal_prefixes::CONN_REJECT,
-    internal_prefixes::GROUP_CREATED,
-    internal_prefixes::GROUP_MSG,
-    internal_prefixes::GROUP_MEMBER_ADDED,
-    internal_prefixes::GROUP_MEMBER_REMOVED,
-    internal_prefixes::GROUP_INFO,
-    internal_prefixes::USER_GROUPS,
-    internal_prefixes::GROUP_ERROR,
-    internal_prefixes::GROUP_MLS_MSG,
-    internal_prefixes::GROUP_MLS_WELCOME,
-    internal_prefixes::GROUP_MLS_COMMIT,
-    internal_prefixes::GROUP_MLS_LEAVE,
-    internal_prefixes::GROUP_RELAY_REGISTER,
-    internal_prefixes::GROUP_RELAY_BROADCAST,
-    internal_prefixes::PRESENCE,
-    internal_prefixes::TYPING_INDICATOR,
-    internal_prefixes::READ_RECEIPT,
-    offline_protocol_services::SVC_MESSAGE_PREFIX,
-    offline_protocol_services::SVC_DISCOVER_QUERY,
-    offline_protocol_services::SVC_DISCOVER_RESPONSE,
-    offline_protocol_services::SVC_REQUEST,
-    offline_protocol_services::SVC_RESPONSE,
+/// These prefixes rely on MLS for authentication (not Ed25519 control-message
+/// signing) and are sent via `send_message`, not `send_internal_message`, so
+/// they are never signed outbound. Listing them here rather than maintaining a
+/// separate `SECURITY_GATED_PREFIXES` array ensures that any new prefix added
+/// to `INTERNAL_PREFIXES` is automatically security-gated unless explicitly
+/// excluded here.
+///
+/// **Maintenance note:** Only add prefixes here if they are MLS-authenticated
+/// data-plane messages. All other internal prefixes are control-plane and
+/// require signature verification + TOFU enforcement.
+const DATA_PLANE_PREFIXES: &[&str] = &[
+    internal_prefixes::ENCRYPTED,
 ];
 
 /// Maximum number of TOFU-pinned peer public keys to retain.
 ///
-/// NOTE: The TOFU store is currently in-memory only — all pinned keys are lost
-/// on process restart. Persisting this store (e.g. via `MlsStorage`) is a
-/// future hardening item. Until then, peers are re-pinned on first signed
-/// contact after restart.
+/// // TODO(security): The TOFU store is currently in-memory only — all pinned
+/// // keys are lost on process restart. This allows key-substitution attacks
+/// // during the re-pinning window after restart. Persist the TOFU store via
+/// // `MlsStorage` to close this gap.
+///
+/// // TODO(security): There is no mechanism for legitimate key rotation. A peer
+/// // who re-initializes MLS (getting a new identity key) will be permanently
+/// // rejected by all peers who have TOFU-pinned the old key, until process
+/// // restart clears the in-memory store. Implement a key rotation protocol
+/// // (e.g. signed key-update messages) or a manual TOFU reset API.
 const MAX_TOFU_PEERS: usize = 1000;
 
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
@@ -773,6 +753,9 @@ pub struct OfflineProtocol {
     /// Subsequent messages from the same peer must present the same key;
     /// a mismatch triggers a security warning and the message is dropped.
     /// Entries track a last-seen timestamp for LRU eviction when the store is full.
+    ///
+    // TODO(security): persist via MlsStorage; see MAX_TOFU_PEERS doc.
+    // TODO(security): support key rotation; see MAX_TOFU_PEERS doc.
     known_peer_public_keys: HashMap<String, TofuEntry>,
 }
 
@@ -6721,12 +6704,18 @@ impl OfflineProtocol {
 
     /// Returns `true` if the message content starts with a control-plane
     /// prefix that requires security gate enforcement (transport identity +
-    /// signature verification + TOFU). Data-plane prefixes like `__MLS_ENC__`
-    /// are excluded because MLS provides its own authentication layer.
+    /// signature verification + TOFU). Data-plane prefixes listed in
+    /// `DATA_PLANE_PREFIXES` (e.g. `__MLS_ENC__`) are excluded because MLS
+    /// provides its own authentication layer.
     fn is_security_gated_prefix(content: &str) -> bool {
-        SECURITY_GATED_PREFIXES
-            .iter()
-            .any(|p| content.starts_with(p))
+        // A prefix is security-gated if it is an internal prefix AND not a
+        // data-plane prefix. This derives the gated set from INTERNAL_PREFIXES
+        // minus DATA_PLANE_PREFIXES, so any new internal prefix is automatically
+        // gated unless explicitly excluded.
+        Self::is_internal_prefix(content)
+            && !DATA_PLANE_PREFIXES
+                .iter()
+                .any(|p| content.starts_with(p))
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
@@ -13884,27 +13873,33 @@ pub(crate) mod tests {
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_REQUEST));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_RESPONSE));
 
-        // Every SECURITY_GATED_PREFIXES entry must also be in INTERNAL_PREFIXES
-        // (security-gated messages are a subset of internal messages).
-        for prefix in SECURITY_GATED_PREFIXES {
+        // Every DATA_PLANE_PREFIXES entry must also be in INTERNAL_PREFIXES
+        // (data-plane messages still need injection prevention).
+        for prefix in DATA_PLANE_PREFIXES {
             assert!(
                 INTERNAL_PREFIXES.contains(prefix),
-                "SECURITY_GATED_PREFIXES entry {:?} is missing from INTERNAL_PREFIXES — \
-                 the security-gated set must be a subset of the injection-prevention set",
+                "DATA_PLANE_PREFIXES entry {:?} is missing from INTERNAL_PREFIXES — \
+                 data-plane messages must still be protected from injection",
                 prefix
             );
         }
 
-        // __MLS_ENC__ must be in INTERNAL_PREFIXES (injection prevention) but
-        // NOT in SECURITY_GATED_PREFIXES (it's a data-plane message).
-        assert!(
-            INTERNAL_PREFIXES.contains(&internal_prefixes::ENCRYPTED),
-            "__MLS_ENC__ must be in INTERNAL_PREFIXES for injection prevention"
-        );
-        assert!(
-            !SECURITY_GATED_PREFIXES.contains(&internal_prefixes::ENCRYPTED),
-            "__MLS_ENC__ must NOT be in SECURITY_GATED_PREFIXES — \
-             MLS provides its own authentication for encrypted messages"
+        // Only DATA_PLANE_PREFIXES entries should be excluded from security
+        // gating. Any internal prefix NOT in DATA_PLANE_PREFIXES is
+        // automatically security-gated (signature + TOFU). If this assertion
+        // fails, a new prefix was added to INTERNAL_PREFIXES but also needs to
+        // be evaluated: should it be in DATA_PLANE_PREFIXES (MLS-authenticated)
+        // or remain security-gated (control-plane, Ed25519-signed)?
+        let excluded: Vec<&&str> = INTERNAL_PREFIXES
+            .iter()
+            .filter(|p| !OfflineProtocol::is_security_gated_prefix(p))
+            .collect();
+        let expected_excluded: Vec<&&str> = DATA_PLANE_PREFIXES.iter().collect();
+        assert_eq!(
+            excluded, expected_excluded,
+            "Only DATA_PLANE_PREFIXES entries should be excluded from security gating. \
+             If a new internal prefix was added, decide whether it is data-plane \
+             (MLS-authenticated) or control-plane (Ed25519-signed) and update accordingly."
         );
     }
 
@@ -14225,10 +14220,10 @@ pub(crate) mod tests {
         // downgrade". MLS provides its own authentication for encrypted
         // messages; they are not signed with the control-plane Ed25519 key.
         //
-        // Without the SECURITY_GATED_PREFIXES / INTERNAL_PREFIXES split,
-        // this test would fail because the security gate would treat
-        // __MLS_ENC__ as a control message and reject it for being unsigned
-        // from a TOFU-pinned peer.
+        // Without the DATA_PLANE_PREFIXES exclusion in
+        // `is_security_gated_prefix`, this test would fail because the
+        // security gate would treat __MLS_ENC__ as a control message and
+        // reject it for being unsigned from a TOFU-pinned peer.
 
         use crate::mls::InMemoryStorage;
 
@@ -14352,10 +14347,20 @@ pub(crate) mod tests {
     #[test]
     fn test_security_gate_rejects_spoofed_transport_for_all_gated_prefixes() {
         // Verify that the security gate drops control messages with a
-        // transport identity mismatch for EVERY security-gated prefix.
+        // transport identity mismatch for EVERY security-gated prefix
+        // (all INTERNAL_PREFIXES except DATA_PLANE_PREFIXES).
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-        for prefix in SECURITY_GATED_PREFIXES {
+        let gated_prefixes: Vec<&&str> = INTERNAL_PREFIXES
+            .iter()
+            .filter(|p| !DATA_PLANE_PREFIXES.contains(p))
+            .collect();
+        assert!(
+            !gated_prefixes.is_empty(),
+            "There must be at least one security-gated prefix"
+        );
+
+        for prefix in gated_prefixes {
             let mut msg = pending_test_message("sender123", &format!("{}test_payload", prefix));
             msg.set_transport_peer_id("eve".to_string()).unwrap();
 
