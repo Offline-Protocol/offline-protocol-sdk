@@ -138,8 +138,9 @@ const CTRL_PK_META_KEY: &str = "__ctrl_pk";
 /// same MLS identity key but with a different domain separator.
 const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 
-/// All internal message prefixes used for control messages.
-/// Used to reject user-sent messages that start with these prefixes.
+/// All internal message prefixes — used to reject user-sent messages that
+/// start with a reserved prefix via the public `send_message` /
+/// `send_message_via_transport` APIs (injection prevention).
 ///
 /// **Maintenance note:** When adding a new control message prefix (in
 /// `internal_prefixes` or `offline-protocol-services`), it MUST be registered
@@ -174,6 +175,48 @@ const INTERNAL_PREFIXES: &[&str] = &[
     // NOTE: individual SVC prefixes are listed explicitly so that new service
     // prefixes added in offline-protocol-services must be registered here too.
     // The catch-all `SVC_MESSAGE_PREFIX` ("__SVC_") covers any future additions.
+    offline_protocol_services::SVC_MESSAGE_PREFIX,
+    offline_protocol_services::SVC_DISCOVER_QUERY,
+    offline_protocol_services::SVC_DISCOVER_RESPONSE,
+    offline_protocol_services::SVC_REQUEST,
+    offline_protocol_services::SVC_RESPONSE,
+];
+
+/// Control-plane prefixes that require signature verification and TOFU
+/// enforcement in the security gate. Data-plane prefixes like `__MLS_ENC__`
+/// are deliberately excluded because they are MLS-encrypted (MLS provides
+/// its own authentication) and are sent via `send_message`, not
+/// `send_internal_message`, so they are never signed outbound.
+///
+/// **Maintenance note:** Only add prefixes here that are sent via
+/// `send_internal_message` (which calls `sign_control_message`). Data-plane
+/// messages that rely on MLS for authentication must NOT be listed here,
+/// or they will be rejected as "unsigned" once the sender's key is
+/// TOFU-pinned from a prior signed control message.
+const SECURITY_GATED_PREFIXES: &[&str] = &[
+    internal_prefixes::KEY_PACKAGE,
+    internal_prefixes::WELCOME,
+    internal_prefixes::SESSION_CONFIRM_PROBE,
+    internal_prefixes::SESSION_CONFIRM_ACK,
+    internal_prefixes::CONN_REQUEST,
+    internal_prefixes::CONN_ACCEPT,
+    internal_prefixes::CONN_REJECT,
+    internal_prefixes::GROUP_CREATED,
+    internal_prefixes::GROUP_MSG,
+    internal_prefixes::GROUP_MEMBER_ADDED,
+    internal_prefixes::GROUP_MEMBER_REMOVED,
+    internal_prefixes::GROUP_INFO,
+    internal_prefixes::USER_GROUPS,
+    internal_prefixes::GROUP_ERROR,
+    internal_prefixes::GROUP_MLS_MSG,
+    internal_prefixes::GROUP_MLS_WELCOME,
+    internal_prefixes::GROUP_MLS_COMMIT,
+    internal_prefixes::GROUP_MLS_LEAVE,
+    internal_prefixes::GROUP_RELAY_REGISTER,
+    internal_prefixes::GROUP_RELAY_BROADCAST,
+    internal_prefixes::PRESENCE,
+    internal_prefixes::TYPING_INDICATOR,
+    internal_prefixes::READ_RECEIPT,
     offline_protocol_services::SVC_MESSAGE_PREFIX,
     offline_protocol_services::SVC_DISCOVER_QUERY,
     offline_protocol_services::SVC_DISCOVER_RESPONSE,
@@ -1390,7 +1433,7 @@ impl OfflineProtocol {
         }
 
         let mut message = self.create_message(recipient, content, Some(priority), None)?;
-        self.sign_control_message(&mut message);
+        self.sign_control_message(&mut message)?;
         let message_id = message.id.clone();
 
         if self.deduplicator.is_duplicate(&message_id) {
@@ -2181,7 +2224,7 @@ impl OfflineProtocol {
         let content = format!("{}{}", internal_prefixes::WELCOME, serialized);
         let mut message =
             self.create_message(recipient, content, Some(MessagePriority::High), None)?;
-        self.sign_control_message(&mut message);
+        self.sign_control_message(&mut message)?;
         let group_id = welcome.group_id.as_str().to_string();
 
         self.upsert_welcome_lifecycle(recipient, &group_id, message, "welcome_created")?;
@@ -4287,7 +4330,7 @@ impl OfflineProtocol {
 
         let mut message =
             self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
-        self.sign_control_message(&mut message);
+        self.sign_control_message(&mut message)?;
 
         match self.transport_manager.send(&message) {
             Ok(()) => {
@@ -6351,7 +6394,7 @@ impl OfflineProtocol {
     /// Each field is encoded as `<4-byte big-endian length><utf-8 bytes>`,
     /// making the encoding unambiguous regardless of field content (no
     /// delimiter-collision risk).
-    fn build_canonical_payload(message: &Message) -> Vec<u8> {
+    fn build_canonical_payload(message: &Message) -> Result<Vec<u8>> {
         let fields: [&str; 4] = [
             message.sender.as_str(),
             &message.id.as_str(),
@@ -6363,62 +6406,60 @@ impl OfflineProtocol {
         );
         buf.extend_from_slice(CTRL_SIGN_DOMAIN);
         for field in &fields {
-            debug_assert!(
-                field.len() <= u32::MAX as usize,
-                "field too large for canonical payload length prefix"
-            );
-            buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
+            let len: u32 = field.len().try_into().map_err(|_| {
+                Error::Other(format!(
+                    "Field too large for canonical payload length prefix: {} bytes",
+                    field.len()
+                ))
+            })?;
+            buf.extend_from_slice(&len.to_be_bytes());
             buf.extend_from_slice(field.as_bytes());
         }
-        buf
+        Ok(buf)
     }
 
     /// Signs a control message by adding an Ed25519 signature and the sender's
     /// public key to the message metadata.
     ///
-    /// If MLS is not initialized, the message is sent unsigned and a
-    /// `SecurityWarning` event is emitted so the application layer is aware.
-    fn sign_control_message(&self, message: &mut Message) {
+    /// Returns `Ok(())` on success (or when MLS is not initialized — unsigned
+    /// messages are acceptable for backward compatibility with pre-MLS peers).
+    /// Returns `Err` when MLS is initialized but signing fails, so the caller
+    /// can decide whether to abort the send.
+    fn sign_control_message(&self, message: &mut Message) -> Result<()> {
         let mls = match self.mls_manager.as_ref() {
             Some(m) => m,
             None => {
                 debug!("MLS not initialized — sending unsigned control message");
-                return;
+                return Ok(());
             }
         };
         let manager = match mls.read() {
             Ok(guard) => guard,
             Err(e) => {
+                let reason = format!("MLS lock poisoned — cannot sign control message: {}", e);
                 error!(error = %e, "MLS lock poisoned — cannot sign control message");
-                self.emit_security_warning(
-                    message.sender.as_str(),
-                    "Control message sent unsigned: MLS lock poisoned",
-                );
-                return;
+                self.emit_security_warning(message.sender.as_str(), &reason);
+                return Err(Error::Other(reason));
             }
         };
 
         let public_key = match manager.get_identity_public_key() {
             Ok(pk) => pk,
             Err(e) => {
-                error!(error = %e, "Failed to get identity public key — sending unsigned control message");
-                self.emit_security_warning(
-                    message.sender.as_str(),
-                    format!("Control message sent unsigned: {}", e),
-                );
-                return;
+                let reason = format!("Failed to get identity public key: {}", e);
+                error!(error = %e, "Failed to get identity public key — cannot sign control message");
+                self.emit_security_warning(message.sender.as_str(), &reason);
+                return Err(Error::Other(reason));
             }
         };
-        let canonical = Self::build_canonical_payload(message);
+        let canonical = Self::build_canonical_payload(message)?;
         let signature = match manager.sign_data(&canonical) {
             Ok(sig) => sig,
             Err(e) => {
-                error!(error = %e, "Failed to sign control message — sending unsigned");
-                self.emit_security_warning(
-                    message.sender.as_str(),
-                    format!("Control message sent unsigned: {}", e),
-                );
-                return;
+                let reason = format!("Failed to sign control message: {}", e);
+                error!(error = %e, "Failed to sign control message");
+                self.emit_security_warning(message.sender.as_str(), &reason);
+                return Err(Error::Other(reason));
             }
         };
 
@@ -6428,6 +6469,7 @@ impl OfflineProtocol {
         message
             .metadata
             .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&public_key));
+        Ok(())
     }
 
     /// Verifies a control message's Ed25519 signature from metadata.
@@ -6469,7 +6511,7 @@ impl OfflineProtocol {
 
         // Verify Ed25519 signature over a length-prefixed canonical payload
         // that binds sender, message ID, recipient, and content.
-        let canonical = Self::build_canonical_payload(message);
+        let canonical = Self::build_canonical_payload(message)?;
         let valid =
             offline_protocol_mls::MlsManager::verify_signature(&public_key, &canonical, &signature)
                 .map_err(|e| Error::Other(format!("Signature verification error: {}", e)))?;
@@ -6577,8 +6619,8 @@ impl OfflineProtocol {
         let content = &message.content;
         let sender = message.sender.as_str();
 
-        if !Self::is_internal_prefix(content) {
-            return None; // Not a control message — no gate needed
+        if !Self::is_security_gated_prefix(content) {
+            return None; // Not a security-gated control message — no gate needed
         }
 
         // Transport-level identity check
@@ -6672,8 +6714,19 @@ impl OfflineProtocol {
     }
 
     /// Returns `true` if the message content starts with any internal prefix.
+    /// Used for injection prevention on the public send APIs.
     fn is_internal_prefix(content: &str) -> bool {
         INTERNAL_PREFIXES.iter().any(|p| content.starts_with(p))
+    }
+
+    /// Returns `true` if the message content starts with a control-plane
+    /// prefix that requires security gate enforcement (transport identity +
+    /// signature verification + TOFU). Data-plane prefixes like `__MLS_ENC__`
+    /// are excluded because MLS provides its own authentication layer.
+    fn is_security_gated_prefix(content: &str) -> bool {
+        SECURITY_GATED_PREFIXES
+            .iter()
+            .any(|p| content.starts_with(p))
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
@@ -13725,7 +13778,7 @@ pub(crate) mod tests {
             "__CONN_REQ__payload",
         );
 
-        let canonical = OfflineProtocol::build_canonical_payload(&msg);
+        let canonical = OfflineProtocol::build_canonical_payload(&msg).unwrap();
 
         // Payload must start with the domain separator
         assert!(
@@ -13771,8 +13824,8 @@ pub(crate) mod tests {
             "content",
         );
 
-        let payload_a = OfflineProtocol::build_canonical_payload(&msg_a);
-        let payload_b = OfflineProtocol::build_canonical_payload(&msg_b);
+        let payload_a = OfflineProtocol::build_canonical_payload(&msg_a).unwrap();
+        let payload_b = OfflineProtocol::build_canonical_payload(&msg_b).unwrap();
 
         // Both must start with domain separator
         assert!(payload_a.starts_with(CTRL_SIGN_DOMAIN));
@@ -13830,6 +13883,29 @@ pub(crate) mod tests {
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_REQUEST));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_RESPONSE));
+
+        // Every SECURITY_GATED_PREFIXES entry must also be in INTERNAL_PREFIXES
+        // (security-gated messages are a subset of internal messages).
+        for prefix in SECURITY_GATED_PREFIXES {
+            assert!(
+                INTERNAL_PREFIXES.contains(prefix),
+                "SECURITY_GATED_PREFIXES entry {:?} is missing from INTERNAL_PREFIXES — \
+                 the security-gated set must be a subset of the injection-prevention set",
+                prefix
+            );
+        }
+
+        // __MLS_ENC__ must be in INTERNAL_PREFIXES (injection prevention) but
+        // NOT in SECURITY_GATED_PREFIXES (it's a data-plane message).
+        assert!(
+            INTERNAL_PREFIXES.contains(&internal_prefixes::ENCRYPTED),
+            "__MLS_ENC__ must be in INTERNAL_PREFIXES for injection prevention"
+        );
+        assert!(
+            !SECURITY_GATED_PREFIXES.contains(&internal_prefixes::ENCRYPTED),
+            "__MLS_ENC__ must NOT be in SECURITY_GATED_PREFIXES — \
+             MLS provides its own authentication for encrypted messages"
+        );
     }
 
     // ========================================================================
@@ -13851,7 +13927,7 @@ pub(crate) mod tests {
         );
 
         // Sign it
-        protocol.sign_control_message(&mut msg);
+        protocol.sign_control_message(&mut msg).unwrap();
 
         // Must have signature and public key metadata
         assert!(
@@ -13895,7 +13971,7 @@ pub(crate) mod tests {
             ),
         );
 
-        protocol.sign_control_message(&mut msg);
+        protocol.sign_control_message(&mut msg).unwrap();
 
         // Tamper with the content after signing
         msg.content = format!(
@@ -13920,7 +13996,7 @@ pub(crate) mod tests {
             format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
         );
 
-        protocol.sign_control_message(&mut msg);
+        protocol.sign_control_message(&mut msg).unwrap();
 
         assert!(
             !msg.metadata.contains_key(CTRL_SIG_META_KEY),
@@ -14029,7 +14105,7 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             format!("{}{{\"data\":\"hello\"}}", internal_prefixes::CONN_REQUEST),
         );
-        alice.sign_control_message(&mut msg);
+        alice.sign_control_message(&mut msg).unwrap();
         assert!(
             msg.metadata.contains_key(CTRL_SIG_META_KEY),
             "Alice should have signed the message"
@@ -14080,7 +14156,7 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             format!("{}{{\"data\":\"evil\"}}", internal_prefixes::CONN_REQUEST),
         );
-        alice.sign_control_message(&mut msg);
+        alice.sign_control_message(&mut msg).unwrap();
 
         // Deliver via "eve" — transport identity mismatch.
         mock_transport.queue_message_from(msg, "eve".to_string());
@@ -14141,18 +14217,145 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn test_integration_encrypted_message_survives_security_gate_after_tofu_pin() {
+        // Critical regression test: after a signed control message exchange
+        // TOFU-pins the sender's key, subsequent __MLS_ENC__ (data-plane)
+        // messages from that sender must NOT be rejected as "signature
+        // downgrade". MLS provides its own authentication for encrypted
+        // messages; they are not signed with the control-plane Ed25519 key.
+        //
+        // Without the SECURITY_GATED_PREFIXES / INTERNAL_PREFIXES split,
+        // this test would fail because the security gate would treat
+        // __MLS_ENC__ as a control message and reject it for being unsigned
+        // from a TOFU-pinned peer.
+
+        use crate::mls::InMemoryStorage;
+
+        // --- Set up Alice (sender) with MLS ---
+        let mut alice_config = create_test_config_for_user("alice");
+        alice_config.encryption.enabled = true;
+        alice_config.encryption.store_pending = true;
+        let mut alice = OfflineProtocol::new(alice_config).unwrap();
+        alice
+            .initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
+
+        let mut alice_transport = MockTransport::new(TransportType::BLE);
+        alice_transport.start().unwrap();
+        let alice_transport_handle = alice_transport.clone();
+        alice
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(alice_transport));
+        alice.start().unwrap();
+
+        // --- Set up Bob (receiver) with MLS ---
+        let mut bob_config = create_test_config_for_user("bob");
+        bob_config.encryption.enabled = true;
+        bob_config.encryption.store_pending = true;
+        let mut bob = OfflineProtocol::new(bob_config).unwrap();
+        bob.initialize_mls(Arc::new(InMemoryStorage::new()))
+            .unwrap();
+
+        let mut bob_transport = MockTransport::new(TransportType::BLE);
+        bob_transport.start().unwrap();
+        let bob_transport_handle = bob_transport.clone();
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(bob_transport));
+        bob.start().unwrap();
+
+        // --- Step 1: Alice sends a signed control message (key package) ---
+        // Manually create and sign a CONN_REQUEST from Alice to Bob.
+        let mut ctrl_msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!(
+                "{}{{\"sender_name\":\"alice\",\"timestamp_ms\":1234}}",
+                internal_prefixes::CONN_REQUEST
+            ),
+        );
+        alice.sign_control_message(&mut ctrl_msg).unwrap();
+        assert!(
+            ctrl_msg.metadata.contains_key(CTRL_SIG_META_KEY),
+            "Control message should be signed"
+        );
+
+        // Bob receives it — this will TOFU-pin Alice's public key.
+        bob_transport_handle.queue_message_from(ctrl_msg, "alice".to_string());
+        let _ = bob.receive_message(); // consumed internally
+
+        // Verify Alice's key is now TOFU-pinned at Bob.
+        assert!(
+            bob.known_peer_public_keys.contains_key("alice"),
+            "Alice's key should be TOFU-pinned at Bob after signed control message"
+        );
+
+        // --- Step 2: Set up MLS session directly (shortcut) ---
+        let bob_key_package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        {
+            let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+            manager
+                .import_key_package("bob", &bob_key_package.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("bob").unwrap();
+            let bob_manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            bob_manager.join_session(&welcome).unwrap();
+        }
+        alice.confirm_session_state("bob", "test_setup").unwrap();
+        bob.confirm_session_state("alice", "test_setup").unwrap();
+
+        // --- Step 3: Alice sends an encrypted message ---
+        alice
+            .send_message(
+                "bob",
+                "hello after TOFU pin",
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+
+        let encrypted_wire = alice_transport_handle
+            .sent_messages()
+            .last()
+            .expect("expected encrypted message from alice")
+            .clone();
+        assert!(
+            encrypted_wire
+                .content
+                .starts_with(internal_prefixes::ENCRYPTED),
+            "Message should be MLS-encrypted"
+        );
+
+        // --- Step 4: Bob receives the encrypted message ---
+        // This is the critical assertion: the __MLS_ENC__ message must NOT
+        // be rejected by the security gate, even though Alice has a
+        // TOFU-pinned key and this message is unsigned.
+        bob_transport_handle.queue_message(encrypted_wire);
+        let received = bob
+            .receive_message()
+            .expect("Encrypted message must NOT be dropped by security gate after TOFU pin");
+        assert_eq!(received.content, "hello after TOFU pin");
+        assert_eq!(
+            received.metadata.get("encrypted").map(String::as_str),
+            Some("true")
+        );
+    }
+
     // ========================================================================
     // SECURITY: parameterized security gate, edge cases, ACK bypass
     // ========================================================================
 
     #[test]
-    fn test_security_gate_rejects_spoofed_transport_for_all_prefixes() {
+    fn test_security_gate_rejects_spoofed_transport_for_all_gated_prefixes() {
         // Verify that the security gate drops control messages with a
-        // transport identity mismatch for EVERY registered internal prefix,
-        // not just CONN_REQUEST.
+        // transport identity mismatch for EVERY security-gated prefix.
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
-        for prefix in INTERNAL_PREFIXES {
+        for prefix in SECURITY_GATED_PREFIXES {
             let mut msg = pending_test_message("sender123", &format!("{}test_payload", prefix));
             msg.set_transport_peer_id("eve".to_string()).unwrap();
 
@@ -14163,6 +14366,35 @@ pub(crate) mod tests {
                 prefix
             );
         }
+    }
+
+    #[test]
+    fn test_data_plane_prefixes_bypass_security_gate() {
+        // __MLS_ENC__ messages are data-plane (MLS provides its own
+        // authentication) and must NOT be rejected by the security gate,
+        // even when the sender has a TOFU-pinned key.
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // First, TOFU-pin a key for "alice" to simulate a prior signed
+        // control message exchange.
+        protocol.tofu_check_or_pin("alice", vec![1u8; 32]).unwrap();
+        assert!(protocol.known_peer_public_keys.contains_key("alice"));
+
+        // Now send an unsigned __MLS_ENC__ message from alice — this is the
+        // normal data path after MLS session establishment.
+        let msg = pending_test_message(
+            "alice",
+            &format!(
+                "{}{{\"group_id\":\"session:alice:bob\",\"message_type\":\"Application\",\"epoch\":0,\"ciphertext\":[1,2,3],\"sender_id\":\"alice\",\"timestamp_ms\":12345}}",
+                internal_prefixes::ENCRYPTED
+            ),
+        );
+
+        let result = protocol.security_gate_control_message(&msg);
+        assert!(
+            result.is_none(),
+            "Security gate must NOT block __MLS_ENC__ messages — MLS provides its own authentication"
+        );
     }
 
     #[test]

@@ -201,9 +201,14 @@ impl BleTransport {
     ///   UUID, etc.). The protocol layer uses this value to verify that
     ///   `message.sender` matches the physical peer that delivered it.
     pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
-        message
-            .set_transport_peer_id(peer_id)
-            .expect("transport must provide non-empty peer_id");
+        if let Err(e) = message.set_transport_peer_id(peer_id) {
+            tracing::warn!(
+                error = %e,
+                message_id = %message.id,
+                "Dropping message: transport provided invalid peer_id"
+            );
+            return;
+        }
         let mut queue = self.receive_queue.lock().unwrap();
         queue.push_back(message);
     }
