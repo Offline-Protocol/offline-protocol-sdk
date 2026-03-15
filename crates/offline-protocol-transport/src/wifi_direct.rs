@@ -159,7 +159,9 @@ impl WifiDirectTransport {
     ///   The protocol layer uses this value to verify that `message.sender`
     ///   matches the physical peer that delivered it.
     pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
-        message.set_transport_peer_id(peer_id);
+        message
+            .set_transport_peer_id(peer_id)
+            .expect("transport must provide non-empty peer_id");
         let mut queue = self.receive_queue.lock().unwrap();
         queue.push_back(message);
     }
@@ -223,7 +225,7 @@ impl WifiDirectTransport {
     pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
         match self.deserialize_message(&data) {
             Ok(mut message) => {
-                message.set_transport_peer_id(peer_id);
+                message.set_transport_peer_id(peer_id)?;
                 let mut queue = self.receive_queue.lock().unwrap();
                 queue.push_back(message);
                 Ok(())

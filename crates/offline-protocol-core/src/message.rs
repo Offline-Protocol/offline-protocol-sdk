@@ -347,9 +347,20 @@ impl Message {
     /// match the transport-authenticated peer.
     ///
     /// **Never call this from application code.**
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `peer_id` is empty, since an empty transport peer
+    /// identity cannot meaningfully authenticate a sender.
     #[doc(hidden)]
-    pub fn set_transport_peer_id(&mut self, peer_id: String) {
+    pub fn set_transport_peer_id(&mut self, peer_id: String) -> crate::Result<()> {
+        if peer_id.is_empty() {
+            return Err(crate::Error::InvalidMessage(
+                "transport_peer_id must not be empty".to_string(),
+            ));
+        }
         self.transport_peer_id = Some(peer_id);
+        Ok(())
     }
 
     /// Returns the transport-verified peer identity, if set.

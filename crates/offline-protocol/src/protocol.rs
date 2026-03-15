@@ -5201,74 +5201,15 @@ impl OfflineProtocol {
         message: &Message,
     ) -> Option<InternalMessageResult> {
         let content = &message.content;
-        let sender = message.sender.as_str();
 
-        // --- Security gate: validate sender identity and control message signature ---
-        //
-        // 1. If the transport layer provided a peer identity, verify it matches the
-        //    claimed sender. This prevents a BLE/WiFi/Internet peer from spoofing
-        //    another user's identity.
-        //
-        // 2. Verify the Ed25519 control message signature (if present). This binds
-        //    the message to the sender's cryptographic identity via TOFU.
-        if Self::is_internal_prefix(content) {
-            // Transport-level identity check
-            if !self.validate_transport_sender(message) {
-                warn!(
-                    sender = %sender,
-                    message_id = %message.id,
-                    "Dropping control message: sender/transport identity mismatch"
-                );
-                self.emit_security_warning(
-                    sender,
-                    "Control message sender does not match transport peer identity",
-                );
-                return Some(InternalMessageResult::Consumed);
-            }
-
-            // Cryptographic signature check
-            match self.verify_control_message(message) {
-                Ok(true) => {
-                    // Signed and verified — proceed
-                }
-                Ok(false) => {
-                    // Unsigned (legacy) — but if the sender already has a TOFU-pinned
-                    // key, reject: a known-signed peer going unsigned is a suspicious
-                    // downgrade that could indicate an impersonation attempt.
-                    if self.known_peer_public_keys.contains_key(sender) {
-                        warn!(
-                            sender = %sender,
-                            message_id = %message.id,
-                            "Dropping unsigned control message from TOFU-pinned peer (signature downgrade)"
-                        );
-                        self.emit_security_warning(
-                            sender,
-                            "Unsigned control message from peer with pinned key (possible downgrade attack)",
-                        );
-                        return Some(InternalMessageResult::Consumed);
-                    }
-                    debug!(
-                        sender = %sender,
-                        message_id = %message.id,
-                        "Received unsigned control message (legacy peer)"
-                    );
-                }
-                Err(err) => {
-                    // Signature invalid or TOFU violation — drop
-                    warn!(
-                        sender = %sender,
-                        message_id = %message.id,
-                        error = %err,
-                        "Dropping control message: signature verification failed"
-                    );
-                    self.emit_security_warning(
-                        sender,
-                        format!("Control message rejected: {}", err),
-                    );
-                    return Some(InternalMessageResult::Consumed);
-                }
-            }
+        // Run the security gate for control messages (transport identity +
+        // signature verification). Returns `Some(Consumed)` to drop the
+        // message, or `None` to proceed.
+        if let Some(result) = self.security_gate_control_message(message) {
+            return Some(result);
         }
+
+        let sender = message.sender.as_str();
 
         // Handle key package messages
         if let Some(data) = content.strip_prefix(internal_prefixes::KEY_PACKAGE) {
@@ -6493,12 +6434,24 @@ impl OfflineProtocol {
     ///
     /// Returns:
     /// - `Ok(true)`  — valid signature, TOFU key check passed
-    /// - `Ok(false)` — no signature present (legacy/unsigned message)
-    /// - `Err(..)`   — signature invalid, key mismatch, or TOFU violation
+    /// - `Ok(false)` — no signature metadata at all (legacy/unsigned message)
+    /// - `Err(..)` — signature invalid, key mismatch, TOFU violation, or
+    ///   malformed metadata (e.g. public key present without a signature,
+    ///   or vice versa)
     fn verify_control_message(&mut self, message: &Message) -> Result<bool> {
         let sig_b64 = match message.metadata.get(CTRL_SIG_META_KEY) {
             Some(s) => s,
-            None => return Ok(false), // Unsigned — caller decides policy
+            None => {
+                // If the public key metadata is present without a signature,
+                // treat this as a malformed message rather than unsigned.
+                if message.metadata.contains_key(CTRL_PK_META_KEY) {
+                    return Err(Error::Other(
+                        "Control message has public key but missing signature (malformed)"
+                            .to_string(),
+                    ));
+                }
+                return Ok(false); // Truly unsigned — caller decides policy
+            }
         };
         let pk_b64 = match message.metadata.get(CTRL_PK_META_KEY) {
             Some(s) => s,
@@ -6535,8 +6488,14 @@ impl OfflineProtocol {
     /// first contact. Handles bounded-capacity eviction with a minimum age
     /// threshold to resist cache-filling attacks.
     ///
-    /// Returns `Ok(true)` on success, `Err(..)` on TOFU key mismatch.
+    /// Returns `Ok(true)` on success, `Err(..)` on TOFU key mismatch or
+    /// invalid (empty) public key.
     fn tofu_check_or_pin(&mut self, sender: &str, public_key: Vec<u8>) -> Result<bool> {
+        if public_key.is_empty() {
+            return Err(Error::Other(
+                "Cannot TOFU-pin an empty public key".to_string(),
+            ));
+        }
         let now_ms = Utc::now().timestamp_millis();
 
         if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
@@ -6603,6 +6562,80 @@ impl OfflineProtocol {
         }
 
         Ok(true)
+    }
+
+    /// Security gate for control messages. Validates transport-level sender
+    /// identity and cryptographic signature before allowing the message to
+    /// proceed through `process_internal_message`.
+    ///
+    /// Returns `Some(InternalMessageResult::Consumed)` to drop the message,
+    /// or `None` to allow it through.
+    fn security_gate_control_message(
+        &mut self,
+        message: &Message,
+    ) -> Option<InternalMessageResult> {
+        let content = &message.content;
+        let sender = message.sender.as_str();
+
+        if !Self::is_internal_prefix(content) {
+            return None; // Not a control message — no gate needed
+        }
+
+        // Transport-level identity check
+        if !self.validate_transport_sender(message) {
+            warn!(
+                sender = %sender,
+                message_id = %message.id,
+                "Dropping control message: sender/transport identity mismatch"
+            );
+            self.emit_security_warning(
+                sender,
+                "Control message sender does not match transport peer identity",
+            );
+            return Some(InternalMessageResult::Consumed);
+        }
+
+        // Cryptographic signature check
+        match self.verify_control_message(message) {
+            Ok(true) => {
+                // Signed and verified — proceed
+            }
+            Ok(false) => {
+                // Unsigned (legacy) — but if the sender already has a TOFU-pinned
+                // key, reject: a known-signed peer going unsigned is a suspicious
+                // downgrade that could indicate an impersonation attempt.
+                if self.known_peer_public_keys.contains_key(sender) {
+                    warn!(
+                        sender = %sender,
+                        message_id = %message.id,
+                        "Dropping unsigned control message from TOFU-pinned peer (signature downgrade)"
+                    );
+                    self.emit_security_warning(
+                        sender,
+                        "Unsigned control message from peer with pinned key (possible downgrade attack)",
+                    );
+                    return Some(InternalMessageResult::Consumed);
+                }
+                debug!(
+                    sender = %sender,
+                    message_id = %message.id,
+                    "Received unsigned control message (legacy peer)"
+                );
+            }
+            Err(err) => {
+                // Signature invalid, TOFU violation, or malformed metadata — drop
+                warn!(
+                    sender = %sender,
+                    message_id = %message.id,
+                    error = %err,
+                    "Dropping control message: signature verification failed"
+                );
+                self.emit_security_warning(sender, format!("Control message rejected: {}", err));
+                return Some(InternalMessageResult::Consumed);
+            }
+        }
+
+        None // Passed the security gate
     }
 
     /// Validates that the claimed `message.sender` matches the transport-level
@@ -13332,8 +13365,15 @@ pub(crate) mod tests {
         assert!(OfflineProtocol::is_internal_prefix("__CONN_REQ__data"));
         assert!(OfflineProtocol::is_internal_prefix("__SVC_DISC_Q__data"));
         assert!(OfflineProtocol::is_internal_prefix("__SVC_REQ__data"));
-        // Catch-all SVC prefix covers future service message types
+        // The `SVC_MESSAGE_PREFIX` ("__SVC_") entry in `INTERNAL_PREFIXES` acts
+        // as a catch-all: any content starting with "__SVC_" matches, even if the
+        // specific sub-prefix (e.g., "__SVC_NEW_THING__") is not explicitly listed.
+        // This ensures future service prefixes are automatically blocked from
+        // user-sent messages without requiring a code change to `INTERNAL_PREFIXES`.
         assert!(OfflineProtocol::is_internal_prefix("__SVC_NEW_THING__data"));
+        assert!(OfflineProtocol::is_internal_prefix(
+            "__SVC_my_legitimate_content"
+        ));
         assert!(!OfflineProtocol::is_internal_prefix("Hello world"));
         assert!(!OfflineProtocol::is_internal_prefix("__UNKNOWN__data"));
         assert!(!OfflineProtocol::is_internal_prefix(""));
@@ -13349,7 +13389,7 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        msg.set_transport_peer_id("alice".to_string());
+        msg.set_transport_peer_id("alice".to_string()).unwrap();
 
         assert!(protocol.validate_transport_sender(&msg));
     }
@@ -13364,7 +13404,7 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        msg.set_transport_peer_id("eve".to_string());
+        msg.set_transport_peer_id("eve".to_string()).unwrap();
 
         assert!(!protocol.validate_transport_sender(&msg));
     }
@@ -13395,7 +13435,7 @@ pub(crate) mod tests {
             "sender123",
             &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
         );
-        msg.set_transport_peer_id("eve".to_string());
+        msg.set_transport_peer_id("eve".to_string()).unwrap();
 
         // process_internal_message should consume (drop) the message
         let result = protocol.process_internal_message(&msg);
@@ -13518,7 +13558,8 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        msg.set_transport_peer_id("ble-device-42".to_string());
+        msg.set_transport_peer_id("ble-device-42".to_string())
+            .unwrap();
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
@@ -14074,7 +14115,10 @@ pub(crate) mod tests {
             UserId::new("alice").unwrap(),
             UserId::new("bob").unwrap(),
             AppId::new("test-app").unwrap(),
-            format!("{}{{\"data\":\"relayed\"}}", internal_prefixes::CONN_REQUEST),
+            format!(
+                "{}{{\"data\":\"relayed\"}}",
+                internal_prefixes::CONN_REQUEST
+            ),
         );
         assert!(
             msg.transport_peer_id().is_none(),
@@ -14094,6 +14138,159 @@ pub(crate) mod tests {
         assert!(
             received.is_none(),
             "Unsigned relay message from unknown peer should be consumed by handler"
+        );
+    }
+
+    // ========================================================================
+    // SECURITY: parameterized security gate, edge cases, ACK bypass
+    // ========================================================================
+
+    #[test]
+    fn test_security_gate_rejects_spoofed_transport_for_all_prefixes() {
+        // Verify that the security gate drops control messages with a
+        // transport identity mismatch for EVERY registered internal prefix,
+        // not just CONN_REQUEST.
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        for prefix in INTERNAL_PREFIXES {
+            let mut msg = pending_test_message("sender123", &format!("{}test_payload", prefix));
+            msg.set_transport_peer_id("eve".to_string()).unwrap();
+
+            let result = protocol.process_internal_message(&msg);
+            assert!(
+                matches!(result, Some(InternalMessageResult::Consumed)),
+                "Security gate should drop spoofed message for prefix '{}'",
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    fn test_verify_control_message_pk_without_signature_is_malformed() {
+        // A message with a public key in metadata but no signature should
+        // be treated as malformed (not as unsigned/legacy).
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        // Public key present but no signature
+        msg.metadata
+            .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&vec![1u8; 32]));
+
+        let result = protocol.verify_control_message(&msg);
+        assert!(
+            result.is_err(),
+            "Public key without signature must be rejected as malformed"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("missing signature"),
+            "Error should mention missing signature, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_security_gate_rejects_pk_only_no_signature() {
+        // Full process_internal_message path: a control message with a
+        // public key but no signature should be dropped by the security gate.
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        msg.metadata
+            .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&vec![1u8; 32]));
+
+        let result = protocol.process_internal_message(&msg);
+        assert!(
+            matches!(result, Some(InternalMessageResult::Consumed)),
+            "Malformed message (pk without sig) should be dropped by security gate"
+        );
+    }
+
+    #[test]
+    fn test_ack_messages_bypass_security_gate() {
+        // ACK messages do not start with any internal prefix (they have
+        // empty or non-prefixed content), so the security gate must not
+        // interfere with them — even if transport_peer_id mismatches.
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        // ACK-like message: content is just the acked message ID, not an
+        // internal prefix.
+        let msg = pending_test_message("alice", "some-message-id-being-acked");
+        assert!(
+            !OfflineProtocol::is_internal_prefix(&msg.content),
+            "ACK content must not be detected as an internal prefix"
+        );
+
+        // The security gate should return None (pass-through) regardless
+        // of any transport mismatch, because ACKs aren't control messages.
+        assert!(
+            !OfflineProtocol::is_internal_prefix(""),
+            "Empty content must not trigger the security gate"
+        );
+    }
+
+    #[test]
+    fn test_set_transport_peer_id_rejects_empty_string() {
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        let result = msg.set_transport_peer_id("".to_string());
+        assert!(result.is_err(), "Empty transport_peer_id must be rejected");
+        assert!(
+            msg.transport_peer_id().is_none(),
+            "transport_peer_id should remain None after rejected empty set"
+        );
+    }
+
+    #[test]
+    fn test_tofu_rejects_empty_public_key() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let result = protocol.tofu_check_or_pin("alice", vec![]);
+        assert!(
+            result.is_err(),
+            "Empty public key must be rejected by TOFU store"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("empty public key"),
+            "Error should mention empty public key, got: {}",
+            err_msg
+        );
+        assert!(
+            !protocol.known_peer_public_keys.contains_key("alice"),
+            "Empty key must not be pinned"
+        );
+    }
+
+    #[test]
+    fn test_verify_control_message_zero_byte_public_key_rejected() {
+        // Even if someone constructs a message with a valid-looking
+        // signature but a 0-byte public key, Ed25519 parsing should fail.
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+        let mut msg = pending_test_message(
+            "alice",
+            &format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        msg.metadata
+            .insert(CTRL_SIG_META_KEY.to_string(), base64_encode(&vec![0u8; 64]));
+        msg.metadata
+            .insert(CTRL_PK_META_KEY.to_string(), base64_encode(&[]));
+
+        let result = protocol.verify_control_message(&msg);
+        assert!(
+            result.is_err(),
+            "Zero-byte public key must be rejected during verification"
         );
     }
 }
