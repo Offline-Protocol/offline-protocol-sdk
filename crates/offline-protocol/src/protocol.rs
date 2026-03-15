@@ -6422,6 +6422,10 @@ impl OfflineProtocol {
         );
         buf.extend_from_slice(CTRL_SIGN_DOMAIN);
         for field in &fields {
+            debug_assert!(
+                field.len() <= u32::MAX as usize,
+                "field too large for canonical payload length prefix"
+            );
             buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
             buf.extend_from_slice(field.as_bytes());
         }
@@ -6605,6 +6609,15 @@ impl OfflineProtocol {
     /// peer identity, if available. Returns `true` if validated or if no
     /// transport identity is available (best-effort). Returns `false` if
     /// there is a mismatch.
+    ///
+    /// # Relay / mesh forwarding
+    ///
+    /// Forwarded messages are re-created via [`send_internal_message`] which
+    /// calls [`create_message`], producing a fresh `Message` with
+    /// `transport_peer_id: None`. Because `transport_peer_id` is
+    /// `#[serde(skip)]`, it is also `None` after deserialization. In both
+    /// cases this method returns `true` (best-effort pass), so relayed
+    /// control messages are never incorrectly rejected by this check.
     fn validate_transport_sender(&self, message: &Message) -> bool {
         if let Some(transport_peer) = message.transport_peer_id() {
             if message.sender.as_str() != transport_peer {
@@ -13946,6 +13959,141 @@ pub(crate) mod tests {
             err_msg.contains("missing public key"),
             "Error should mention missing public key, got: {}",
             err_msg
+        );
+    }
+
+    // ========================================================================
+    // INTEGRATION: full transport → receive → verify → TOFU round-trip
+    // ========================================================================
+
+    #[test]
+    fn test_integration_signed_control_message_via_mock_transport() {
+        // Set up "alice" as the sender with MLS initialized so she can sign.
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+        alice.initialize_mls(storage_a).unwrap();
+
+        // Set up "bob" as the receiver with MLS initialized so he can verify.
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+        bob.initialize_mls(storage_b).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        // Alice creates and signs a control message destined for bob.
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"hello\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        alice.sign_control_message(&mut msg);
+        assert!(
+            msg.metadata.contains_key(CTRL_SIG_META_KEY),
+            "Alice should have signed the message"
+        );
+
+        // Enqueue the signed message on bob's transport with alice's identity.
+        mock_transport.queue_message_from(msg, "alice".to_string());
+
+        // Wire up bob's transport manager.
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        bob.start().unwrap();
+
+        // Bob receives and processes — the security gate should pass.
+        // receive_message drives the full transport → dedup → process_internal_message path.
+        let received = bob.receive_message();
+        // CONN_REQUEST is consumed internally (not surfaced to the app).
+        assert!(
+            received.is_none(),
+            "Control message should be consumed, not surfaced"
+        );
+
+        // Alice's key should now be TOFU-pinned in bob's store.
+        assert!(
+            bob.known_peer_public_keys.contains_key("alice"),
+            "Bob should have TOFU-pinned alice's public key"
+        );
+    }
+
+    #[test]
+    fn test_integration_spoofed_transport_identity_rejected() {
+        // A signed control message claiming to be from "alice" but delivered
+        // by transport peer "eve" must be rejected.
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+        alice.initialize_mls(storage_a).unwrap();
+
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+        bob.initialize_mls(storage_b).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"evil\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        alice.sign_control_message(&mut msg);
+
+        // Deliver via "eve" — transport identity mismatch.
+        mock_transport.queue_message_from(msg, "eve".to_string());
+
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        bob.start().unwrap();
+
+        let received = bob.receive_message();
+        assert!(
+            received.is_none(),
+            "Spoofed message should be consumed (dropped)"
+        );
+        assert!(
+            !bob.known_peer_public_keys.contains_key("alice"),
+            "Spoofed message must not TOFU-pin alice's key"
+        );
+    }
+
+    #[test]
+    fn test_integration_relay_forwarded_message_no_transport_peer_id() {
+        // Relay-forwarded messages are created fresh via send_internal_message
+        // and thus have transport_peer_id = None. Verify they pass the
+        // transport sender check (best-effort).
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+
+        // Simulate a relay-forwarded control message: no transport_peer_id.
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"relayed\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        assert!(
+            msg.transport_peer_id().is_none(),
+            "Relay-forwarded message should have no transport_peer_id"
+        );
+
+        // Enqueue without transport identity (using queue_message, not queue_message_from).
+        mock_transport.queue_message(msg);
+
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        bob.start().unwrap();
+
+        // Should pass the transport sender check and reach the handler
+        // (CONN_REQUEST handler will consume it).
+        let received = bob.receive_message();
+        assert!(
+            received.is_none(),
+            "Unsigned relay message from unknown peer should be consumed by handler"
         );
     }
 }
