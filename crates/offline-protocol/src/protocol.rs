@@ -4315,6 +4315,9 @@ impl OfflineProtocol {
     /// Restores TOFU key entries from persistent storage.
     ///
     /// Skips corrupted entries with a warning (best-effort restore).
+    /// Caps the restored set at `MAX_TOFU_PEERS` to honour the in-memory
+    /// capacity limit even if storage contains more entries (e.g. after
+    /// the limit was lowered in a new version).
     fn restore_tofu_keys(&mut self) {
         let Some(storage) = &self.message_storage else {
             return;
@@ -4326,8 +4329,18 @@ impl OfflineProtocol {
                 return;
             }
         };
+        if peer_ids.len() > MAX_TOFU_PEERS {
+            warn!(
+                stored = peer_ids.len(),
+                limit = MAX_TOFU_PEERS,
+                "TOFU storage contains more entries than current limit, truncating"
+            );
+        }
         let mut restored = 0u32;
         for peer_id in peer_ids {
+            if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
+                break;
+            }
             match storage.load(storage_keys::TOFU_KEYS, &peer_id) {
                 Ok(Some(data)) => match serde_json::from_slice::<TofuEntry>(&data) {
                     Ok(entry) => {
@@ -6715,6 +6728,7 @@ impl OfflineProtocol {
             debug!(
                 sender = %sender,
                 message_id = %message.id,
+                require_identity = %self.config.security.require_transport_identity,
                 "Control message passed without transport peer identity (best-effort)"
             );
         }
@@ -13940,11 +13954,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_canonical_payload_no_collision_with_colon_in_sender() {
-        // Regression test: ensure that a sender containing a colon does NOT
-        // produce the same payload as a different sender/id split.
+    fn test_canonical_payload_no_collision_with_similar_sender() {
+        // Regression test: ensure that a longer sender does NOT produce the
+        // same payload as a shorter sender with matching content.
         let msg_a = Message::new(
-            UserId::new("alice:extra").unwrap(),
+            UserId::new("alice-extra").unwrap(),
             UserId::new("bob").unwrap(),
             AppId::new("test-app").unwrap(),
             "content",
@@ -14918,6 +14932,167 @@ pub(crate) mod tests {
         assert!(
             entry2.last_seen_ms >= first_seen,
             "last_seen_ms should be updated after re-verification"
+        );
+    }
+
+    #[test]
+    fn test_tofu_restore_skips_corrupted_entries() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        // Write a valid entry
+        let valid_entry = TofuEntry {
+            public_key: vec![1u8; 32],
+            last_seen_ms: Utc::now().timestamp_millis(),
+        };
+        storage
+            .store(
+                storage_keys::TOFU_KEYS,
+                "valid_peer",
+                &serde_json::to_vec(&valid_entry).unwrap(),
+            )
+            .unwrap();
+
+        // Write corrupted data for another peer
+        storage
+            .store(
+                storage_keys::TOFU_KEYS,
+                "corrupted_peer",
+                b"not valid json{{{",
+            )
+            .unwrap();
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.enable_message_persistence(storage).unwrap();
+
+        // Valid entry should be restored, corrupted should be skipped
+        assert!(
+            protocol.known_peer_public_keys.contains_key("valid_peer"),
+            "Valid TOFU entry should be restored"
+        );
+        assert!(
+            !protocol
+                .known_peer_public_keys
+                .contains_key("corrupted_peer"),
+            "Corrupted TOFU entry should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_tofu_restore_caps_at_max_peers() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        // Store more entries than MAX_TOFU_PEERS
+        let now = Utc::now().timestamp_millis();
+        for i in 0..(MAX_TOFU_PEERS + 50) {
+            let entry = TofuEntry {
+                public_key: vec![i as u8; 32],
+                last_seen_ms: now,
+            };
+            storage
+                .store(
+                    storage_keys::TOFU_KEYS,
+                    &format!("peer_{}", i),
+                    &serde_json::to_vec(&entry).unwrap(),
+                )
+                .unwrap();
+        }
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.enable_message_persistence(storage).unwrap();
+
+        assert!(
+            protocol.known_peer_public_keys.len() <= MAX_TOFU_PEERS,
+            "Restored TOFU entries should be capped at MAX_TOFU_PEERS, got {}",
+            protocol.known_peer_public_keys.len()
+        );
+    }
+
+    #[test]
+    fn test_security_gate_rejects_missing_transport_id_when_required() {
+        let mut config = create_test_config_for_user("bob");
+        config.security.require_transport_identity = true;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        // Create a signed control message from alice with no transport_peer_id
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+        alice.initialize_mls(storage_a).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        alice.sign_control_message(&mut msg).unwrap();
+        // No transport_peer_id set — should be rejected by security gate
+
+        let result = protocol.security_gate_control_message(&msg);
+        assert!(
+            matches!(result, Some(InternalMessageResult::SecurityRejected)),
+            "Control message without transport identity should be rejected \
+             when require_transport_identity=true"
+        );
+    }
+
+    #[test]
+    fn test_security_gate_passes_with_matching_transport_id_when_required() {
+        let mut config = create_test_config_for_user("bob");
+        config.security.require_transport_identity = true;
+        let mut protocol = OfflineProtocol::new(config).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+        alice.initialize_mls(storage_a).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"test\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        alice.sign_control_message(&mut msg).unwrap();
+        msg.set_transport_peer_id("alice".to_string()).unwrap();
+
+        let result = protocol.security_gate_control_message(&msg);
+        assert!(
+            result.is_none(),
+            "Signed control message with matching transport identity should pass"
+        );
+    }
+
+    #[test]
+    fn test_enable_message_persistence_restores_tofu_keys() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        // Pre-populate storage with a TOFU entry
+        let entry = TofuEntry {
+            public_key: vec![55u8; 32],
+            last_seen_ms: Utc::now().timestamp_millis(),
+        };
+        storage
+            .store(
+                storage_keys::TOFU_KEYS,
+                "dave",
+                &serde_json::to_vec(&entry).unwrap(),
+            )
+            .unwrap();
+
+        // Use enable_message_persistence (not initialize_mls)
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.enable_message_persistence(storage).unwrap();
+
+        assert!(
+            protocol.known_peer_public_keys.contains_key("dave"),
+            "TOFU entry should be restored via enable_message_persistence path"
+        );
+        assert_eq!(
+            protocol.known_peer_public_keys["dave"].public_key,
+            vec![55u8; 32]
         );
     }
 }

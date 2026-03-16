@@ -24,6 +24,17 @@ impl UserId {
                 "User ID cannot be empty".into(),
             ));
         }
+        // Reject characters that are hostile to storage backends (filesystem
+        // path traversal, key-separator collisions in KV stores, null bytes).
+        if id_str.contains('\0')
+            || id_str.contains('/')
+            || id_str.contains('\\')
+            || id_str.contains(':')
+        {
+            return Err(crate::Error::InvalidUserId(
+                "User ID contains invalid characters (NUL, '/', '\\', or ':')".into(),
+            ));
+        }
         Ok(Self(id_str))
     }
 
@@ -57,6 +68,15 @@ impl AppId {
         let id_str = id.into();
         if id_str.is_empty() {
             return Err(crate::Error::InvalidAppId("App ID cannot be empty".into()));
+        }
+        if id_str.contains('\0')
+            || id_str.contains('/')
+            || id_str.contains('\\')
+            || id_str.contains(':')
+        {
+            return Err(crate::Error::InvalidAppId(
+                "App ID contains invalid characters (NUL, '/', '\\', or ':')".into(),
+            ));
         }
         Ok(Self(id_str))
     }
@@ -334,12 +354,31 @@ mod tests {
     }
 
     #[test]
+    fn test_user_id_rejects_storage_hostile_chars() {
+        assert!(UserId::new("user/evil").is_err());
+        assert!(UserId::new("user\\evil").is_err());
+        assert!(UserId::new("user:evil").is_err());
+        assert!(UserId::new("user\0evil").is_err());
+        // Valid characters should still work
+        assert!(UserId::new("user-123_test.name@domain").is_ok());
+    }
+
+    #[test]
     fn test_app_id_creation() {
         let app_id = AppId::new("my-app").unwrap();
         assert_eq!(app_id.as_str(), "my-app");
 
         let empty_result = AppId::new("");
         assert!(empty_result.is_err());
+    }
+
+    #[test]
+    fn test_app_id_rejects_storage_hostile_chars() {
+        assert!(AppId::new("app/evil").is_err());
+        assert!(AppId::new("app\\evil").is_err());
+        assert!(AppId::new("app:evil").is_err());
+        assert!(AppId::new("app\0evil").is_err());
+        assert!(AppId::new("my-app_v2.0").is_ok());
     }
 
     #[test]
