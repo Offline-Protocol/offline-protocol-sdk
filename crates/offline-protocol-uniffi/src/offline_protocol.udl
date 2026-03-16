@@ -359,6 +359,7 @@ dictionary ProtocolConfig {
     OverflowPolicy overflow_policy;
     u32 max_group_members = 256;
     boolean group_relay_enabled = true;
+    boolean require_transport_identity = false;
 };
 
 // Extended protocol configuration with all options

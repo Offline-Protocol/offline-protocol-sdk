@@ -22,6 +22,7 @@ pub mod visualization;
 
 pub use config::{
     EncryptionConfig, GroupConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig,
+    SecurityConfig,
 };
 pub use error::{Error, EstablishmentState, Result, SessionStateError};
 pub use events::{

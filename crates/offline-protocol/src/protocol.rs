@@ -54,56 +54,85 @@ pub(crate) fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, String> 
     BASE64.decode(data).map_err(|e| e.to_string())
 }
 
-/// Internal message prefixes for protocol messages.
-pub(crate) mod internal_prefixes {
+/// Defines both the `internal_prefixes` module (named constants) and the
+/// `INTERNAL_PREFIXES` array in one place, so they can never drift apart.
+///
+/// Adding a new control-message prefix is a single-line change — the macro
+/// guarantees the constant and the injection-prevention array stay in sync.
+macro_rules! define_internal_prefixes {
+    ( $( $(#[$attr:meta])* $name:ident = $value:expr ),+ $(,)? ) => {
+        /// Internal message prefixes for protocol messages.
+        pub(crate) mod internal_prefixes {
+            $( $(#[$attr])* pub const $name: &str = $value; )+
+        }
+
+        /// All internal message prefixes — used to reject user-sent messages
+        /// that start with a reserved prefix via the public `send_message` /
+        /// `send_message_via_transport` APIs (injection prevention).
+        ///
+        /// Service discovery prefixes (`__SVC_*`) from `offline-protocol-services`
+        /// are appended after the macro-generated entries.
+        const INTERNAL_PREFIXES: &[&str] = &[
+            $( internal_prefixes::$name, )+
+            // Service discovery and request/response prefixes.
+            offline_protocol_services::SVC_MESSAGE_PREFIX,
+            offline_protocol_services::SVC_DISCOVER_QUERY,
+            offline_protocol_services::SVC_DISCOVER_RESPONSE,
+            offline_protocol_services::SVC_REQUEST,
+            offline_protocol_services::SVC_RESPONSE,
+        ];
+    };
+}
+
+define_internal_prefixes! {
     /// Prefix for key package messages.
-    pub const KEY_PACKAGE: &str = "__MLS_KEY_PKG__";
+    KEY_PACKAGE = "__MLS_KEY_PKG__",
     /// Prefix for welcome messages.
-    pub const WELCOME: &str = "__MLS_WELCOME__";
+    WELCOME = "__MLS_WELCOME__",
     /// Prefix for encrypted messages.
-    pub const ENCRYPTED: &str = "__MLS_ENC__";
+    ENCRYPTED = "__MLS_ENC__",
     /// Prefix for session confirmation probe messages.
-    pub const SESSION_CONFIRM_PROBE: &str = "__MLS_CONFIRM_PROBE__";
+    SESSION_CONFIRM_PROBE = "__MLS_CONFIRM_PROBE__",
     /// Prefix for session confirmation acknowledgement messages.
-    pub const SESSION_CONFIRM_ACK: &str = "__MLS_CONFIRM_ACK__";
+    SESSION_CONFIRM_ACK = "__MLS_CONFIRM_ACK__",
     /// Prefix for connection request messages.
-    pub const CONN_REQUEST: &str = "__CONN_REQ__";
+    CONN_REQUEST = "__CONN_REQ__",
     /// Prefix for connection accepted messages.
-    pub const CONN_ACCEPT: &str = "__CONN_ACC__";
+    CONN_ACCEPT = "__CONN_ACC__",
     /// Prefix for connection rejected messages.
-    pub const CONN_REJECT: &str = "__CONN_REJ__";
+    CONN_REJECT = "__CONN_REJ__",
     /// Prefix for group created (relay).
-    pub const GROUP_CREATED: &str = "__GROUP_CREATED__";
+    GROUP_CREATED = "__GROUP_CREATED__",
     /// Prefix for group message received (relay).
-    pub const GROUP_MSG: &str = "__GROUP_MSG__";
+    GROUP_MSG = "__GROUP_MSG__",
     /// Prefix for group member added (relay).
-    pub const GROUP_MEMBER_ADDED: &str = "__GROUP_MEMBER_ADDED__";
+    GROUP_MEMBER_ADDED = "__GROUP_MEMBER_ADDED__",
     /// Prefix for group member removed (relay).
-    pub const GROUP_MEMBER_REMOVED: &str = "__GROUP_MEMBER_REMOVED__";
+    GROUP_MEMBER_REMOVED = "__GROUP_MEMBER_REMOVED__",
     /// Prefix for group info (relay).
-    pub const GROUP_INFO: &str = "__GROUP_INFO__";
+    GROUP_INFO = "__GROUP_INFO__",
     /// Prefix for user groups list (relay).
-    pub const USER_GROUPS: &str = "__USER_GROUPS__";
+    USER_GROUPS = "__USER_GROUPS__",
     /// Prefix for group error (relay).
-    pub const GROUP_ERROR: &str = "__GROUP_ERROR__";
+    GROUP_ERROR = "__GROUP_ERROR__",
     /// Prefix for MLS-encrypted group messages.
-    pub const GROUP_MLS_MSG: &str = "__GRP_MLS_MSG__";
+    GROUP_MLS_MSG = "__GRP_MLS_MSG__",
     /// Prefix for MLS Welcome messages for group invites.
-    pub const GROUP_MLS_WELCOME: &str = "__GRP_MLS_WELCOME__";
+    GROUP_MLS_WELCOME = "__GRP_MLS_WELCOME__",
     /// Prefix for MLS Commit messages for group membership changes.
-    pub const GROUP_MLS_COMMIT: &str = "__GRP_MLS_COMMIT__";
+    GROUP_MLS_COMMIT = "__GRP_MLS_COMMIT__",
     /// Prefix for group leave notifications.
-    pub const GROUP_MLS_LEAVE: &str = "__GRP_MLS_LEAVE__";
+    GROUP_MLS_LEAVE = "__GRP_MLS_LEAVE__",
     /// Prefix for relay group registration (SDK → relay server).
-    pub const GROUP_RELAY_REGISTER: &str = "__GRP_RELAY_REG__";
+    GROUP_RELAY_REGISTER = "__GRP_RELAY_REG__",
     /// Prefix for relay group broadcast (SDK → relay server fan-out).
-    pub const GROUP_RELAY_BROADCAST: &str = "__GRP_RELAY_BCAST__";
+    GROUP_RELAY_BROADCAST = "__GRP_RELAY_BCAST__",
     /// Prefix for presence update messages.
-    pub const PRESENCE: &str = "__PRESENCE__";
+    PRESENCE = "__PRESENCE__",
     /// Prefix for typing indicator messages.
-    pub const TYPING_INDICATOR: &str = "__TYPING__";
+    TYPING_INDICATOR = "__TYPING__",
     /// Prefix for read receipt messages.
-    pub const READ_RECEIPT: &str = "__READ_RECEIPT__";
+    READ_RECEIPT = "__READ_RECEIPT__",
 }
 
 /// Retry interval for persisting session confirmation after a transient storage error.
@@ -138,50 +167,6 @@ const CTRL_PK_META_KEY: &str = "__ctrl_pk";
 /// same MLS identity key but with a different domain separator.
 const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 
-/// All internal message prefixes — used to reject user-sent messages that
-/// start with a reserved prefix via the public `send_message` /
-/// `send_message_via_transport` APIs (injection prevention).
-///
-/// **Maintenance note:** When adding a new control message prefix (in
-/// `internal_prefixes` or `offline-protocol-services`), it MUST be registered
-/// here. The `SVC_MESSAGE_PREFIX` catch-all covers future `__SVC_*` prefixes
-/// automatically, but non-SVC prefixes require an explicit entry.
-const INTERNAL_PREFIXES: &[&str] = &[
-    internal_prefixes::KEY_PACKAGE,
-    internal_prefixes::WELCOME,
-    internal_prefixes::ENCRYPTED,
-    internal_prefixes::SESSION_CONFIRM_PROBE,
-    internal_prefixes::SESSION_CONFIRM_ACK,
-    internal_prefixes::CONN_REQUEST,
-    internal_prefixes::CONN_ACCEPT,
-    internal_prefixes::CONN_REJECT,
-    internal_prefixes::GROUP_CREATED,
-    internal_prefixes::GROUP_MSG,
-    internal_prefixes::GROUP_MEMBER_ADDED,
-    internal_prefixes::GROUP_MEMBER_REMOVED,
-    internal_prefixes::GROUP_INFO,
-    internal_prefixes::USER_GROUPS,
-    internal_prefixes::GROUP_ERROR,
-    internal_prefixes::GROUP_MLS_MSG,
-    internal_prefixes::GROUP_MLS_WELCOME,
-    internal_prefixes::GROUP_MLS_COMMIT,
-    internal_prefixes::GROUP_MLS_LEAVE,
-    internal_prefixes::GROUP_RELAY_REGISTER,
-    internal_prefixes::GROUP_RELAY_BROADCAST,
-    internal_prefixes::PRESENCE,
-    internal_prefixes::TYPING_INDICATOR,
-    internal_prefixes::READ_RECEIPT,
-    // Service discovery and request/response prefixes.
-    // NOTE: individual SVC prefixes are listed explicitly so that new service
-    // prefixes added in offline-protocol-services must be registered here too.
-    // The catch-all `SVC_MESSAGE_PREFIX` ("__SVC_") covers any future additions.
-    offline_protocol_services::SVC_MESSAGE_PREFIX,
-    offline_protocol_services::SVC_DISCOVER_QUERY,
-    offline_protocol_services::SVC_DISCOVER_RESPONSE,
-    offline_protocol_services::SVC_REQUEST,
-    offline_protocol_services::SVC_RESPONSE,
-];
-
 /// Data-plane prefixes that are **excluded** from the security gate.
 ///
 /// These prefixes rely on MLS for authentication (not Ed25519 control-message
@@ -194,22 +179,18 @@ const INTERNAL_PREFIXES: &[&str] = &[
 /// **Maintenance note:** Only add prefixes here if they are MLS-authenticated
 /// data-plane messages. All other internal prefixes are control-plane and
 /// require signature verification + TOFU enforcement.
-const DATA_PLANE_PREFIXES: &[&str] = &[
-    internal_prefixes::ENCRYPTED,
-];
+const DATA_PLANE_PREFIXES: &[&str] = &[internal_prefixes::ENCRYPTED];
 
 /// Maximum number of TOFU-pinned peer public keys to retain.
 ///
-/// // TODO(security): The TOFU store is currently in-memory only — all pinned
-/// // keys are lost on process restart. This allows key-substitution attacks
-/// // during the re-pinning window after restart. Persist the TOFU store via
-/// // `MlsStorage` to close this gap.
+/// Entries are persisted via `MlsStorage` (when available) so pinned keys
+/// survive process restarts and prevent key-substitution during re-pinning.
 ///
 /// // TODO(security): There is no mechanism for legitimate key rotation. A peer
 /// // who re-initializes MLS (getting a new identity key) will be permanently
-/// // rejected by all peers who have TOFU-pinned the old key, until process
-/// // restart clears the in-memory store. Implement a key rotation protocol
-/// // (e.g. signed key-update messages) or a manual TOFU reset API.
+/// // rejected by all peers who have TOFU-pinned the old key. Implement a key
+/// // rotation protocol (e.g. signed key-update messages) or a manual TOFU
+/// // reset API.
 const MAX_TOFU_PEERS: usize = 1000;
 
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
@@ -221,7 +202,7 @@ const TOFU_MIN_EVICTION_AGE_MS: i64 = 3_600_000;
 
 /// Entry in the TOFU key store, pairing the peer's public key with a
 /// last-seen timestamp used for LRU eviction.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TofuEntry {
     public_key: Vec<u8>,
     /// Milliseconds since epoch (UTC) when we last verified a signed message
@@ -546,6 +527,8 @@ mod storage_keys {
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
     pub const LAMPORT_CLOCK_ID: &str = "current";
+    /// Key type for persisted TOFU (Trust-On-First-Use) peer public keys.
+    pub const TOFU_KEYS: &str = "tofu_keys";
 }
 
 /// Protocol state.
@@ -760,7 +743,7 @@ pub struct OfflineProtocol {
     /// a mismatch triggers a security warning and the message is dropped.
     /// Entries track a last-seen timestamp for LRU eviction when the store is full.
     ///
-    // TODO(security): persist via MlsStorage; see MAX_TOFU_PEERS doc.
+    /// Persisted via `MlsStorage` (when available) to survive restarts.
     // TODO(security): support key rotation; see MAX_TOFU_PEERS doc.
     known_peer_public_keys: HashMap<String, TofuEntry>,
 }
@@ -863,6 +846,7 @@ impl OfflineProtocol {
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
+        let previous_tofu_keys = self.known_peer_public_keys.clone();
 
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
@@ -871,6 +855,7 @@ impl OfflineProtocol {
         let restore_result = (|| {
             self.restore_pending_messages()?;
             self.restore_lamport_clock();
+            self.restore_tofu_keys();
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
@@ -883,6 +868,7 @@ impl OfflineProtocol {
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
+            self.known_peer_public_keys = previous_tofu_keys;
             return Err(err);
         }
 
@@ -905,6 +891,7 @@ impl OfflineProtocol {
         self.message_storage = Some(storage);
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
+        self.restore_tofu_keys();
         info!("Message persistence enabled");
         Ok(())
     }
@@ -4295,6 +4282,74 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // TOFU KEY PERSISTENCE
+    // ========================================================================
+
+    /// Persists a single TOFU entry to storage.
+    fn persist_tofu_entry(&self, peer_id: &str, entry: &TofuEntry) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        match serde_json::to_vec(entry) {
+            Ok(data) => {
+                if let Err(e) = storage.store(storage_keys::TOFU_KEYS, peer_id, &data) {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist TOFU entry");
+                }
+            }
+            Err(e) => {
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize TOFU entry");
+            }
+        }
+    }
+
+    /// Deletes a TOFU entry from storage (e.g. on LRU eviction).
+    fn delete_tofu_entry(&self, peer_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::TOFU_KEYS, peer_id) {
+            warn!(peer_id = %peer_id, error = %e, "Failed to delete TOFU entry from storage");
+        }
+    }
+
+    /// Restores TOFU key entries from persistent storage.
+    ///
+    /// Skips corrupted entries with a warning (best-effort restore).
+    fn restore_tofu_keys(&mut self) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        let peer_ids = match storage.list_keys(storage_keys::TOFU_KEYS) {
+            Ok(keys) => keys,
+            Err(e) => {
+                warn!(error = %e, "Failed to list TOFU keys from storage, starting with empty store");
+                return;
+            }
+        };
+        let mut restored = 0u32;
+        for peer_id in peer_ids {
+            match storage.load(storage_keys::TOFU_KEYS, &peer_id) {
+                Ok(Some(data)) => match serde_json::from_slice::<TofuEntry>(&data) {
+                    Ok(entry) => {
+                        self.known_peer_public_keys.insert(peer_id, entry);
+                        restored += 1;
+                    }
+                    Err(e) => {
+                        warn!(peer_id = %peer_id, error = %e, "Skipping corrupted TOFU entry");
+                    }
+                },
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to load TOFU entry");
+                }
+            }
+        }
+        if restored > 0 {
+            info!(count = restored, "Restored TOFU key entries from storage");
+        }
+    }
+
+    // ========================================================================
     // KEY PACKAGE HANDLING
     // ========================================================================
 
@@ -6536,6 +6591,14 @@ impl OfflineProtocol {
         }
         let now_ms = Utc::now().timestamp_millis();
 
+        // Deferred persistence actions collected here to avoid borrow conflicts
+        // between `get_mut` on the HashMap and `&self` in persistence helpers.
+        enum TofuAction {
+            Persist(String, TofuEntry),
+            Delete(String),
+        }
+        let mut actions: Vec<TofuAction> = Vec::new();
+
         if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
             if entry.public_key != public_key {
                 warn!(
@@ -6553,6 +6616,7 @@ impl OfflineProtocol {
             }
             // Update last-seen timestamp for LRU tracking
             entry.last_seen_ms = now_ms;
+            actions.push(TofuAction::Persist(sender.to_string(), entry.clone()));
         } else {
             // First contact — pin the key (with bounded capacity, LRU eviction)
             if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
@@ -6571,6 +6635,7 @@ impl OfflineProtocol {
                     Some(key) => {
                         debug!(evicted_peer = %key, "TOFU store full, evicting LRU entry");
                         self.known_peer_public_keys.remove(&key);
+                        actions.push(TofuAction::Delete(key));
                     }
                     None => {
                         warn!(
@@ -6590,13 +6655,21 @@ impl OfflineProtocol {
                 }
             }
             debug!(sender = %sender, "TOFU: pinning public key for new peer");
-            self.known_peer_public_keys.insert(
-                sender.to_string(),
-                TofuEntry {
-                    public_key,
-                    last_seen_ms: now_ms,
-                },
-            );
+            let entry = TofuEntry {
+                public_key,
+                last_seen_ms: now_ms,
+            };
+            actions.push(TofuAction::Persist(sender.to_string(), entry.clone()));
+            self.known_peer_public_keys
+                .insert(sender.to_string(), entry);
+        }
+
+        // Execute deferred persistence actions (HashMap borrow is now released)
+        for action in actions {
+            match action {
+                TofuAction::Persist(peer_id, entry) => self.persist_tofu_entry(&peer_id, &entry),
+                TofuAction::Delete(peer_id) => self.delete_tofu_entry(&peer_id),
+            }
         }
 
         Ok(true)
@@ -6625,13 +6698,25 @@ impl OfflineProtocol {
             warn!(
                 sender = %sender,
                 message_id = %message.id,
-                "Dropping control message: sender/transport identity mismatch"
+                "Dropping control message: sender/transport identity mismatch or missing"
             );
             self.emit_security_warning(
                 sender,
                 "Control message sender does not match transport peer identity",
             );
             return Some(InternalMessageResult::SecurityRejected);
+        }
+
+        // Log telemetry when transport identity is absent (passed best-effort).
+        // This is not emitted as a SecurityWarning event because relayed/forwarded
+        // messages routinely lack transport_peer_id and flooding the event stream
+        // would desensitize operators to real warnings.
+        if message.transport_peer_id().is_none() {
+            debug!(
+                sender = %sender,
+                message_id = %message.id,
+                "Control message passed without transport peer identity (best-effort)"
+            );
         }
 
         // Cryptographic signature check
@@ -6691,15 +6776,28 @@ impl OfflineProtocol {
     /// cases this method returns `true` (best-effort pass), so relayed
     /// control messages are never incorrectly rejected by this check.
     fn validate_transport_sender(&self, message: &Message) -> bool {
-        if let Some(transport_peer) = message.transport_peer_id() {
-            if message.sender.as_str() != transport_peer {
-                warn!(
-                    claimed_sender = %message.sender,
-                    transport_peer = %transport_peer,
-                    message_id = %message.id,
-                    "Sender identity mismatch: claimed sender does not match transport peer"
-                );
-                return false;
+        match message.transport_peer_id() {
+            Some(transport_peer) => {
+                if message.sender.as_str() != transport_peer {
+                    warn!(
+                        claimed_sender = %message.sender,
+                        transport_peer = %transport_peer,
+                        message_id = %message.id,
+                        "Sender identity mismatch: claimed sender does not match transport peer"
+                    );
+                    return false;
+                }
+            }
+            None => {
+                if self.config.security.require_transport_identity {
+                    warn!(
+                        claimed_sender = %message.sender,
+                        message_id = %message.id,
+                        "Rejecting control message without transport peer identity \
+                         (require_transport_identity=true)"
+                    );
+                    return false;
+                }
             }
         }
         true
@@ -6727,9 +6825,7 @@ impl OfflineProtocol {
         // minus DATA_PLANE_PREFIXES, so any new internal prefix is automatically
         // gated unless explicitly excluded.
         Self::is_internal_prefix(content)
-            && !DATA_PLANE_PREFIXES
-                .iter()
-                .any(|p| content.starts_with(p))
+            && !DATA_PLANE_PREFIXES.iter().any(|p| content.starts_with(p))
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
@@ -13475,7 +13571,40 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        // No transport_peer_id — should pass (best effort)
+        // No transport_peer_id — should pass (best effort, default config)
+        assert!(protocol.validate_transport_sender(&msg));
+    }
+
+    #[test]
+    fn test_validate_transport_sender_no_transport_id_required() {
+        let mut config = create_test_config();
+        config.security.require_transport_identity = true;
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        // No transport_peer_id — should FAIL when require_transport_identity is true
+        assert!(!protocol.validate_transport_sender(&msg));
+    }
+
+    #[test]
+    fn test_validate_transport_sender_match_with_require_identity() {
+        let mut config = create_test_config();
+        config.security.require_transport_identity = true;
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        msg.set_transport_peer_id("alice".to_string()).unwrap();
+        // Matching transport_peer_id — should pass regardless of config
         assert!(protocol.validate_transport_sender(&msg));
     }
 
@@ -13841,46 +13970,11 @@ pub(crate) mod tests {
 
     #[test]
     fn test_internal_prefixes_completeness() {
-        // Verify that every constant defined in `internal_prefixes` is
-        // registered in INTERNAL_PREFIXES. If a new prefix is added to the
-        // module but not to the array, this test fails.
-        let module_prefixes: Vec<&str> = vec![
-            internal_prefixes::KEY_PACKAGE,
-            internal_prefixes::WELCOME,
-            internal_prefixes::ENCRYPTED,
-            internal_prefixes::SESSION_CONFIRM_PROBE,
-            internal_prefixes::SESSION_CONFIRM_ACK,
-            internal_prefixes::CONN_REQUEST,
-            internal_prefixes::CONN_ACCEPT,
-            internal_prefixes::CONN_REJECT,
-            internal_prefixes::GROUP_CREATED,
-            internal_prefixes::GROUP_MSG,
-            internal_prefixes::GROUP_MEMBER_ADDED,
-            internal_prefixes::GROUP_MEMBER_REMOVED,
-            internal_prefixes::GROUP_INFO,
-            internal_prefixes::USER_GROUPS,
-            internal_prefixes::GROUP_ERROR,
-            internal_prefixes::GROUP_MLS_MSG,
-            internal_prefixes::GROUP_MLS_WELCOME,
-            internal_prefixes::GROUP_MLS_COMMIT,
-            internal_prefixes::GROUP_MLS_LEAVE,
-            internal_prefixes::GROUP_RELAY_REGISTER,
-            internal_prefixes::GROUP_RELAY_BROADCAST,
-            internal_prefixes::PRESENCE,
-            internal_prefixes::TYPING_INDICATOR,
-            internal_prefixes::READ_RECEIPT,
-        ];
+        // The `define_internal_prefixes!` macro guarantees that every constant
+        // in `internal_prefixes` is also in `INTERNAL_PREFIXES`. This test
+        // verifies the SVC and DATA_PLANE invariants that aren't macro-generated.
 
-        for prefix in &module_prefixes {
-            assert!(
-                INTERNAL_PREFIXES.contains(prefix),
-                "internal_prefixes::{:?} is missing from INTERNAL_PREFIXES array — \
-                 this is a security gap that allows prefix injection for this message type",
-                prefix
-            );
-        }
-
-        // Also verify the SVC catch-all and explicit SVC prefixes
+        // Verify the SVC catch-all and explicit SVC prefixes
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_MESSAGE_PREFIX));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_QUERY));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
@@ -14571,7 +14665,10 @@ pub(crate) mod tests {
 
         // Bob verifies — this TOFU-pins alice's key.
         let result = protocol.verify_control_message(&signed_msg);
-        assert!(matches!(result, Ok(true)), "First signed message should verify");
+        assert!(
+            matches!(result, Ok(true)),
+            "First signed message should verify"
+        );
         assert!(
             protocol.known_peer_public_keys.contains_key("alice"),
             "Alice's key should be TOFU-pinned"
@@ -14582,7 +14679,10 @@ pub(crate) mod tests {
             UserId::new("alice").unwrap(),
             UserId::new("bob").unwrap(),
             AppId::new("test-app").unwrap(),
-            format!("{}{{\"data\":\"unsigned\"}}", internal_prefixes::CONN_REQUEST),
+            format!(
+                "{}{{\"data\":\"unsigned\"}}",
+                internal_prefixes::CONN_REQUEST
+            ),
         );
         assert!(!unsigned_msg.metadata.contains_key(CTRL_SIG_META_KEY));
 
@@ -14677,6 +14777,147 @@ pub(crate) mod tests {
         assert_eq!(
             ack_count, 0,
             "Security-rejected messages must NOT trigger a delivery ACK"
+        );
+    }
+
+    // ========================================================================
+    // TOFU PERSISTENCE
+    // ========================================================================
+
+    #[test]
+    fn test_tofu_entries_persisted_via_storage() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Pin a key for "alice"
+        let pk = vec![42u8; 32];
+        protocol.tofu_check_or_pin("alice", pk.clone()).unwrap();
+
+        // Verify the entry was persisted to raw storage
+        let raw = storage
+            .load(storage_keys::TOFU_KEYS, "alice")
+            .unwrap()
+            .expect("TOFU entry should be persisted");
+        let restored: TofuEntry = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(restored.public_key, pk);
+    }
+
+    #[test]
+    fn test_tofu_entries_restored_on_restart() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        // Protocol A pins a key for "alice"
+        {
+            let mut protocol_a = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+            protocol_a.initialize_mls(storage.clone()).unwrap();
+            protocol_a
+                .tofu_check_or_pin("alice", vec![10u8; 32])
+                .unwrap();
+        }
+
+        // Protocol B uses the same storage — simulates restart
+        let mut protocol_b = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        protocol_b.initialize_mls(storage.clone()).unwrap();
+
+        // The restored TOFU store should contain alice's pinned key
+        assert!(
+            protocol_b.known_peer_public_keys.contains_key("alice"),
+            "TOFU entry for alice should be restored from storage"
+        );
+        assert_eq!(
+            protocol_b.known_peer_public_keys["alice"].public_key,
+            vec![10u8; 32]
+        );
+
+        // A different key for alice should be rejected (TOFU mismatch)
+        let result = protocol_b.tofu_check_or_pin("alice", vec![99u8; 32]);
+        assert!(
+            result.is_err(),
+            "TOFU mismatch should be detected after restore"
+        );
+    }
+
+    #[test]
+    fn test_tofu_eviction_deletes_from_storage() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Fill the TOFU store with old entries
+        let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
+        for i in 0..MAX_TOFU_PEERS {
+            let entry = TofuEntry {
+                public_key: vec![i as u8; 32],
+                last_seen_ms: old_base + i as i64,
+            };
+            protocol
+                .known_peer_public_keys
+                .insert(format!("peer_{}", i), entry.clone());
+            protocol.persist_tofu_entry(&format!("peer_{}", i), &entry);
+        }
+
+        // Verify peer_0 is in storage
+        assert!(
+            storage
+                .load(storage_keys::TOFU_KEYS, "peer_0")
+                .unwrap()
+                .is_some(),
+            "peer_0 should be in storage before eviction"
+        );
+
+        // Pin a new peer — should evict peer_0 (oldest)
+        protocol
+            .tofu_check_or_pin("new_peer", vec![0xFFu8; 32])
+            .unwrap();
+
+        // peer_0 should be deleted from storage
+        assert!(
+            storage
+                .load(storage_keys::TOFU_KEYS, "peer_0")
+                .unwrap()
+                .is_none(),
+            "Evicted peer_0 should be deleted from storage"
+        );
+
+        // new_peer should be persisted
+        assert!(
+            storage
+                .load(storage_keys::TOFU_KEYS, "new_peer")
+                .unwrap()
+                .is_some(),
+            "Newly pinned peer should be persisted"
+        );
+    }
+
+    #[test]
+    fn test_tofu_last_seen_update_persisted() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let pk = vec![7u8; 32];
+        protocol.tofu_check_or_pin("carol", pk.clone()).unwrap();
+
+        let raw1 = storage
+            .load(storage_keys::TOFU_KEYS, "carol")
+            .unwrap()
+            .unwrap();
+        let entry1: TofuEntry = serde_json::from_slice(&raw1).unwrap();
+        let first_seen = entry1.last_seen_ms;
+
+        // Re-verify the same key (updates last_seen)
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        protocol.tofu_check_or_pin("carol", pk).unwrap();
+
+        let raw2 = storage
+            .load(storage_keys::TOFU_KEYS, "carol")
+            .unwrap()
+            .unwrap();
+        let entry2: TofuEntry = serde_json::from_slice(&raw2).unwrap();
+        assert!(
+            entry2.last_seen_ms >= first_seen,
+            "last_seen_ms should be updated after re-verification"
         );
     }
 }
