@@ -6676,15 +6676,34 @@ impl OfflineProtocol {
     /// cases this method returns `true` (best-effort pass), so relayed
     /// control messages are never incorrectly rejected by this check.
     fn validate_transport_sender(&self, message: &Message) -> bool {
-        if let Some(transport_peer) = message.transport_peer_id() {
-            if message.sender.as_str() != transport_peer {
+        match message.transport_peer_id() {
+            Some(transport_peer) => {
+                if message.sender.as_str() != transport_peer {
+                    warn!(
+                        claimed_sender = %message.sender,
+                        transport_peer = %transport_peer,
+                        message_id = %message.id,
+                        "Sender identity mismatch: claimed sender does not match transport peer"
+                    );
+                    return false;
+                }
+            }
+            None => {
+                // No transport identity available — always emit telemetry so
+                // operators can measure how often this path is hit.
                 warn!(
                     claimed_sender = %message.sender,
-                    transport_peer = %transport_peer,
                     message_id = %message.id,
-                    "Sender identity mismatch: claimed sender does not match transport peer"
+                    "Control message received without transport peer identity"
                 );
-                return false;
+                self.emit_security_warning(
+                    message.sender.as_str(),
+                    "Control message has no transport peer identity (transport_peer_id absent)",
+                );
+
+                if self.config.security.require_transport_identity {
+                    return false;
+                }
             }
         }
         true
@@ -13460,7 +13479,40 @@ pub(crate) mod tests {
             AppId::new("test-app").unwrap(),
             "hello",
         );
-        // No transport_peer_id — should pass (best effort)
+        // No transport_peer_id — should pass (best effort, default config)
+        assert!(protocol.validate_transport_sender(&msg));
+    }
+
+    #[test]
+    fn test_validate_transport_sender_no_transport_id_required() {
+        let mut config = create_test_config();
+        config.security.require_transport_identity = true;
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        let msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        // No transport_peer_id — should FAIL when require_transport_identity is true
+        assert!(!protocol.validate_transport_sender(&msg));
+    }
+
+    #[test]
+    fn test_validate_transport_sender_match_with_require_identity() {
+        let mut config = create_test_config();
+        config.security.require_transport_identity = true;
+        let protocol = OfflineProtocol::new(config).unwrap();
+
+        let mut msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("user123").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello",
+        );
+        msg.set_transport_peer_id("alice".to_string()).unwrap();
+        // Matching transport_peer_id — should pass regardless of config
         assert!(protocol.validate_transport_sender(&msg));
     }
 

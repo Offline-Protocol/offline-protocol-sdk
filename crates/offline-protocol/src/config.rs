@@ -93,6 +93,24 @@ impl EncryptionConfig {
     }
 }
 
+/// Security configuration for transport and control-message hardening.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// When `true`, control messages with no transport-level peer identity
+    /// (`transport_peer_id` is `None`) are rejected. When `false` (default),
+    /// missing transport identity emits a `SecurityWarning` but allows the
+    /// message through (best-effort / fail-open).
+    pub require_transport_identity: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            require_transport_identity: false,
+        }
+    }
+}
+
 /// Transport-specific configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportConfig {
@@ -188,6 +206,9 @@ pub struct ProtocolConfig {
 
     /// Mesh group messaging configuration.
     pub group: GroupConfig,
+
+    /// Security configuration for transport and control-message hardening.
+    pub security: SecurityConfig,
 }
 
 impl ProtocolConfig {
@@ -209,6 +230,7 @@ impl ProtocolConfig {
             encryption: EncryptionConfig::default(),
             initial_ttl: DEFAULT_INITIAL_TTL,
             group: GroupConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 
@@ -443,6 +465,18 @@ impl ProtocolConfigBuilder {
     /// Sets whether groups should attempt relay server registration.
     pub fn group_relay_enabled(mut self, enabled: bool) -> Self {
         self.config.group.relay_enabled = enabled;
+        self
+    }
+
+    /// Configures security settings.
+    pub fn security(mut self, config: SecurityConfig) -> Self {
+        self.config.security = config;
+        self
+    }
+
+    /// Sets whether transport identity is required for control messages.
+    pub fn require_transport_identity(mut self, required: bool) -> Self {
+        self.config.security.require_transport_identity = required;
         self
     }
 

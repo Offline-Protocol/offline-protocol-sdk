@@ -790,6 +790,7 @@ pub struct ProtocolConfig {
     pub overflow_policy: OverflowPolicy,
     pub max_group_members: u32,
     pub group_relay_enabled: bool,
+    pub require_transport_identity: bool,
 }
 
 /// Extended protocol configuration with all options
@@ -828,6 +829,7 @@ impl From<ProtocolConfig> for CoreConfig {
         };
         core_config.group.max_group_members = config.max_group_members as usize;
         core_config.group.relay_enabled = config.group_relay_enabled;
+        core_config.security.require_transport_identity = config.require_transport_identity;
         core_config
     }
 }
@@ -3426,6 +3428,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
+            require_transport_identity: false,
         }
     }
 
@@ -3448,6 +3451,7 @@ mod tests {
             overflow_policy: OverflowPolicy::DropOldest,
             max_group_members: 256,
             group_relay_enabled: true,
+            require_transport_identity: false,
         }
     }
 
