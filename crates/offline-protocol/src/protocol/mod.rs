@@ -18,8 +18,6 @@ pub use types::{PendingQueueMetrics, ProtocolState};
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
 use crate::events::{DecryptionFailureCode, PresenceStatus};
 use crate::file_transfer::{FileChunk, FileTransferManager, OutboundTransferState};
-#[cfg(feature = "mls-observability")]
-use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsEventRateLimiter,
     MlsOperationContext, NoopMlsEventEmitter,
@@ -346,26 +344,6 @@ impl OfflineProtocol {
         self.mls_event_emitter = emitter;
     }
 
-    #[cfg(feature = "mls-observability")]
-    fn session_id_for_observability(
-        &self,
-        peer_id: Option<&str>,
-        group_id: Option<&str>,
-    ) -> String {
-        let seed = format!(
-            "peer={}|group={}",
-            peer_id.unwrap_or("none"),
-            group_id.unwrap_or("none")
-        );
-        opaque_id(&seed, &self.mls_observability_secret)
-    }
-
-    #[cfg(feature = "mls-observability")]
-    fn emit_mls_lifecycle_event(&self, event: MlsLifecycleEvent) {
-        if self.mls_event_rate_limiter.should_emit(&event) {
-            self.mls_event_emitter.emit(event);
-        }
-    }
     /// Starts the protocol.
     ///
     /// # Returns
@@ -1078,17 +1056,6 @@ impl OfflineProtocol {
         }
     }
 
-    // ========================================================================
-    // PENDING MESSAGE PERSISTENCE
-    // ========================================================================
-
-    // ========================================================================
-    // LAMPORT CLOCK PERSISTENCE
-    // ========================================================================
-    // ========================================================================
-    // ========================================================================
-    // KEY PACKAGE HANDLING
-    // ========================================================================
     /// Called when a new neighbor is discovered.
     ///
     /// When auto key exchange is enabled, this method sends our key package
@@ -1405,12 +1372,7 @@ impl OfflineProtocol {
             }
         }
     }
-    // ========================================================================
-    // PRESENCE, TYPING INDICATORS, AND READ RECEIPTS
-    // ========================================================================
-    // ========================================================================
-    // SERVICE DISCOVERY & REQUEST/RESPONSE
-    // ========================================================================
+
     /// Processes internal MLS protocol messages.
     ///
     /// Returns `Some(InternalMessageResult::Consumed)` if the message was an internal
@@ -1777,9 +1739,6 @@ impl OfflineProtocol {
         }
         Ok(())
     }
-    // ========================================================================
-    // GROUP MESSAGING (MLS-encrypted, transport-agnostic)
-    // ========================================================================
 
     /// Emits a protocol event to all registered handlers.
     ///
@@ -1823,10 +1782,6 @@ impl OfflineProtocol {
         mls.read()
             .map_err(|_| Error::Other("MLS lock poisoned".to_string()))
     }
-
-    // ========================================================================
-    // CONTROL MESSAGE SIGNING & VERIFICATION
-    // ========================================================================
 }
 
 #[cfg(test)]
