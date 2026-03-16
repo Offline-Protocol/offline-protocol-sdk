@@ -17,11 +17,18 @@ fn validate_id_chars(id: &str, type_name: &str) -> Result<(), String> {
             type_name
         ));
     }
-    // Reject characters that are hostile to storage backends (filesystem
-    // path traversal, key-separator collisions in KV stores, null bytes).
-    if id.contains('\0') || id.contains('/') || id.contains('\\') || id.contains(':') {
+    // Reject ASCII control characters (0x00–0x1F, 0x7F) and characters
+    // hostile to storage backends (filesystem path traversal, key-separator
+    // collisions in KV stores).
+    if id.bytes().any(|b| b.is_ascii_control()) {
         return Err(format!(
-            "{} contains invalid characters (NUL, '/', '\\', or ':')",
+            "{} contains ASCII control characters",
+            type_name
+        ));
+    }
+    if id.contains('/') || id.contains('\\') || id.contains(':') {
+        return Err(format!(
+            "{} contains invalid characters ('/', '\\', or ':')",
             type_name
         ));
     }
@@ -374,6 +381,11 @@ mod tests {
         assert!(UserId::new("user\0evil").is_err());
         assert!(UserId::new(".").is_err());
         assert!(UserId::new("..").is_err());
+        // All ASCII control characters should be rejected
+        assert!(UserId::new("user\nevil").is_err());
+        assert!(UserId::new("user\revil").is_err());
+        assert!(UserId::new("user\tevil").is_err());
+        assert!(UserId::new("user\x7Fevil").is_err()); // DEL
         // Valid characters should still work
         assert!(UserId::new("user-123_test.name@domain").is_ok());
     }
@@ -407,6 +419,9 @@ mod tests {
         assert!(AppId::new("app\0evil").is_err());
         assert!(AppId::new(".").is_err());
         assert!(AppId::new("..").is_err());
+        // ASCII control characters
+        assert!(AppId::new("app\nevil").is_err());
+        assert!(AppId::new("app\x1Bevil").is_err()); // ESC
         assert!(AppId::new("my-app_v2.0").is_ok());
     }
 

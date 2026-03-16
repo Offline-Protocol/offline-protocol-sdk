@@ -4333,6 +4333,12 @@ impl OfflineProtocol {
         // keep the most recently seen peers when truncating.
         let mut valid_entries: Vec<(String, TofuEntry)> = Vec::new();
         for peer_id in &peer_ids {
+            // Validate the peer_id: storage keys bypass UserId::new() so a
+            // corrupted or pre-validation-era entry could contain hostile chars.
+            if UserId::new(peer_id).is_err() {
+                warn!(peer_id = %peer_id, "Skipping TOFU entry with invalid peer ID");
+                continue;
+            }
             match storage.load(storage_keys::TOFU_KEYS, peer_id) {
                 Ok(Some(data)) => match serde_json::from_slice::<TofuEntry>(&data) {
                     Ok(entry) => {
@@ -4354,8 +4360,13 @@ impl OfflineProtocol {
                 limit = MAX_TOFU_PEERS,
                 "TOFU storage contains more entries than current limit, keeping most recent"
             );
-            // Sort by last_seen_ms descending to keep most recently seen peers
-            valid_entries.sort_by(|a, b| b.1.last_seen_ms.cmp(&a.1.last_seen_ms));
+            // Sort by last_seen_ms descending, then by peer_id ascending for
+            // deterministic ordering when timestamps are equal.
+            valid_entries.sort_by(|a, b| {
+                b.1.last_seen_ms
+                    .cmp(&a.1.last_seen_ms)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
             valid_entries.truncate(MAX_TOFU_PEERS);
         }
         let restored = valid_entries.len() as u32;
@@ -15098,6 +15109,105 @@ pub(crate) mod tests {
         assert_eq!(
             protocol.known_peer_public_keys["dave"].public_key,
             vec![55u8; 32]
+        );
+    }
+
+    #[test]
+    fn test_tofu_restore_skips_invalid_peer_ids() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        // Write a valid entry
+        let valid_entry = TofuEntry {
+            public_key: vec![1u8; 32],
+            last_seen_ms: Utc::now().timestamp_millis(),
+        };
+        storage
+            .store(
+                storage_keys::TOFU_KEYS,
+                "valid_peer",
+                &serde_json::to_vec(&valid_entry).unwrap(),
+            )
+            .unwrap();
+
+        // Write entries with hostile peer IDs (pre-validation-era data)
+        let hostile_entry = TofuEntry {
+            public_key: vec![2u8; 32],
+            last_seen_ms: Utc::now().timestamp_millis(),
+        };
+        for hostile_id in &["../evil", "peer/slash", "peer:colon", "peer\0nul"] {
+            storage
+                .store(
+                    storage_keys::TOFU_KEYS,
+                    hostile_id,
+                    &serde_json::to_vec(&hostile_entry).unwrap(),
+                )
+                .unwrap();
+        }
+
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.enable_message_persistence(storage).unwrap();
+
+        assert!(
+            protocol.known_peer_public_keys.contains_key("valid_peer"),
+            "Valid peer ID should be restored"
+        );
+        assert!(
+            !protocol.known_peer_public_keys.contains_key("../evil"),
+            "Path-traversal peer ID should be skipped"
+        );
+        assert!(
+            !protocol.known_peer_public_keys.contains_key("peer/slash"),
+            "Slash peer ID should be skipped"
+        );
+        assert!(
+            !protocol.known_peer_public_keys.contains_key("peer:colon"),
+            "Colon peer ID should be skipped"
+        );
+        assert_eq!(
+            protocol.known_peer_public_keys.len(),
+            1,
+            "Only the valid peer should be restored"
+        );
+    }
+
+    #[test]
+    fn test_tofu_restore_truncation_deterministic_on_equal_timestamps() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        // Store more entries than MAX_TOFU_PEERS, all with the same timestamp
+        let now = Utc::now().timestamp_millis();
+        let count = MAX_TOFU_PEERS + 10;
+        for i in 0..count {
+            let entry = TofuEntry {
+                public_key: vec![i as u8; 32],
+                last_seen_ms: now, // identical timestamps
+            };
+            storage
+                .store(
+                    storage_keys::TOFU_KEYS,
+                    &format!("peer_{:04}", i),
+                    &serde_json::to_vec(&entry).unwrap(),
+                )
+                .unwrap();
+        }
+
+        // Restore twice and verify we get the same set both times
+        let mut protocol_a = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol_a
+            .enable_message_persistence(storage.clone())
+            .unwrap();
+        let keys_a: std::collections::BTreeSet<String> =
+            protocol_a.known_peer_public_keys.keys().cloned().collect();
+
+        let mut protocol_b = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol_b.enable_message_persistence(storage).unwrap();
+        let keys_b: std::collections::BTreeSet<String> =
+            protocol_b.known_peer_public_keys.keys().cloned().collect();
+
+        assert_eq!(keys_a.len(), MAX_TOFU_PEERS);
+        assert_eq!(
+            keys_a, keys_b,
+            "Truncation should be deterministic when timestamps are equal"
         );
     }
 }
