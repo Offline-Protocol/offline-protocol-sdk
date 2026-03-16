@@ -1612,6 +1612,12 @@ impl OfflineProtocol {
         if recipient.is_empty() {
             return Err(Error::Other("recipient must not be empty".to_string()));
         }
+        if self.is_user_blocked(recipient) {
+            return Err(Error::Other(format!(
+                "Cannot send presence to blocked user: {}",
+                recipient
+            )));
+        }
 
         let payload = PresencePayload {
             status,
@@ -1642,6 +1648,12 @@ impl OfflineProtocol {
     ) -> Result<MessageId> {
         if recipient.is_empty() {
             return Err(Error::Other("recipient must not be empty".to_string()));
+        }
+        if self.is_user_blocked(recipient) {
+            return Err(Error::Other(format!(
+                "Cannot send typing indicator to blocked user: {}",
+                recipient
+            )));
         }
         if conversation_id.is_empty() {
             return Err(Error::Other(
@@ -1677,6 +1689,12 @@ impl OfflineProtocol {
     ) -> Result<MessageId> {
         if recipient.is_empty() {
             return Err(Error::Other("recipient must not be empty".to_string()));
+        }
+        if self.is_user_blocked(recipient) {
+            return Err(Error::Other(format!(
+                "Cannot send read receipt to blocked user: {}",
+                recipient
+            )));
         }
         if message_ids.is_empty() {
             return Err(Error::Other("message_ids must not be empty".to_string()));

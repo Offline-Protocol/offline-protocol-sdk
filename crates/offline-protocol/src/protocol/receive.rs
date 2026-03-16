@@ -75,10 +75,10 @@ impl OfflineProtocol {
                         continue;
                     }
 
-                    self.deduplicator.mark_seen(message.id.clone());
-
                     // Block filter: silently drop messages from blocked users
                     // addressed to us. No ACK, no event, no side-effects.
+                    // Checked before mark_seen so that if the user is later
+                    // unblocked, retransmissions can still be delivered.
                     if sender_blocked {
                         debug!(
                             sender = %message.sender,
@@ -87,6 +87,8 @@ impl OfflineProtocol {
                         );
                         continue;
                     }
+
+                    self.deduplicator.mark_seen(message.id.clone());
 
                     // Handle internal MLS messages
                     if let Some(result) = self.process_internal_message(&message) {

@@ -50,6 +50,9 @@ pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 /// // reset API.
 pub(crate) const MAX_TOFU_PEERS: usize = 1000;
 
+/// Maximum number of blocked users to retain.
+pub(crate) const MAX_BLOCKED_USERS: usize = 10_000;
+
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
 /// evicted by LRU. This prevents a cache-filling attack where an adversary
 /// rapidly registers many fake identities to evict legitimate pinned keys.

@@ -2,6 +2,7 @@
 //! messages, discovery events, and connection requests from blocked users.
 
 use super::{lock_shared_state, OfflineProtocol};
+use crate::protocol::types::MAX_BLOCKED_USERS;
 use crate::{Error, Event, Result};
 use offline_protocol_core::UserId;
 use tracing::{debug, info};
@@ -23,6 +24,14 @@ impl OfflineProtocol {
             return Err(Error::InvalidConfiguration(
                 "Cannot block own user ID".to_string(),
             ));
+        }
+
+        // Enforce capacity limit
+        if self.blocked_users.len() >= MAX_BLOCKED_USERS && !self.blocked_users.contains(user_id) {
+            return Err(Error::InvalidConfiguration(format!(
+                "Blocked users limit reached ({})",
+                MAX_BLOCKED_USERS
+            )));
         }
 
         if !self.blocked_users.insert(user_id.to_string()) {
@@ -483,5 +492,97 @@ mod tests {
 
         let blocked = proto.get_blocked_users();
         assert_eq!(blocked, vec!["bob", "charlie", "dave"]);
+    }
+
+    #[test]
+    fn test_presence_to_blocked_user_rejected() {
+        use crate::events::PresenceStatus;
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.send_presence_update("mallory", PresenceStatus::Online);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot send presence to blocked user"));
+    }
+
+    #[test]
+    fn test_typing_indicator_to_blocked_user_rejected() {
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.send_typing_indicator("mallory", "conv-1", true);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot send typing indicator to blocked user"));
+    }
+
+    #[test]
+    fn test_read_receipt_to_blocked_user_rejected() {
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.send_read_receipt("mallory", vec!["msg-1".to_string()]);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot send read receipt to blocked user"));
+    }
+
+    #[test]
+    fn test_block_cap_enforced() {
+        use crate::protocol::types::MAX_BLOCKED_USERS;
+
+        let mut proto = make_protocol("alice");
+        for i in 0..MAX_BLOCKED_USERS {
+            proto.block_user(&format!("user-{i}")).unwrap();
+        }
+        assert_eq!(proto.blocked_users.len(), MAX_BLOCKED_USERS);
+
+        // One more should fail
+        let result = proto.block_user("one-too-many");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Blocked users limit reached"));
+
+        // But re-blocking an existing user should still succeed (idempotent)
+        proto.block_user("user-0").unwrap();
     }
 }
