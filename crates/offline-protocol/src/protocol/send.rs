@@ -748,6 +748,12 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let file_name_str: String = file_name.into();
 
+        // Prevent sending media to blocked users. Blocking is bidirectional:
+        // we neither receive from nor send to a blocked peer.
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::UserBlocked(recipient_str));
+        }
+
         let file_id = format!("file_{}", MessageId::new().as_str());
         let pinned_transport = self.select_media_transport()?;
 

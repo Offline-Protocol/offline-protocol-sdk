@@ -429,6 +429,29 @@ mod tests {
     }
 
     #[test]
+    fn test_send_media_to_blocked_user_rejected() {
+        use offline_protocol_core::ContentType;
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.send_media("mallory", vec![0u8; 100], "photo.jpg", ContentType::Image, None);
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
+    }
+
+    #[test]
     fn test_pending_decryption_drops_blocked_sender() {
         use offline_protocol_core::{AppId, Message, UserId};
 

@@ -486,10 +486,7 @@ impl OfflineProtocol {
     /// * `Err(SessionNotReady(state))` - Establishment in progress; caller can retry or show "Establishing…"
     pub fn establish_secure_session(&mut self, peer_id: &str) -> Result<Option<WelcomeMessage>> {
         if self.is_user_blocked(peer_id) {
-            return Err(Error::Other(format!(
-                "Cannot establish session with blocked user: {}",
-                peer_id
-            )));
+            return Err(Error::UserBlocked(peer_id.to_string()));
         }
 
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
