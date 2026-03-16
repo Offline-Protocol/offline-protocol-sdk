@@ -99,6 +99,10 @@ pub enum ProtocolError {
     #[error("MLS error: {0}")]
     MlsError(String),
 
+    /// Operation rejected because the target user is blocked.
+    #[error("User is blocked: {0}")]
+    UserBlocked(String),
+
     /// Other error
     #[error("{0}")]
     Other(String),
@@ -277,6 +281,7 @@ impl From<offline_protocol::Error> for ProtocolError {
             }
             offline_protocol::Error::MlsNotInitialized => ProtocolError::MlsNotInitialized,
             offline_protocol::Error::Mls(err) => ProtocolError::MlsError(err.to_string()),
+            offline_protocol::Error::UserBlocked(user_id) => ProtocolError::UserBlocked(user_id),
             _ => ProtocolError::Other(err.to_string()),
         }
     }

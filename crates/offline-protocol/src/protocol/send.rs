@@ -67,10 +67,7 @@ impl OfflineProtocol {
         // Prevent sending messages to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
         if self.is_user_blocked(&recipient_str) {
-            return Err(Error::Other(format!(
-                "Cannot send message to blocked user: {}",
-                recipient_str
-            )));
+            return Err(Error::UserBlocked(recipient_str));
         }
 
         // Reject content that starts with an internal control prefix to prevent
@@ -220,10 +217,7 @@ impl OfflineProtocol {
         // Prevent sending messages to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
         if self.is_user_blocked(&recipient_str) {
-            return Err(Error::Other(format!(
-                "Cannot send message to blocked user: {}",
-                recipient_str
-            )));
+            return Err(Error::UserBlocked(recipient_str));
         }
 
         // Reject content that starts with an internal control prefix to prevent
@@ -1613,10 +1607,7 @@ impl OfflineProtocol {
             return Err(Error::Other("recipient must not be empty".to_string()));
         }
         if self.is_user_blocked(recipient) {
-            return Err(Error::Other(format!(
-                "Cannot send presence to blocked user: {}",
-                recipient
-            )));
+            return Err(Error::UserBlocked(recipient.to_string()));
         }
 
         let payload = PresencePayload {
@@ -1650,10 +1641,7 @@ impl OfflineProtocol {
             return Err(Error::Other("recipient must not be empty".to_string()));
         }
         if self.is_user_blocked(recipient) {
-            return Err(Error::Other(format!(
-                "Cannot send typing indicator to blocked user: {}",
-                recipient
-            )));
+            return Err(Error::UserBlocked(recipient.to_string()));
         }
         if conversation_id.is_empty() {
             return Err(Error::Other(
@@ -1691,10 +1679,7 @@ impl OfflineProtocol {
             return Err(Error::Other("recipient must not be empty".to_string()));
         }
         if self.is_user_blocked(recipient) {
-            return Err(Error::Other(format!(
-                "Cannot send read receipt to blocked user: {}",
-                recipient
-            )));
+            return Err(Error::UserBlocked(recipient.to_string()));
         }
         if message_ids.is_empty() {
             return Err(Error::Other("message_ids must not be empty".to_string()));

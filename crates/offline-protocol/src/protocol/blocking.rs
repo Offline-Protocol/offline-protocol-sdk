@@ -89,6 +89,8 @@ impl OfflineProtocol {
     fn cleanup_peer_session_state(&mut self, user_id: &str) {
         // 1. Delete the MLS session (+ confirmed_sessions, confirmation
         //    tracking, welcome lifecycles, persisted session/welcome state).
+        //    Only needed when MLS is initialized; steps 2-5 operate on
+        //    in-memory maps that always exist regardless of MLS state.
         if self.mls_manager.is_some() {
             if let Err(e) = self.manual_mls_delete_session(user_id) {
                 // Not an error — there may simply be no session to delete.
@@ -122,7 +124,27 @@ impl OfflineProtocol {
             );
         }
 
-        // 5. Allow a fresh key exchange on re-discovery.
+        // 5. Cancel any in-progress inbound file transfers from this peer
+        //    and remove their pending media metadata.
+        let file_ids_to_cancel: Vec<String> = self
+            .pending_media_metadata
+            .iter()
+            .filter(|(_, entry)| entry.sender == user_id)
+            .map(|(file_id, _)| file_id.clone())
+            .collect();
+        for file_id in &file_ids_to_cancel {
+            self.file_transfer_manager.cancel_transfer(file_id);
+            self.pending_media_metadata.remove(file_id);
+        }
+        if !file_ids_to_cancel.is_empty() {
+            debug!(
+                user_id = %user_id,
+                count = file_ids_to_cancel.len(),
+                "Cancelled in-progress file transfers for unblocked user"
+            );
+        }
+
+        // 6. Allow a fresh key exchange on re-discovery.
         self.key_package_sent_to.remove(user_id);
     }
 
@@ -315,7 +337,10 @@ mod tests {
         assert!(proto.pending_key_packages.get("bob").is_none());
         assert!(!proto.key_package_sent_to.contains("bob"));
         assert!(!proto.confirmed_sessions.contains("bob"));
-        assert!(proto.pending_queue.drain_for_peer(&proto.config.encryption.pending_queue, "bob").is_empty());
+        assert!(proto
+            .pending_queue
+            .drain_for_peer(&proto.config.encryption.pending_queue, "bob")
+            .is_empty());
     }
 
     #[test]
@@ -369,13 +394,10 @@ mod tests {
         proto.block_user("mallory").unwrap();
 
         let result = proto.send_message("mallory", "hello", None, None::<String>);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Cannot send message to blocked user"),
-        );
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
     }
 
     #[test]
@@ -400,13 +422,10 @@ mod tests {
             TransportType::BLE,
             None::<String>,
         );
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Cannot send message to blocked user"),
-        );
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
     }
 
     #[test]
@@ -511,11 +530,10 @@ mod tests {
         proto.block_user("mallory").unwrap();
 
         let result = proto.send_presence_update("mallory", PresenceStatus::Online);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot send presence to blocked user"));
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
     }
 
     #[test]
@@ -534,11 +552,10 @@ mod tests {
         proto.block_user("mallory").unwrap();
 
         let result = proto.send_typing_indicator("mallory", "conv-1", true);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot send typing indicator to blocked user"));
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
     }
 
     #[test]
@@ -557,11 +574,10 @@ mod tests {
         proto.block_user("mallory").unwrap();
 
         let result = proto.send_read_receipt("mallory", vec!["msg-1".to_string()]);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Cannot send read receipt to blocked user"));
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
     }
 
     #[test]
@@ -584,5 +600,79 @@ mod tests {
 
         // But re-blocking an existing user should still succeed (idempotent)
         proto.block_user("user-0").unwrap();
+    }
+
+    #[test]
+    fn test_on_neighbor_discovered_skips_blocked_user() {
+        let mut proto = make_protocol("alice");
+        proto.block_user("mallory").unwrap();
+
+        // Calling on_neighbor_discovered for a blocked peer should NOT
+        // add them to known_peers or trigger key exchange tracking.
+        proto.on_neighbor_discovered("mallory");
+        assert!(
+            !proto.known_peers.contains("mallory"),
+            "Blocked user should not be added to known_peers"
+        );
+        assert!(
+            !proto.key_package_sent_to.contains("mallory"),
+            "Blocked user should not trigger key package exchange"
+        );
+
+        // Non-blocked peer should be tracked normally
+        proto.on_neighbor_discovered("bob");
+        assert!(
+            proto.known_peers.contains("bob"),
+            "Non-blocked peer should be tracked"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_cancels_inbound_file_transfers() {
+        use crate::file_transfer::FileChunk;
+        use offline_protocol_core::{AppId, ContentType, Message, UserId};
+
+        let mut proto = make_protocol("alice");
+
+        // Simulate an in-progress inbound file transfer from bob by inserting
+        // a partial assembly and its pending media metadata.
+        let chunk = FileChunk {
+            file_id: "file-from-bob".to_string(),
+            file_name: "photo.jpg".to_string(),
+            file_size: 1000,
+            total_chunks: 10,
+            chunk_index: 0,
+            chunk_data: vec![0u8; 100],
+            file_checksum: "abc123".to_string(),
+        };
+        proto.file_transfer_manager.process_chunk(chunk);
+
+        use crate::protocol::types::PendingMediaMetadataEntry;
+        use std::time::Instant;
+        proto.pending_media_metadata.insert(
+            "file-from-bob".to_string(),
+            PendingMediaMetadataEntry {
+                content_type: ContentType::Image,
+                media_metadata: None,
+                last_updated_at: Instant::now(),
+                sender: "bob".to_string(),
+            },
+        );
+
+        // Block then unblock — cleanup should cancel the transfer
+        proto.block_user("bob").unwrap();
+        proto.unblock_user("bob").unwrap();
+
+        assert!(
+            proto
+                .file_transfer_manager
+                .get_progress("file-from-bob")
+                .is_none(),
+            "Inbound file transfer should be cancelled on unblock cleanup"
+        );
+        assert!(
+            !proto.pending_media_metadata.contains_key("file-from-bob"),
+            "Pending media metadata should be removed on unblock cleanup"
+        );
     }
 }

@@ -386,6 +386,8 @@ pub(crate) struct PendingMediaMetadataEntry {
     pub(crate) content_type: ContentType,
     pub(crate) media_metadata: Option<MediaMetadata>,
     pub(crate) last_updated_at: Instant,
+    /// Sender of the file transfer (used to drain partial transfers on block).
+    pub(crate) sender: String,
 }
 
 #[derive(Clone)]

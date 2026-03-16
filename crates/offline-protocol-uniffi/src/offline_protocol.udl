@@ -101,6 +101,7 @@ enum ProtocolError {
     "InvalidState",
     "MlsNotInitialized",
     "MlsError",
+    "UserBlocked",
     "Other",
 };
 

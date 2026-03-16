@@ -224,6 +224,7 @@ impl OfflineProtocol {
                     content_type: original_ct,
                     media_metadata: message.media_metadata.clone(),
                     last_updated_at: Instant::now(),
+                    sender: message.sender.as_str().to_string(),
                 },
             );
         }
