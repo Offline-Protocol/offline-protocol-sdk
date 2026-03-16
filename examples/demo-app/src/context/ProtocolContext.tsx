@@ -1,0 +1,855 @@
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+} from 'react';
+import {
+  OfflineProtocol,
+  MeshServices,
+  MessagePriority,
+} from '@offline-protocol/mesh-sdk';
+import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, DiscoveredService, ServiceLogEntry} from '../types';
+import {
+  PRESENCE_MESSAGE_PREFIX,
+  PRESENCE_REBROADCAST_INTERVAL_MS,
+  MAX_PRESENCE_SENDS_PER_TICK,
+  NEARBY_THRESHOLD_MS,
+  PROTOCOL_CONFIG,
+} from '../constants';
+
+// ─── Context Shape ───────────────────────────────────────────
+
+interface ProtocolContextValue {
+  // State
+  protocol: OfflineProtocol | null;
+  meshServices: MeshServices | null;
+  isStarted: boolean;
+  userId: string;
+  userName: string;
+  neighbors: Map<string, Neighbor>;
+  contacts: Map<string, Contact>;
+  connectionRequests: ConnectionRequest[];
+  chats: Map<string, Chat>;
+  groups: Map<string, Group>;
+  registeredServices: string[];
+  discoveredServices: DiscoveredService[];
+  serviceLog: ServiceLogEntry[];
+
+  // Actions
+  initialize: (userId: string, userName: string) => Promise<void>;
+  sendMessage: (recipientId: string, content: string, priority?: 'medium' | 'critical') => Promise<void>;
+  sendConnectionRequest: (peerId: string) => Promise<void>;
+  acceptConnectionRequest: (peerId: string) => Promise<void>;
+  rejectConnectionRequest: (peerId: string) => Promise<void>;
+  createGroup: (name: string, memberIds: string[]) => Promise<void>;
+  sendGroupMessage: (groupId: string, content: string, priority?: 'medium' | 'critical') => Promise<void>;
+  leaveGroup: (groupId: string) => Promise<void>;
+  registerService: (serviceId: string, version: string) => Promise<void>;
+  unregisterService: (serviceId: string) => Promise<void>;
+  discoverServices: (serviceId?: string) => Promise<void>;
+  sendServiceRequest: (provider: string, serviceId: string, method: string, body: string) => Promise<void>;
+  markChatRead: (peerId: string) => void;
+  blockUser: (peerId: string) => void;
+  unblockUser: (peerId: string) => void;
+}
+
+const ProtocolContext = createContext<ProtocolContextValue | null>(null);
+
+export function useProtocol(): ProtocolContextValue {
+  const ctx = useContext(ProtocolContext);
+  if (!ctx) {
+    throw new Error('useProtocol must be used within ProtocolProvider');
+  }
+  return ctx;
+}
+
+// ─── Provider ────────────────────────────────────────────────
+
+export function ProtocolProvider({children}: {children: React.ReactNode}) {
+  const [protocol, setProtocol] = useState<OfflineProtocol | null>(null);
+  const [meshServices, setMeshServices] = useState<MeshServices | null>(null);
+  const [isStarted, setIsStarted] = useState(false);
+  const [userId, setUserId] = useState('');
+  const [userName, setUserName] = useState('');
+  const [neighbors, setNeighbors] = useState<Map<string, Neighbor>>(new Map());
+  const [contacts, setContacts] = useState<Map<string, Contact>>(new Map());
+  const [connectionRequests, setConnectionRequests] = useState<ConnectionRequest[]>([]);
+  const [chats, setChats] = useState<Map<string, Chat>>(new Map());
+  const [groups, setGroups] = useState<Map<string, Group>>(new Map());
+  const [registeredServices, setRegisteredServices] = useState<string[]>([]);
+  const [discoveredServices, setDiscoveredServices] = useState<DiscoveredService[]>([]);
+  const [serviceLog, setServiceLog] = useState<ServiceLogEntry[]>([]);
+
+  const MAX_SERVICE_LOG = 100;
+  const appendServiceLog = useCallback((entry: ServiceLogEntry) => {
+    setServiceLog(prev => {
+      const next = [...prev, entry];
+      return next.length > MAX_SERVICE_LOG ? next.slice(-MAX_SERVICE_LOG) : next;
+    });
+  }, []);
+
+  const protocolRef = useRef<OfflineProtocol | null>(null);
+  const processedMessagesRef = useRef<Set<string>>(new Set());
+  const contactsRef = useRef<Map<string, Contact>>(contacts);
+  const neighborsRef = useRef<Map<string, Neighbor>>(neighbors);
+  const userNameRef = useRef(userName);
+  const userIdRef = useRef(userId);
+  const blockedUsersRef = useRef<Set<string>>(new Set());
+
+  // Keep refs in sync
+  useEffect(() => { contactsRef.current = contacts; }, [contacts]);
+  useEffect(() => { neighborsRef.current = neighbors; }, [neighbors]);
+  useEffect(() => { userNameRef.current = userName; }, [userName]);
+  useEffect(() => { userIdRef.current = userId; }, [userId]);
+
+  // ─── Event Handlers ──────────────────────────────────────
+
+  const handleEvent = useCallback((event: any) => {
+    const eventType = event.eventType || event.type;
+
+    switch (eventType) {
+      case 'neighbor_discovered': {
+        const peerId = event.peerId || event.peer_id;
+        if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
+        setNeighbors(prev => {
+          const next = new Map(prev);
+          next.set(peerId, {
+            peerId,
+            transport: event.transport || 'ble',
+            rssi: event.rssi,
+            discoveredAt: Date.now(),
+          });
+          return next;
+        });
+        // Also update contact presence if they exist
+        setContacts(prev => {
+          if (!prev.has(peerId)) {return prev;}
+          const next = new Map(prev);
+          const contact = next.get(peerId)!;
+          next.set(peerId, {...contact, isNearby: true, lastSeen: Date.now()});
+          return next;
+        });
+        break;
+      }
+
+      case 'neighbor_lost': {
+        const peerId = event.peerId || event.peer_id;
+        if (!peerId) {break;}
+        setNeighbors(prev => {
+          const next = new Map(prev);
+          next.delete(peerId);
+          return next;
+        });
+        setContacts(prev => {
+          if (!prev.has(peerId)) {return prev;}
+          const next = new Map(prev);
+          const contact = next.get(peerId)!;
+          next.set(peerId, {...contact, isNearby: false});
+          return next;
+        });
+        break;
+      }
+
+      case 'connection_request_received': {
+        const peerId = event.peerId || event.peer_id || event.fromUserId || event.from_user_id;
+        if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
+        setConnectionRequests(prev => {
+          if (prev.some(r => r.peerId === peerId && r.direction === 'in')) {return prev;}
+          return [...prev, {
+            peerId,
+            name: event.userName || event.user_name || peerId,
+            direction: 'in',
+            timestamp: Date.now(),
+          }];
+        });
+        break;
+      }
+
+      case 'connection_accepted': {
+        const peerId = event.peerId || event.peer_id || event.byUserId || event.by_user_id;
+        if (!peerId) {break;}
+        setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
+        setContacts(prev => {
+          const next = new Map(prev);
+          const existing = next.get(peerId);
+          next.set(peerId, {
+            peerId,
+            name: existing?.name || event.userName || event.user_name || peerId,
+            lastSeen: Date.now(),
+            isNearby: neighborsRef.current.has(peerId),
+            hasSession: existing?.hasSession || false,
+            isBlocked: false,
+          });
+          return next;
+        });
+        break;
+      }
+
+      case 'connection_rejected': {
+        const peerId = event.peerId || event.peer_id || event.byUserId || event.by_user_id;
+        if (!peerId) {break;}
+        setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
+        break;
+      }
+
+      case 'secure_session_established': {
+        const peerId = event.peerId || event.peer_id || event.otherUserId || event.other_user_id;
+        if (!peerId) {break;}
+        setContacts(prev => {
+          const next = new Map(prev);
+          const existing = next.get(peerId);
+          next.set(peerId, {
+            peerId,
+            name: existing?.name || peerId,
+            lastSeen: Date.now(),
+            isNearby: neighborsRef.current.has(peerId),
+            hasSession: true,
+            isBlocked: false,
+          });
+          return next;
+        });
+        break;
+      }
+
+      case 'message_received': {
+        const msgId = event.messageId || event.message_id || event.id;
+        const senderId = event.senderId || event.sender_id || event.fromUserId || event.from_user_id;
+        const content = event.content || event.message || '';
+
+        if (!senderId || !msgId) {break;}
+        if (blockedUsersRef.current.has(senderId)) {break;}
+        if (processedMessagesRef.current.has(msgId)) {break;}
+        processedMessagesRef.current.add(msgId);
+
+        // Handle presence messages
+        if (content.startsWith(PRESENCE_MESSAGE_PREFIX)) {
+          const presenceData = content.slice(PRESENCE_MESSAGE_PREFIX.length);
+          try {
+            const parsed = JSON.parse(presenceData);
+            setContacts(prev => {
+              const next = new Map(prev);
+              const existing = next.get(senderId);
+              if (existing) {
+                next.set(senderId, {
+                  ...existing,
+                  name: parsed.name || existing.name,
+                  lastSeen: Date.now(),
+                  isNearby: true,
+                });
+              }
+              return next;
+            });
+          } catch { /* ignore malformed presence */ }
+          break;
+        }
+
+        // Regular chat message
+        const chatMsg: ChatMessage = {
+          id: msgId,
+          senderId,
+          content,
+          timestamp: event.timestamp || Date.now(),
+          status: 'delivered',
+          isOutgoing: false,
+        };
+
+        setChats(prev => {
+          const next = new Map(prev);
+          const chat = next.get(senderId) || {peerId: senderId, messages: [], unreadCount: 0};
+          next.set(senderId, {
+            ...chat,
+            messages: [...chat.messages, chatMsg],
+            unreadCount: chat.unreadCount + 1,
+          });
+          return next;
+        });
+
+        // Update contact last seen
+        setContacts(prev => {
+          if (!prev.has(senderId)) {return prev;}
+          const next = new Map(prev);
+          const contact = next.get(senderId)!;
+          next.set(senderId, {...contact, lastSeen: Date.now(), isNearby: true});
+          return next;
+        });
+        break;
+      }
+
+      case 'message_sent': {
+        const msgId = event.messageId || event.message_id;
+        if (!msgId) {break;}
+        setChats(prev => {
+          const next = new Map(prev);
+          for (const [peerId, chat] of next) {
+            const msgIndex = chat.messages.findIndex(m => m.id === msgId);
+            if (msgIndex >= 0) {
+              const msgs = [...chat.messages];
+              msgs[msgIndex] = {...msgs[msgIndex], status: 'sent'};
+              next.set(peerId, {...chat, messages: msgs});
+              break;
+            }
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'message_delivered': {
+        const msgId = event.messageId || event.message_id;
+        if (!msgId) {break;}
+        setChats(prev => {
+          const next = new Map(prev);
+          for (const [peerId, chat] of next) {
+            const msgIndex = chat.messages.findIndex(m => m.id === msgId);
+            if (msgIndex >= 0) {
+              const msgs = [...chat.messages];
+              msgs[msgIndex] = {...msgs[msgIndex], status: 'delivered'};
+              next.set(peerId, {...chat, messages: msgs});
+              break;
+            }
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'message_failed': {
+        const msgId = event.messageId || event.message_id;
+        if (!msgId) {break;}
+        setChats(prev => {
+          const next = new Map(prev);
+          for (const [peerId, chat] of next) {
+            const msgIndex = chat.messages.findIndex(m => m.id === msgId);
+            if (msgIndex >= 0) {
+              const msgs = [...chat.messages];
+              msgs[msgIndex] = {...msgs[msgIndex], status: 'failed'};
+              next.set(peerId, {...chat, messages: msgs});
+              break;
+            }
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'group_created': {
+        const groupId = event.groupId || event.group_id;
+        const groupName = event.groupName || event.group_name || event.name || 'Group';
+        if (!groupId) {break;}
+        setGroups(prev => {
+          const next = new Map(prev);
+          if (!next.has(groupId)) {
+            next.set(groupId, {
+              id: groupId,
+              name: groupName,
+              members: event.members || [userIdRef.current],
+              messages: [],
+            });
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'group_message_received': {
+        const groupId = event.groupId || event.group_id;
+        const msgId = event.messageId || event.message_id || event.id;
+        const senderId = event.senderId || event.sender_id;
+        const content = event.content || event.message || '';
+        if (!groupId || !msgId) {break;}
+        if (blockedUsersRef.current.has(senderId)) {break;}
+        if (processedMessagesRef.current.has(msgId)) {break;}
+        processedMessagesRef.current.add(msgId);
+
+        const chatMsg: ChatMessage = {
+          id: msgId,
+          senderId,
+          groupId,
+          content,
+          timestamp: event.timestamp || Date.now(),
+          status: 'delivered',
+          isOutgoing: senderId === userIdRef.current,
+        };
+
+        setGroups(prev => {
+          const next = new Map(prev);
+          const group = next.get(groupId);
+          if (group) {
+            next.set(groupId, {
+              ...group,
+              messages: [...group.messages, chatMsg],
+            });
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'group_member_added': {
+        const groupId = event.groupId || event.group_id;
+        const memberId = event.memberId || event.member_id || event.userId || event.user_id;
+        if (!groupId || !memberId) {break;}
+        setGroups(prev => {
+          const next = new Map(prev);
+          const group = next.get(groupId);
+          if (group && !group.members.includes(memberId)) {
+            next.set(groupId, {
+              ...group,
+              members: [...group.members, memberId],
+            });
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'group_member_removed': {
+        const groupId = event.groupId || event.group_id;
+        const memberId = event.memberId || event.member_id || event.userId || event.user_id;
+        if (!groupId || !memberId) {break;}
+        setGroups(prev => {
+          const next = new Map(prev);
+          const group = next.get(groupId);
+          if (group) {
+            next.set(groupId, {
+              ...group,
+              members: group.members.filter(m => m !== memberId),
+            });
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'service_discovered': {
+        const serviceId = event.serviceId || event.service_id;
+        const provider = event.provider || event.providerId || event.provider_id;
+        const version = event.version || '1.0';
+        if (!serviceId || !provider) {break;}
+        setDiscoveredServices(prev => {
+          if (prev.some(s => s.serviceId === serviceId && s.provider === provider)) {return prev;}
+          return [...prev, {serviceId, provider, version}];
+        });
+        break;
+      }
+
+      case 'service_request_received': {
+        const requestId = event.requestId || event.request_id;
+        const requester = event.requester || event.requesterId || event.requester_id;
+        const serviceId = event.serviceId || event.service_id;
+        const body = event.body || event.message || '';
+        if (!requestId) {break;}
+
+        appendServiceLog({
+          type: 'request',
+          from: requester || 'unknown',
+          body: `[${serviceId}] ${body}`,
+          timestamp: Date.now(),
+        });
+
+        // Auto-respond to ping requests
+        if (serviceId === 'ping.v1' && protocolRef.current) {
+          const svc = new MeshServices();
+          svc.respondToServiceRequest(
+            requestId,
+            requester,
+            serviceId,
+            'ok',
+            'pong',
+          ).catch(console.warn);
+        }
+        break;
+      }
+
+      case 'service_response_received': {
+        const body = event.body || event.message || '';
+        const provider = event.provider || event.providerId || event.provider_id || 'unknown';
+        appendServiceLog({
+          type: 'response',
+          from: provider,
+          body,
+          timestamp: Date.now(),
+        });
+        break;
+      }
+
+      default:
+        break;
+    }
+  }, []);
+
+  // ─── Initialize Protocol ─────────────────────────────────
+
+  const initialize = useCallback(async (uid: string, uname: string) => {
+    setUserId(uid);
+    setUserName(uname);
+
+    const config = {
+      ...PROTOCOL_CONFIG,
+      userId: uid,
+    };
+
+    const proto = new OfflineProtocol(config);
+    protocolRef.current = proto;
+    setProtocol(proto);
+
+    // Register event handlers
+    proto.on('all', handleEvent);
+
+    // Start protocol
+    await proto.start();
+    setIsStarted(true);
+
+    // Initialize mesh services
+    const svc = new MeshServices();
+    setMeshServices(svc);
+  }, [handleEvent]);
+
+  // ─── Presence Broadcasting ───────────────────────────────
+
+  useEffect(() => {
+    if (!isStarted || !protocolRef.current) {return;}
+
+    const interval = setInterval(async () => {
+      const proto = protocolRef.current;
+      if (!proto) {return;}
+
+      const presencePayload = JSON.stringify({
+        name: userNameRef.current,
+        timestamp: Date.now(),
+      });
+      const presenceContent = `${PRESENCE_MESSAGE_PREFIX}${presencePayload}`;
+
+      let sendCount = 0;
+      for (const [peerId, contact] of contactsRef.current) {
+        if (sendCount >= MAX_PRESENCE_SENDS_PER_TICK) {break;}
+        if (!contact.hasSession || !contact.isNearby || contact.isBlocked) {continue;}
+
+        try {
+          await proto.sendMessage({
+            recipient: peerId,
+            content: presenceContent,
+            priority: MessagePriority.Low,
+          });
+          sendCount++;
+        } catch {
+          // Ignore presence send failures
+        }
+      }
+    }, PRESENCE_REBROADCAST_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [isStarted]);
+
+  // ─── Stale neighbor cleanup ──────────────────────────────
+
+  useEffect(() => {
+    if (!isStarted) {return;}
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setNeighbors(prev => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [peerId, neighbor] of next) {
+          if (now - neighbor.discoveredAt > NEARBY_THRESHOLD_MS * 2) {
+            next.delete(peerId);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+
+      setContacts(prev => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [peerId, contact] of next) {
+          if (contact.isNearby && now - contact.lastSeen > NEARBY_THRESHOLD_MS) {
+            next.set(peerId, {...contact, isNearby: false});
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+
+      // Prevent unbounded growth of processed message IDs
+      if (processedMessagesRef.current.size > 1000) {
+        processedMessagesRef.current.clear();
+      }
+    }, NEARBY_THRESHOLD_MS);
+
+    return () => clearInterval(interval);
+  }, [isStarted]);
+
+  // ─── Cleanup ─────────────────────────────────────────────
+
+  useEffect(() => {
+    return () => {
+      if (protocolRef.current) {
+        protocolRef.current.removeAllListeners();
+        protocolRef.current.stop().catch(console.warn);
+      }
+    };
+  }, []);
+
+  // ─── Actions ─────────────────────────────────────────────
+
+  const sendMessage = useCallback(async (recipientId: string, content: string, priority: 'medium' | 'critical' = 'medium') => {
+    if (!protocolRef.current) {return;}
+
+    const msgPriority = priority === 'critical' ? MessagePriority.Critical : MessagePriority.Medium;
+    const msgId = await protocolRef.current.sendMessage({
+      recipient: recipientId,
+      content,
+      priority: msgPriority,
+    });
+
+    const chatMsg: ChatMessage = {
+      id: msgId,
+      senderId: userIdRef.current,
+      recipientId,
+      content,
+      timestamp: Date.now(),
+      status: 'sending',
+      isOutgoing: true,
+    };
+
+    setChats(prev => {
+      const next = new Map(prev);
+      const chat = next.get(recipientId) || {peerId: recipientId, messages: [], unreadCount: 0};
+      next.set(recipientId, {
+        ...chat,
+        messages: [...chat.messages, chatMsg],
+      });
+      return next;
+    });
+  }, []);
+
+  const sendConnectionRequestAction = useCallback(async (peerId: string) => {
+    if (!protocolRef.current) {return;}
+    await protocolRef.current.sendConnectionRequest({
+      recipient: peerId,
+      senderName: userNameRef.current,
+    });
+    setConnectionRequests(prev => {
+      if (prev.some(r => r.peerId === peerId)) {return prev;}
+      return [...prev, {
+        peerId,
+        name: peerId,
+        direction: 'out',
+        timestamp: Date.now(),
+      }];
+    });
+  }, []);
+
+  const acceptConnectionRequestAction = useCallback(async (peerId: string) => {
+    if (!protocolRef.current) {return;}
+    await protocolRef.current.acceptConnectionRequest({
+      recipient: peerId,
+      accepterName: userNameRef.current,
+    });
+    setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
+    setContacts(prev => {
+      const next = new Map(prev);
+      const existing = next.get(peerId);
+      next.set(peerId, {
+        peerId,
+        name: existing?.name || peerId,
+        lastSeen: Date.now(),
+        isNearby: neighborsRef.current.has(peerId),
+        hasSession: existing?.hasSession || false,
+        isBlocked: false,
+      });
+      return next;
+    });
+  }, []);
+
+  const rejectConnectionRequestAction = useCallback(async (peerId: string) => {
+    if (!protocolRef.current) {return;}
+    await protocolRef.current.rejectConnectionRequest({recipient: peerId});
+    setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
+  }, []);
+
+  const createGroupAction = useCallback(async (name: string, memberIds: string[]) => {
+    if (!protocolRef.current) {return;}
+    const result = await protocolRef.current.mlsCreateGroup(name);
+    const groupId = result.groupId;
+
+    const allMembers = [userIdRef.current, ...memberIds];
+
+    setGroups(prev => {
+      const next = new Map(prev);
+      next.set(groupId, {
+        id: groupId,
+        name,
+        members: allMembers,
+        messages: [],
+      });
+      return next;
+    });
+
+    // Attempt to invite each member via MLS key packages
+    for (const memberId of memberIds) {
+      try {
+        // Check if we have a pending key package for this peer
+        const hasPkg = await protocolRef.current.hasPendingKeyPackage(memberId);
+        if (hasPkg) {
+          const pkgs = await protocolRef.current.mlsGetPendingKeyPackages();
+          const peerPkg = pkgs.find(p => p.userId === memberId);
+          if (peerPkg) {
+            await protocolRef.current.mlsAddGroupMember(groupId, peerPkg.keyPackageData);
+          }
+        }
+      } catch (err) {
+        console.warn(`Failed to invite ${memberId} to group (key exchange may still be pending):`, err);
+      }
+    }
+  }, []);
+
+  const sendGroupMessageAction = useCallback(async (groupId: string, content: string, _priority: 'medium' | 'critical' = 'medium') => {
+    if (!protocolRef.current) {return;}
+
+    const msgId = await protocolRef.current.groupSendMessage(groupId, content);
+
+    const chatMsg: ChatMessage = {
+      id: msgId,
+      senderId: userIdRef.current,
+      groupId,
+      content,
+      timestamp: Date.now(),
+      status: 'sending',
+      isOutgoing: true,
+    };
+
+    setGroups(prev => {
+      const next = new Map(prev);
+      const group = next.get(groupId);
+      if (group) {
+        next.set(groupId, {...group, messages: [...group.messages, chatMsg]});
+      }
+      return next;
+    });
+  }, []);
+
+  const leaveGroupAction = useCallback(async (groupId: string) => {
+    if (!protocolRef.current) {return;}
+    await protocolRef.current.mlsLeaveGroup(groupId);
+    setGroups(prev => {
+      const next = new Map(prev);
+      next.delete(groupId);
+      return next;
+    });
+  }, []);
+
+  const registerServiceAction = useCallback(async (serviceId: string, version: string) => {
+    if (!meshServices) {return;}
+    await meshServices.registerService(serviceId, version);
+    setRegisteredServices(prev =>
+      prev.includes(serviceId) ? prev : [...prev, serviceId],
+    );
+  }, [meshServices]);
+
+  const unregisterServiceAction = useCallback(async (serviceId: string) => {
+    if (!meshServices) {return;}
+    await meshServices.unregisterService(serviceId);
+    setRegisteredServices(prev => prev.filter(s => s !== serviceId));
+  }, [meshServices]);
+
+  const discoverServicesAction = useCallback(async (serviceId?: string) => {
+    if (!meshServices) {return;}
+    setDiscoveredServices([]);
+    await meshServices.discoverServices(serviceId);
+  }, [meshServices]);
+
+  const sendServiceRequestAction = useCallback(async (
+    provider: string,
+    serviceId: string,
+    method: string,
+    body: string,
+  ) => {
+    if (!meshServices) {return;}
+    await meshServices.sendServiceRequest(provider, serviceId, method, body);
+    appendServiceLog({
+      type: 'request',
+      from: 'me',
+      body: `[${serviceId}] ${method}: ${body}`,
+      timestamp: Date.now(),
+    });
+  }, [meshServices]);
+
+  const markChatRead = useCallback((peerId: string) => {
+    setChats(prev => {
+      const chat = prev.get(peerId);
+      if (!chat || chat.unreadCount === 0) {return prev;}
+      const next = new Map(prev);
+      next.set(peerId, {...chat, unreadCount: 0});
+      return next;
+    });
+  }, []);
+
+  const blockUserAction = useCallback((peerId: string) => {
+    blockedUsersRef.current.add(peerId);
+    setContacts(prev => {
+      const next = new Map(prev);
+      const contact = next.get(peerId);
+      if (contact) {
+        next.set(peerId, {...contact, isBlocked: true});
+      }
+      return next;
+    });
+  }, []);
+
+  const unblockUserAction = useCallback((peerId: string) => {
+    blockedUsersRef.current.delete(peerId);
+    setContacts(prev => {
+      const next = new Map(prev);
+      const contact = next.get(peerId);
+      if (contact) {
+        next.set(peerId, {...contact, isBlocked: false});
+      }
+      return next;
+    });
+  }, []);
+
+  // ─── Context Value ───────────────────────────────────────
+
+  const value: ProtocolContextValue = {
+    protocol,
+    meshServices,
+    isStarted,
+    userId,
+    userName,
+    neighbors,
+    contacts,
+    connectionRequests,
+    chats,
+    groups,
+    registeredServices,
+    discoveredServices,
+    serviceLog,
+    initialize,
+    sendMessage,
+    sendConnectionRequest: sendConnectionRequestAction,
+    acceptConnectionRequest: acceptConnectionRequestAction,
+    rejectConnectionRequest: rejectConnectionRequestAction,
+    createGroup: createGroupAction,
+    sendGroupMessage: sendGroupMessageAction,
+    leaveGroup: leaveGroupAction,
+    registerService: registerServiceAction,
+    unregisterService: unregisterServiceAction,
+    discoverServices: discoverServicesAction,
+    sendServiceRequest: sendServiceRequestAction,
+    markChatRead,
+    blockUser: blockUserAction,
+    unblockUser: unblockUserAction,
+  };
+
+  return (
+    <ProtocolContext.Provider value={value}>
+      {children}
+    </ProtocolContext.Provider>
+  );
+}

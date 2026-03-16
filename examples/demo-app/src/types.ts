@@ -1,0 +1,61 @@
+export interface Contact {
+  peerId: string;
+  name: string;
+  lastSeen: number;
+  isNearby: boolean;
+  hasSession: boolean;
+  isBlocked: boolean;
+}
+
+export interface Neighbor {
+  peerId: string;
+  transport: string;
+  rssi?: number;
+  discoveredAt: number;
+}
+
+export interface ConnectionRequest {
+  peerId: string;
+  name: string;
+  direction: 'in' | 'out';
+  timestamp: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  recipientId?: string;
+  groupId?: string;
+  content: string;
+  timestamp: number;
+  status: 'sending' | 'sent' | 'delivered' | 'failed';
+  isOutgoing: boolean;
+}
+
+export interface Chat {
+  peerId: string;
+  messages: ChatMessage[];
+  unreadCount: number;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  members: string[];
+  messages: ChatMessage[];
+}
+
+export interface DiscoveredService {
+  serviceId: string;
+  provider: string;
+  version: string;
+}
+
+export interface ServiceLogEntry {
+  type: 'request' | 'response';
+  from: string;
+  body: string;
+  timestamp: number;
+}
+
+export type TabName = 'people' | 'chats' | 'groups' | 'services';
