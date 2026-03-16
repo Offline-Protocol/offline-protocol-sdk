@@ -731,6 +731,7 @@ export interface GroupMemberAddedEvent extends BaseEvent {
   group_id: string;
   user_id: string;
   added_by: string;
+  group_name?: string;
 }
 
 /**

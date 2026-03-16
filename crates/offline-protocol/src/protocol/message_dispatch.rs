@@ -682,6 +682,7 @@ impl OfflineProtocol {
                         payload.group_id,
                         payload.user_id,
                         payload.added_by,
+                        payload.group_name,
                     ));
                 }
             } else {

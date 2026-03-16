@@ -175,6 +175,8 @@ pub(crate) struct GroupMemberAddedPayload {
     pub(crate) group_id: String,
     pub(crate) user_id: String,
     pub(crate) added_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

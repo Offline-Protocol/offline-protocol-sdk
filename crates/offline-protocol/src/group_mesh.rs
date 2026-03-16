@@ -402,6 +402,7 @@ impl OfflineProtocol {
                 group_id,
                 self.config.user_id.clone(),
                 sender.to_string(),
+                payload.group_name.clone(),
             ));
         }
     }
@@ -561,6 +562,7 @@ impl OfflineProtocol {
                 payload.group_id.clone(),
                 (*member).clone(),
                 sender.to_string(),
+                None,
             ));
         }
         for member in &actual_removed {
@@ -1047,6 +1049,7 @@ impl OfflineProtocol {
             group_id.to_string(),
             invitee_user_id.to_string(),
             self_id,
+            None,
         ));
 
         // Sync membership update to relay

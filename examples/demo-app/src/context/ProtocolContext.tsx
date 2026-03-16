@@ -415,6 +415,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         const groupId = event.groupId || event.group_id;
         const memberId = event.memberId || event.member_id || event.userId || event.user_id;
         const addedBy = event.addedBy || event.added_by;
+        const groupName = event.groupName || event.group_name || null;
         if (!groupId || !memberId) {break;}
         setGroups(prev => {
           const next = new Map(prev);
@@ -423,6 +424,8 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             if (!group.members.includes(memberId)) {
               next.set(groupId, {
                 ...group,
+                // Update name if we now have it (e.g. from a late-arriving event)
+                name: groupName || group.name,
                 members: [...group.members, memberId],
               });
             }
@@ -433,7 +436,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             if (!members.includes(userIdRef.current)) {members.push(userIdRef.current);}
             next.set(groupId, {
               id: groupId,
-              name: event.groupName || event.group_name || 'Group',
+              name: groupName || 'Group',
               members,
               messages: [],
             });

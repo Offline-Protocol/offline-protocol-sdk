@@ -1795,7 +1795,7 @@ fn test_group_mls_invite_to_group_end_to_end() {
     // Verify GroupMemberAdded event was emitted
     let events = alice_events.lock().unwrap();
     let added_event = events.iter().find(|e| {
-        matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, added_by }
+        matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, added_by, .. }
             if gid == &group_id && user_id == "bob" && added_by == "alice")
     });
     assert!(
