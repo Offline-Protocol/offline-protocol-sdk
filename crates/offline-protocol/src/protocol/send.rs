@@ -64,6 +64,15 @@ impl OfflineProtocol {
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
+        // Prevent sending messages to blocked users. Blocking is bidirectional:
+        // we neither receive from nor send to a blocked peer.
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::Other(format!(
+                "Cannot send message to blocked user: {}",
+                recipient_str
+            )));
+        }
+
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.
         if Self::is_internal_prefix(&content_str) {
@@ -207,6 +216,15 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
+
+        // Prevent sending messages to blocked users. Blocking is bidirectional:
+        // we neither receive from nor send to a blocked peer.
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::Other(format!(
+                "Cannot send message to blocked user: {}",
+                recipient_str
+            )));
+        }
 
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.

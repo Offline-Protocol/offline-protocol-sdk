@@ -117,9 +117,11 @@ impl OfflineProtocol {
         self.key_package_sent_to.remove(user_id);
     }
 
-    /// Returns the list of currently blocked user IDs.
+    /// Returns the list of currently blocked user IDs, sorted for stable output.
     pub fn get_blocked_users(&self) -> Vec<String> {
-        self.blocked_users.iter().cloned().collect()
+        let mut users: Vec<String> = self.blocked_users.iter().cloned().collect();
+        users.sort();
+        users
     }
 
     /// Checks whether a user is currently blocked.
@@ -340,5 +342,146 @@ mod tests {
             "Messages should be received after unblocking"
         );
         assert_eq!(received.unwrap().id, msg_id);
+    }
+
+    #[test]
+    fn test_send_to_blocked_user_rejected() {
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.send_message("mallory", "hello", None, None::<String>);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot send message to blocked user"),
+        );
+    }
+
+    #[test]
+    fn test_send_via_transport_to_blocked_user_rejected() {
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.send_message_via_transport(
+            "mallory",
+            "hello",
+            None,
+            TransportType::BLE,
+            None::<String>,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot send message to blocked user"),
+        );
+    }
+
+    #[test]
+    fn test_pending_decryption_drops_blocked_sender() {
+        use offline_protocol_core::{AppId, Message, UserId};
+
+        let mut proto = make_protocol("alice");
+
+        // Enqueue a pending message from bob before blocking
+        let msg = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "secret",
+        );
+        proto.enqueue_pending_decryption("bob", &msg);
+
+        // Now block bob
+        proto.block_user("bob").unwrap();
+
+        // process_pending_decryption should silently discard bob's messages
+        proto.process_pending_decryption("bob");
+
+        // Verify nothing was surfaced to the app
+        let state = crate::protocol::lock_shared_state(&proto.shared_state).unwrap();
+        assert!(
+            state.received_messages.is_empty(),
+            "Pending messages from blocked user should not be surfaced"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_from_blocked_user_no_ack() {
+        use offline_protocol_core::{AppId, Message, UserId};
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+
+        // First, receive a normal message from mallory (before blocking)
+        let msg = Message::new(
+            UserId::new("mallory").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "first message",
+        );
+        let msg_clone = msg.clone();
+        mock.queue_message(msg);
+
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        // Receive the first message normally
+        let received = proto.receive_message();
+        assert!(received.is_some());
+
+        // Now block mallory
+        proto.block_user("mallory").unwrap();
+
+        // Re-send the same message (duplicate) — should be silently discarded.
+        // The dedup path should NOT send a re-ACK because the sender is blocked.
+        let mut mock2 = MockTransport::new(TransportType::BLE);
+        mock2.start().unwrap();
+        mock2.queue_message(msg_clone);
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock2));
+
+        // This should return None without sending any ACK
+        assert!(proto.receive_message().is_none());
+    }
+
+    #[test]
+    fn test_get_blocked_users_sorted() {
+        let mut proto = make_protocol("alice");
+        proto.block_user("charlie").unwrap();
+        proto.block_user("bob").unwrap();
+        proto.block_user("dave").unwrap();
+
+        let blocked = proto.get_blocked_users();
+        assert_eq!(blocked, vec!["bob", "charlie", "dave"]);
     }
 }

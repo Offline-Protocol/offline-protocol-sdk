@@ -36,23 +36,34 @@ impl OfflineProtocol {
         loop {
             match self.transport_manager.receive() {
                 Ok(Some((transport_used, mut message))) => {
-                    // Merge Lamport clock for every received message — including
-                    // duplicates, ACKs, and internal protocol messages — so the
-                    // local clock always advances past any observed peer value.
-                    if message.lamport_clock.value() > 0 {
+                    // Block filter (early): check before any side-effects so
+                    // that blocked users cannot advance our Lamport clock,
+                    // leak our presence via re-ACK, or trigger any processing.
+                    // Relay messages for third parties pass through.
+                    let sender_blocked = self.is_user_blocked(message.sender.as_str())
+                        && message.recipient.as_str() == self.config.user_id;
+
+                    // Merge Lamport clock for every non-blocked received message
+                    // — including duplicates, ACKs, and internal protocol
+                    // messages — so the local clock always advances past any
+                    // observed peer value.
+                    if !sender_blocked && message.lamport_clock.value() > 0 {
                         self.lamport_clock.merge(message.lamport_clock);
                         self.persist_lamport_clock();
                     }
 
                     if message.metadata.contains_key(ACK_FOR_KEY) {
-                        self.handle_ack_message(&message);
+                        if !sender_blocked {
+                            self.handle_ack_message(&message);
+                        }
                         continue;
                     }
 
                     if self.deduplicator.is_duplicate(&message.id) {
-                        // Re-ACK duplicate packets so the sender can stop retrying
-                        // if our previous ACK was dropped.
-                        if message.requires_ack {
+                        // Re-ACK duplicate packets so the sender can stop
+                        // retrying — but NOT for blocked users, to avoid
+                        // leaking presence information.
+                        if !sender_blocked && message.requires_ack {
                             if let Err(err) = self.send_delivery_ack(&message, transport_used) {
                                 error!(
                                     message_id = %message.id,
@@ -67,16 +78,14 @@ impl OfflineProtocol {
                     self.deduplicator.mark_seen(message.id.clone());
 
                     // Block filter: silently drop messages from blocked users
-                    // addressed to us. Relay messages for third parties pass through.
-                    if self.is_user_blocked(message.sender.as_str())
-                        && message.recipient.as_str() == self.config.user_id
-                    {
+                    // addressed to us. No ACK, no event, no side-effects.
+                    if sender_blocked {
                         debug!(
                             sender = %message.sender,
                             message_id = %message.id,
                             "Dropping message from blocked user"
                         );
-                        continue; // No ACK sent, no event emitted
+                        continue;
                     }
 
                     // Handle internal MLS messages

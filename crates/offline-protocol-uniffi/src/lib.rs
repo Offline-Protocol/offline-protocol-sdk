@@ -1383,7 +1383,11 @@ impl OfflineProtocol {
             }
         }
 
-        // Notify the core protocol of neighbor discovery for auto key exchange
+        // Notify the core protocol of neighbor discovery for auto key exchange.
+        // Note: on_neighbor_discovered() has its own is_user_blocked() check
+        // and returns early for blocked peers (preventing key exchange). The
+        // check here is only needed to suppress the NeighborDiscovered event
+        // emitted by the UniFFI layer.
         let is_blocked;
         {
             let mut protocol = self.inner.lock().unwrap();
@@ -1391,7 +1395,6 @@ impl OfflineProtocol {
             protocol.on_neighbor_discovered(&peer_id);
         }
 
-        // Suppress NeighborDiscovered event for blocked users
         if !is_blocked {
             let event = CoreEvent::NeighborDiscovered {
                 peer_id: peer_id.clone(),
