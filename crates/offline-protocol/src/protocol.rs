@@ -54,56 +54,85 @@ pub(crate) fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, String> 
     BASE64.decode(data).map_err(|e| e.to_string())
 }
 
-/// Internal message prefixes for protocol messages.
-pub(crate) mod internal_prefixes {
+/// Defines both the `internal_prefixes` module (named constants) and the
+/// `INTERNAL_PREFIXES` array in one place, so they can never drift apart.
+///
+/// Adding a new control-message prefix is a single-line change — the macro
+/// guarantees the constant and the injection-prevention array stay in sync.
+macro_rules! define_internal_prefixes {
+    ( $( $(#[$attr:meta])* $name:ident = $value:expr ),+ $(,)? ) => {
+        /// Internal message prefixes for protocol messages.
+        pub(crate) mod internal_prefixes {
+            $( $(#[$attr])* pub const $name: &str = $value; )+
+        }
+
+        /// All internal message prefixes — used to reject user-sent messages
+        /// that start with a reserved prefix via the public `send_message` /
+        /// `send_message_via_transport` APIs (injection prevention).
+        ///
+        /// Service discovery prefixes (`__SVC_*`) from `offline-protocol-services`
+        /// are appended after the macro-generated entries.
+        const INTERNAL_PREFIXES: &[&str] = &[
+            $( internal_prefixes::$name, )+
+            // Service discovery and request/response prefixes.
+            offline_protocol_services::SVC_MESSAGE_PREFIX,
+            offline_protocol_services::SVC_DISCOVER_QUERY,
+            offline_protocol_services::SVC_DISCOVER_RESPONSE,
+            offline_protocol_services::SVC_REQUEST,
+            offline_protocol_services::SVC_RESPONSE,
+        ];
+    };
+}
+
+define_internal_prefixes! {
     /// Prefix for key package messages.
-    pub const KEY_PACKAGE: &str = "__MLS_KEY_PKG__";
+    KEY_PACKAGE = "__MLS_KEY_PKG__",
     /// Prefix for welcome messages.
-    pub const WELCOME: &str = "__MLS_WELCOME__";
+    WELCOME = "__MLS_WELCOME__",
     /// Prefix for encrypted messages.
-    pub const ENCRYPTED: &str = "__MLS_ENC__";
+    ENCRYPTED = "__MLS_ENC__",
     /// Prefix for session confirmation probe messages.
-    pub const SESSION_CONFIRM_PROBE: &str = "__MLS_CONFIRM_PROBE__";
+    SESSION_CONFIRM_PROBE = "__MLS_CONFIRM_PROBE__",
     /// Prefix for session confirmation acknowledgement messages.
-    pub const SESSION_CONFIRM_ACK: &str = "__MLS_CONFIRM_ACK__";
+    SESSION_CONFIRM_ACK = "__MLS_CONFIRM_ACK__",
     /// Prefix for connection request messages.
-    pub const CONN_REQUEST: &str = "__CONN_REQ__";
+    CONN_REQUEST = "__CONN_REQ__",
     /// Prefix for connection accepted messages.
-    pub const CONN_ACCEPT: &str = "__CONN_ACC__";
+    CONN_ACCEPT = "__CONN_ACC__",
     /// Prefix for connection rejected messages.
-    pub const CONN_REJECT: &str = "__CONN_REJ__";
+    CONN_REJECT = "__CONN_REJ__",
     /// Prefix for group created (relay).
-    pub const GROUP_CREATED: &str = "__GROUP_CREATED__";
+    GROUP_CREATED = "__GROUP_CREATED__",
     /// Prefix for group message received (relay).
-    pub const GROUP_MSG: &str = "__GROUP_MSG__";
+    GROUP_MSG = "__GROUP_MSG__",
     /// Prefix for group member added (relay).
-    pub const GROUP_MEMBER_ADDED: &str = "__GROUP_MEMBER_ADDED__";
+    GROUP_MEMBER_ADDED = "__GROUP_MEMBER_ADDED__",
     /// Prefix for group member removed (relay).
-    pub const GROUP_MEMBER_REMOVED: &str = "__GROUP_MEMBER_REMOVED__";
+    GROUP_MEMBER_REMOVED = "__GROUP_MEMBER_REMOVED__",
     /// Prefix for group info (relay).
-    pub const GROUP_INFO: &str = "__GROUP_INFO__";
+    GROUP_INFO = "__GROUP_INFO__",
     /// Prefix for user groups list (relay).
-    pub const USER_GROUPS: &str = "__USER_GROUPS__";
+    USER_GROUPS = "__USER_GROUPS__",
     /// Prefix for group error (relay).
-    pub const GROUP_ERROR: &str = "__GROUP_ERROR__";
+    GROUP_ERROR = "__GROUP_ERROR__",
     /// Prefix for MLS-encrypted group messages.
-    pub const GROUP_MLS_MSG: &str = "__GRP_MLS_MSG__";
+    GROUP_MLS_MSG = "__GRP_MLS_MSG__",
     /// Prefix for MLS Welcome messages for group invites.
-    pub const GROUP_MLS_WELCOME: &str = "__GRP_MLS_WELCOME__";
+    GROUP_MLS_WELCOME = "__GRP_MLS_WELCOME__",
     /// Prefix for MLS Commit messages for group membership changes.
-    pub const GROUP_MLS_COMMIT: &str = "__GRP_MLS_COMMIT__";
+    GROUP_MLS_COMMIT = "__GRP_MLS_COMMIT__",
     /// Prefix for group leave notifications.
-    pub const GROUP_MLS_LEAVE: &str = "__GRP_MLS_LEAVE__";
+    GROUP_MLS_LEAVE = "__GRP_MLS_LEAVE__",
     /// Prefix for relay group registration (SDK → relay server).
-    pub const GROUP_RELAY_REGISTER: &str = "__GRP_RELAY_REG__";
+    GROUP_RELAY_REGISTER = "__GRP_RELAY_REG__",
     /// Prefix for relay group broadcast (SDK → relay server fan-out).
-    pub const GROUP_RELAY_BROADCAST: &str = "__GRP_RELAY_BCAST__";
+    GROUP_RELAY_BROADCAST = "__GRP_RELAY_BCAST__",
     /// Prefix for presence update messages.
-    pub const PRESENCE: &str = "__PRESENCE__";
+    PRESENCE = "__PRESENCE__",
     /// Prefix for typing indicator messages.
-    pub const TYPING_INDICATOR: &str = "__TYPING__";
+    TYPING_INDICATOR = "__TYPING__",
     /// Prefix for read receipt messages.
-    pub const READ_RECEIPT: &str = "__READ_RECEIPT__";
+    READ_RECEIPT = "__READ_RECEIPT__",
 }
 
 /// Retry interval for persisting session confirmation after a transient storage error.
@@ -137,50 +166,6 @@ const CTRL_PK_META_KEY: &str = "__ctrl_pk";
 /// messages cannot be replayed in a future protocol extension that reuses the
 /// same MLS identity key but with a different domain separator.
 const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
-
-/// All internal message prefixes — used to reject user-sent messages that
-/// start with a reserved prefix via the public `send_message` /
-/// `send_message_via_transport` APIs (injection prevention).
-///
-/// **Maintenance note:** When adding a new control message prefix (in
-/// `internal_prefixes` or `offline-protocol-services`), it MUST be registered
-/// here. The `SVC_MESSAGE_PREFIX` catch-all covers future `__SVC_*` prefixes
-/// automatically, but non-SVC prefixes require an explicit entry.
-const INTERNAL_PREFIXES: &[&str] = &[
-    internal_prefixes::KEY_PACKAGE,
-    internal_prefixes::WELCOME,
-    internal_prefixes::ENCRYPTED,
-    internal_prefixes::SESSION_CONFIRM_PROBE,
-    internal_prefixes::SESSION_CONFIRM_ACK,
-    internal_prefixes::CONN_REQUEST,
-    internal_prefixes::CONN_ACCEPT,
-    internal_prefixes::CONN_REJECT,
-    internal_prefixes::GROUP_CREATED,
-    internal_prefixes::GROUP_MSG,
-    internal_prefixes::GROUP_MEMBER_ADDED,
-    internal_prefixes::GROUP_MEMBER_REMOVED,
-    internal_prefixes::GROUP_INFO,
-    internal_prefixes::USER_GROUPS,
-    internal_prefixes::GROUP_ERROR,
-    internal_prefixes::GROUP_MLS_MSG,
-    internal_prefixes::GROUP_MLS_WELCOME,
-    internal_prefixes::GROUP_MLS_COMMIT,
-    internal_prefixes::GROUP_MLS_LEAVE,
-    internal_prefixes::GROUP_RELAY_REGISTER,
-    internal_prefixes::GROUP_RELAY_BROADCAST,
-    internal_prefixes::PRESENCE,
-    internal_prefixes::TYPING_INDICATOR,
-    internal_prefixes::READ_RECEIPT,
-    // Service discovery and request/response prefixes.
-    // NOTE: individual SVC prefixes are listed explicitly so that new service
-    // prefixes added in offline-protocol-services must be registered here too.
-    // The catch-all `SVC_MESSAGE_PREFIX` ("__SVC_") covers any future additions.
-    offline_protocol_services::SVC_MESSAGE_PREFIX,
-    offline_protocol_services::SVC_DISCOVER_QUERY,
-    offline_protocol_services::SVC_DISCOVER_RESPONSE,
-    offline_protocol_services::SVC_REQUEST,
-    offline_protocol_services::SVC_RESPONSE,
-];
 
 /// Data-plane prefixes that are **excluded** from the security gate.
 ///
@@ -13841,46 +13826,11 @@ pub(crate) mod tests {
 
     #[test]
     fn test_internal_prefixes_completeness() {
-        // Verify that every constant defined in `internal_prefixes` is
-        // registered in INTERNAL_PREFIXES. If a new prefix is added to the
-        // module but not to the array, this test fails.
-        let module_prefixes: Vec<&str> = vec![
-            internal_prefixes::KEY_PACKAGE,
-            internal_prefixes::WELCOME,
-            internal_prefixes::ENCRYPTED,
-            internal_prefixes::SESSION_CONFIRM_PROBE,
-            internal_prefixes::SESSION_CONFIRM_ACK,
-            internal_prefixes::CONN_REQUEST,
-            internal_prefixes::CONN_ACCEPT,
-            internal_prefixes::CONN_REJECT,
-            internal_prefixes::GROUP_CREATED,
-            internal_prefixes::GROUP_MSG,
-            internal_prefixes::GROUP_MEMBER_ADDED,
-            internal_prefixes::GROUP_MEMBER_REMOVED,
-            internal_prefixes::GROUP_INFO,
-            internal_prefixes::USER_GROUPS,
-            internal_prefixes::GROUP_ERROR,
-            internal_prefixes::GROUP_MLS_MSG,
-            internal_prefixes::GROUP_MLS_WELCOME,
-            internal_prefixes::GROUP_MLS_COMMIT,
-            internal_prefixes::GROUP_MLS_LEAVE,
-            internal_prefixes::GROUP_RELAY_REGISTER,
-            internal_prefixes::GROUP_RELAY_BROADCAST,
-            internal_prefixes::PRESENCE,
-            internal_prefixes::TYPING_INDICATOR,
-            internal_prefixes::READ_RECEIPT,
-        ];
+        // The `define_internal_prefixes!` macro guarantees that every constant
+        // in `internal_prefixes` is also in `INTERNAL_PREFIXES`. This test
+        // verifies the SVC and DATA_PLANE invariants that aren't macro-generated.
 
-        for prefix in &module_prefixes {
-            assert!(
-                INTERNAL_PREFIXES.contains(prefix),
-                "internal_prefixes::{:?} is missing from INTERNAL_PREFIXES array — \
-                 this is a security gap that allows prefix injection for this message type",
-                prefix
-            );
-        }
-
-        // Also verify the SVC catch-all and explicit SVC prefixes
+        // Verify the SVC catch-all and explicit SVC prefixes
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_MESSAGE_PREFIX));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_QUERY));
         assert!(INTERNAL_PREFIXES.contains(&offline_protocol_services::SVC_DISCOVER_RESPONSE));
