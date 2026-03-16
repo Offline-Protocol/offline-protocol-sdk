@@ -8,10 +8,10 @@ use offline_protocol_core::{AppId, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{
     mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
 };
+use std::collections::VecDeque;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::time::Duration as StdDuration;
 
 pub(crate) fn create_test_config() -> ProtocolConfig {
     ProtocolConfig::new("test-app", "user123")
@@ -3336,7 +3336,7 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         encrypted_result,
         Some(InternalMessageResult::Consumed)
     ));
-    assert!(bob.pending_decryption.contains_key("alice"));
+    assert!(bob.pending_queue.pending_decryption.contains_key("alice"));
     assert!(!bob.confirmed_sessions.contains("alice"));
 
     let welcome_result = bob.process_internal_message(&welcome_wire);
@@ -3345,7 +3345,7 @@ fn test_welcome_reordered_after_encrypted_message_flushes_pending_decryption() {
         Some(InternalMessageResult::Consumed)
     ));
     assert!(bob.confirmed_sessions.contains("alice"));
-    assert!(!bob.pending_decryption.contains_key("alice"));
+    assert!(!bob.pending_queue.pending_decryption.contains_key("alice"));
 
     let delayed_received = bob
         .receive_message()
@@ -4322,7 +4322,7 @@ fn test_pending_decryption_queue() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Initially no pending decryption messages
-    assert!(protocol.pending_decryption.is_empty());
+    assert!(protocol.pending_queue.pending_decryption.is_empty());
 
     // Queue an encrypted message for a sender
     let message = Message::new(
@@ -4335,9 +4335,17 @@ fn test_pending_decryption_queue() {
     protocol.enqueue_pending_decryption("sender123", &message);
 
     // Check message is queued
-    assert!(protocol.pending_decryption.contains_key("sender123"));
+    assert!(protocol
+        .pending_queue
+        .pending_decryption
+        .contains_key("sender123"));
     assert_eq!(
-        protocol.pending_decryption.get("sender123").unwrap().len(),
+        protocol
+            .pending_queue
+            .pending_decryption
+            .get("sender123")
+            .unwrap()
+            .len(),
         1
     );
 
@@ -4352,7 +4360,12 @@ fn test_pending_decryption_queue() {
     protocol.enqueue_pending_decryption("sender123", &message2);
 
     assert_eq!(
-        protocol.pending_decryption.get("sender123").unwrap().len(),
+        protocol
+            .pending_queue
+            .pending_decryption
+            .get("sender123")
+            .unwrap()
+            .len(),
         2
     );
 }
@@ -4374,14 +4387,17 @@ fn test_session_confirmation_clears_pending_decryption() {
 
     protocol.enqueue_pending_decryption("sender123", &message);
 
-    assert!(!protocol.pending_decryption.is_empty());
+    assert!(!protocol.pending_queue.pending_decryption.is_empty());
 
     // Calling process_pending_decryption should remove the entries
     // (even if decryption fails since MLS is not initialized)
     protocol.process_pending_decryption("sender123");
 
     // The messages should be removed from the pending queue
-    assert!(!protocol.pending_decryption.contains_key("sender123"));
+    assert!(!protocol
+        .pending_queue
+        .pending_decryption
+        .contains_key("sender123"));
 }
 
 #[test]
@@ -4597,13 +4613,17 @@ fn test_mls_pipeline_missing_session_applies_drop_newest_policy() {
         second_result,
         Some(InternalMessageResult::Consumed)
     ));
-    assert_eq!(bob.pending_decryption["alice"].len(), 1);
+    assert_eq!(bob.pending_queue.pending_decryption["alice"].len(), 1);
     assert_eq!(
-        bob.pending_decryption["alice"][0].message.id.as_str(),
+        bob.pending_queue.pending_decryption["alice"][0]
+            .message
+            .id
+            .as_str(),
         first_message.id.as_str()
     );
     assert_eq!(
-        bob.pending_queue_metrics
+        bob.pending_queue
+            .metrics
             .pending_messages_dropped_overflow_total,
         1
     );
@@ -4823,8 +4843,14 @@ fn test_encrypted_message_group_not_found_is_queued_with_typed_classification() 
     let result = protocol.process_internal_message(&message);
 
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
-    assert!(protocol.pending_decryption.contains_key("sender123"));
-    assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
+    assert!(protocol
+        .pending_queue
+        .pending_decryption
+        .contains_key("sender123"));
+    assert_eq!(
+        protocol.pending_queue.pending_decryption["sender123"].len(),
+        1
+    );
 }
 
 #[test]
@@ -4842,11 +4868,12 @@ fn test_pending_queue_stress_memory_plateaus_with_unfinished_handshake() {
         protocol.enqueue_pending_decryption("sender123", &msg);
     }
 
-    assert_eq!(protocol.pending_decryption_total, 32);
-    assert_eq!(protocol.pending_queue_metrics.pending_messages_current, 32);
+    assert_eq!(protocol.pending_queue.pending_decryption_total, 32);
+    assert_eq!(protocol.pending_queue.metrics.pending_messages_current, 32);
     assert_eq!(
         *protocol
-            .pending_queue_metrics
+            .pending_queue
+            .metrics
             .pending_messages_per_peer
             .get("sender123")
             .unwrap(),
@@ -4909,9 +4936,10 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
         .pending_queue
         .max_pending_per_peer;
     let global_limit = protocol.config.encryption.pending_queue.max_pending_global;
-    assert!(protocol.pending_decryption_total <= global_limit);
+    assert!(protocol.pending_queue.pending_decryption_total <= global_limit);
     assert!(
         protocol
+            .pending_queue
             .pending_decryption
             .get("sender123")
             .map(VecDeque::len)
@@ -4923,7 +4951,7 @@ fn test_pending_queue_sustained_mixed_invalid_and_early_encrypted_is_bounded() {
     assert_eq!(metrics.pending_messages_received_total, early_count);
     assert_eq!(
         metrics.pending_messages_current,
-        protocol.pending_decryption_total
+        protocol.pending_queue.pending_decryption_total
     );
     assert!(metrics.pending_messages_dropped_overflow_total > 0);
     assert_eq!(early_count + invalid_count, 10_000);
@@ -4951,17 +4979,24 @@ fn test_pending_queue_flood_respects_per_peer_fairness() {
         protocol.enqueue_pending_decryption("peer-b", &msg);
     }
 
-    assert!(protocol.pending_decryption_total <= 6);
+    assert!(protocol.pending_queue.pending_decryption_total <= 6);
     assert!(
         protocol
+            .pending_queue
             .pending_decryption
             .get("noisy-peer")
             .map(VecDeque::len)
             .unwrap_or(0)
             <= 3
     );
-    assert!(protocol.pending_decryption.contains_key("peer-a"));
-    assert!(protocol.pending_decryption.contains_key("peer-b"));
+    assert!(protocol
+        .pending_queue
+        .pending_decryption
+        .contains_key("peer-a"));
+    assert!(protocol
+        .pending_queue
+        .pending_decryption
+        .contains_key("peer-b"));
 }
 
 #[test]
@@ -4979,12 +5014,13 @@ fn test_pending_queue_drop_newest_policy_enforced_for_per_peer_limit() {
     protocol.enqueue_pending_decryption("peer-a", &first);
     protocol.enqueue_pending_decryption("peer-a", &second);
 
-    assert_eq!(protocol.pending_decryption["peer-a"].len(), 1);
-    let queued_message = &protocol.pending_decryption["peer-a"][0];
+    assert_eq!(protocol.pending_queue.pending_decryption["peer-a"].len(), 1);
+    let queued_message = &protocol.pending_queue.pending_decryption["peer-a"][0];
     assert_eq!(queued_message.message.content, "first");
     assert_eq!(
         protocol
-            .pending_queue_metrics
+            .pending_queue
+            .metrics
             .pending_messages_dropped_overflow_total,
         1
     );
@@ -5001,19 +5037,29 @@ fn test_pending_queue_global_limit_fail_closed_when_global_index_corrupted() {
 
     let mut protocol = OfflineProtocol::new(config).unwrap();
     protocol.enqueue_pending_decryption("peer-a", &pending_test_message("peer-a", "m1"));
-    assert_eq!(protocol.pending_decryption_total, 1);
+    assert_eq!(protocol.pending_queue.pending_decryption_total, 1);
 
     // Simulate index drift: queue has data but global-order index is empty.
-    protocol.pending_decryption_global_order.clear();
+    protocol
+        .pending_queue
+        .pending_decryption_global_order
+        .clear();
 
     protocol.enqueue_pending_decryption("peer-b", &pending_test_message("peer-b", "m2"));
 
-    assert_eq!(protocol.pending_decryption_total, 1);
-    assert!(!protocol.pending_decryption.contains_key("peer-b"));
-    assert!(protocol.pending_decryption.contains_key("peer-a"));
+    assert_eq!(protocol.pending_queue.pending_decryption_total, 1);
+    assert!(!protocol
+        .pending_queue
+        .pending_decryption
+        .contains_key("peer-b"));
+    assert!(protocol
+        .pending_queue
+        .pending_decryption
+        .contains_key("peer-a"));
     assert!(
         protocol
-            .pending_queue_metrics
+            .pending_queue
+            .metrics
             .pending_messages_eviction_failures_total
             >= 1
     );
@@ -5034,17 +5080,29 @@ fn test_pending_queue_ttl_expiration_is_deterministic_and_monotonic() {
     protocol.enqueue_pending_decryption("sender123", &fresh_msg);
 
     {
-        let queue = protocol.pending_decryption.get_mut("sender123").unwrap();
+        let queue = protocol
+            .pending_queue
+            .pending_decryption
+            .get_mut("sender123")
+            .unwrap();
         let old = queue.front_mut().unwrap();
-        old.received_at = Instant::now() - StdDuration::from_millis(2_000);
+        old.received_at = Instant::now() - Duration::from_millis(2_000);
     }
 
-    let expired = protocol.prune_expired_pending_for_peer("sender123", Instant::now());
+    let config = protocol.config.encryption.pending_queue.clone();
+    let expired =
+        protocol
+            .pending_queue
+            .prune_expired_for_peer(&config, "sender123", Instant::now());
     assert_eq!(expired, 1);
-    assert_eq!(protocol.pending_decryption["sender123"].len(), 1);
+    assert_eq!(
+        protocol.pending_queue.pending_decryption["sender123"].len(),
+        1
+    );
     assert_eq!(
         protocol
-            .pending_queue_metrics
+            .pending_queue
+            .metrics
             .pending_messages_expired_total,
         1
     );
@@ -5085,7 +5143,7 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
 
     let result = bob.process_internal_message(&incoming);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
-    assert_eq!(bob.pending_decryption["alice"].len(), 1);
+    assert_eq!(bob.pending_queue.pending_decryption["alice"].len(), 1);
 
     {
         let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
@@ -5093,7 +5151,7 @@ fn test_pending_messages_replay_decrypt_after_session_readiness() {
     }
 
     bob.process_pending_decryption("alice");
-    assert!(!bob.pending_decryption.contains_key("alice"));
+    assert!(!bob.pending_queue.pending_decryption.contains_key("alice"));
     let metrics = bob.pending_queue_metrics();
     assert_eq!(metrics.pending_messages_received_total, 1);
 }
@@ -5132,8 +5190,8 @@ fn test_pending_queue_concurrency_multi_peer_enqueue_is_bounded() {
     }
 
     let protocol = protocol.lock().unwrap();
-    assert!(protocol.pending_decryption_total <= 64);
-    for queue in protocol.pending_decryption.values() {
+    assert!(protocol.pending_queue.pending_decryption_total <= 64);
+    for queue in protocol.pending_queue.pending_decryption.values() {
         assert!(queue.len() <= 8);
     }
 }

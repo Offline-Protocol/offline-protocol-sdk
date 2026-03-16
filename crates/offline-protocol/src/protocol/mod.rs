@@ -25,7 +25,7 @@ use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMess
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
 use offline_protocol_services::MeshServices;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -85,27 +85,9 @@ pub struct OfflineProtocol {
     /// Only encrypt messages when the session is confirmed to avoid race conditions.
     confirmed_sessions: std::collections::HashSet<String>,
 
-    /// Encrypted messages received before session was established (sender -> messages).
-    /// These are queued and processed after session confirmation.
-    /// Invariants:
-    /// - bounded by both per-peer and global limits
-    /// - deterministic FIFO order within each peer
-    /// - monotonic TTL expiration (Instant-based)
-    pending_decryption: HashMap<String, VecDeque<PendingDecryptMessage>>,
-    /// Global insertion order index for deterministic global oldest eviction.
-    pending_decryption_global_order: VecDeque<PendingDecryptEntryRef>,
-    /// Live sequence IDs currently present in pending queues.
-    pending_decryption_live_sequences: HashSet<u64>,
-    /// Current number of pending encrypted messages across all peers.
-    pending_decryption_total: usize,
-    /// Monotonic sequence assigned on enqueue for deterministic tie-breaking.
-    pending_decryption_next_sequence: u64,
-    /// Pending queue observability counters and gauges.
-    pending_queue_metrics: PendingQueueMetrics,
-    /// Overflow hit count per peer for warning signal emission.
-    pending_peer_overflow_hits: HashMap<String, u32>,
-    /// Drop warning counters used for log-rate limiting by reason/limit.
-    pending_drop_warning_counters: HashMap<String, u64>,
+    /// Bounded pending decryption queue for encrypted messages received before
+    /// the MLS session is ready.
+    pub(crate) pending_queue: PendingDecryptionQueue,
 
     /// Storage for persisting pending messages (reuses MLS storage).
     /// When set, pending messages survive app crashes/restarts.
@@ -205,14 +187,7 @@ impl OfflineProtocol {
             key_package_sent_to: std::collections::HashSet::new(),
             known_peers: std::collections::HashSet::new(),
             confirmed_sessions: std::collections::HashSet::new(),
-            pending_decryption: HashMap::new(),
-            pending_decryption_global_order: VecDeque::new(),
-            pending_decryption_live_sequences: HashSet::new(),
-            pending_decryption_total: 0,
-            pending_decryption_next_sequence: 0,
-            pending_queue_metrics: PendingQueueMetrics::default(),
-            pending_peer_overflow_hits: HashMap::new(),
-            pending_drop_warning_counters: HashMap::new(),
+            pending_queue: PendingDecryptionQueue::default(),
             message_storage: None,
             lamport_clock: LamportClock::new(),
             confirmation_retry_due_at: HashMap::new(),

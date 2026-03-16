@@ -105,7 +105,7 @@ impl OfflineProtocol {
 
     /// Gets pending encrypted message queue counters and gauges.
     pub fn pending_queue_metrics(&self) -> PendingQueueMetrics {
-        self.pending_queue_metrics.clone()
+        self.pending_queue.metrics.clone()
     }
 
     /// Gets the current ACK manager statistics.
