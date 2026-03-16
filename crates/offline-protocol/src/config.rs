@@ -94,21 +94,13 @@ impl EncryptionConfig {
 }
 
 /// Security configuration for transport and control-message hardening.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// When `true`, control messages with no transport-level peer identity
     /// (`transport_peer_id` is `None`) are rejected. When `false` (default),
     /// missing transport identity emits a `SecurityWarning` but allows the
     /// message through (best-effort / fail-open).
     pub require_transport_identity: bool,
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            require_transport_identity: false,
-        }
-    }
 }
 
 /// Transport-specific configuration.

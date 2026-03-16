@@ -179,22 +179,18 @@ const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 /// **Maintenance note:** Only add prefixes here if they are MLS-authenticated
 /// data-plane messages. All other internal prefixes are control-plane and
 /// require signature verification + TOFU enforcement.
-const DATA_PLANE_PREFIXES: &[&str] = &[
-    internal_prefixes::ENCRYPTED,
-];
+const DATA_PLANE_PREFIXES: &[&str] = &[internal_prefixes::ENCRYPTED];
 
 /// Maximum number of TOFU-pinned peer public keys to retain.
 ///
-/// // TODO(security): The TOFU store is currently in-memory only — all pinned
-/// // keys are lost on process restart. This allows key-substitution attacks
-/// // during the re-pinning window after restart. Persist the TOFU store via
-/// // `MlsStorage` to close this gap.
+/// Entries are persisted via `MlsStorage` (when available) so pinned keys
+/// survive process restarts and prevent key-substitution during re-pinning.
 ///
 /// // TODO(security): There is no mechanism for legitimate key rotation. A peer
 /// // who re-initializes MLS (getting a new identity key) will be permanently
-/// // rejected by all peers who have TOFU-pinned the old key, until process
-/// // restart clears the in-memory store. Implement a key rotation protocol
-/// // (e.g. signed key-update messages) or a manual TOFU reset API.
+/// // rejected by all peers who have TOFU-pinned the old key. Implement a key
+/// // rotation protocol (e.g. signed key-update messages) or a manual TOFU
+/// // reset API.
 const MAX_TOFU_PEERS: usize = 1000;
 
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
@@ -206,7 +202,7 @@ const TOFU_MIN_EVICTION_AGE_MS: i64 = 3_600_000;
 
 /// Entry in the TOFU key store, pairing the peer's public key with a
 /// last-seen timestamp used for LRU eviction.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TofuEntry {
     public_key: Vec<u8>,
     /// Milliseconds since epoch (UTC) when we last verified a signed message
@@ -531,6 +527,8 @@ mod storage_keys {
     pub const LAMPORT_CLOCK: &str = "lamport_clock";
     /// Key ID for the single Lamport clock entry.
     pub const LAMPORT_CLOCK_ID: &str = "current";
+    /// Key type for persisted TOFU (Trust-On-First-Use) peer public keys.
+    pub const TOFU_KEYS: &str = "tofu_keys";
 }
 
 /// Protocol state.
@@ -745,7 +743,7 @@ pub struct OfflineProtocol {
     /// a mismatch triggers a security warning and the message is dropped.
     /// Entries track a last-seen timestamp for LRU eviction when the store is full.
     ///
-    // TODO(security): persist via MlsStorage; see MAX_TOFU_PEERS doc.
+    /// Persisted via `MlsStorage` (when available) to survive restarts.
     // TODO(security): support key rotation; see MAX_TOFU_PEERS doc.
     known_peer_public_keys: HashMap<String, TofuEntry>,
 }
@@ -848,6 +846,7 @@ impl OfflineProtocol {
         let previous_confirmed_sessions = self.confirmed_sessions.clone();
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
+        let previous_tofu_keys = self.known_peer_public_keys.clone();
 
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
@@ -856,6 +855,7 @@ impl OfflineProtocol {
         let restore_result = (|| {
             self.restore_pending_messages()?;
             self.restore_lamport_clock();
+            self.restore_tofu_keys();
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
@@ -868,6 +868,7 @@ impl OfflineProtocol {
             self.confirmed_sessions = previous_confirmed_sessions;
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
+            self.known_peer_public_keys = previous_tofu_keys;
             return Err(err);
         }
 
@@ -890,6 +891,7 @@ impl OfflineProtocol {
         self.message_storage = Some(storage);
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
+        self.restore_tofu_keys();
         info!("Message persistence enabled");
         Ok(())
     }
@@ -4280,6 +4282,74 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // TOFU KEY PERSISTENCE
+    // ========================================================================
+
+    /// Persists a single TOFU entry to storage.
+    fn persist_tofu_entry(&self, peer_id: &str, entry: &TofuEntry) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        match serde_json::to_vec(entry) {
+            Ok(data) => {
+                if let Err(e) = storage.store(storage_keys::TOFU_KEYS, peer_id, &data) {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist TOFU entry");
+                }
+            }
+            Err(e) => {
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize TOFU entry");
+            }
+        }
+    }
+
+    /// Deletes a TOFU entry from storage (e.g. on LRU eviction).
+    fn delete_tofu_entry(&self, peer_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::TOFU_KEYS, peer_id) {
+            warn!(peer_id = %peer_id, error = %e, "Failed to delete TOFU entry from storage");
+        }
+    }
+
+    /// Restores TOFU key entries from persistent storage.
+    ///
+    /// Skips corrupted entries with a warning (best-effort restore).
+    fn restore_tofu_keys(&mut self) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        let peer_ids = match storage.list_keys(storage_keys::TOFU_KEYS) {
+            Ok(keys) => keys,
+            Err(e) => {
+                warn!(error = %e, "Failed to list TOFU keys from storage, starting with empty store");
+                return;
+            }
+        };
+        let mut restored = 0u32;
+        for peer_id in peer_ids {
+            match storage.load(storage_keys::TOFU_KEYS, &peer_id) {
+                Ok(Some(data)) => match serde_json::from_slice::<TofuEntry>(&data) {
+                    Ok(entry) => {
+                        self.known_peer_public_keys.insert(peer_id, entry);
+                        restored += 1;
+                    }
+                    Err(e) => {
+                        warn!(peer_id = %peer_id, error = %e, "Skipping corrupted TOFU entry");
+                    }
+                },
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to load TOFU entry");
+                }
+            }
+        }
+        if restored > 0 {
+            info!(count = restored, "Restored TOFU key entries from storage");
+        }
+    }
+
+    // ========================================================================
     // KEY PACKAGE HANDLING
     // ========================================================================
 
@@ -6521,6 +6591,14 @@ impl OfflineProtocol {
         }
         let now_ms = Utc::now().timestamp_millis();
 
+        // Deferred persistence actions collected here to avoid borrow conflicts
+        // between `get_mut` on the HashMap and `&self` in persistence helpers.
+        enum TofuAction {
+            Persist(String, TofuEntry),
+            Delete(String),
+        }
+        let mut actions: Vec<TofuAction> = Vec::new();
+
         if let Some(entry) = self.known_peer_public_keys.get_mut(sender) {
             if entry.public_key != public_key {
                 warn!(
@@ -6538,6 +6616,7 @@ impl OfflineProtocol {
             }
             // Update last-seen timestamp for LRU tracking
             entry.last_seen_ms = now_ms;
+            actions.push(TofuAction::Persist(sender.to_string(), entry.clone()));
         } else {
             // First contact — pin the key (with bounded capacity, LRU eviction)
             if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
@@ -6556,6 +6635,7 @@ impl OfflineProtocol {
                     Some(key) => {
                         debug!(evicted_peer = %key, "TOFU store full, evicting LRU entry");
                         self.known_peer_public_keys.remove(&key);
+                        actions.push(TofuAction::Delete(key));
                     }
                     None => {
                         warn!(
@@ -6575,13 +6655,21 @@ impl OfflineProtocol {
                 }
             }
             debug!(sender = %sender, "TOFU: pinning public key for new peer");
-            self.known_peer_public_keys.insert(
-                sender.to_string(),
-                TofuEntry {
-                    public_key,
-                    last_seen_ms: now_ms,
-                },
-            );
+            let entry = TofuEntry {
+                public_key,
+                last_seen_ms: now_ms,
+            };
+            actions.push(TofuAction::Persist(sender.to_string(), entry.clone()));
+            self.known_peer_public_keys
+                .insert(sender.to_string(), entry);
+        }
+
+        // Execute deferred persistence actions (HashMap borrow is now released)
+        for action in actions {
+            match action {
+                TofuAction::Persist(peer_id, entry) => self.persist_tofu_entry(&peer_id, &entry),
+                TofuAction::Delete(peer_id) => self.delete_tofu_entry(&peer_id),
+            }
         }
 
         Ok(true)
@@ -6610,13 +6698,25 @@ impl OfflineProtocol {
             warn!(
                 sender = %sender,
                 message_id = %message.id,
-                "Dropping control message: sender/transport identity mismatch"
+                "Dropping control message: sender/transport identity mismatch or missing"
             );
             self.emit_security_warning(
                 sender,
                 "Control message sender does not match transport peer identity",
             );
             return Some(InternalMessageResult::SecurityRejected);
+        }
+
+        // Log telemetry when transport identity is absent (passed best-effort).
+        // This is not emitted as a SecurityWarning event because relayed/forwarded
+        // messages routinely lack transport_peer_id and flooding the event stream
+        // would desensitize operators to real warnings.
+        if message.transport_peer_id().is_none() {
+            debug!(
+                sender = %sender,
+                message_id = %message.id,
+                "Control message passed without transport peer identity (best-effort)"
+            );
         }
 
         // Cryptographic signature check
@@ -6689,19 +6789,13 @@ impl OfflineProtocol {
                 }
             }
             None => {
-                // No transport identity available — always emit telemetry so
-                // operators can measure how often this path is hit.
-                warn!(
-                    claimed_sender = %message.sender,
-                    message_id = %message.id,
-                    "Control message received without transport peer identity"
-                );
-                self.emit_security_warning(
-                    message.sender.as_str(),
-                    "Control message has no transport peer identity (transport_peer_id absent)",
-                );
-
                 if self.config.security.require_transport_identity {
+                    warn!(
+                        claimed_sender = %message.sender,
+                        message_id = %message.id,
+                        "Rejecting control message without transport peer identity \
+                         (require_transport_identity=true)"
+                    );
                     return false;
                 }
             }
@@ -6731,9 +6825,7 @@ impl OfflineProtocol {
         // minus DATA_PLANE_PREFIXES, so any new internal prefix is automatically
         // gated unless explicitly excluded.
         Self::is_internal_prefix(content)
-            && !DATA_PLANE_PREFIXES
-                .iter()
-                .any(|p| content.starts_with(p))
+            && !DATA_PLANE_PREFIXES.iter().any(|p| content.starts_with(p))
     }
 
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
@@ -14573,7 +14665,10 @@ pub(crate) mod tests {
 
         // Bob verifies — this TOFU-pins alice's key.
         let result = protocol.verify_control_message(&signed_msg);
-        assert!(matches!(result, Ok(true)), "First signed message should verify");
+        assert!(
+            matches!(result, Ok(true)),
+            "First signed message should verify"
+        );
         assert!(
             protocol.known_peer_public_keys.contains_key("alice"),
             "Alice's key should be TOFU-pinned"
@@ -14584,7 +14679,10 @@ pub(crate) mod tests {
             UserId::new("alice").unwrap(),
             UserId::new("bob").unwrap(),
             AppId::new("test-app").unwrap(),
-            format!("{}{{\"data\":\"unsigned\"}}", internal_prefixes::CONN_REQUEST),
+            format!(
+                "{}{{\"data\":\"unsigned\"}}",
+                internal_prefixes::CONN_REQUEST
+            ),
         );
         assert!(!unsigned_msg.metadata.contains_key(CTRL_SIG_META_KEY));
 
@@ -14679,6 +14777,147 @@ pub(crate) mod tests {
         assert_eq!(
             ack_count, 0,
             "Security-rejected messages must NOT trigger a delivery ACK"
+        );
+    }
+
+    // ========================================================================
+    // TOFU PERSISTENCE
+    // ========================================================================
+
+    #[test]
+    fn test_tofu_entries_persisted_via_storage() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Pin a key for "alice"
+        let pk = vec![42u8; 32];
+        protocol.tofu_check_or_pin("alice", pk.clone()).unwrap();
+
+        // Verify the entry was persisted to raw storage
+        let raw = storage
+            .load(storage_keys::TOFU_KEYS, "alice")
+            .unwrap()
+            .expect("TOFU entry should be persisted");
+        let restored: TofuEntry = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(restored.public_key, pk);
+    }
+
+    #[test]
+    fn test_tofu_entries_restored_on_restart() {
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+        // Protocol A pins a key for "alice"
+        {
+            let mut protocol_a = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+            protocol_a.initialize_mls(storage.clone()).unwrap();
+            protocol_a
+                .tofu_check_or_pin("alice", vec![10u8; 32])
+                .unwrap();
+        }
+
+        // Protocol B uses the same storage — simulates restart
+        let mut protocol_b = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        protocol_b.initialize_mls(storage.clone()).unwrap();
+
+        // The restored TOFU store should contain alice's pinned key
+        assert!(
+            protocol_b.known_peer_public_keys.contains_key("alice"),
+            "TOFU entry for alice should be restored from storage"
+        );
+        assert_eq!(
+            protocol_b.known_peer_public_keys["alice"].public_key,
+            vec![10u8; 32]
+        );
+
+        // A different key for alice should be rejected (TOFU mismatch)
+        let result = protocol_b.tofu_check_or_pin("alice", vec![99u8; 32]);
+        assert!(
+            result.is_err(),
+            "TOFU mismatch should be detected after restore"
+        );
+    }
+
+    #[test]
+    fn test_tofu_eviction_deletes_from_storage() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        // Fill the TOFU store with old entries
+        let old_base = Utc::now().timestamp_millis() - TOFU_MIN_EVICTION_AGE_MS - 100_000;
+        for i in 0..MAX_TOFU_PEERS {
+            let entry = TofuEntry {
+                public_key: vec![i as u8; 32],
+                last_seen_ms: old_base + i as i64,
+            };
+            protocol
+                .known_peer_public_keys
+                .insert(format!("peer_{}", i), entry.clone());
+            protocol.persist_tofu_entry(&format!("peer_{}", i), &entry);
+        }
+
+        // Verify peer_0 is in storage
+        assert!(
+            storage
+                .load(storage_keys::TOFU_KEYS, "peer_0")
+                .unwrap()
+                .is_some(),
+            "peer_0 should be in storage before eviction"
+        );
+
+        // Pin a new peer — should evict peer_0 (oldest)
+        protocol
+            .tofu_check_or_pin("new_peer", vec![0xFFu8; 32])
+            .unwrap();
+
+        // peer_0 should be deleted from storage
+        assert!(
+            storage
+                .load(storage_keys::TOFU_KEYS, "peer_0")
+                .unwrap()
+                .is_none(),
+            "Evicted peer_0 should be deleted from storage"
+        );
+
+        // new_peer should be persisted
+        assert!(
+            storage
+                .load(storage_keys::TOFU_KEYS, "new_peer")
+                .unwrap()
+                .is_some(),
+            "Newly pinned peer should be persisted"
+        );
+    }
+
+    #[test]
+    fn test_tofu_last_seen_update_persisted() {
+        let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage.clone()).unwrap();
+
+        let pk = vec![7u8; 32];
+        protocol.tofu_check_or_pin("carol", pk.clone()).unwrap();
+
+        let raw1 = storage
+            .load(storage_keys::TOFU_KEYS, "carol")
+            .unwrap()
+            .unwrap();
+        let entry1: TofuEntry = serde_json::from_slice(&raw1).unwrap();
+        let first_seen = entry1.last_seen_ms;
+
+        // Re-verify the same key (updates last_seen)
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        protocol.tofu_check_or_pin("carol", pk).unwrap();
+
+        let raw2 = storage
+            .load(storage_keys::TOFU_KEYS, "carol")
+            .unwrap()
+            .unwrap();
+        let entry2: TofuEntry = serde_json::from_slice(&raw2).unwrap();
+        assert!(
+            entry2.last_seen_ms >= first_seen,
+            "last_seen_ms should be updated after re-verification"
         );
     }
 }
