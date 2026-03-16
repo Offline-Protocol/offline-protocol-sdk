@@ -1,0 +1,237 @@
+//! Message receive loop and file chunk handling.
+
+use super::*;
+
+impl OfflineProtocol {
+    /// Receives the next available message.
+    pub fn receive_message(&mut self) -> Option<Message> {
+        let Ok(mut state) = lock_shared_state(&self.shared_state) else {
+            error!("Failed to lock shared state in receive_message");
+            return None;
+        };
+        let protocol_running = state.state == ProtocolState::Running;
+
+        if !state.received_messages.is_empty() {
+            return Some(state.received_messages.remove(0));
+        }
+
+        drop(state);
+
+        // Drive confirmation maintenance from receive polling as an additional
+        // liveness source when the app does not call process() on a timer.
+        if protocol_running {
+            self.retry_pending_session_confirmations();
+            self.kick_pending_session_reconciliation("receive_message_poll");
+        }
+
+        loop {
+            match self.transport_manager.receive() {
+                Ok(Some((transport_used, mut message))) => {
+                    // Merge Lamport clock for every received message — including
+                    // duplicates, ACKs, and internal protocol messages — so the
+                    // local clock always advances past any observed peer value.
+                    if message.lamport_clock.value() > 0 {
+                        self.lamport_clock.merge(message.lamport_clock);
+                        self.persist_lamport_clock();
+                    }
+
+                    if message.metadata.contains_key(ACK_FOR_KEY) {
+                        self.handle_ack_message(&message);
+                        continue;
+                    }
+
+                    if self.deduplicator.is_duplicate(&message.id) {
+                        // Re-ACK duplicate packets so the sender can stop retrying
+                        // if our previous ACK was dropped.
+                        if message.requires_ack {
+                            if let Err(err) = self.send_delivery_ack(&message, transport_used) {
+                                error!(
+                                    message_id = %message.id,
+                                    error = %err,
+                                    "Failed to send delivery ACK for duplicate message"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
+                    self.deduplicator.mark_seen(message.id.clone());
+
+                    // Handle internal MLS messages
+                    if let Some(result) = self.process_internal_message(&message) {
+                        match result {
+                            InternalMessageResult::Consumed => {
+                                // Internal control messages are still delivery-sensitive for
+                                // the sender (invites/accept/welcome). ACK before consume.
+                                if message.requires_ack {
+                                    if let Err(err) =
+                                        self.send_delivery_ack(&message, transport_used)
+                                    {
+                                        error!(
+                                            message_id = %message.id,
+                                            error = %err,
+                                            "Failed to send delivery ACK for internal message"
+                                        );
+                                    }
+                                }
+                                // Internal message handled, don't surface to app
+                                continue;
+                            }
+                            InternalMessageResult::SecurityRejected => {
+                                // Security gate rejected this message (spoofed sender,
+                                // bad signature, TOFU violation). Do NOT send a delivery
+                                // ACK — acknowledging would confirm to the attacker that
+                                // the target peer is online and processing messages.
+                                continue;
+                            }
+                            InternalMessageResult::Decrypted(plaintext) => {
+                                // Replace content with decrypted plaintext
+                                message.content = plaintext;
+                                message
+                                    .metadata
+                                    .insert("encrypted".to_string(), "true".to_string());
+                            }
+                        }
+                    }
+
+                    if message.requires_ack {
+                        if let Err(err) = self.send_delivery_ack(&message, transport_used) {
+                            error!(
+                                message_id = %message.id,
+                                error = %err,
+                                "Failed to send delivery ACK"
+                            );
+                        }
+                    }
+
+                    // Route file-chunk messages to the transfer manager instead
+                    // of surfacing them to the app as regular messages.
+                    if message.content_type == ContentType::FileChunk {
+                        self.handle_incoming_file_chunk(&message);
+                        continue;
+                    }
+
+                    let event = Event::MessageReceived {
+                        message_id: message.id.as_str(),
+                        sender: message.sender.as_str().to_string(),
+                        recipient: message.recipient.as_str().to_string(),
+                        content: message.content.clone(),
+                        hop_count: message.hop_count.value(),
+                        transport: transport_used.to_string(),
+                        timestamp: message.timestamp.as_millis(),
+                        lamport_clock: message.lamport_clock.value(),
+                        reply_to_msg: message
+                            .reply_to_msg
+                            .as_ref()
+                            .map(|id| id.as_str().to_string()),
+                        content_type: message.content_type.to_string(),
+                        media_metadata: message.media_metadata.clone(),
+                    };
+
+                    let Ok(state) = lock_shared_state(&self.shared_state) else {
+                        error!("Failed to lock shared state for message received event");
+                        return None;
+                    };
+                    state.emit_event(event);
+                    drop(state);
+
+                    return Some(message);
+                }
+                Ok(None) => return None,
+                Err(err) => {
+                    error!(error = %err, "Transport receive error");
+                    return None;
+                }
+            }
+        }
+    }
+
+    pub(super) fn handle_incoming_file_chunk(&mut self, message: &Message) {
+        let chunk = if let Some(ref binary) = message.binary_content {
+            match FileChunk::from_bytes(binary) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        message_id = %message.id,
+                        error = %e,
+                        "Failed to deserialize binary file chunk, dropping"
+                    );
+                    return;
+                }
+            }
+        } else {
+            match FileChunk::from_json(&message.content) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        message_id = %message.id,
+                        error = %e,
+                        "Failed to deserialize file chunk, dropping"
+                    );
+                    return;
+                }
+            }
+        };
+
+        let file_id = chunk.file_id.clone();
+        let file_name = chunk.file_name.clone();
+        let file_size = chunk.file_size;
+        let sender = message.sender.as_str().to_string();
+
+        if chunk.chunk_index == 0 {
+            use crate::constants::ORIGINAL_CONTENT_TYPE_KEY;
+            let original_ct = message
+                .metadata
+                .get(ORIGINAL_CONTENT_TYPE_KEY)
+                .map(|s| ContentType::parse(s))
+                .unwrap_or(ContentType::File);
+            self.pending_media_metadata.insert(
+                file_id.clone(),
+                PendingMediaMetadataEntry {
+                    content_type: original_ct,
+                    media_metadata: message.media_metadata.clone(),
+                    last_updated_at: Instant::now(),
+                },
+            );
+        }
+
+        if let Some(progress) = self.file_transfer_manager.process_chunk(chunk) {
+            if let Some(entry) = self.pending_media_metadata.get_mut(&file_id) {
+                entry.last_updated_at = Instant::now();
+            }
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_progress(
+                    file_id.clone(),
+                    progress.chunks_completed,
+                    progress.total_chunks,
+                ));
+            }
+        }
+
+        if self.file_transfer_manager.is_complete(&file_id) {
+            let Some(file_data) = self.file_transfer_manager.finalize_file(&file_id) else {
+                warn!(
+                    file_id = %file_id,
+                    "File transfer marked complete but reassembly failed"
+                );
+                return;
+            };
+            let metadata_entry = self.pending_media_metadata.remove(&file_id);
+            let (content_type, media_metadata) = metadata_entry
+                .map(|entry| (entry.content_type, entry.media_metadata))
+                .unwrap_or((ContentType::File, None));
+
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::file_received(
+                    file_id,
+                    file_name,
+                    file_size,
+                    sender,
+                    content_type,
+                    media_metadata,
+                    file_data,
+                ));
+            }
+        }
+    }
+}

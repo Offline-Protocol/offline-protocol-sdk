@@ -21,10 +21,7 @@ fn validate_id_chars(id: &str, type_name: &str) -> Result<(), String> {
     // hostile to storage backends (filesystem path traversal, key-separator
     // collisions in KV stores).
     if id.bytes().any(|b| b.is_ascii_control()) {
-        return Err(format!(
-            "{} contains ASCII control characters",
-            type_name
-        ));
+        return Err(format!("{} contains ASCII control characters", type_name));
     }
     if id.contains('/') || id.contains('\\') || id.contains(':') {
         return Err(format!(
@@ -386,17 +383,23 @@ mod tests {
         assert!(UserId::new("user\revil").is_err());
         assert!(UserId::new("user\tevil").is_err());
         assert!(UserId::new("user\x7Fevil").is_err()); // DEL
-        // Valid characters should still work
+                                                       // Valid characters should still work
         assert!(UserId::new("user-123_test.name@domain").is_ok());
     }
 
     #[test]
     fn test_user_id_deserialize_rejects_hostile_chars() {
         let result: Result<UserId, _> = serde_json::from_str(r#""evil/path""#);
-        assert!(result.is_err(), "Deserialization should reject '/' in UserId");
+        assert!(
+            result.is_err(),
+            "Deserialization should reject '/' in UserId"
+        );
 
         let result: Result<UserId, _> = serde_json::from_str(r#""..""#);
-        assert!(result.is_err(), "Deserialization should reject '..' as UserId");
+        assert!(
+            result.is_err(),
+            "Deserialization should reject '..' as UserId"
+        );
 
         let result: Result<UserId, _> = serde_json::from_str(r#""valid-user""#);
         assert!(result.is_ok(), "Deserialization should accept valid UserId");
@@ -428,10 +431,16 @@ mod tests {
     #[test]
     fn test_app_id_deserialize_rejects_hostile_chars() {
         let result: Result<AppId, _> = serde_json::from_str(r#""app/evil""#);
-        assert!(result.is_err(), "Deserialization should reject '/' in AppId");
+        assert!(
+            result.is_err(),
+            "Deserialization should reject '/' in AppId"
+        );
 
         let result: Result<AppId, _> = serde_json::from_str(r#""..""#);
-        assert!(result.is_err(), "Deserialization should reject '..' as AppId");
+        assert!(
+            result.is_err(),
+            "Deserialization should reject '..' as AppId"
+        );
 
         let result: Result<AppId, _> = serde_json::from_str(r#""valid-app""#);
         assert!(result.is_ok(), "Deserialization should accept valid AppId");
