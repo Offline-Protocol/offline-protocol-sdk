@@ -836,9 +836,11 @@ interface OfflineProtocol {
     void unblock_user(string user_id);
 
     // Get list of currently blocked user IDs
+    [Throws=ProtocolError]
     sequence<string> get_blocked_users();
 
     // Check if a user is currently blocked
+    [Throws=ProtocolError]
     boolean is_user_blocked(string user_id);
 
 };

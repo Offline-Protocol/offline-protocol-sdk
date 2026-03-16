@@ -82,6 +82,7 @@ impl OfflineProtocol {
 mod tests {
     use crate::mls::InMemoryStorage;
     use crate::ProtocolConfig;
+    use offline_protocol_transport::Transport;
     use std::sync::Arc;
 
     fn make_protocol(user_id: &str) -> crate::OfflineProtocol {
@@ -97,7 +98,9 @@ mod tests {
 
         proto.block_user("bob").unwrap();
         assert!(proto.is_user_blocked("bob"));
-        assert_eq!(proto.get_blocked_users(), vec!["bob".to_string()]);
+        let blocked = proto.get_blocked_users();
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked.contains(&"bob".to_string()));
 
         proto.unblock_user("bob").unwrap();
         assert!(!proto.is_user_blocked("bob"));
@@ -153,48 +156,99 @@ mod tests {
     #[test]
     fn test_receive_drops_blocked_sender() {
         use offline_protocol_core::{AppId, Message, UserId};
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
 
         let mut proto = make_protocol("alice");
         proto.block_user("mallory").unwrap();
 
-        // Create a message from blocked user addressed to us
-        let msg = Message::builder(
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+
+        // Queue a message from the blocked user addressed to us
+        let msg = Message::new(
             UserId::new("mallory").unwrap(),
             UserId::new("alice").unwrap(),
             AppId::new("test-app").unwrap(),
-        )
-        .content("you shouldn't see this")
-        .build();
+            "you shouldn't see this",
+        );
+        mock.queue_message(msg);
 
-        // Inject it into the transport and try to receive
-        // Since we don't have a full transport setup, verify the filter logic directly:
-        assert!(proto.is_user_blocked(msg.sender.as_str()));
-        assert_eq!(msg.recipient.as_str(), proto.config.user_id);
-        // The block filter in receive.rs will drop this message
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        // receive_message should return None — the blocked message is silently dropped
+        assert!(proto.receive_message().is_none());
     }
 
     #[test]
     fn test_relay_continues_for_blocked_user() {
         use offline_protocol_core::{AppId, Message, UserId};
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
 
         let mut proto = make_protocol("alice");
         proto.block_user("mallory").unwrap();
 
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+
         // Message from blocked user but addressed to a THIRD party — should NOT be blocked
-        let msg = Message::builder(
+        let msg = Message::new(
             UserId::new("mallory").unwrap(),
             UserId::new("charlie").unwrap(),
             AppId::new("test-app").unwrap(),
-        )
-        .content("relay this")
-        .build();
+            "relay this",
+        );
+        let msg_id = msg.id.clone();
+        mock.queue_message(msg);
 
-        // The block filter checks recipient == our user_id, so this should pass through
-        let should_block = proto.is_user_blocked(msg.sender.as_str())
-            && msg.recipient.as_str() == proto.config.user_id;
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        // receive_message should return the message since it's not addressed to us
+        let received = proto.receive_message();
         assert!(
-            !should_block,
+            received.is_some(),
             "Relay messages for third parties must not be blocked"
         );
+        assert_eq!(received.unwrap().id, msg_id);
+    }
+
+    #[test]
+    fn test_unblock_then_receive() {
+        use offline_protocol_core::{AppId, Message, UserId};
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+        proto.block_user("bob").unwrap();
+        proto.unblock_user("bob").unwrap();
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+
+        let msg = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "hello again",
+        );
+        let msg_id = msg.id.clone();
+        mock.queue_message(msg);
+
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        // After unblocking, messages should flow normally
+        let received = proto.receive_message();
+        assert!(
+            received.is_some(),
+            "Messages should be received after unblocking"
+        );
+        assert_eq!(received.unwrap().id, msg_id);
     }
 }

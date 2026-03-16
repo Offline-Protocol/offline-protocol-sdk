@@ -30,6 +30,7 @@ use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
 use offline_protocol_services::MeshServices;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -154,7 +155,7 @@ pub struct OfflineProtocol {
 
     /// Set of blocked user IDs. Messages from blocked users are silently
     /// dropped (no ACK, no event). Persisted via `MlsStorage`.
-    blocked_users: std::collections::HashSet<String>,
+    blocked_users: HashSet<String>,
 }
 
 impl OfflineProtocol {
@@ -212,7 +213,7 @@ impl OfflineProtocol {
             mesh_services: MeshServices::new(),
             group_mesh: crate::group_mesh::GroupMeshState::default(),
             known_peer_public_keys: HashMap::new(),
-            blocked_users: std::collections::HashSet::new(),
+            blocked_users: HashSet::new(),
             config,
         })
     }

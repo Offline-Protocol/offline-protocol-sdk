@@ -3329,15 +3329,21 @@ impl OfflineProtocol {
     }
 
     /// Get list of currently blocked user IDs.
-    pub fn get_blocked_users(&self) -> Vec<String> {
-        let guard = self.inner.lock().unwrap();
-        guard.get_blocked_users()
+    pub fn get_blocked_users(&self) -> Result<Vec<String>, ProtocolError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        Ok(guard.get_blocked_users())
     }
 
     /// Check if a user is currently blocked.
-    pub fn is_user_blocked(&self, user_id: String) -> bool {
-        let guard = self.inner.lock().unwrap();
-        guard.is_user_blocked(&user_id)
+    pub fn is_user_blocked(&self, user_id: String) -> Result<bool, ProtocolError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        Ok(guard.is_user_blocked(&user_id))
     }
 }
 
