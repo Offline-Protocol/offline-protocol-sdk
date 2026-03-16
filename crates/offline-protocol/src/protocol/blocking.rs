@@ -698,4 +698,92 @@ mod tests {
             "Pending media metadata should be removed on unblock cleanup"
         );
     }
+
+    #[test]
+    fn test_connection_request_to_blocked_user_rejected() {
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.send_connection_request("mallory", "Alice", None);
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
+    }
+
+    #[test]
+    fn test_accept_connection_request_to_blocked_user_rejected() {
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.accept_connection_request("mallory", "Alice", None);
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
+    }
+
+    #[test]
+    fn test_reject_connection_request_to_blocked_user_rejected() {
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+
+        let mut mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+
+        proto.block_user("mallory").unwrap();
+
+        let result = proto.reject_connection_request("mallory");
+        assert!(matches!(
+            result,
+            Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
+        ));
+    }
+
+    #[test]
+    fn test_restore_blocked_users_skips_invalid_entries() {
+        use crate::mls::InMemoryStorage;
+        use offline_protocol_mls::MlsStorage;
+
+        let mut proto = make_protocol("alice");
+        let storage = Arc::new(InMemoryStorage::new());
+        proto.enable_message_persistence(storage.clone()).unwrap();
+
+        // Directly write valid and invalid entries into storage
+        storage.store("blocked_users", "bob", &[]).unwrap();
+        storage.store("blocked_users", "", &[]).unwrap(); // invalid: empty user ID
+
+        proto.blocked_users.clear();
+        proto.restore_blocked_users();
+
+        // "bob" should be restored, "" should be skipped
+        assert!(proto.is_user_blocked("bob"));
+        assert!(!proto.is_user_blocked(""));
+        assert_eq!(proto.blocked_users.len(), 1);
+    }
 }

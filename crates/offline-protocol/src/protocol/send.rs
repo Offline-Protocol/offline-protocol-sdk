@@ -1520,6 +1520,9 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
         self.ensure_plaintext_control_send_allowed("send_connection_request")?;
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
+        }
 
         let payload = ConnectionRequestPayload {
             sender_name: sender_name.to_string(),
@@ -1557,6 +1560,9 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
         self.ensure_plaintext_control_send_allowed("accept_connection_request")?;
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
+        }
 
         let payload = ConnectionAcceptedPayload {
             accepted_by_name: accepter_name.to_string(),
@@ -1587,6 +1593,9 @@ impl OfflineProtocol {
     /// because bootstrap control messages are plaintext by design.
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
         self.ensure_plaintext_control_send_allowed("reject_connection_request")?;
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
+        }
 
         let content = internal_prefixes::CONN_REJECT.to_string();
 
