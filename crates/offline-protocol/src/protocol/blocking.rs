@@ -44,6 +44,10 @@ impl OfflineProtocol {
 
     /// Unblocks a previously blocked user.
     ///
+    /// Clears any stale MLS session state, pending key packages, and queued
+    /// messages for the peer so that a fresh key exchange can occur on
+    /// re-discovery.
+    ///
     /// Unblocking a non-blocked user succeeds silently.
     pub fn unblock_user(&mut self, user_id: &str) -> Result<()> {
         // Validate user_id format
@@ -57,6 +61,7 @@ impl OfflineProtocol {
         }
 
         self.delete_blocked_user(user_id);
+        self.cleanup_peer_session_state(user_id);
 
         info!(user_id = %user_id, "User unblocked");
 
@@ -65,6 +70,51 @@ impl OfflineProtocol {
         }
 
         Ok(())
+    }
+
+    /// Removes all MLS session state for a peer so the next encounter starts
+    /// with a clean slate.
+    ///
+    /// Best-effort: individual cleanup failures are logged but do not prevent
+    /// the unblock from succeeding.
+    fn cleanup_peer_session_state(&mut self, user_id: &str) {
+        // 1. Delete the MLS session (+ confirmed_sessions, confirmation
+        //    tracking, welcome lifecycles, persisted session/welcome state).
+        if self.mls_manager.is_some() {
+            if let Err(e) = self.manual_mls_delete_session(user_id) {
+                // Not an error — there may simply be no session to delete.
+                debug!(user_id = %user_id, error = %e, "No MLS session to clean up for unblocked user");
+            }
+        }
+
+        // 2. Discard any received key package we were holding for them.
+        if self.pending_key_packages.remove(user_id).is_some() {
+            debug!(user_id = %user_id, "Cleared pending key package for unblocked user");
+        }
+        self.delete_peer_key_package_from_storage(user_id);
+
+        // 3. Drop queued outbound messages that were waiting for session
+        //    establishment with this peer.
+        if self.pending_encrypted_messages.remove(user_id).is_some() {
+            debug!(user_id = %user_id, "Cleared pending encrypted messages for unblocked user");
+        }
+        self.clear_pending_messages_from_storage(user_id);
+
+        // 4. Drain any inbound messages sitting in the pending decryption
+        //    queue (encrypted messages received before the session was ready).
+        let drained = self
+            .pending_queue
+            .drain_for_peer(&self.config.encryption.pending_queue, user_id);
+        if !drained.is_empty() {
+            debug!(
+                user_id = %user_id,
+                count = drained.len(),
+                "Drained pending decryption queue for unblocked user"
+            );
+        }
+
+        // 5. Allow a fresh key exchange on re-discovery.
+        self.key_package_sent_to.remove(user_id);
     }
 
     /// Returns the list of currently blocked user IDs.
@@ -215,6 +265,46 @@ mod tests {
             "Relay messages for third parties must not be blocked"
         );
         assert_eq!(received.unwrap().id, msg_id);
+    }
+
+    #[test]
+    fn test_unblock_clears_session_state() {
+        use crate::mls::InMemoryStorage as MlsInMemoryStorage;
+        use offline_protocol_core::{AppId, Message, UserId};
+
+        let mut proto = make_protocol("alice");
+        let storage = Arc::new(MlsInMemoryStorage::new());
+        proto.initialize_mls(storage).unwrap();
+
+        use crate::protocol::types::ReceivedKeyPackage;
+
+        // Simulate receiving a key package from bob (pending state)
+        proto.pending_key_packages.insert(
+            "bob".to_string(),
+            ReceivedKeyPackage {
+                key_package_data: vec![0x01, 0x02],
+                local_expires_at_ms: u64::MAX,
+            },
+        );
+        proto.key_package_sent_to.insert("bob".to_string());
+
+        // Queue a pending encrypted message for bob
+        let pending_msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "queued",
+        );
+        proto.enqueue_pending_decryption("bob", &pending_msg);
+
+        // Block then unblock — should clear all state
+        proto.block_user("bob").unwrap();
+        proto.unblock_user("bob").unwrap();
+
+        assert!(proto.pending_key_packages.get("bob").is_none());
+        assert!(!proto.key_package_sent_to.contains("bob"));
+        assert!(!proto.confirmed_sessions.contains("bob"));
+        assert!(proto.pending_queue.drain_for_peer(&proto.config.encryption.pending_queue, "bob").is_empty());
     }
 
     #[test]
