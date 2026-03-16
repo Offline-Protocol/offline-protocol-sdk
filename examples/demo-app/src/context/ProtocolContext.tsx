@@ -52,8 +52,8 @@ interface ProtocolContextValue {
   discoverServices: (serviceId?: string) => Promise<void>;
   sendServiceRequest: (provider: string, serviceId: string, method: string, body: string) => Promise<void>;
   markChatRead: (peerId: string) => void;
-  blockUser: (peerId: string) => void;
-  unblockUser: (peerId: string) => void;
+  blockUser: (peerId: string) => Promise<void>;
+  unblockUser: (peerId: string) => Promise<void>;
 }
 
 const ProtocolContext = createContext<ProtocolContextValue | null>(null);
@@ -154,13 +154,13 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       }
 
       case 'connection_request_received': {
-        const peerId = event.peerId || event.peer_id || event.fromUserId || event.from_user_id;
+        const peerId = event.sender || event.peerId || event.peer_id;
         if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
         setConnectionRequests(prev => {
           if (prev.some(r => r.peerId === peerId && r.direction === 'in')) {return prev;}
           return [...prev, {
             peerId,
-            name: event.userName || event.user_name || peerId,
+            name: event.sender_name || event.userName || peerId,
             direction: 'in',
             timestamp: Date.now(),
           }];
@@ -169,7 +169,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       }
 
       case 'connection_accepted': {
-        const peerId = event.peerId || event.peer_id || event.byUserId || event.by_user_id;
+        const peerId = event.accepted_by || event.peerId || event.peer_id;
         if (!peerId) {break;}
         setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
         setContacts(prev => {
@@ -177,7 +177,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
           const existing = next.get(peerId);
           next.set(peerId, {
             peerId,
-            name: existing?.name || event.userName || event.user_name || peerId,
+            name: existing?.name || event.accepted_by_name || peerId,
             lastSeen: Date.now(),
             isNearby: neighborsRef.current.has(peerId),
             hasSession: existing?.hasSession || false,
@@ -189,7 +189,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       }
 
       case 'connection_rejected': {
-        const peerId = event.peerId || event.peer_id || event.byUserId || event.by_user_id;
+        const peerId = event.rejected_by || event.peerId || event.peer_id;
         if (!peerId) {break;}
         setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
         break;
@@ -216,7 +216,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'message_received': {
         const msgId = event.messageId || event.message_id || event.id;
-        const senderId = event.senderId || event.sender_id || event.fromUserId || event.from_user_id;
+        const senderId = event.sender || event.senderId || event.sender_id;
         const content = event.content || event.message || '';
 
         if (!senderId || !msgId) {break;}
@@ -357,7 +357,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       case 'group_message_received': {
         const groupId = event.groupId || event.group_id;
         const msgId = event.messageId || event.message_id || event.id;
-        const senderId = event.senderId || event.sender_id;
+        const senderId = event.sender || event.senderId || event.sender_id;
         const content = event.content || event.message || '';
         if (!groupId || !msgId) {break;}
         if (blockedUsersRef.current.has(senderId)) {break;}
@@ -376,12 +376,35 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
         setGroups(prev => {
           const next = new Map(prev);
+          const group = next.get(groupId) || {
+            id: groupId,
+            name: event.groupName || event.group_name || 'Group',
+            members: [userIdRef.current],
+            messages: [],
+          };
+          next.set(groupId, {
+            ...group,
+            messages: [...group.messages, chatMsg],
+          });
+          return next;
+        });
+        break;
+      }
+
+      case 'group_message_sent': {
+        const groupId = event.groupId || event.group_id;
+        const messageIds: string[] = event.messageIds || event.message_ids || [];
+        if (!groupId || messageIds.length === 0) {break;}
+        setGroups(prev => {
+          const next = new Map(prev);
           const group = next.get(groupId);
           if (group) {
-            next.set(groupId, {
-              ...group,
-              messages: [...group.messages, chatMsg],
-            });
+            const msgs = group.messages.map(m =>
+              messageIds.includes(m.id) && m.status === 'sending'
+                ? {...m, status: 'sent' as const}
+                : m,
+            );
+            next.set(groupId, {...group, messages: msgs});
           }
           return next;
         });
@@ -391,14 +414,28 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       case 'group_member_added': {
         const groupId = event.groupId || event.group_id;
         const memberId = event.memberId || event.member_id || event.userId || event.user_id;
+        const addedBy = event.addedBy || event.added_by;
         if (!groupId || !memberId) {break;}
         setGroups(prev => {
           const next = new Map(prev);
           const group = next.get(groupId);
-          if (group && !group.members.includes(memberId)) {
+          if (group) {
+            if (!group.members.includes(memberId)) {
+              next.set(groupId, {
+                ...group,
+                members: [...group.members, memberId],
+              });
+            }
+          } else {
+            // Auto-create group when we're being added (invitee side)
+            const members = [memberId];
+            if (addedBy && addedBy !== memberId) {members.push(addedBy);}
+            if (!members.includes(userIdRef.current)) {members.push(userIdRef.current);}
             next.set(groupId, {
-              ...group,
-              members: [...group.members, memberId],
+              id: groupId,
+              name: event.groupName || event.group_name || 'Group',
+              members,
+              messages: [],
             });
           }
           return next;
@@ -426,7 +463,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'service_discovered': {
         const serviceId = event.serviceId || event.service_id;
-        const provider = event.provider || event.providerId || event.provider_id;
+        const provider = event.provider_peer_id || event.provider || event.providerId || event.provider_id;
         const version = event.version || '1.0';
         if (!serviceId || !provider) {break;}
         setDiscoveredServices(prev => {
@@ -438,7 +475,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'service_request_received': {
         const requestId = event.requestId || event.request_id;
-        const requester = event.requester || event.requesterId || event.requester_id;
+        const requester = event.sender || event.requester || event.requesterId || event.requester_id;
         const serviceId = event.serviceId || event.service_id;
         const body = event.body || event.message || '';
         if (!requestId) {break;}
@@ -466,7 +503,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'service_response_received': {
         const body = event.body || event.message || '';
-        const provider = event.provider || event.providerId || event.provider_id || 'unknown';
+        const provider = event.provider_peer_id || event.provider || event.providerId || event.provider_id || 'unknown';
         appendServiceLog({
           type: 'response',
           from: provider,
@@ -675,7 +712,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
   const createGroupAction = useCallback(async (name: string, memberIds: string[]) => {
     if (!protocolRef.current) {return;}
-    const result = await protocolRef.current.mlsCreateGroup(name);
+    const result = await protocolRef.current.meshCreateGroup(name);
     const groupId = result.groupId;
 
     const allMembers = [userIdRef.current, ...memberIds];
@@ -691,28 +728,22 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       return next;
     });
 
-    // Attempt to invite each member via MLS key packages
+    // Invite each member via the high-level protocol API
+    // This sends MLS Welcome to the invitee and Commit to existing members
     for (const memberId of memberIds) {
       try {
-        // Check if we have a pending key package for this peer
-        const hasPkg = await protocolRef.current.hasPendingKeyPackage(memberId);
-        if (hasPkg) {
-          const pkgs = await protocolRef.current.mlsGetPendingKeyPackages();
-          const peerPkg = pkgs.find(p => p.userId === memberId);
-          if (peerPkg) {
-            await protocolRef.current.mlsAddGroupMember(groupId, peerPkg.keyPackageData);
-          }
-        }
+        await protocolRef.current.meshInviteToGroup(groupId, memberId);
       } catch (err) {
         console.warn(`Failed to invite ${memberId} to group (key exchange may still be pending):`, err);
       }
     }
   }, []);
 
-  const sendGroupMessageAction = useCallback(async (groupId: string, content: string, _priority: 'medium' | 'critical' = 'medium') => {
+  const sendGroupMessageAction = useCallback(async (groupId: string, content: string, priority: 'medium' | 'critical' = 'medium') => {
     if (!protocolRef.current) {return;}
 
-    const msgId = await protocolRef.current.groupSendMessage(groupId, content);
+    const msgIds = await protocolRef.current.meshSendGroupMessage(groupId, content, priority);
+    const msgId = msgIds[0] || `grp-${Date.now()}`;
 
     const chatMsg: ChatMessage = {
       id: msgId,
@@ -736,7 +767,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
   const leaveGroupAction = useCallback(async (groupId: string) => {
     if (!protocolRef.current) {return;}
-    await protocolRef.current.mlsLeaveGroup(groupId);
+    await protocolRef.current.meshLeaveGroup(groupId);
     setGroups(prev => {
       const next = new Map(prev);
       next.delete(groupId);
@@ -790,8 +821,15 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     });
   }, []);
 
-  const blockUserAction = useCallback((peerId: string) => {
+  const blockUserAction = useCallback(async (peerId: string) => {
     blockedUsersRef.current.add(peerId);
+    if (protocolRef.current) {
+      try {
+        await protocolRef.current.blockUser(peerId);
+      } catch {
+        // Protocol-level blocking failed, still keep UI-level block
+      }
+    }
     setContacts(prev => {
       const next = new Map(prev);
       const contact = next.get(peerId);
@@ -802,8 +840,15 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     });
   }, []);
 
-  const unblockUserAction = useCallback((peerId: string) => {
+  const unblockUserAction = useCallback(async (peerId: string) => {
     blockedUsersRef.current.delete(peerId);
+    if (protocolRef.current) {
+      try {
+        await protocolRef.current.unblockUser(peerId);
+      } catch {
+        // Protocol-level unblocking failed, still update UI
+      }
+    }
     setContacts(prev => {
       const next = new Map(prev);
       const contact = next.get(peerId);

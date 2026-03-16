@@ -690,6 +690,54 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // User Blocking
+
+    @ReactMethod
+    fun blockUser(userId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.blockUser(userId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_BLOCK_USER", "Failed to block user: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun unblockUser(userId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.unblockUser(userId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_UNBLOCK_USER", "Failed to unblock user: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getBlockedUsers(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val blocked = proto.getBlockedUsers()
+            val array = Arguments.createArray()
+            blocked.forEach { array.pushString(it) }
+            promise.resolve(array)
+        } catch (e: Exception) {
+            promise.reject("ERROR_GET_BLOCKED", "Failed to get blocked users: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun isUserBlocked(userId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val isBlocked = proto.isUserBlocked(userId)
+            promise.resolve(isBlocked)
+        } catch (e: Exception) {
+            promise.reject("ERROR_IS_BLOCKED", "Failed to check blocked status: ${e.message}", e)
+        }
+    }
+
     // Service Discovery & Request/Response (via MeshServices)
 
     @ReactMethod
@@ -2738,6 +2786,118 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(json)
         } catch (e: Exception) {
             promise.reject("ERROR_GROUP", "Failed to get user groups: ${e.message}", e)
+        }
+    }
+
+    // ========================================================================
+    // GROUP MANAGEMENT (MESH / MLS PROTOCOL-LEVEL)
+    // ========================================================================
+
+    /**
+     * Create a new MLS group via the mesh transport.
+     */
+    @ReactMethod
+    fun meshCreateGroup(name: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val info = proto.createGroup(name)
+            val result = Arguments.createMap().apply {
+                putString("groupId", info.groupId)
+                putString("name", info.name)
+                val members = Arguments.createArray()
+                info.members.forEach { members.pushString(it) }
+                putArray("members", members)
+                putDouble("epoch", info.epoch.toDouble())
+                putBoolean("isSession", info.isSession)
+                putDouble("createdAtMs", info.createdAtMs.toDouble())
+                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to create mesh group: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Invite a user to a mesh group (sends Welcome+Commit to peer).
+     */
+    @ReactMethod
+    fun meshInviteToGroup(groupId: String, inviteeUserId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.inviteToGroup(groupId, inviteeUserId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to invite to mesh group: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Send an MLS-encrypted message to all members of a mesh group.
+     */
+    @ReactMethod
+    fun meshSendGroupMessage(groupId: String, content: String, priority: String?, replyToMsg: String?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val msgPriority = priority?.let {
+                when (it.lowercase()) {
+                    "low" -> MessagePriority.LOW
+                    "medium" -> MessagePriority.MEDIUM
+                    "high" -> MessagePriority.HIGH
+                    "critical" -> MessagePriority.CRITICAL
+                    else -> null
+                }
+            }
+            val messageIds = proto.sendGroupMessage(groupId, content, msgPriority, replyToMsg)
+            val result = Arguments.createArray()
+            messageIds.forEach { result.pushString(it) }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to send mesh group message: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Remove a member from a mesh group with notification.
+     */
+    @ReactMethod
+    fun meshRemoveFromGroup(groupId: String, memberId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.removeFromGroup(groupId, memberId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to remove from mesh group: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Leave a mesh group with notification.
+     */
+    @ReactMethod
+    fun meshLeaveGroup(groupId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.leaveGroup(groupId)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to leave mesh group: ${e.message}", e)
+        }
+    }
+
+    /**
+     * List all mesh groups.
+     */
+    @ReactMethod
+    fun meshListGroups(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val groups = proto.listGroups()
+            val result = Arguments.createArray()
+            groups.forEach { result.pushString(it) }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to list mesh groups: ${e.message}", e)
         }
     }
 

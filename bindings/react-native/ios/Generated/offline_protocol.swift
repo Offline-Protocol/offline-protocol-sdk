@@ -780,6 +780,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func bleStatusChanged(isAvailable: Bool) throws 
     
+    func blockUser(userId: String) throws 
+    
     func cancelFileTransfer(fileId: String) throws 
     
     func checkPresence(username: String) throws  -> String
@@ -787,6 +789,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func cleanupExpiredRoutes() 
     
     func clearTyping(conversationId: String) throws  -> String
+    
+    func createGroup(groupName: String) throws  -> MlsGroupInfo
     
     func deriveUserIdFromPublicKey(publicKey: [UInt8])  -> String
     
@@ -805,6 +809,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func getBatteryLevel()  -> UInt8?
     
     func getBestRoute(destination: String)  -> RouteEntry?
+    
+    func getBlockedUsers() throws  -> [String]
     
     func getDedupStats()  -> DedupStats
     
@@ -838,26 +844,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getTransportMetrics(transportType: TransportType)  -> TransportMetrics?
     
-    func groupAddMember(groupId: String, username: String) throws  -> String
-    
-    func groupCreate(name: String) throws  -> String
-    
-    func groupDelete(groupId: String) throws  -> String
-    
-    func groupGetInfo(groupId: String) throws  -> String
-    
-    func groupGetUserGroups() throws  -> String
-    
-    func groupLeave(groupId: String) throws  -> String
-    
-    func groupRemoveAdmin(groupId: String, username: String) throws  -> String
-    
-    func groupRemoveMember(groupId: String, username: String) throws  -> String
-    
-    func groupSendMessage(groupId: String, content: String, replyToMsg: String?) throws  -> String
-    
-    func groupSetAdmin(groupId: String, username: String) throws  -> String
-    
     func hasPendingKeyPackage(peerId: String)  -> Bool
     
     func hasRoute(destination: String)  -> Bool
@@ -876,13 +862,21 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func internetStatusChanged(isConnected: Bool) throws 
     
+    func inviteToGroup(groupId: String, inviteeUserId: String) throws 
+    
     func isMlsInitialized()  -> Bool
     
     func isRelay()  -> Bool
     
+    func isUserBlocked(userId: String) throws  -> Bool
+    
     func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float, sequenceNumber: UInt32) 
     
-    func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8]) throws  -> MlsWelcomeMessage
+    func leaveGroup(groupId: String) throws 
+    
+    func listGroups() throws  -> [String]
+    
+    func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8]) throws  -> MlsAddMemberResult
     
     func mlsClearPendingWelcome(otherUserId: String) throws 
     
@@ -946,6 +940,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func releaseTransportLock() 
     
+    func removeFromGroup(groupId: String, memberId: String) throws 
+    
     func removeNeighborRoutes(neighborId: String) 
     
     func removeTransport(transportType: TransportType) throws 
@@ -958,9 +954,17 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendFile(recipient: String, fileData: [UInt8], fileName: String) throws  -> String
     
+    func sendGroupMessage(groupId: String, content: String, priority: MessagePriority?, replyToMsg: String?) throws  -> [String]
+    
     func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?) throws  -> String
     
     func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?) throws  -> String
+    
+    func sendPresenceUpdate(recipient: String, status: PresenceStatus) throws  -> String
+    
+    func sendReadReceipt(recipient: String, messageIds: [String]) throws  -> String
+    
+    func sendTypingIndicator(recipient: String, conversationId: String, isTyping: Bool) throws  -> String
     
     func setBatteryLevel(level: UInt8) 
     
@@ -981,6 +985,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func start() throws 
     
     func stop() throws 
+    
+    func unblockUser(userId: String) throws 
     
     func updateAckConfig(config: AckConfig) 
     
@@ -1149,6 +1155,14 @@ open func bleStatusChanged(isAvailable: Bool)throws   {try rustCallWithError(Ffi
 }
 }
     
+open func blockUser(userId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_block_user(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(userId),$0
+    )
+}
+}
+    
 open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
             self.uniffiCloneHandle(),
@@ -1178,6 +1192,15 @@ open func clearTyping(conversationId: String)throws  -> String  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_clear_typing(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(conversationId),$0
+    )
+})
+}
+    
+open func createGroup(groupName: String)throws  -> MlsGroupInfo  {
+    return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupName),$0
     )
 })
 }
@@ -1253,6 +1276,14 @@ open func getBestRoute(destination: String) -> RouteEntry?  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_best_route(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(destination),$0
+    )
+})
+}
+    
+open func getBlockedUsers()throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -1388,101 +1419,6 @@ open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?
 })
 }
     
-open func groupAddMember(groupId: String, username: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_add_member(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterString.lower(username),$0
-    )
-})
-}
-    
-open func groupCreate(name: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_create(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(name),$0
-    )
-})
-}
-    
-open func groupDelete(groupId: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_delete(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
-    )
-})
-}
-    
-open func groupGetInfo(groupId: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_get_info(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
-    )
-})
-}
-    
-open func groupGetUserGroups()throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_get_user_groups(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func groupLeave(groupId: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_leave(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
-    )
-})
-}
-    
-open func groupRemoveAdmin(groupId: String, username: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remove_admin(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterString.lower(username),$0
-    )
-})
-}
-    
-open func groupRemoveMember(groupId: String, username: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_remove_member(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterString.lower(username),$0
-    )
-})
-}
-    
-open func groupSendMessage(groupId: String, content: String, replyToMsg: String?)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_send_message(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterString.lower(content),
-        FfiConverterOptionString.lower(replyToMsg),$0
-    )
-})
-}
-    
-open func groupSetAdmin(groupId: String, username: String)throws  -> String  {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_set_admin(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterString.lower(username),$0
-    )
-})
-}
-    
 open func hasPendingKeyPackage(peerId: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
@@ -1559,6 +1495,15 @@ open func internetStatusChanged(isConnected: Bool)throws   {try rustCallWithErro
 }
 }
     
+open func inviteToGroup(groupId: String, inviteeUserId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_invite_to_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(inviteeUserId),$0
+    )
+}
+}
+    
 open func isMlsInitialized() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_mls_initialized(
@@ -1575,6 +1520,15 @@ open func isRelay() -> Bool  {
 })
 }
     
+open func isUserBlocked(userId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(userId),$0
+    )
+})
+}
+    
 open func learnRoute(destination: String, nextHop: String, hopCount: UInt8, quality: Float, sequenceNumber: UInt32)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_learn_route(
             self.uniffiCloneHandle(),
@@ -1587,8 +1541,24 @@ open func learnRoute(destination: String, nextHop: String, hopCount: UInt8, qual
 }
 }
     
-open func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8])throws  -> MlsWelcomeMessage  {
-    return try  FfiConverterTypeMlsWelcomeMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+open func leaveGroup(groupId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+}
+}
+    
+open func listGroups()throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8])throws  -> MlsAddMemberResult  {
+    return try  FfiConverterTypeMlsAddMemberResult_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_add_group_member(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
@@ -1867,6 +1837,15 @@ open func releaseTransportLock()  {try! rustCall() {
 }
 }
     
+open func removeFromGroup(groupId: String, memberId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(memberId),$0
+    )
+}
+}
+    
 open func removeNeighborRoutes(neighborId: String)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes(
             self.uniffiCloneHandle(),
@@ -1921,6 +1900,18 @@ open func sendFile(recipient: String, fileData: [UInt8], fileName: String)throws
 })
 }
     
+open func sendGroupMessage(groupId: String, content: String, priority: MessagePriority?, replyToMsg: String?)throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(content),
+        FfiConverterOptionTypeMessagePriority.lower(priority),
+        FfiConverterOptionString.lower(replyToMsg),$0
+    )
+})
+}
+    
 open func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(
@@ -1942,6 +1933,37 @@ open func sendMessage(recipient: String, content: String, priority: MessagePrior
         FfiConverterString.lower(content),
         FfiConverterTypeMessagePriority_lower(priority),
         FfiConverterOptionString.lower(replyToMsg),$0
+    )
+})
+}
+    
+open func sendPresenceUpdate(recipient: String, status: PresenceStatus)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_presence_update(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterTypePresenceStatus_lower(status),$0
+    )
+})
+}
+    
+open func sendReadReceipt(recipient: String, messageIds: [String])throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_read_receipt(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterSequenceString.lower(messageIds),$0
+    )
+})
+}
+    
+open func sendTypingIndicator(recipient: String, conversationId: String, isTyping: Bool)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterString.lower(conversationId),
+        FfiConverterBool.lower(isTyping),$0
     )
 })
 }
@@ -2022,6 +2044,14 @@ open func start()throws   {try rustCallWithError(FfiConverterTypeProtocolError_l
 open func stop()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(
             self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+open func unblockUser(userId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(userId),$0
     )
 }
 }
@@ -2882,6 +2912,58 @@ public func FfiConverterTypeMessageStats_lower(_ value: MessageStats) -> RustBuf
 }
 
 
+public struct MlsAddMemberResult: Equatable, Hashable {
+    public var welcome: MlsWelcomeMessage
+    public var commit: MlsEncryptedMessage
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(welcome: MlsWelcomeMessage, commit: MlsEncryptedMessage) {
+        self.welcome = welcome
+        self.commit = commit
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MlsAddMemberResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMlsAddMemberResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsAddMemberResult {
+        return
+            try MlsAddMemberResult(
+                welcome: FfiConverterTypeMlsWelcomeMessage.read(from: &buf), 
+                commit: FfiConverterTypeMlsEncryptedMessage.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MlsAddMemberResult, into buf: inout [UInt8]) {
+        FfiConverterTypeMlsWelcomeMessage.write(value.welcome, into: &buf)
+        FfiConverterTypeMlsEncryptedMessage.write(value.commit, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsAddMemberResult_lift(_ buf: RustBuffer) throws -> MlsAddMemberResult {
+    return try FfiConverterTypeMlsAddMemberResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsAddMemberResult_lower(_ value: MlsAddMemberResult) -> RustBuffer {
+    return FfiConverterTypeMlsAddMemberResult.lower(value)
+}
+
+
 public struct MlsEncryptedMessage: Equatable, Hashable {
     public var groupId: String
     public var messageType: String
@@ -3514,10 +3596,13 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var maxPendingGlobal: UInt64
     public var pendingTtlMs: UInt64
     public var overflowPolicy: OverflowPolicy
+    public var maxGroupMembers: UInt32
+    public var groupRelayEnabled: Bool
+    public var requireTransportIdentity: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
@@ -3533,6 +3618,9 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.maxPendingGlobal = maxPendingGlobal
         self.pendingTtlMs = pendingTtlMs
         self.overflowPolicy = overflowPolicy
+        self.maxGroupMembers = maxGroupMembers
+        self.groupRelayEnabled = groupRelayEnabled
+        self.requireTransportIdentity = requireTransportIdentity
     }
 
     
@@ -3563,7 +3651,10 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 maxPendingPerPeer: FfiConverterUInt64.read(from: &buf), 
                 maxPendingGlobal: FfiConverterUInt64.read(from: &buf), 
                 pendingTtlMs: FfiConverterUInt64.read(from: &buf), 
-                overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf)
+                overflowPolicy: FfiConverterTypeOverflowPolicy.read(from: &buf), 
+                maxGroupMembers: FfiConverterUInt32.read(from: &buf), 
+                groupRelayEnabled: FfiConverterBool.read(from: &buf), 
+                requireTransportIdentity: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -3583,6 +3674,9 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.maxPendingGlobal, into: &buf)
         FfiConverterUInt64.write(value.pendingTtlMs, into: &buf)
         FfiConverterTypeOverflowPolicy.write(value.overflowPolicy, into: &buf)
+        FfiConverterUInt32.write(value.maxGroupMembers, into: &buf)
+        FfiConverterBool.write(value.groupRelayEnabled, into: &buf)
+        FfiConverterBool.write(value.requireTransportIdentity, into: &buf)
     }
 }
 
@@ -4579,6 +4673,78 @@ public func FfiConverterTypeOverflowPolicy_lower(_ value: OverflowPolicy) -> Rus
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum PresenceStatus: Equatable, Hashable {
+    
+    case online
+    case away
+    case offline
+
+
+
+}
+
+#if compiler(>=6)
+extension PresenceStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePresenceStatus: FfiConverterRustBuffer {
+    typealias SwiftType = PresenceStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PresenceStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .online
+        
+        case 2: return .away
+        
+        case 3: return .offline
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PresenceStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .online:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .away:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .offline:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePresenceStatus_lift(_ buf: RustBuffer) throws -> PresenceStatus {
+    return try FfiConverterTypePresenceStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePresenceStatus_lower(_ value: PresenceStatus) -> RustBuffer {
+    return FfiConverterTypePresenceStatus.lower(value)
+}
+
+
 
 public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -4603,6 +4769,8 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     case MlsNotInitialized(message: String)
     
     case MlsError(message: String)
+    
+    case UserBlocked(message: String)
     
     case Other(message: String)
     
@@ -4673,7 +4841,11 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 11: return .Other(
+        case 11: return .UserBlocked(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 12: return .Other(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -4708,8 +4880,10 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(9))
         case .MlsError(_ /* message is ignored*/):
             writeInt(&buf, Int32(10))
-        case .Other(_ /* message is ignored*/):
+        case .UserBlocked(_ /* message is ignored*/):
             writeInt(&buf, Int32(11))
+        case .Other(_ /* message is ignored*/):
+            writeInt(&buf, Int32(12))
 
         
         }
@@ -5882,6 +6056,30 @@ fileprivate struct FfiConverterOptionTypeWifiDirectMessage: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeMessagePriority: FfiConverterRustBuffer {
+    typealias SwiftType = MessagePriority?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMessagePriority.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMessagePriority.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionSequenceUInt8: FfiConverterRustBuffer {
     typealias SwiftType = [UInt8]?
 
@@ -6164,6 +6362,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 19618) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 26742) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6174,6 +6375,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_clear_typing() != 54663) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152) {
@@ -6201,6 +6405,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_best_route() != 31041) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 24603) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 43759) {
@@ -6251,36 +6458,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_add_member() != 6312) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_create() != 16661) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_delete() != 20529) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_get_info() != 43670) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_get_user_groups() != 44986) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_leave() != 21356) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_remove_admin() != 55696) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_remove_member() != 28253) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_send_message() != 3905) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_set_admin() != 36104) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6308,16 +6485,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group() != 35932) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() != 21230) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 39343) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_learn_route() != 29659) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member() != 22947) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 2480) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 60142) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member() != 27167) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627) {
@@ -6413,6 +6602,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 64736) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_neighbor_routes() != 19049) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6431,10 +6623,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 11824) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != 54773) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 42952) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 20289) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() != 8350) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 47532) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 65320) {
@@ -6465,6 +6669,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 58995) {
