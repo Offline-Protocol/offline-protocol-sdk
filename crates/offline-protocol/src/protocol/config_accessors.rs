@@ -1,6 +1,22 @@
 //! Configuration accessors, diagnostics, and service registration.
 
-use super::*;
+use super::{
+    lock_shared_state, OfflineProtocol, PendingQueueMetrics, ProtocolState,
+    MEDIA_TRANSFER_STALE_TIMEOUT_SECS,
+};
+use crate::file_transfer::FileTransferManager;
+use crate::{Error, ProtocolConfig, Result, TransportManager};
+use offline_protocol_core::{MessageId, ServiceDescriptor};
+use offline_protocol_mls::MlsManager;
+use offline_protocol_reliability::{
+    AckConfig, AckManager, Deduplicator, DeduplicatorConfig, DeduplicatorStats, RetryConfig,
+    RetryQueue,
+};
+use offline_protocol_router::DorsConfig;
+use offline_protocol_services::MeshServices;
+use std::sync::{Arc, RwLock};
+use std::time::Duration as StdDuration;
+use tracing::{error, warn};
 
 impl OfflineProtocol {
     /// Gets the current protocol state.
@@ -89,7 +105,7 @@ impl OfflineProtocol {
 
     /// Gets pending encrypted message queue counters and gauges.
     pub fn pending_queue_metrics(&self) -> PendingQueueMetrics {
-        self.pending_queue_metrics.clone()
+        self.pending_queue.metrics().clone()
     }
 
     /// Gets the current ACK manager statistics.

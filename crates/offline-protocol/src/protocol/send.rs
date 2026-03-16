@@ -1,6 +1,24 @@
 //! Send pipeline, outbox management, and delivery tracking.
 
-use super::*;
+use super::{
+    internal_prefixes, lock_shared_state, ConnectionAcceptedPayload, ConnectionRequestPayload,
+    KeyPackagePayload, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
+    OutboxEntry, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
+    TypingIndicatorPayload, WelcomeDeliveryState, MAX_READ_RECEIPT_IDS,
+};
+use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
+use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
+use crate::file_transfer::{FileChunk, OutboundTransferState};
+use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
+use crate::{Error, Result};
+use chrono::{Duration as ChronoDuration, Utc};
+use offline_protocol_core::{
+    AppId, ContentType, MediaMetadata, Message, MessageId, MessagePriority, UserId, TTL,
+};
+use offline_protocol_transport::TransportType;
+use std::collections::HashSet;
+use std::time::{Duration as StdDuration, Instant};
+use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
     // ========================================================================

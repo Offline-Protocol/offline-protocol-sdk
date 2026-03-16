@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use offline_protocol_core::{ContentType, MediaMetadata, Message, MessageId, MessagePriority};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -22,10 +22,6 @@ pub(crate) const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
 pub(crate) const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
 /// Timeout waiting for explicit internet send confirmation for welcome.
 pub(crate) const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
-pub(crate) const PENDING_TTL_SPIKE_WARN_THRESHOLD: usize = 25;
-pub(crate) const PENDING_PEER_PRESSURE_WARN_EVERY: u32 = 10;
-pub(crate) const PENDING_DROP_WARN_EVERY: u64 = 100;
-pub(crate) const PENDING_EVICTION_FAILURE_WARN_EVERY: u64 = 10;
 pub(crate) const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 pub(crate) const MAX_KNOWN_PEERS: usize = 1000;
@@ -250,75 +246,6 @@ pub(crate) struct PendingMessage {
     pub(crate) reply_to_msg: Option<MessageId>,
     /// When the message was queued (for future TTL/expiry support).
     pub(crate) queued_at: DateTime<Utc>,
-}
-
-#[derive(Clone)]
-pub(crate) struct PendingDecryptMessage {
-    pub(crate) peer_id: String,
-    pub(crate) message_id: String,
-    pub(crate) received_at: Instant,
-    pub(crate) sequence: u64,
-    pub(crate) message: Message,
-}
-
-#[derive(Clone)]
-pub(crate) struct PendingDecryptEntryRef {
-    pub(crate) peer_id: String,
-    pub(crate) message_id: String,
-    pub(crate) sequence: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PendingQueueLimit {
-    PerPeer,
-    Global,
-}
-
-impl PendingQueueLimit {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::PerPeer => "per_peer",
-            Self::Global => "global",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PendingQueueDropReason {
-    OverflowDropOldest,
-    OverflowDropNewest,
-    TtlExpired,
-}
-
-impl PendingQueueDropReason {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::OverflowDropOldest => "overflow_drop_oldest",
-            Self::OverflowDropNewest => "overflow_drop_newest",
-            Self::TtlExpired => "ttl_expired",
-        }
-    }
-}
-
-/// Counters and gauges for pending encrypted message queue pressure.
-#[derive(Debug, Clone, Default)]
-pub struct PendingQueueMetrics {
-    /// Total encrypted messages received before session readiness.
-    pub pending_messages_received_total: u64,
-    /// Total queued messages evicted from pending storage.
-    pub pending_messages_evicted_total: u64,
-    /// Total messages dropped due to overflow policy decisions.
-    pub pending_messages_dropped_overflow_total: u64,
-    /// Total pending messages expired due to TTL.
-    pub pending_messages_expired_total: u64,
-    /// Number of failed eviction attempts while enforcing hard bounds.
-    pub pending_messages_eviction_failures_total: u64,
-    /// Number of detected pending queue invariant violations.
-    pub pending_queue_invariant_violations_total: u64,
-    /// Current number of messages in pending queues across all peers.
-    pub pending_messages_current: usize,
-    /// Current per-peer pending queue sizes.
-    pub pending_messages_per_peer: HashMap<String, usize>,
 }
 
 /// Durable state for a peer MLS session.

@@ -1,8 +1,9 @@
 //! MLS lifecycle event emission for observability.
 
-use super::*;
+use super::OfflineProtocol;
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
+use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 
 impl OfflineProtocol {
     #[cfg(feature = "mls-observability")]
