@@ -9,7 +9,7 @@ use crate::events::Event;
 use crate::file_transfer::FileChunk;
 use offline_protocol_core::{ContentType, Message};
 use std::time::Instant;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 impl OfflineProtocol {
     /// Receives the next available message.
@@ -65,6 +65,19 @@ impl OfflineProtocol {
                     }
 
                     self.deduplicator.mark_seen(message.id.clone());
+
+                    // Block filter: silently drop messages from blocked users
+                    // addressed to us. Relay messages for third parties pass through.
+                    if self.is_user_blocked(message.sender.as_str())
+                        && message.recipient.as_str() == self.config.user_id
+                    {
+                        debug!(
+                            sender = %message.sender,
+                            message_id = %message.id,
+                            "Dropping message from blocked user"
+                        );
+                        continue; // No ACK sent, no event emitted
+                    }
 
                     // Handle internal MLS messages
                     if let Some(result) = self.process_internal_message(&message) {

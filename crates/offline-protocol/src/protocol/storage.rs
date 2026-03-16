@@ -468,6 +468,59 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // BLOCKED USERS PERSISTENCE
+    // ========================================================================
+
+    /// Persists a blocked user entry to storage.
+    pub(crate) fn persist_blocked_user(&self, user_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.store(storage_keys::BLOCKED_USERS, user_id, &[]) {
+            warn!(user_id = %user_id, error = %e, "Failed to persist blocked user");
+        }
+    }
+
+    /// Deletes a blocked user entry from storage.
+    pub(crate) fn delete_blocked_user(&self, user_id: &str) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        if let Err(e) = storage.delete(storage_keys::BLOCKED_USERS, user_id) {
+            warn!(user_id = %user_id, error = %e, "Failed to delete blocked user from storage");
+        }
+    }
+
+    /// Restores blocked users from persistent storage.
+    ///
+    /// Skips entries with invalid user IDs (best-effort restore).
+    pub(crate) fn restore_blocked_users(&mut self) {
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+        let user_ids = match storage.list_keys(storage_keys::BLOCKED_USERS) {
+            Ok(keys) => keys,
+            Err(e) => {
+                warn!(error = %e, "Failed to list blocked users from storage");
+                return;
+            }
+        };
+        for user_id in &user_ids {
+            if offline_protocol_core::UserId::new(user_id).is_err() {
+                warn!(user_id = %user_id, "Skipping blocked user entry with invalid user ID");
+                continue;
+            }
+            self.blocked_users.insert(user_id.clone());
+        }
+        if !self.blocked_users.is_empty() {
+            info!(
+                count = self.blocked_users.len(),
+                "Restored blocked users from storage"
+            );
+        }
+    }
+
+    // ========================================================================
     // LAMPORT CLOCK PERSISTENCE
     // ========================================================================
 

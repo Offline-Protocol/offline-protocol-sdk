@@ -1,5 +1,6 @@
 //! Main protocol engine.
 
+mod blocking;
 mod config_accessors;
 mod decryption_queue;
 mod message_dispatch;
@@ -150,6 +151,10 @@ pub struct OfflineProtocol {
     /// Persisted via `MlsStorage` (when available) to survive restarts.
     // TODO(security): support key rotation; see MAX_TOFU_PEERS doc.
     known_peer_public_keys: HashMap<String, TofuEntry>,
+
+    /// Set of blocked user IDs. Messages from blocked users are silently
+    /// dropped (no ACK, no event). Persisted via `MlsStorage`.
+    blocked_users: std::collections::HashSet<String>,
 }
 
 impl OfflineProtocol {
@@ -207,6 +212,7 @@ impl OfflineProtocol {
             mesh_services: MeshServices::new(),
             group_mesh: crate::group_mesh::GroupMeshState::default(),
             known_peer_public_keys: HashMap::new(),
+            blocked_users: std::collections::HashSet::new(),
             config,
         })
     }
@@ -244,6 +250,7 @@ impl OfflineProtocol {
         let previous_welcome_lifecycles = self.welcome_lifecycles.clone();
         let previous_lamport_clock = self.lamport_clock.value();
         let previous_tofu_keys = self.known_peer_public_keys.clone();
+        let previous_blocked_users = self.blocked_users.clone();
 
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
@@ -253,6 +260,7 @@ impl OfflineProtocol {
             self.restore_pending_messages()?;
             self.restore_lamport_clock();
             self.restore_tofu_keys();
+            self.restore_blocked_users();
             self.restore_session_states_from_manager(manager.clone())?;
             self.restore_peer_key_packages(&manager)?;
             self.restore_welcome_lifecycles()?;
@@ -266,6 +274,7 @@ impl OfflineProtocol {
             self.welcome_lifecycles = previous_welcome_lifecycles;
             self.lamport_clock = LamportClock::from_value(previous_lamport_clock);
             self.known_peer_public_keys = previous_tofu_keys;
+            self.blocked_users = previous_blocked_users;
             return Err(err);
         }
 
@@ -289,6 +298,7 @@ impl OfflineProtocol {
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();
+        self.restore_blocked_users();
         info!("Message persistence enabled");
         Ok(())
     }
@@ -407,6 +417,12 @@ impl OfflineProtocol {
             return;
         }
 
+        // Don't track or auto-exchange keys with blocked users
+        if self.is_user_blocked(peer_id) {
+            debug!(peer_id = %peer_id, "Ignoring neighbor discovery for blocked user");
+            return;
+        }
+
         // Track discovered peers for service discovery and routing, with capacity limit
         if self.known_peers.len() < MAX_KNOWN_PEERS || self.known_peers.contains(peer_id) {
             self.known_peers.insert(peer_id.to_string());
@@ -468,6 +484,13 @@ impl OfflineProtocol {
     /// * `Ok(None)` - Session already exists
     /// * `Err(SessionNotReady(state))` - Establishment in progress; caller can retry or show "Establishing…"
     pub fn establish_secure_session(&mut self, peer_id: &str) -> Result<Option<WelcomeMessage>> {
+        if self.is_user_blocked(peer_id) {
+            return Err(Error::Other(format!(
+                "Cannot establish session with blocked user: {}",
+                peer_id
+            )));
+        }
+
         let mls = self.mls_manager.clone().ok_or(Error::MlsNotInitialized)?;
 
         // Check if session already exists

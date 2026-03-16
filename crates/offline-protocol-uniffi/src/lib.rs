@@ -1384,18 +1384,22 @@ impl OfflineProtocol {
         }
 
         // Notify the core protocol of neighbor discovery for auto key exchange
+        let is_blocked;
         {
             let mut protocol = self.inner.lock().unwrap();
+            is_blocked = protocol.is_user_blocked(&peer_id);
             protocol.on_neighbor_discovered(&peer_id);
         }
 
-        // Emit NeighborDiscovered event
-        let event = CoreEvent::NeighborDiscovered {
-            peer_id: peer_id.clone(),
-            transport: "BLE".to_string(),
-            rssi: Some(rssi),
-        };
-        self.emit_event(event);
+        // Suppress NeighborDiscovered event for blocked users
+        if !is_blocked {
+            let event = CoreEvent::NeighborDiscovered {
+                peer_id: peer_id.clone(),
+                transport: "BLE".to_string(),
+                rssi: Some(rssi),
+            };
+            self.emit_event(event);
+        }
 
         Ok(())
     }
@@ -1643,14 +1647,17 @@ impl OfflineProtocol {
         }
 
         while protocol.receive_message().is_some() {}
+        let is_blocked = protocol.is_user_blocked(&sender_id);
         drop(protocol);
 
-        let event = CoreEvent::NeighborDiscovered {
-            peer_id: sender_id.clone(),
-            transport: "Internet".to_string(),
-            rssi: None,
-        };
-        self.emit_event(event);
+        if !is_blocked {
+            let event = CoreEvent::NeighborDiscovered {
+                peer_id: sender_id.clone(),
+                transport: "Internet".to_string(),
+                rssi: None,
+            };
+            self.emit_event(event);
+        }
 
         Ok(())
     }
@@ -1888,14 +1895,17 @@ impl OfflineProtocol {
         }
 
         while protocol.receive_message().is_some() {}
+        let is_blocked = protocol.is_user_blocked(&sender_id);
         drop(protocol);
 
-        let event = CoreEvent::NeighborDiscovered {
-            peer_id: sender_id.clone(),
-            transport: "WiFiDirect".to_string(),
-            rssi: None,
-        };
-        self.emit_event(event);
+        if !is_blocked {
+            let event = CoreEvent::NeighborDiscovered {
+                peer_id: sender_id.clone(),
+                transport: "WiFiDirect".to_string(),
+                rssi: None,
+            };
+            self.emit_event(event);
+        }
 
         Ok(())
     }
@@ -1947,13 +1957,19 @@ impl OfflineProtocol {
             wifi_direct_state.connected_peer = Some(peer_id.clone());
         }
 
-        // Emit NeighborDiscovered event
-        let event = CoreEvent::NeighborDiscovered {
-            peer_id,
-            transport: "WiFiDirect".to_string(),
-            rssi: None,
+        // Suppress NeighborDiscovered event for blocked users
+        let is_blocked = {
+            let guard = self.inner.lock().unwrap();
+            guard.is_user_blocked(&peer_id)
         };
-        self.emit_event(event);
+        if !is_blocked {
+            let event = CoreEvent::NeighborDiscovered {
+                peer_id,
+                transport: "WiFiDirect".to_string(),
+                rssi: None,
+            };
+            self.emit_event(event);
+        }
 
         Ok(())
     }
@@ -3288,6 +3304,40 @@ impl OfflineProtocol {
         guard
             .list_groups()
             .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    // ========================================================================
+    // USER BLOCKING
+    // ========================================================================
+
+    /// Block a user (silently drops all their messages, no notification sent).
+    pub fn block_user(&self, user_id: String) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard.block_user(&user_id).map_err(ProtocolError::from)
+    }
+
+    /// Unblock a previously blocked user.
+    pub fn unblock_user(&self, user_id: String) -> Result<(), ProtocolError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ProtocolError::Other("Protocol lock poisoned".to_string()))?;
+        guard.unblock_user(&user_id).map_err(ProtocolError::from)
+    }
+
+    /// Get list of currently blocked user IDs.
+    pub fn get_blocked_users(&self) -> Vec<String> {
+        let guard = self.inner.lock().unwrap();
+        guard.get_blocked_users()
+    }
+
+    /// Check if a user is currently blocked.
+    pub fn is_user_blocked(&self, user_id: String) -> bool {
+        let guard = self.inner.lock().unwrap();
+        guard.is_user_blocked(&user_id)
     }
 }
 

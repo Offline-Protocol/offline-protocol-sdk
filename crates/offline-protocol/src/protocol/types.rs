@@ -317,6 +317,8 @@ pub(crate) mod storage_keys {
     pub const LAMPORT_CLOCK_ID: &str = "current";
     /// Key type for persisted TOFU (Trust-On-First-Use) peer public keys.
     pub const TOFU_KEYS: &str = "tofu_keys";
+    /// Key type for persisted blocked user entries.
+    pub const BLOCKED_USERS: &str = "blocked_users";
 }
 
 /// Protocol state.
