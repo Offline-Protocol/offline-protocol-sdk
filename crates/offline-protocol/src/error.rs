@@ -172,6 +172,10 @@ pub enum Error {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    /// Operation rejected because the target user is blocked.
+    #[error("User is blocked: {0}")]
+    UserBlocked(String),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),

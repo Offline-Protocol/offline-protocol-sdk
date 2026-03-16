@@ -50,6 +50,9 @@ pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 /// // reset API.
 pub(crate) const MAX_TOFU_PEERS: usize = 1000;
 
+/// Maximum number of blocked users to retain.
+pub(crate) const MAX_BLOCKED_USERS: usize = 10_000;
+
 /// Minimum age (in milliseconds) a TOFU entry must have before it can be
 /// evicted by LRU. This prevents a cache-filling attack where an adversary
 /// rapidly registers many fake identities to evict legitimate pinned keys.
@@ -317,6 +320,8 @@ pub(crate) mod storage_keys {
     pub const LAMPORT_CLOCK_ID: &str = "current";
     /// Key type for persisted TOFU (Trust-On-First-Use) peer public keys.
     pub const TOFU_KEYS: &str = "tofu_keys";
+    /// Key type for persisted blocked user entries.
+    pub const BLOCKED_USERS: &str = "blocked_users";
 }
 
 /// Protocol state.
@@ -381,6 +386,8 @@ pub(crate) struct PendingMediaMetadataEntry {
     pub(crate) content_type: ContentType,
     pub(crate) media_metadata: Option<MediaMetadata>,
     pub(crate) last_updated_at: Instant,
+    /// Sender of the file transfer (used to drain partial transfers on block).
+    pub(crate) sender: String,
 }
 
 #[derive(Clone)]

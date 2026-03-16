@@ -48,6 +48,18 @@ impl OfflineProtocol {
 
         for entry in drained {
             let msg = entry.message;
+
+            // Block filter: skip messages from blocked users that were queued
+            // before the block was applied.
+            if self.is_user_blocked(msg.sender.as_str()) {
+                debug!(
+                    sender = %msg.sender,
+                    message_id = %msg.id,
+                    "Dropping pending message from blocked user"
+                );
+                continue;
+            }
+
             if let Some(result) = self.process_internal_message(&msg) {
                 match result {
                     InternalMessageResult::Decrypted(content) => {

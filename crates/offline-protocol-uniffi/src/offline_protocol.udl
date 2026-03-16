@@ -101,6 +101,7 @@ enum ProtocolError {
     "InvalidState",
     "MlsNotInitialized",
     "MlsError",
+    "UserBlocked",
     "Other",
 };
 
@@ -826,6 +827,22 @@ interface OfflineProtocol {
     // List all MLS groups (excluding 1:1 sessions)
     [Throws=ProtocolError]
     sequence<string> list_groups();
+
+    // Block a user (silently drops all their messages, no notification sent)
+    [Throws=ProtocolError]
+    void block_user(string user_id);
+
+    // Unblock a previously blocked user
+    [Throws=ProtocolError]
+    void unblock_user(string user_id);
+
+    // Get list of currently blocked user IDs
+    [Throws=ProtocolError]
+    sequence<string> get_blocked_users();
+
+    // Check if a user is currently blocked
+    [Throws=ProtocolError]
+    boolean is_user_blocked(string user_id);
 
 };
 

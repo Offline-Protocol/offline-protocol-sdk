@@ -64,6 +64,12 @@ impl OfflineProtocol {
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
+        // Prevent sending messages to blocked users. Blocking is bidirectional:
+        // we neither receive from nor send to a blocked peer.
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::UserBlocked(recipient_str));
+        }
+
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.
         if Self::is_internal_prefix(&content_str) {
@@ -207,6 +213,12 @@ impl OfflineProtocol {
         let recipient_str: String = recipient.into();
         let content_str: String = content.into();
         let priority = priority.unwrap_or(MessagePriority::Medium);
+
+        // Prevent sending messages to blocked users. Blocking is bidirectional:
+        // we neither receive from nor send to a blocked peer.
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::UserBlocked(recipient_str));
+        }
 
         // Reject content that starts with an internal control prefix to prevent
         // injection of protocol-level messages through the public API.
@@ -735,6 +747,12 @@ impl OfflineProtocol {
 
         let recipient_str: String = recipient.into();
         let file_name_str: String = file_name.into();
+
+        // Prevent sending media to blocked users. Blocking is bidirectional:
+        // we neither receive from nor send to a blocked peer.
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::UserBlocked(recipient_str));
+        }
 
         let file_id = format!("file_{}", MessageId::new().as_str());
         let pinned_transport = self.select_media_transport()?;
@@ -1502,6 +1520,9 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
         self.ensure_plaintext_control_send_allowed("send_connection_request")?;
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
+        }
 
         let payload = ConnectionRequestPayload {
             sender_name: sender_name.to_string(),
@@ -1539,6 +1560,9 @@ impl OfflineProtocol {
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
         self.ensure_plaintext_control_send_allowed("accept_connection_request")?;
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
+        }
 
         let payload = ConnectionAcceptedPayload {
             accepted_by_name: accepter_name.to_string(),
@@ -1569,6 +1593,9 @@ impl OfflineProtocol {
     /// because bootstrap control messages are plaintext by design.
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
         self.ensure_plaintext_control_send_allowed("reject_connection_request")?;
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
+        }
 
         let content = internal_prefixes::CONN_REJECT.to_string();
 
@@ -1593,6 +1620,9 @@ impl OfflineProtocol {
     ) -> Result<MessageId> {
         if recipient.is_empty() {
             return Err(Error::Other("recipient must not be empty".to_string()));
+        }
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
         }
 
         let payload = PresencePayload {
@@ -1624,6 +1654,9 @@ impl OfflineProtocol {
     ) -> Result<MessageId> {
         if recipient.is_empty() {
             return Err(Error::Other("recipient must not be empty".to_string()));
+        }
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
         }
         if conversation_id.is_empty() {
             return Err(Error::Other(
@@ -1659,6 +1692,9 @@ impl OfflineProtocol {
     ) -> Result<MessageId> {
         if recipient.is_empty() {
             return Err(Error::Other("recipient must not be empty".to_string()));
+        }
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
         }
         if message_ids.is_empty() {
             return Err(Error::Other("message_ids must not be empty".to_string()));

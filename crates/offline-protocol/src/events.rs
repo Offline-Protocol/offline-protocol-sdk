@@ -741,6 +741,18 @@ pub enum Event {
         /// Human-readable description of the security issue.
         reason: String,
     },
+
+    /// A user was blocked. Emitted for local UI notification only.
+    UserBlocked {
+        /// User ID that was blocked.
+        user_id: String,
+    },
+
+    /// A user was unblocked. Emitted for local UI notification only.
+    UserUnblocked {
+        /// User ID that was unblocked.
+        user_id: String,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -1364,6 +1376,16 @@ impl Event {
         Self::SecurityWarning { peer_id, reason }
     }
 
+    /// Creates a UserBlocked event.
+    pub fn user_blocked(user_id: String) -> Self {
+        Self::UserBlocked { user_id }
+    }
+
+    /// Creates a UserUnblocked event.
+    pub fn user_unblocked(user_id: String) -> Self {
+        Self::UserUnblocked { user_id }
+    }
+
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -1949,6 +1971,14 @@ impl fmt::Debug for Event {
                 .debug_struct("SecurityWarning")
                 .field("peer_id", peer_id)
                 .field("reason", reason)
+                .finish(),
+            Self::UserBlocked { user_id: _ } => f
+                .debug_struct("UserBlocked")
+                .field("user_id", &"[REDACTED]")
+                .finish(),
+            Self::UserUnblocked { user_id: _ } => f
+                .debug_struct("UserUnblocked")
+                .field("user_id", &"[REDACTED]")
                 .finish(),
         }
     }
