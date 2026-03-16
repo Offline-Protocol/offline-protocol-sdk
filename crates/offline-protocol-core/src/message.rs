@@ -234,6 +234,24 @@ pub struct Message {
     /// ID of the message this is replying to (optional).
     #[serde(default)]
     pub reply_to_msg: Option<MessageId>,
+
+    /// Transport-verified peer identity.
+    ///
+    /// Set by the transport layer when a message is received, binding the message
+    /// to the physical peer that delivered it. This field is **never serialized**
+    /// over the wire — it exists only in-process to prevent sender spoofing.
+    ///
+    /// When `Some`, the protocol layer validates that `sender` matches this value
+    /// before processing security-sensitive control messages.
+    ///
+    /// # Security
+    ///
+    /// This field is private to prevent application code from bypassing sender
+    /// verification. Use [`set_transport_peer_id`](Self::set_transport_peer_id)
+    /// (transport layers only) and [`transport_peer_id`](Self::transport_peer_id)
+    /// to interact with it.
+    #[serde(skip)]
+    transport_peer_id: Option<String>,
 }
 
 fn default_requires_ack() -> bool {
@@ -272,6 +290,7 @@ impl Message {
             metadata: HashMap::new(),
             requires_ack: true,
             reply_to_msg: None,
+            transport_peer_id: None,
         }
     }
 
@@ -316,6 +335,44 @@ impl Message {
     /// Deserializes a message from JSON.
     pub fn from_json(json: &str) -> crate::Result<Self> {
         serde_json::from_str(json).map_err(|e| crate::Error::DeserializationError(e.to_string()))
+    }
+
+    /// Sets the transport-verified peer identity.
+    ///
+    /// # Security
+    ///
+    /// This method must only be called by transport layer implementations
+    /// (e.g., `BleTransport::on_message_received_from`) to bind a message to
+    /// the physical peer that delivered it. The protocol layer uses this value
+    /// to reject control messages where the claimed `sender` does not match the
+    /// transport-authenticated peer.
+    ///
+    /// This method is `pub` because transport implementations live in a
+    /// separate crate (`offline-protocol-transport`). It is **not** exposed
+    /// through UniFFI bindings, and the underlying field is private +
+    /// `#[serde(skip)]`, so application code cannot set it via deserialization
+    /// or direct field access.
+    ///
+    /// **Do not call from application code or expose via FFI.**
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `peer_id` is empty, since an empty transport peer
+    /// identity cannot meaningfully authenticate a sender.
+    #[doc(hidden)]
+    pub fn set_transport_peer_id(&mut self, peer_id: String) -> crate::Result<()> {
+        if peer_id.is_empty() {
+            return Err(crate::Error::InvalidMessage(
+                "transport_peer_id must not be empty".to_string(),
+            ));
+        }
+        self.transport_peer_id = Some(peer_id);
+        Ok(())
+    }
+
+    /// Returns the transport-verified peer identity, if set.
+    pub fn transport_peer_id(&self) -> Option<&str> {
+        self.transport_peer_id.as_deref()
     }
 
     /// Serializes the message to binary (MessagePack-like JSON bytes).
@@ -437,6 +494,7 @@ impl MessageBuilder {
             metadata: self.metadata,
             requires_ack: self.requires_ack,
             reply_to_msg: self.reply_to_msg,
+            transport_peer_id: None,
         }
     }
 }

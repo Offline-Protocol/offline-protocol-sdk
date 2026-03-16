@@ -148,6 +148,29 @@ impl WifiDirectTransport {
         queue.push_back(message);
     }
 
+    /// Like [`on_message_received`](Self::on_message_received), but attaches a
+    /// transport-verified `peer_id` to the message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, IP, etc.).
+    ///   The protocol layer uses this value to verify that `message.sender`
+    ///   matches the physical peer that delivered it.
+    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
+        if let Err(e) = message.set_transport_peer_id(peer_id) {
+            tracing::warn!(
+                error = %e,
+                message_id = %message.id,
+                "Dropping message: transport provided invalid peer_id"
+            );
+            return;
+        }
+        let mut queue = self.receive_queue.lock().unwrap();
+        queue.push_back(message);
+    }
+
     /// Gets all discovered peers.
     pub fn get_peers(&self) -> Vec<WifiDirectPeer> {
         let peers = self.peers.lock().unwrap();
@@ -190,6 +213,31 @@ impl WifiDirectTransport {
             Err(e) => {
                 tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
                 Ok(()) // Don't fail - just drop bad data
+            }
+        }
+    }
+
+    /// Like [`on_data_received`](Self::on_data_received), but attaches a
+    /// transport-verified `peer_id` to the deserialized message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, IP, etc.).
+    ///   The protocol layer uses this value to verify that `message.sender`
+    ///   matches the physical peer that delivered it.
+    pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        match self.deserialize_message(&data) {
+            Ok(mut message) => {
+                message.set_transport_peer_id(peer_id)?;
+                let mut queue = self.receive_queue.lock().unwrap();
+                queue.push_back(message);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
+                Ok(())
             }
         }
     }

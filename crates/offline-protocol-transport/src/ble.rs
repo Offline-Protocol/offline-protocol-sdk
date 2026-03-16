@@ -190,6 +190,29 @@ impl BleTransport {
         queue.push_back(message);
     }
 
+    /// Like [`on_message_received`](Self::on_message_received), but attaches a
+    /// transport-verified `peer_id` to the message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, BLE device
+    ///   UUID, etc.). The protocol layer uses this value to verify that
+    ///   `message.sender` matches the physical peer that delivered it.
+    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
+        if let Err(e) = message.set_transport_peer_id(peer_id) {
+            tracing::warn!(
+                error = %e,
+                message_id = %message.id,
+                "Dropping message: transport provided invalid peer_id"
+            );
+            return;
+        }
+        let mut queue = self.receive_queue.lock().unwrap();
+        queue.push_back(message);
+    }
+
     /// Called when connection status changes.
     pub fn on_status_changed(&self, status: TransportStatus) {
         *self.status.lock().unwrap() = status;
@@ -502,6 +525,40 @@ impl BleTransport {
             }
             Err(e) => {
                 // Log error but don't fail - just drop bad fragment
+                tracing::warn!(error = %e, "Error processing fragment, dropping bad fragment");
+                Ok(())
+            }
+        }
+    }
+
+    /// Like [`on_fragment_received`](Self::on_fragment_received), but attaches a
+    /// transport-verified `peer_id` to the reassembled message.
+    ///
+    /// # Parameters
+    ///
+    /// * `peer_id` — The **user-level identifier** (i.e., the remote peer's
+    ///   `UserId` string) that the transport layer has authenticated for this
+    ///   connection. This is **not** the raw transport address (MAC, BLE device
+    ///   UUID, etc.). The protocol layer uses this value to verify that
+    ///   `message.sender` matches the physical peer that delivered it.
+    pub fn on_fragment_received_from(&self, fragment_data: Vec<u8>, peer_id: String) -> Result<()> {
+        match self.process_fragment(&fragment_data) {
+            Ok(Some(mut message)) => {
+                message.set_transport_peer_id(peer_id)?;
+                let msg_id = message.id.clone();
+                let mut queue = self.receive_queue.lock().unwrap();
+                queue.push_back(message);
+                tracing::debug!(
+                    message_id = %msg_id,
+                    "Complete message assembled from fragments (with peer identity)"
+                );
+                Ok(())
+            }
+            Ok(None) => {
+                tracing::debug!("Fragment received, more needed for complete message");
+                Ok(())
+            }
+            Err(e) => {
                 tracing::warn!(error = %e, "Error processing fragment, dropping bad fragment");
                 Ok(())
             }

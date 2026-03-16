@@ -732,6 +732,15 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason_detail: Option<String>,
     },
+
+    /// A security-relevant anomaly was detected (e.g. sender spoofing, TOFU
+    /// key mismatch, unsigned control message when signatures are required).
+    SecurityWarning {
+        /// Peer ID involved in the warning.
+        peer_id: String,
+        /// Human-readable description of the security issue.
+        reason: String,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -1350,6 +1359,11 @@ impl Event {
         }
     }
 
+    /// Creates a SecurityWarning event.
+    pub fn security_warning(peer_id: String, reason: String) -> Self {
+        Self::SecurityWarning { peer_id, reason }
+    }
+
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -1930,6 +1944,11 @@ impl fmt::Debug for Event {
                 .field("to", to)
                 .field("reason_code", reason_code)
                 .field("reason_detail", reason_detail)
+                .finish(),
+            Self::SecurityWarning { peer_id, reason } => f
+                .debug_struct("SecurityWarning")
+                .field("peer_id", peer_id)
+                .field("reason", reason)
                 .finish(),
         }
     }

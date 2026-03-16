@@ -50,6 +50,15 @@ impl MockTransport {
         queue.push(message);
     }
 
+    /// Adds a message to the receive queue with a transport-verified peer identity.
+    pub fn queue_message_from(&self, mut message: Message, peer_id: String) {
+        message
+            .set_transport_peer_id(peer_id)
+            .expect("test must provide non-empty peer_id");
+        let mut queue = self.receive_queue.lock().unwrap();
+        queue.push(message);
+    }
+
     /// Returns all messages that were sent through this transport.
     pub fn sent_messages(&self) -> Vec<Message> {
         self.sent_messages.lock().unwrap().clone()
