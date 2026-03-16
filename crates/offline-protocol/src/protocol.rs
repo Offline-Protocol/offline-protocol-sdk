@@ -385,6 +385,12 @@ pub(crate) struct ReceivedKeyPackage {
 pub(crate) enum InternalMessageResult {
     /// Message was consumed internally (don't surface to app).
     Consumed,
+    /// Message was rejected by the security gate (spoofed sender, bad
+    /// signature, TOFU violation, etc.). Like `Consumed`, the message is not
+    /// surfaced to the app — but unlike `Consumed`, a delivery ACK must NOT
+    /// be sent back, to avoid confirming to the attacker that the target is
+    /// online and processing messages.
+    SecurityRejected,
     /// Message was decrypted, here's the plaintext.
     Decrypted(String),
 }
@@ -3284,6 +3290,9 @@ impl OfflineProtocol {
                     InternalMessageResult::Consumed => {
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
                     }
+                    InternalMessageResult::SecurityRejected => {
+                        debug!(message_id = %msg.id, "Delayed message was rejected by security gate");
+                    }
                 }
             }
         }
@@ -5153,6 +5162,13 @@ impl OfflineProtocol {
                                 // Internal message handled, don't surface to app
                                 continue;
                             }
+                            InternalMessageResult::SecurityRejected => {
+                                // Security gate rejected this message (spoofed sender,
+                                // bad signature, TOFU violation). Do NOT send a delivery
+                                // ACK — acknowledging would confirm to the attacker that
+                                // the target peer is online and processing messages.
+                                continue;
+                            }
                             InternalMessageResult::Decrypted(plaintext) => {
                                 // Replace content with decrypted plaintext
                                 message.content = plaintext;
@@ -6421,7 +6437,6 @@ impl OfflineProtocol {
             Err(e) => {
                 let reason = format!("MLS lock poisoned — cannot sign control message: {}", e);
                 error!(error = %e, "MLS lock poisoned — cannot sign control message");
-                self.emit_security_warning(message.sender.as_str(), &reason);
                 return Err(Error::Other(reason));
             }
         };
@@ -6431,7 +6446,6 @@ impl OfflineProtocol {
             Err(e) => {
                 let reason = format!("Failed to get identity public key: {}", e);
                 error!(error = %e, "Failed to get identity public key — cannot sign control message");
-                self.emit_security_warning(message.sender.as_str(), &reason);
                 return Err(Error::Other(reason));
             }
         };
@@ -6441,7 +6455,6 @@ impl OfflineProtocol {
             Err(e) => {
                 let reason = format!("Failed to sign control message: {}", e);
                 error!(error = %e, "Failed to sign control message");
-                self.emit_security_warning(message.sender.as_str(), &reason);
                 return Err(Error::Other(reason));
             }
         };
@@ -6593,8 +6606,9 @@ impl OfflineProtocol {
     /// identity and cryptographic signature before allowing the message to
     /// proceed through `process_internal_message`.
     ///
-    /// Returns `Some(InternalMessageResult::Consumed)` to drop the message,
-    /// or `None` to allow it through.
+    /// Returns `Some(InternalMessageResult::SecurityRejected)` to drop the
+    /// message (without sending a delivery ACK), or `None` to allow it
+    /// through.
     fn security_gate_control_message(
         &mut self,
         message: &Message,
@@ -6617,7 +6631,7 @@ impl OfflineProtocol {
                 sender,
                 "Control message sender does not match transport peer identity",
             );
-            return Some(InternalMessageResult::Consumed);
+            return Some(InternalMessageResult::SecurityRejected);
         }
 
         // Cryptographic signature check
@@ -6639,7 +6653,7 @@ impl OfflineProtocol {
                         sender,
                         "Unsigned control message from peer with pinned key (possible downgrade attack)",
                     );
-                    return Some(InternalMessageResult::Consumed);
+                    return Some(InternalMessageResult::SecurityRejected);
                 }
                 debug!(
                     sender = %sender,
@@ -6656,7 +6670,7 @@ impl OfflineProtocol {
                     "Dropping control message: signature verification failed"
                 );
                 self.emit_security_warning(sender, format!("Control message rejected: {}", err));
-                return Some(InternalMessageResult::Consumed);
+                return Some(InternalMessageResult::SecurityRejected);
             }
         }
 
@@ -13479,11 +13493,11 @@ pub(crate) mod tests {
         );
         msg.set_transport_peer_id("eve".to_string()).unwrap();
 
-        // process_internal_message should consume (drop) the message
+        // process_internal_message should reject (drop without ACK) the message
         let result = protocol.process_internal_message(&msg);
         assert!(
-            matches!(result, Some(InternalMessageResult::Consumed)),
-            "Expected spoofed control message to be dropped"
+            matches!(result, Some(InternalMessageResult::SecurityRejected)),
+            "Expected spoofed control message to be rejected by security gate"
         );
     }
 
@@ -13641,8 +13655,8 @@ pub(crate) mod tests {
         // Should be rejected because alice has a TOFU-pinned key
         let result = protocol.process_internal_message(&msg);
         assert!(
-            matches!(result, Some(InternalMessageResult::Consumed)),
-            "Unsigned control message from TOFU-pinned peer should be dropped"
+            matches!(result, Some(InternalMessageResult::SecurityRejected)),
+            "Unsigned control message from TOFU-pinned peer should be rejected by security gate"
         );
     }
 
@@ -14366,8 +14380,8 @@ pub(crate) mod tests {
 
             let result = protocol.process_internal_message(&msg);
             assert!(
-                matches!(result, Some(InternalMessageResult::Consumed)),
-                "Security gate should drop spoofed message for prefix '{}'",
+                matches!(result, Some(InternalMessageResult::SecurityRejected)),
+                "Security gate should reject spoofed message for prefix '{}'",
                 prefix
             );
         }
@@ -14444,8 +14458,8 @@ pub(crate) mod tests {
 
         let result = protocol.process_internal_message(&msg);
         assert!(
-            matches!(result, Some(InternalMessageResult::Consumed)),
-            "Malformed message (pk without sig) should be dropped by security gate"
+            matches!(result, Some(InternalMessageResult::SecurityRejected)),
+            "Malformed message (pk without sig) should be rejected by security gate"
         );
     }
 
@@ -14528,6 +14542,141 @@ pub(crate) mod tests {
         assert!(
             result.is_err(),
             "Zero-byte public key must be rejected during verification"
+        );
+    }
+
+    #[test]
+    fn test_signature_downgrade_detection_for_tofu_pinned_peer() {
+        // A peer that has previously sent signed control messages (TOFU-pinned)
+        // must have subsequent unsigned control messages rejected as a possible
+        // downgrade attack (impersonation attempt).
+        let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        // Set up "alice" as a sender with MLS so she can sign.
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+        alice.initialize_mls(storage_a).unwrap();
+
+        // Alice creates and signs a control message.
+        let mut signed_msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        alice.sign_control_message(&mut signed_msg).unwrap();
+        assert!(signed_msg.metadata.contains_key(CTRL_SIG_META_KEY));
+
+        // Bob verifies — this TOFU-pins alice's key.
+        let result = protocol.verify_control_message(&signed_msg);
+        assert!(matches!(result, Ok(true)), "First signed message should verify");
+        assert!(
+            protocol.known_peer_public_keys.contains_key("alice"),
+            "Alice's key should be TOFU-pinned"
+        );
+
+        // Now "alice" (or an impersonator) sends an unsigned control message.
+        let unsigned_msg = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"unsigned\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        assert!(!unsigned_msg.metadata.contains_key(CTRL_SIG_META_KEY));
+
+        // The security gate should reject this as a signature downgrade.
+        let gate_result = protocol.security_gate_control_message(&unsigned_msg);
+        assert!(
+            matches!(gate_result, Some(InternalMessageResult::SecurityRejected)),
+            "Unsigned message from TOFU-pinned peer should be rejected as signature downgrade"
+        );
+    }
+
+    #[test]
+    fn test_second_signed_message_from_tofu_pinned_peer_passes_gate() {
+        // After TOFU-pinning, a subsequent correctly-signed control message
+        // from the same peer (with the same key) should pass the security gate.
+        let mut protocol = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        let storage = Arc::new(crate::mls::InMemoryStorage::new());
+        protocol.initialize_mls(storage).unwrap();
+
+        let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+        let storage_a = Arc::new(crate::mls::InMemoryStorage::new());
+        alice.initialize_mls(storage_a).unwrap();
+
+        // First signed message — pins alice's key.
+        let mut msg1 = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"first\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        alice.sign_control_message(&mut msg1).unwrap();
+
+        let gate1 = protocol.security_gate_control_message(&msg1);
+        assert!(
+            gate1.is_none(),
+            "First signed message should pass the security gate"
+        );
+        assert!(protocol.known_peer_public_keys.contains_key("alice"));
+
+        // Second signed message — same key, should also pass.
+        let mut msg2 = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"second\"}}", internal_prefixes::CONN_ACCEPT),
+        );
+        alice.sign_control_message(&mut msg2).unwrap();
+
+        let gate2 = protocol.security_gate_control_message(&msg2);
+        assert!(
+            gate2.is_none(),
+            "Second signed message from same TOFU-pinned peer should pass the security gate"
+        );
+    }
+
+    #[test]
+    fn test_security_rejected_does_not_send_ack() {
+        // Verify that SecurityRejected messages do NOT trigger a delivery ACK,
+        // preventing an attacker from confirming the target is online.
+        let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+        let storage_b = Arc::new(crate::mls::InMemoryStorage::new());
+        bob.initialize_mls(storage_b).unwrap();
+
+        let mut mock_transport = MockTransport::new(TransportType::BLE);
+        mock_transport.start().unwrap();
+        let transport_handle = mock_transport.clone();
+
+        // Create a spoofed control message: sender says "alice", transport says "eve"
+        let mut spoofed = Message::new(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+            format!("{}{{\"data\":\"evil\"}}", internal_prefixes::CONN_REQUEST),
+        );
+        spoofed.requires_ack = true;
+        mock_transport.queue_message_from(spoofed, "eve".to_string());
+
+        bob.transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock_transport));
+        bob.start().unwrap();
+
+        // Process the message — should be security-rejected
+        let received = bob.receive_message();
+        assert!(received.is_none(), "Spoofed message should not surface");
+
+        // Verify no ACK was sent back
+        let sent = transport_handle.sent_messages();
+        let ack_count = sent
+            .iter()
+            .filter(|m| m.metadata.contains_key(ACK_FOR_KEY))
+            .count();
+        assert_eq!(
+            ack_count, 0,
+            "Security-rejected messages must NOT trigger a delivery ACK"
         );
     }
 }
