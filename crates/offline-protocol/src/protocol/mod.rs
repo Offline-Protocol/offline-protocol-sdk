@@ -1,6 +1,7 @@
 //! Main protocol engine.
 
 mod config_accessors;
+mod decryption_queue;
 mod message_dispatch;
 mod observability;
 mod pending_queue;
@@ -12,9 +13,11 @@ mod session;
 mod storage;
 mod types;
 
+pub(crate) use decryption_queue::PendingDecryptionQueue;
+pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
+pub use types::ProtocolState;
 pub(crate) use types::*;
-pub use types::{PendingQueueMetrics, ProtocolState};
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
