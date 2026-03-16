@@ -154,13 +154,13 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       }
 
       case 'connection_request_received': {
-        const peerId = event.sender || event.peerId || event.peer_id;
+        const peerId = event.sender || event.peerId || event.peer_id || event.fromUserId || event.from_user_id;
         if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
         setConnectionRequests(prev => {
           if (prev.some(r => r.peerId === peerId && r.direction === 'in')) {return prev;}
           return [...prev, {
             peerId,
-            name: event.sender_name || event.userName || peerId,
+            name: event.sender_name || event.userName || event.user_name || peerId,
             direction: 'in',
             timestamp: Date.now(),
           }];
@@ -169,7 +169,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       }
 
       case 'connection_accepted': {
-        const peerId = event.accepted_by || event.peerId || event.peer_id;
+        const peerId = event.accepted_by || event.peerId || event.peer_id || event.byUserId || event.by_user_id;
         if (!peerId) {break;}
         setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
         setContacts(prev => {
@@ -177,7 +177,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
           const existing = next.get(peerId);
           next.set(peerId, {
             peerId,
-            name: existing?.name || event.accepted_by_name || peerId,
+            name: existing?.name || event.accepted_by_name || event.userName || event.user_name || peerId,
             lastSeen: Date.now(),
             isNearby: neighborsRef.current.has(peerId),
             hasSession: existing?.hasSession || false,
@@ -189,7 +189,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       }
 
       case 'connection_rejected': {
-        const peerId = event.rejected_by || event.peerId || event.peer_id;
+        const peerId = event.rejected_by || event.peerId || event.peer_id || event.byUserId || event.by_user_id;
         if (!peerId) {break;}
         setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
         break;
@@ -216,7 +216,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'message_received': {
         const msgId = event.messageId || event.message_id || event.id;
-        const senderId = event.sender || event.senderId || event.sender_id;
+        const senderId = event.sender || event.senderId || event.sender_id || event.fromUserId || event.from_user_id;
         const content = event.content || event.message || '';
 
         if (!senderId || !msgId) {break;}
