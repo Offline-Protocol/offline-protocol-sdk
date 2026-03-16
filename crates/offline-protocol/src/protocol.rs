@@ -4329,23 +4329,14 @@ impl OfflineProtocol {
                 return;
             }
         };
-        if peer_ids.len() > MAX_TOFU_PEERS {
-            warn!(
-                stored = peer_ids.len(),
-                limit = MAX_TOFU_PEERS,
-                "TOFU storage contains more entries than current limit, truncating"
-            );
-        }
-        let mut restored = 0u32;
-        for peer_id in peer_ids {
-            if self.known_peer_public_keys.len() >= MAX_TOFU_PEERS {
-                break;
-            }
-            match storage.load(storage_keys::TOFU_KEYS, &peer_id) {
+        // Load all valid entries first so we can sort by last_seen_ms and
+        // keep the most recently seen peers when truncating.
+        let mut valid_entries: Vec<(String, TofuEntry)> = Vec::new();
+        for peer_id in &peer_ids {
+            match storage.load(storage_keys::TOFU_KEYS, peer_id) {
                 Ok(Some(data)) => match serde_json::from_slice::<TofuEntry>(&data) {
                     Ok(entry) => {
-                        self.known_peer_public_keys.insert(peer_id, entry);
-                        restored += 1;
+                        valid_entries.push((peer_id.clone(), entry));
                     }
                     Err(e) => {
                         warn!(peer_id = %peer_id, error = %e, "Skipping corrupted TOFU entry");
@@ -4356,6 +4347,20 @@ impl OfflineProtocol {
                     warn!(peer_id = %peer_id, error = %e, "Failed to load TOFU entry");
                 }
             }
+        }
+        if valid_entries.len() > MAX_TOFU_PEERS {
+            warn!(
+                stored = valid_entries.len(),
+                limit = MAX_TOFU_PEERS,
+                "TOFU storage contains more entries than current limit, keeping most recent"
+            );
+            // Sort by last_seen_ms descending to keep most recently seen peers
+            valid_entries.sort_by(|a, b| b.1.last_seen_ms.cmp(&a.1.last_seen_ms));
+            valid_entries.truncate(MAX_TOFU_PEERS);
+        }
+        let restored = valid_entries.len() as u32;
+        for (peer_id, entry) in valid_entries {
+            self.known_peer_public_keys.insert(peer_id, entry);
         }
         if restored > 0 {
             info!(count = restored, "Restored TOFU key entries from storage");

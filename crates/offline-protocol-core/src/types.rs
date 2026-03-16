@@ -3,8 +3,33 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Validates that an identifier string is safe for use as a storage key.
+///
+/// Rejects empty strings, path-traversal components (`.`, `..`), and
+/// characters hostile to storage backends (NUL, `/`, `\`, `:`).
+fn validate_id_chars(id: &str, type_name: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err(format!("{} cannot be empty", type_name));
+    }
+    if id == "." || id == ".." {
+        return Err(format!(
+            "{} cannot be '.' or '..' (path traversal)",
+            type_name
+        ));
+    }
+    // Reject characters that are hostile to storage backends (filesystem
+    // path traversal, key-separator collisions in KV stores, null bytes).
+    if id.contains('\0') || id.contains('/') || id.contains('\\') || id.contains(':') {
+        return Err(format!(
+            "{} contains invalid characters (NUL, '/', '\\', or ':')",
+            type_name
+        ));
+    }
+    Ok(())
+}
+
 /// User identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct UserId(String);
 
 impl UserId {
@@ -19,22 +44,7 @@ impl UserId {
     /// Returns `Ok(UserId)` if valid, `Err` if the ID is empty.
     pub fn new(id: impl Into<String>) -> crate::Result<Self> {
         let id_str = id.into();
-        if id_str.is_empty() {
-            return Err(crate::Error::InvalidUserId(
-                "User ID cannot be empty".into(),
-            ));
-        }
-        // Reject characters that are hostile to storage backends (filesystem
-        // path traversal, key-separator collisions in KV stores, null bytes).
-        if id_str.contains('\0')
-            || id_str.contains('/')
-            || id_str.contains('\\')
-            || id_str.contains(':')
-        {
-            return Err(crate::Error::InvalidUserId(
-                "User ID contains invalid characters (NUL, '/', '\\', or ':')".into(),
-            ));
-        }
+        validate_id_chars(&id_str, "User ID").map_err(crate::Error::InvalidUserId)?;
         Ok(Self(id_str))
     }
 
@@ -50,8 +60,15 @@ impl fmt::Display for UserId {
     }
 }
 
+impl<'de> Deserialize<'de> for UserId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        UserId::new(s).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Application identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct AppId(String);
 
 impl AppId {
@@ -66,18 +83,7 @@ impl AppId {
     /// Returns `Ok(AppId)` if valid, `Err` if the ID is empty.
     pub fn new(id: impl Into<String>) -> crate::Result<Self> {
         let id_str = id.into();
-        if id_str.is_empty() {
-            return Err(crate::Error::InvalidAppId("App ID cannot be empty".into()));
-        }
-        if id_str.contains('\0')
-            || id_str.contains('/')
-            || id_str.contains('\\')
-            || id_str.contains(':')
-        {
-            return Err(crate::Error::InvalidAppId(
-                "App ID contains invalid characters (NUL, '/', '\\', or ':')".into(),
-            ));
-        }
+        validate_id_chars(&id_str, "App ID").map_err(crate::Error::InvalidAppId)?;
         Ok(Self(id_str))
     }
 
@@ -90,6 +96,13 @@ impl AppId {
 impl fmt::Display for AppId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for AppId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        AppId::new(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -359,8 +372,22 @@ mod tests {
         assert!(UserId::new("user\\evil").is_err());
         assert!(UserId::new("user:evil").is_err());
         assert!(UserId::new("user\0evil").is_err());
+        assert!(UserId::new(".").is_err());
+        assert!(UserId::new("..").is_err());
         // Valid characters should still work
         assert!(UserId::new("user-123_test.name@domain").is_ok());
+    }
+
+    #[test]
+    fn test_user_id_deserialize_rejects_hostile_chars() {
+        let result: Result<UserId, _> = serde_json::from_str(r#""evil/path""#);
+        assert!(result.is_err(), "Deserialization should reject '/' in UserId");
+
+        let result: Result<UserId, _> = serde_json::from_str(r#""..""#);
+        assert!(result.is_err(), "Deserialization should reject '..' as UserId");
+
+        let result: Result<UserId, _> = serde_json::from_str(r#""valid-user""#);
+        assert!(result.is_ok(), "Deserialization should accept valid UserId");
     }
 
     #[test]
@@ -378,7 +405,21 @@ mod tests {
         assert!(AppId::new("app\\evil").is_err());
         assert!(AppId::new("app:evil").is_err());
         assert!(AppId::new("app\0evil").is_err());
+        assert!(AppId::new(".").is_err());
+        assert!(AppId::new("..").is_err());
         assert!(AppId::new("my-app_v2.0").is_ok());
+    }
+
+    #[test]
+    fn test_app_id_deserialize_rejects_hostile_chars() {
+        let result: Result<AppId, _> = serde_json::from_str(r#""app/evil""#);
+        assert!(result.is_err(), "Deserialization should reject '/' in AppId");
+
+        let result: Result<AppId, _> = serde_json::from_str(r#""..""#);
+        assert!(result.is_err(), "Deserialization should reject '..' as AppId");
+
+        let result: Result<AppId, _> = serde_json::from_str(r#""valid-app""#);
+        assert!(result.is_ok(), "Deserialization should accept valid AppId");
     }
 
     #[test]
