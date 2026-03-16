@@ -80,7 +80,7 @@ impl OfflineProtocol {
             && self.config.encryption.auto_key_exchange
             && self.mls_manager.is_some()
         {
-            if let Err(e) = self.send_key_package_to(user_id) {
+            if let Err(e) = self.send_key_package_to(user_id, true) {
                 debug!(user_id = %user_id, error = %e, "Failed to send key package after unblock (peer may reconnect later)");
             }
         }
@@ -457,7 +457,13 @@ mod tests {
 
         proto.block_user("mallory").unwrap();
 
-        let result = proto.send_media("mallory", vec![0u8; 100], "photo.jpg", ContentType::Image, None);
+        let result = proto.send_media(
+            "mallory",
+            vec![0u8; 100],
+            "photo.jpg",
+            ContentType::Image,
+            None,
+        );
         assert!(matches!(
             result,
             Err(crate::Error::UserBlocked(ref id)) if id == "mallory"
@@ -798,5 +804,118 @@ mod tests {
         assert!(proto.is_user_blocked("bob"));
         assert!(!proto.is_user_blocked(""));
         assert_eq!(proto.blocked_users.len(), 1);
+    }
+
+    #[test]
+    fn test_session_reset_key_package_clears_stale_session() {
+        use crate::mls::InMemoryStorage as MlsInMemoryStorage;
+        use crate::protocol::types::KeyPackagePayload;
+
+        // Set up alice with MLS
+        let mut alice = make_protocol("alice");
+        let alice_storage = Arc::new(MlsInMemoryStorage::new());
+        alice.initialize_mls(alice_storage).unwrap();
+
+        // Set up bob with MLS
+        let mut bob = make_protocol("bob");
+        let bob_storage = Arc::new(MlsInMemoryStorage::new());
+        bob.initialize_mls(bob_storage).unwrap();
+
+        // Exchange key packages to establish a session
+        let alice_key_pkg = {
+            let mls = alice.mls_manager.as_ref().unwrap();
+            let manager = mls.read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        // Bob imports Alice's key package and creates session
+        {
+            let mls = bob.mls_manager.as_ref().unwrap();
+            let manager = mls.read().unwrap();
+            manager
+                .import_key_package("alice", &alice_key_pkg.key_package_data)
+                .unwrap();
+            let welcome = manager.create_session("alice").unwrap();
+            // Alice joins via welcome
+            let alice_mls = alice.mls_manager.as_ref().unwrap();
+            let alice_manager = alice_mls.read().unwrap();
+            alice_manager.join_session(&welcome).unwrap();
+        }
+
+        // Verify both have sessions
+        {
+            let mls = alice.mls_manager.as_ref().unwrap();
+            assert!(mls.read().unwrap().has_session("bob").unwrap());
+        }
+        {
+            let mls = bob.mls_manager.as_ref().unwrap();
+            assert!(mls.read().unwrap().has_session("alice").unwrap());
+        }
+
+        // Now simulate: Alice blocks then unblocks Bob.
+        // Alice's side deletes her session (done by unblock_user internally).
+        alice.block_user("bob").unwrap();
+        alice.unblock_user("bob").unwrap();
+
+        // Verify Alice no longer has a session with Bob
+        {
+            let mls = alice.mls_manager.as_ref().unwrap();
+            assert!(
+                !mls.read().unwrap().has_session("bob").unwrap(),
+                "Alice should have no session after unblock cleanup"
+            );
+        }
+
+        // Bob still has the stale session
+        {
+            let mls = bob.mls_manager.as_ref().unwrap();
+            assert!(
+                mls.read().unwrap().has_session("alice").unwrap(),
+                "Bob still has the old session before receiving reset"
+            );
+        }
+
+        // Simulate Bob receiving Alice's key package with session_reset=true
+        let alice_fresh_key_pkg = {
+            let mls = alice.mls_manager.as_ref().unwrap();
+            let manager = mls.read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let reset_payload = KeyPackagePayload {
+            user_id: "alice".to_string(),
+            key_package_data: alice_fresh_key_pkg.key_package_data.clone(),
+            remaining_lifetime_ms: alice_fresh_key_pkg.remaining_lifetime_ms(),
+            timestamp_ms: 0,
+            session_reset: true,
+        };
+        let content = serde_json::to_string(&reset_payload).unwrap();
+
+        // Bob handles the key package with session_reset=true.
+        // This deletes the stale session and auto-establishes a fresh one
+        // using Alice's new key package.
+        bob.handle_key_package_message("alice", &content);
+
+        // Bob should have a session (the NEW one, auto-established from
+        // Alice's fresh key package — NOT the stale orphaned session).
+        {
+            let mls = bob.mls_manager.as_ref().unwrap();
+            let manager = mls.read().unwrap();
+            assert!(
+                manager.has_session("alice").unwrap(),
+                "Bob should have a fresh session after session_reset + auto-establish"
+            );
+        }
+
+        // The old confirmed_sessions entry should be gone (cleared during
+        // session delete), proving the stale session was replaced.
+        assert!(
+            !bob.confirmed_sessions.contains("alice"),
+            "Old confirmed session entry should be cleared"
+        );
+
+        // The pending key package should have been consumed by auto-establish
+        assert!(
+            !bob.pending_key_packages.contains_key("alice"),
+            "Key package should be consumed after auto-establish"
+        );
     }
 }

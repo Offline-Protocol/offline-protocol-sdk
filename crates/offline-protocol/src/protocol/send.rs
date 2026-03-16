@@ -1719,7 +1719,7 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
-    pub(super) fn send_key_package_to(&mut self, peer_id: &str) -> Result<()> {
+    pub(super) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
 
         let key_pkg = {
@@ -1734,6 +1734,7 @@ impl OfflineProtocol {
             key_package_data: key_pkg.key_package_data.clone(),
             remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
             timestamp_ms: Utc::now().timestamp_millis() as u64,
+            session_reset,
         };
 
         let serialized =

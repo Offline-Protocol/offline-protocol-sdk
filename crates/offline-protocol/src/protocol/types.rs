@@ -85,6 +85,11 @@ pub(crate) struct KeyPackagePayload {
     /// backward compatibility with old nodes that may still send it.
     #[serde(default)]
     pub(crate) timestamp_ms: u64,
+    /// When `true`, the sender has reset their MLS session state (e.g. after
+    /// unblocking) and the receiver should discard any existing session for
+    /// this peer before establishing a new one.
+    #[serde(default)]
+    pub(crate) session_reset: bool,
 }
 
 /// Payload for a connection request message.

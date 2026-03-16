@@ -20,7 +20,34 @@ impl OfflineProtocol {
     /// Handles an incoming MLS key package message.
     pub(crate) fn handle_key_package_message(&mut self, sender: &str, data: &str) {
         if let Ok(payload) = serde_json::from_str::<KeyPackagePayload>(data) {
-            debug!(sender = %sender, "Received key package");
+            debug!(sender = %sender, session_reset = %payload.session_reset, "Received key package");
+
+            // If the sender has reset their session (e.g. after unblocking us),
+            // we must discard our stale local session so both sides converge on
+            // a fresh MLS group.
+            if payload.session_reset {
+                if let Some(mls) = self.mls_manager.clone() {
+                    if let Ok(manager) = mls.read() {
+                        if manager.has_session(sender).unwrap_or(false) {
+                            drop(manager); // release lock before mutating
+                            info!(sender = %sender, "Session reset requested — deleting stale local session");
+                            if let Err(e) = self.manual_mls_delete_session(sender) {
+                                debug!(sender = %sender, error = %e, "No MLS session to clean up for session reset");
+                            }
+                            // Clear outbound pending messages (encrypted for the old session)
+                            if self.pending_encrypted_messages.remove(sender).is_some() {
+                                self.clear_pending_messages_from_storage(sender);
+                            }
+                            // Drain inbound pending decryption queue (old ciphertexts)
+                            self.pending_queue
+                                .drain_for_peer(&self.config.encryption.pending_queue, sender);
+                            // Allow fresh key exchange
+                            self.key_package_sent_to.remove(sender);
+                        }
+                    }
+                }
+            }
+
             let now_ms = Utc::now().timestamp_millis() as u64;
             let local_expires_at_ms = if payload.remaining_lifetime_ms > 0 {
                 now_ms.saturating_add(payload.remaining_lifetime_ms)
@@ -42,7 +69,7 @@ impl OfflineProtocol {
                 && self.config.encryption.enabled
                 && !self.key_package_sent_to.contains(sender)
             {
-                let _ = self.send_key_package_to(sender);
+                let _ = self.send_key_package_to(sender, false);
             }
 
             // Auto-establish the session now that we have the peer's key
@@ -242,7 +269,7 @@ impl OfflineProtocol {
                         // for group invites (the original was consumed during
                         // session establishment on their side).
                         if self.config.encryption.enabled {
-                            let _ = self.send_key_package_to(&sender_owned);
+                            let _ = self.send_key_package_to(&sender_owned, false);
                         }
 
                         // Emit secure session established event

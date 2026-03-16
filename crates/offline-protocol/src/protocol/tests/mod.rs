@@ -754,6 +754,7 @@ fn test_process_internal_message_key_package() {
         key_package_data: vec![1, 2, 3, 4],
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
+        session_reset: false,
     };
     let content = format!(
         "{}{}",
@@ -5375,6 +5376,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         key_package_data: vec![5, 6, 7, 8],
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
+        session_reset: false,
     };
     let content = format!(
         "{}{}",
@@ -5598,6 +5600,7 @@ fn test_key_package_remaining_lifetime_ms() {
         key_package_data: vec![1, 2, 3],
         remaining_lifetime_ms: 0,
         timestamp_ms: 12345,
+        session_reset: false,
     };
     let content = format!(
         "{}{}",
@@ -5676,6 +5679,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             key_package_data: bob_key_package.key_package_data.clone(),
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
+            session_reset: false,
         };
         let content = format!(
             "{}{}",
@@ -5783,6 +5787,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             key_package_data: bob_key_package.key_package_data.clone(),
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
+            session_reset: false,
         };
         let content = format!(
             "{}{}",

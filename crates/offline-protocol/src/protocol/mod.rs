@@ -446,7 +446,7 @@ impl OfflineProtocol {
             return;
         }
 
-        if let Err(e) = self.send_key_package_to(peer_id) {
+        if let Err(e) = self.send_key_package_to(peer_id, false) {
             warn!(error = %e, peer_id = %peer_id, "Failed to send key package on discovery");
         }
     }
@@ -555,7 +555,7 @@ impl OfflineProtocol {
                 // Send a fresh key package so the peer has one available for
                 // group invites (the original was consumed to create this session).
                 if self.config.encryption.enabled {
-                    let _ = self.send_key_package_to(peer_id);
+                    let _ = self.send_key_package_to(peer_id, false);
                 }
 
                 if welcome_sent {
