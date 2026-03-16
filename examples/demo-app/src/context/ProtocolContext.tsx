@@ -636,13 +636,19 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
   const sendMessage = useCallback(async (recipientId: string, content: string, priority: 'medium' | 'critical' = 'medium') => {
     if (!protocolRef.current) {return;}
+    if (blockedUsersRef.current.has(recipientId)) {return;}
 
     const msgPriority = priority === 'critical' ? MessagePriority.Critical : MessagePriority.Medium;
-    const msgId = await protocolRef.current.sendMessage({
-      recipient: recipientId,
-      content,
-      priority: msgPriority,
-    });
+    let msgId: string;
+    try {
+      msgId = await protocolRef.current.sendMessage({
+        recipient: recipientId,
+        content,
+        priority: msgPriority,
+      });
+    } catch {
+      return;
+    }
 
     const chatMsg: ChatMessage = {
       id: msgId,
@@ -849,11 +855,13 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         // Protocol-level unblocking failed, still update UI
       }
     }
+    // Unblocking clears the MLS session at the protocol level, so mark
+    // hasSession false — a fresh key exchange will re-establish it.
     setContacts(prev => {
       const next = new Map(prev);
       const contact = next.get(peerId);
       if (contact) {
-        next.set(peerId, {...contact, isBlocked: false});
+        next.set(peerId, {...contact, isBlocked: false, hasSession: false});
       }
       return next;
     });

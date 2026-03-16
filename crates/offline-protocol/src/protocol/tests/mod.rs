@@ -5665,7 +5665,9 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
     let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
-    // First session: receive key package (persisted via process_internal_message)
+    // First session: receive key package — auto_key_exchange causes
+    // handle_key_package_message to auto-establish the session, consuming
+    // the pending key package.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
@@ -5687,21 +5689,27 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             &content,
         );
         let _ = protocol.process_internal_message(&message);
-        assert!(protocol.pending_key_packages.contains_key("bob"));
+        // Session is auto-established, key package consumed
+        assert!(
+            !protocol.pending_key_packages.contains_key("bob"),
+            "Key package should be consumed by auto-establish"
+        );
+        assert!(
+            protocol.has_mls_session("bob").unwrap(),
+            "Session should be auto-established after key package exchange"
+        );
     }
 
-    // Second session: new protocol, same storage; restore should repopulate pending_key_packages
+    // Second session: new protocol, same storage; MLS session should be
+    // restorable from the shared storage.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
-        assert!(
-            protocol.pending_key_packages.contains_key("bob"),
-            "Key package should be restored from storage"
-        );
+        // Session already exists from the first instance (shared storage)
         let welcome = protocol.establish_secure_session("bob").unwrap();
         assert!(
-            welcome.is_some(),
-            "Session should be created from restored key package"
+            welcome.is_none(),
+            "Session already exists, no new welcome needed"
         );
     }
 }
@@ -5765,7 +5773,8 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
     let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
-    // Persist key package (simulate receive then restart: in-memory cleared)
+    // First session: receive key package — auto-establish creates the session
+    // immediately, consuming the key package.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
@@ -5787,22 +5796,29 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             &content,
         );
         let _ = protocol.process_internal_message(&message);
-        assert!(protocol.pending_key_packages.contains_key("bob"));
+        // Auto-establish consumed the key package and created the session
+        assert!(
+            protocol.has_mls_session("bob").unwrap(),
+            "Session should be auto-established after key package receipt"
+        );
     }
 
-    // New protocol instance: restore runs and loads key package from storage
+    // New protocol instance: session should be restorable from shared storage
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
-        // establish_secure_session should try load from storage and create session (no terminal error)
+        // Session already exists from the first instance
         let result = protocol.establish_secure_session("bob");
         assert!(
             result.is_ok(),
-            "establish_secure_session should load from storage and create session, got {:?}",
+            "establish_secure_session should succeed, got {:?}",
             result
         );
         let welcome = result.unwrap();
-        assert!(welcome.is_some());
+        assert!(
+            welcome.is_none(),
+            "Session already exists, no new welcome needed"
+        );
     }
 }
 

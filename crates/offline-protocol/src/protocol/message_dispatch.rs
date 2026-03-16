@@ -44,6 +44,22 @@ impl OfflineProtocol {
             {
                 let _ = self.send_key_package_to(sender);
             }
+
+            // Auto-establish the session now that we have the peer's key
+            // package. This avoids waiting until the first send attempt.
+            if self.config.encryption.auto_key_exchange && self.mls_manager.is_some() {
+                match self.establish_secure_session(sender) {
+                    Ok(Some(_)) => {
+                        info!(sender = %sender, "Auto-established secure session after key package exchange");
+                    }
+                    Ok(None) => {
+                        // Session already exists — nothing to do.
+                    }
+                    Err(e) => {
+                        debug!(sender = %sender, error = %e, "Auto-establish deferred (session not ready yet)");
+                    }
+                }
+            }
         }
     }
 

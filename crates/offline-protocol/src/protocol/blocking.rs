@@ -72,6 +72,19 @@ impl OfflineProtocol {
         self.delete_blocked_user(user_id);
         self.cleanup_peer_session_state(user_id);
 
+        // If the peer is currently nearby and MLS is active, proactively send a
+        // fresh key package so both sides can re-establish the session without
+        // waiting for a new neighbor discovery cycle.
+        if self.known_peers.contains(user_id)
+            && self.config.encryption.enabled
+            && self.config.encryption.auto_key_exchange
+            && self.mls_manager.is_some()
+        {
+            if let Err(e) = self.send_key_package_to(user_id) {
+                debug!(user_id = %user_id, error = %e, "Failed to send key package after unblock (peer may reconnect later)");
+            }
+        }
+
         info!(user_id = %user_id, "User unblocked");
 
         if let Ok(state) = lock_shared_state(&self.shared_state) {

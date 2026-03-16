@@ -21,7 +21,7 @@ interface ChatsScreenProps {
 
 export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProps) {
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
-  const {chats, contacts, sendMessage, markChatRead, userId} = useProtocol();
+  const {chats, contacts, sendMessage, markChatRead, userId, unblockUser} = useProtocol();
   const listRef = useRef<FlatList>(null);
 
   // Handle navigation from People tab
@@ -40,6 +40,7 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
     const contact = contacts.get(selectedPeerId);
     const messages = chat?.messages || [];
     const contactName = contact?.name || formatUserId(selectedPeerId);
+    const isBlocked = contact?.isBlocked ?? false;
 
     const handleSend = (text: string, priority: 'medium' | 'critical') => {
       sendMessage(selectedPeerId, text, priority);
@@ -59,49 +60,70 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
             <Text style={styles.backText}>{'‹ Back'}</Text>
           </TouchableOpacity>
           <View style={styles.chatHeaderInfo}>
-            <Text style={styles.chatHeaderName} numberOfLines={1}>
+            <Text style={[styles.chatHeaderName, isBlocked && styles.blockedHeaderName]} numberOfLines={1}>
               {contactName}
             </Text>
-            {contact && (
+            {contact && !isBlocked && (
               <PresenceIndicator
                 isNearby={contact.isNearby}
                 lastSeen={contact.lastSeen}
               />
             )}
+            {isBlocked && (
+              <Text style={styles.blockedLabel}>Blocked</Text>
+            )}
           </View>
-          <Text style={styles.headerLock}>🔒</Text>
+          <Text style={styles.headerLock}>{isBlocked ? '🚫' : '🔒'}</Text>
         </View>
 
         {/* Messages */}
-        <FlatList
-          ref={listRef}
-          data={messages}
-          renderItem={({item}) => <MessageBubble message={item} />}
-          keyExtractor={item => item.id}
-          contentContainerStyle={styles.messageList}
-          onContentSizeChange={() => {
-            if (messages.length > 0) {
-              listRef.current?.scrollToEnd({animated: false});
+        <View style={{flex: 1, opacity: isBlocked ? 0.4 : 1}}>
+          <FlatList
+            ref={listRef}
+            data={messages}
+            renderItem={({item}) => <MessageBubble message={item} />}
+            keyExtractor={item => item.id}
+            contentContainerStyle={styles.messageList}
+            scrollEnabled={!isBlocked}
+            onContentSizeChange={() => {
+              if (messages.length > 0) {
+                listRef.current?.scrollToEnd({animated: false});
+              }
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyChat}>
+                <Text style={styles.emptyChatText}>
+                  {isBlocked
+                    ? `You have blocked ${contactName}`
+                    : `Send an encrypted message to ${contactName}`}
+                </Text>
+              </View>
             }
-          }}
-          ListEmptyComponent={
-            <View style={styles.emptyChat}>
-              <Text style={styles.emptyChatText}>
-                Send an encrypted message to {contactName}
-              </Text>
-            </View>
-          }
-        />
+          />
+        </View>
 
-        {/* Quick Messages */}
-        <QuickMessages onSend={handleSend} />
+        {/* Bottom area: Quick Messages or Blocked Banner */}
+        {isBlocked ? (
+          <View style={styles.blockedBanner}>
+            <Text style={styles.blockedBannerText}>
+              You blocked this user. Unblock to send messages.
+            </Text>
+            <TouchableOpacity
+              style={styles.unblockButton}
+              onPress={() => unblockUser(selectedPeerId)}>
+              <Text style={styles.unblockButtonText}>Unblock</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <QuickMessages onSend={handleSend} />
+        )}
       </View>
     );
   }
 
   // ─── Chat List ───────────────────────────────────────────
 
-  const chatList: (Chat & {contactName: string; isNearby: boolean; lastSeen: number})[] = [];
+  const chatList: (Chat & {contactName: string; isNearby: boolean; lastSeen: number; isBlocked: boolean})[] = [];
 
   // Include chats with messages
   for (const [peerId, chat] of chats) {
@@ -111,6 +133,7 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
       contactName: contact?.name || formatUserId(peerId),
       isNearby: contact?.isNearby || false,
       lastSeen: contact?.lastSeen || 0,
+      isBlocked: contact?.isBlocked || false,
     });
   }
 
@@ -124,6 +147,7 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
         contactName: contact.name,
         isNearby: contact.isNearby,
         lastSeen: contact.lastSeen,
+        isBlocked: false,
       });
     }
   }
@@ -160,32 +184,40 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
 
         return (
           <TouchableOpacity
-            style={styles.chatRow}
+            style={[styles.chatRow, item.isBlocked && styles.chatRowBlocked]}
             onPress={() => handleOpenChat(item.peerId)}>
             <Avatar userId={item.peerId} name={item.contactName} size={48} />
             <View style={styles.chatRowContent}>
               <View style={styles.chatRowTop}>
-                <Text style={styles.chatName} numberOfLines={1}>{item.contactName}</Text>
-                {lastMsg && (
+                <Text style={[styles.chatName, item.isBlocked && styles.chatNameBlocked]} numberOfLines={1}>
+                  {item.contactName}
+                </Text>
+                {item.isBlocked ? (
+                  <Text style={styles.chatBlockedBadge}>Blocked</Text>
+                ) : lastMsg ? (
                   <Text style={styles.chatTime}>
                     {formatRelativeTime(lastMsg.timestamp)}
                   </Text>
-                )}
+                ) : null}
               </View>
               <View style={styles.chatRowBottom}>
                 <View style={styles.chatPreviewRow}>
-                  <PresenceIndicator
-                    isNearby={item.isNearby}
-                    lastSeen={item.lastSeen}
-                    compact
-                  />
+                  {!item.isBlocked && (
+                    <PresenceIndicator
+                      isNearby={item.isNearby}
+                      lastSeen={item.lastSeen}
+                      compact
+                    />
+                  )}
                   <Text style={styles.chatPreview} numberOfLines={1}>
-                    {lastMsg
-                      ? `${lastMsg.isOutgoing ? 'You: ' : ''}${lastMsg.content}`
-                      : 'Tap to send a message'}
+                    {item.isBlocked
+                      ? 'Tap to view or unblock'
+                      : lastMsg
+                        ? `${lastMsg.isOutgoing ? 'You: ' : ''}${lastMsg.content}`
+                        : 'Tap to send a message'}
                   </Text>
                 </View>
-                {item.unreadCount > 0 && (
+                {!item.isBlocked && item.unreadCount > 0 && (
                   <View style={styles.unreadBadge}>
                     <Text style={styles.unreadText}>
                       {item.unreadCount > 9 ? '9+' : item.unreadCount}
@@ -239,6 +271,17 @@ const styles = StyleSheet.create({
   chatTime: {
     fontSize: 12,
     color: '#8E8E93',
+  },
+  chatRowBlocked: {
+    opacity: 0.6,
+  },
+  chatNameBlocked: {
+    color: '#8E8E93',
+  },
+  chatBlockedBadge: {
+    fontSize: 11,
+    color: '#FF3B30',
+    fontWeight: '600',
   },
   chatRowBottom: {
     flexDirection: 'row',
@@ -338,5 +381,38 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     textAlign: 'center',
     lineHeight: 20,
+  },
+  blockedHeaderName: {
+    color: '#8E8E93',
+  },
+  blockedLabel: {
+    fontSize: 12,
+    color: '#FF3B30',
+    fontWeight: '500',
+  },
+  blockedBanner: {
+    backgroundColor: '#FFF0F0',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#FFD5D5',
+    alignItems: 'center',
+    gap: 10,
+  },
+  blockedBannerText: {
+    fontSize: 14,
+    color: '#8E8E93',
+    textAlign: 'center',
+  },
+  unblockButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 24,
+    paddingVertical: 10,
+    borderRadius: 20,
+  },
+  unblockButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
