@@ -552,6 +552,12 @@ impl OfflineProtocol {
 
                 info!(peer_id = %peer_id, group_id = %group_id, "Established secure session");
 
+                // Send a fresh key package so the peer has one available for
+                // group invites (the original was consumed to create this session).
+                if self.config.encryption.enabled {
+                    let _ = self.send_key_package_to(peer_id);
+                }
+
                 if welcome_sent {
                     debug!(peer_id = %peer_id, group_id = %group_id, is_session, "Welcome synchronously sent");
                 }

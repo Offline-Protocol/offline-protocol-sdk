@@ -222,6 +222,13 @@ impl OfflineProtocol {
                             MlsOperationContext::Welcome,
                         );
 
+                        // Send a fresh key package so the peer has one available
+                        // for group invites (the original was consumed during
+                        // session establishment on their side).
+                        if self.config.encryption.enabled {
+                            let _ = self.send_key_package_to(&sender_owned);
+                        }
+
                         // Emit secure session established event
                         if let Ok(state) = lock_shared_state(&self.shared_state) {
                             state.emit_event(Event::secure_session_established(
