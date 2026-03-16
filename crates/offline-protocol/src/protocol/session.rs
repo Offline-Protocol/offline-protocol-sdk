@@ -1,6 +1,21 @@
 //! Session confirmation, welcome lifecycle, and pending session reconciliation.
 
-use super::*;
+use super::{
+    internal_prefixes, lock_shared_state, OfflineProtocol, SessionState, WelcomeDeliveryState,
+    WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS,
+    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS, WELCOME_RETRY_BATCH_SIZE,
+    WELCOME_RETRY_JITTER_RATIO,
+};
+use crate::mls_observability::MlsOperationContext;
+use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
+use chrono::{Duration as ChronoDuration, Utc};
+use offline_protocol_core::{Message, MessagePriority};
+use offline_protocol_mls::{MlsManager, WelcomeMessage};
+use offline_protocol_transport::TransportType;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, RwLock};
+use tracing::{debug, info, warn};
 
 impl OfflineProtocol {
     // ========================================================================

@@ -1,6 +1,15 @@
 //! Message receive loop and file chunk handling.
 
-use super::*;
+use super::{
+    lock_shared_state, InternalMessageResult, OfflineProtocol, PendingMediaMetadataEntry,
+    ProtocolState,
+};
+use crate::constants::ACK_FOR_KEY;
+use crate::events::Event;
+use crate::file_transfer::FileChunk;
+use offline_protocol_core::{ContentType, Message};
+use std::time::Instant;
+use tracing::{error, warn};
 
 impl OfflineProtocol {
     /// Receives the next available message.
