@@ -431,8 +431,10 @@ public class BleManager: NSObject, TransportManager {
         connections.reset()
         discoveredPeripherals.removeAll()
         peripheralRSSI.removeAll()
-        pendingFragments.removeAll()
-        pendingOutboundFragments.removeAll()
+        fragmentQueue.sync {
+            self.pendingFragments.removeAll()
+            self.pendingOutboundFragments.removeAll()
+        }
         lastSeenMeshAdvertisements.removeAll()
         unknownBootstrapAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
@@ -744,7 +746,8 @@ public class BleManager: NSObject, TransportManager {
                     self.attemptConnection(to: peripheral, reason: "monitor")
                 }
             }
-            for centralId in self.pendingFragments.keys {
+            let pendingKeys: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
+            for centralId in pendingKeys {
                 if self.connections.centralDeviceId(for: centralId) == nil && self.connections.peripheralDeviceId(for: centralId) == nil {
                     // Ensure we periodically try to resolve device IDs for pending fragments
                     if let last = self.connectionAttemptTimestamps[centralId], now.timeIntervalSince(last) < self.MIN_RECONNECT_INTERVAL {
@@ -2553,7 +2556,7 @@ extension BleManager: CBPeripheralDelegate {
                 //  Also check all pending fragments and process any that match this device ID
                 // This handles the case where Android wrote to iOS before iOS connected to Android
                 // The central UUID (from write) might be the same as peripheral UUID, but we check all
-                let pendingCentralIds = Array(self.pendingFragments.keys)
+                let pendingCentralIds: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
                 for centralId in pendingCentralIds {
                     // Check if this central ID now maps to the device ID we just resolved
                     let centralDeviceId = self.connections.centralDeviceId(for: centralId)

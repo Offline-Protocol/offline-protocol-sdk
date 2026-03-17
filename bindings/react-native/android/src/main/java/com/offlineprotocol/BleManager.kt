@@ -1587,9 +1587,10 @@ class BleManager(
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
         val pendingCount = synchronized(pendingFragmentsLock) { pendingFragments.values.sumOf { it.size } }
-        // ConcurrentHashMap.values is weakly consistent; ArrayDeque.size is an int field
-        // read (atomic on JVM). Safe for best-effort metrics even off main thread.
-        val outboundPending = pendingOutboundFragments.values.sumOf { it.size }
+        // Best-effort: ConcurrentHashMap iteration is weakly consistent; individual
+        // ArrayDeque.size reads are safe but the deque may be mutated on mainHandler.
+        // Catch any concurrent-modification edge case and fall back to 0.
+        val outboundPending = try { pendingOutboundFragments.values.sumOf { it.size } } catch (_: Exception) { 0 }
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
         val batteryPercent = currentBatteryPercent()
