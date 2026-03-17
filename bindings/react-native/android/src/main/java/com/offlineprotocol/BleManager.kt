@@ -175,7 +175,7 @@ class BleManager(
     // Pending fragments waiting for device ID
     private data class PendingFragment(val data: ByteArray, val timestamp: Long)
     private data class MeshObservation(val advertisement: MeshAdvertisementData, val rssi: Int?, val timestamp: Long)
-    private val pendingFragments = ConcurrentHashMap<String, MutableList<PendingFragment>>()
+    private val pendingFragments = HashMap<String, MutableList<PendingFragment>>()
     private val pendingFragmentsLock = Any()
     private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
@@ -1590,7 +1590,7 @@ class BleManager(
         // Best-effort: ConcurrentHashMap iteration is weakly consistent; individual
         // ArrayDeque.size reads are safe but the deque may be mutated on mainHandler.
         // Catch any concurrent-modification edge case and fall back to 0.
-        val outboundPending = try { pendingOutboundFragments.values.sumOf { it.size } } catch (_: Exception) { 0 }
+        val outboundPending = try { pendingOutboundFragments.values.sumOf { it.size } } catch (_: ConcurrentModificationException) { 0 }
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
         val batteryPercent = currentBatteryPercent()
