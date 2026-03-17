@@ -34,10 +34,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   security:
     name: Dependency Audit
@@ -69,7 +69,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-cov-
 
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
