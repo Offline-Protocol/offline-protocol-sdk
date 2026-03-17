@@ -1687,9 +1687,21 @@ class BleManager(
                 val recipientId = fragment.recipientId
                 val data = fragment.data.map { it.toByte() }.toByteArray()
 
-                val hasConnection = resolveTargetAddress(recipientId)?.let { connections.getGatt(it) } != null
+                val address = resolveTargetAddress(recipientId)
+                val hasConnection = address?.let { connections.getGatt(it) } != null
                 if (!hasConnection) {
                     enqueuePendingOutboundFragment(recipientId, data)
+                    // Proactively attempt reconnection if we know the address
+                    if (address != null) {
+                        bluetoothAdapter?.let { adapter ->
+                            try {
+                                val device = adapter.getRemoteDevice(address)
+                                connectToDevice(device)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error attempting reconnection for $recipientId during fragment drain", e)
+                            }
+                        }
+                    }
                     consecutiveSkips++
                     if (consecutiveSkips >= maxConsecutiveSkips) {
                         break

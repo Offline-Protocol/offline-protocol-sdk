@@ -1083,6 +1083,9 @@ public class BleManager: NSObject, TransportManager {
                     if let identifier = self.connections.peripheralIdentifier(for: recipientId) {
                         if let peripheral = self.discoveredPeripherals[identifier] {
                             self.attemptConnection(to: peripheral, reason: "fragment_drain_reconnect")
+                        } else {
+                            self.emitDiagnostic("debug", "Known peripheral not in discoveredPeripherals, skipping reconnect",
+                                               context: ["recipientId": recipientId, "identifier": identifier.uuidString])
                         }
                     }
                     consecutiveSkips += 1
