@@ -9,7 +9,8 @@
 
 use crate::constants::{
     BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES, BLE_MAX_FRAGMENT_COUNT,
-    BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC, FRAGMENT_VERSION,
+    BLE_MAX_FRAGMENT_SIZE, DEFAULT_MAX_MESSAGE_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC,
+    FRAGMENT_VERSION,
 };
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
@@ -405,6 +406,12 @@ impl BleTransport {
         let fragment = decode_fragment(fragment_data)?;
 
         if fragment.total_fragments == 1 {
+            if fragment.data.len() > DEFAULT_MAX_MESSAGE_SIZE {
+                return Err(crate::Error::MessageTooLarge(
+                    fragment.data.len(),
+                    DEFAULT_MAX_MESSAGE_SIZE,
+                ));
+            }
             return Ok(Some(self.deserialize_message(&fragment.data)?));
         }
 
@@ -486,6 +493,13 @@ impl BleTransport {
         }
 
         if let Some(payload) = completed_payload {
+            if payload.len() > DEFAULT_MAX_MESSAGE_SIZE {
+                return Err(crate::Error::MessageTooLarge(
+                    payload.len(),
+                    DEFAULT_MAX_MESSAGE_SIZE,
+                ));
+            }
+
             let start = assembly_started_at.unwrap_or_else(SystemTime::now);
             let latency = SystemTime::now()
                 .duration_since(start)

@@ -2637,7 +2637,11 @@ fn test_externally_deleted_confirmed_session_queues_message() {
         None::<MessagePriority>,
         None::<String>,
     );
-    assert!(result.is_ok(), "Message should be queued, not error: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Message should be queued, not error: {:?}",
+        result
+    );
     assert_eq!(transport_handle.sent_messages().len(), 0);
     assert_eq!(
         protocol

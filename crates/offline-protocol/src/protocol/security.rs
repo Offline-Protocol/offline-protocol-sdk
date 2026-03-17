@@ -425,6 +425,29 @@ impl OfflineProtocol {
         }
     }
 
+    /// Resets the TOFU-pinned public key for a specific peer.
+    ///
+    /// This allows the peer to re-establish trust with a new public key on
+    /// next contact. Use this when a peer has legitimately re-initialized
+    /// their MLS identity (e.g., reinstalled the app, new device).
+    ///
+    /// Emits a `TofuReset` event so the application can track trust changes.
+    pub fn reset_tofu_for_peer(&mut self, peer_id: &str) -> Result<()> {
+        if self.known_peer_public_keys.remove(peer_id).is_some() {
+            self.delete_tofu_entry(peer_id);
+            info!(peer_id = %peer_id, "TOFU key reset for peer");
+            self.emit_event(Event::TofuReset {
+                peer_id: peer_id.to_string(),
+            });
+            Ok(())
+        } else {
+            Err(Error::Other(format!(
+                "No TOFU entry found for peer '{}'",
+                peer_id
+            )))
+        }
+    }
+
     /// Restores TOFU key entries from persistent storage.
     ///
     /// Skips corrupted entries with a warning (best-effort restore).

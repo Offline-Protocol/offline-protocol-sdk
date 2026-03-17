@@ -4,7 +4,7 @@
 //! It supports both direct TCP connections and WebSocket for web compatibility.
 
 use crate::constants::{
-    INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
+    DEFAULT_MAX_MESSAGE_SIZE, INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
     INTERNET_HEARTBEAT_INTERVAL_SECS, INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
@@ -237,6 +237,12 @@ impl InternetTransport {
     ///
     /// This deserializes the message and queues it.
     pub fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
+        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
+            return Err(crate::Error::MessageTooLarge(
+                data.len(),
+                DEFAULT_MAX_MESSAGE_SIZE,
+            ));
+        }
         match self.deserialize_message(&data) {
             Ok(message) => {
                 let mut queue = self.receive_queue.lock().unwrap();
@@ -261,6 +267,12 @@ impl InternetTransport {
     ///   token, etc.). The protocol layer uses this value to verify that
     ///   `message.sender` matches the authenticated peer.
     pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
+            return Err(crate::Error::MessageTooLarge(
+                data.len(),
+                DEFAULT_MAX_MESSAGE_SIZE,
+            ));
+        }
         match self.deserialize_message(&data) {
             Ok(mut message) => {
                 message.set_transport_peer_id(peer_id)?;

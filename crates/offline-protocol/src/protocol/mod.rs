@@ -150,7 +150,7 @@ pub struct OfflineProtocol {
     /// Entries track a last-seen timestamp for LRU eviction when the store is full.
     ///
     /// Persisted via `MlsStorage` (when available) to survive restarts.
-    // TODO(security): support key rotation; see MAX_TOFU_PEERS doc.
+    // Manual TOFU reset is available via `reset_tofu_for_peer()`; see MAX_TOFU_PEERS doc.
     known_peer_public_keys: HashMap<String, TofuEntry>,
 
     /// Set of blocked user IDs. Messages from blocked users are silently

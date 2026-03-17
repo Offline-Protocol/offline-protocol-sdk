@@ -756,6 +756,12 @@ pub enum Event {
         /// User ID that was unblocked.
         user_id: String,
     },
+
+    /// A peer's TOFU-pinned public key was manually reset.
+    TofuReset {
+        /// ID of the peer whose trust was reset.
+        peer_id: String,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -1395,6 +1401,11 @@ impl Event {
         Self::UserUnblocked { user_id }
     }
 
+    /// Creates a TofuReset event.
+    pub fn tofu_reset(peer_id: String) -> Self {
+        Self::TofuReset { peer_id }
+    }
+
     /// Converts the event to JSON.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
@@ -1990,6 +2001,10 @@ impl fmt::Debug for Event {
             Self::UserUnblocked { user_id: _ } => f
                 .debug_struct("UserUnblocked")
                 .field("user_id", &"[REDACTED]")
+                .finish(),
+            Self::TofuReset { peer_id: _ } => f
+                .debug_struct("TofuReset")
+                .field("peer_id", &"[REDACTED]")
                 .finish(),
         }
     }

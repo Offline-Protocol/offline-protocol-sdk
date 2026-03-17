@@ -38,6 +38,10 @@ pub enum Error {
     #[error("Core error: {0}")]
     Core(#[from] offline_protocol_core::Error),
 
+    /// Message exceeds the configured maximum size.
+    #[error("Message too large: {0} bytes exceeds limit of {1} bytes")]
+    MessageTooLarge(usize, usize),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),
