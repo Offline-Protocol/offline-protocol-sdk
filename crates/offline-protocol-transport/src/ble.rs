@@ -1145,4 +1145,37 @@ mod tests {
         assert_eq!(transport.device_id(), "my-device");
         assert_eq!(transport.transport_type(), TransportType::BLE);
     }
+
+    #[test]
+    fn test_ble_reassembled_payload_rejects_oversized() {
+        let transport = BleTransport::new("test-device");
+        // Split an oversized payload across many fragments so each individual
+        // fragment's data_len fits in a u16 but the reassembled total exceeds
+        // DEFAULT_MAX_MESSAGE_SIZE.
+        let chunk_size: usize = 60_000; // well under u16::MAX
+        let num_fragments = (DEFAULT_MAX_MESSAGE_SIZE / chunk_size) + 2; // guarantees total > limit
+
+        for i in 0..num_fragments {
+            let frag = encode_fragment(
+                b"big",
+                i as u16,
+                num_fragments as u16,
+                &vec![0xAA; chunk_size],
+            )
+            .unwrap();
+
+            let result = transport.process_fragment(&frag);
+            if i < num_fragments - 1 {
+                // Incomplete — should be Ok(None)
+                assert!(result.unwrap().is_none());
+            } else {
+                // Final fragment completes assembly — must reject as too large
+                assert!(result.is_err());
+                assert!(matches!(
+                    result.unwrap_err(),
+                    crate::Error::MessageTooLarge(_, _)
+                ));
+            }
+        }
+    }
 }

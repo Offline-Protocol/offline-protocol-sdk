@@ -3430,11 +3430,10 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Reset the TOFU-pinned public key for a peer, allowing re-pinning on next contact.
-    pub fn reset_tofu_for_peer(&self, peer_id: String) -> Result<(), ProtocolError> {
+    /// Returns `true` if an entry was removed, `false` if no entry existed (idempotent).
+    pub fn reset_tofu_for_peer(&self, peer_id: String) -> Result<bool, ProtocolError> {
         let mut guard = self.lock_inner()?;
-        guard
-            .reset_tofu_for_peer(&peer_id)
-            .map_err(ProtocolError::from)
+        Ok(guard.reset_tofu_for_peer(&peer_id))
     }
 
     // ========================================================================

@@ -935,4 +935,28 @@ mod tests {
         assert!(transport.start().is_ok());
         assert_eq!(transport.status(), TransportStatus::Unavailable);
     }
+
+    #[test]
+    fn test_on_data_received_rejects_oversized_payload() {
+        let transport = InternetTransport::new("test-device");
+        let oversized = vec![0u8; DEFAULT_MAX_MESSAGE_SIZE + 1];
+        let result = transport.on_data_received(oversized);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::MessageTooLarge(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_on_data_received_from_rejects_oversized_payload() {
+        let transport = InternetTransport::new("test-device");
+        let oversized = vec![0u8; DEFAULT_MAX_MESSAGE_SIZE + 1];
+        let result = transport.on_data_received_from(oversized, "peer1".to_string());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::MessageTooLarge(_, _)
+        ));
+    }
 }
