@@ -112,6 +112,7 @@ public class BleManager: NSObject, TransportManager {
     private var pendingFragments: [UUID: [(Data, Date)]] = [:]
     private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0 // For incoming fragments waiting for device ID
     private let PENDING_OUTBOUND_FRAGMENT_TIMEOUT: TimeInterval = 30.0 // For outbound fragments that failed to send
+    private let MAX_PENDING_FRAGMENTS_PER_PEER = 100
     // Track outbound fragments with timestamps for timeout handling
     private var pendingOutboundFragments: [String: [(data: Data, timestamp: Date)]] = [:]
     private struct MeshObservation {
@@ -1084,7 +1085,8 @@ public class BleManager: NSObject, TransportManager {
                     if let identifier = self.connections.peripheralIdentifier(for: recipientId),
                        reconnectAttempted.insert(identifier).inserted {
                         // Dispatch to main: discoveredPeripherals is only safe to read from the main thread
-                        DispatchQueue.main.async {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self = self else { return }
                             if let peripheral = self.discoveredPeripherals[identifier] {
                                 self.attemptConnection(to: peripheral, reason: "fragment_drain_reconnect")
                             } else {
@@ -1227,6 +1229,11 @@ public class BleManager: NSObject, TransportManager {
     private func enqueuePendingOutboundFragment(recipientId: String, data: Data) {
         var queue = pendingOutboundFragments[recipientId] ?? []
         queue.append((data: data, timestamp: Date()))
+        // Drop oldest fragments if the queue exceeds the per-peer cap
+        if queue.count > MAX_PENDING_FRAGMENTS_PER_PEER {
+            let overflow = queue.count - MAX_PENDING_FRAGMENTS_PER_PEER
+            queue.removeFirst(overflow)
+        }
         pendingOutboundFragments[recipientId] = queue
     }
 

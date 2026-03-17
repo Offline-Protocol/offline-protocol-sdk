@@ -267,6 +267,7 @@ class BleManager(
     private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
     private val pendingOutboundFragments = mutableMapOf<String, MutableList<OutboundFragment>>()
     private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
+    private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
     private var pendingAdvertiseRestart: Runnable? = null
     private var lastAdvertiseRestartAt: Long = 0L
@@ -1835,6 +1836,10 @@ class BleManager(
     private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
         val queue = pendingOutboundFragments.getOrPut(recipientId) { mutableListOf() }
         queue.add(OutboundFragment(data, System.currentTimeMillis()))
+        // Drop oldest fragments if the queue exceeds the per-peer cap
+        while (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
+            queue.removeAt(0)
+        }
     }
 
     private fun resolveTargetAddress(recipientId: String): String? {
