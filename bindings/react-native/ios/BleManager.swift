@@ -763,80 +763,84 @@ public class BleManager: NSObject, TransportManager {
     private func attemptConnection(to peripheral: CBPeripheral, reason: String, rssi: Int16? = nil, desiredRole: MeshController.MeshRole? = nil) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
-            // Atomic check-and-connect: all checks must pass before proceeding
-            // This prevents race conditions when multiple discovery callbacks try to connect
-            
-            // 1. Already connected check
-            if self.connections.connectedPeripheral(for: peripheral.identifier) != nil {
-                return
-            }
-            
-            // 2. Recent attempt cooldown check
-            let now = Date()
-            if let lastAttempt = self.connectionAttemptTimestamps[peripheral.identifier], now.timeIntervalSince(lastAttempt) < self.MIN_RECONNECT_INTERVAL {
-                return
-            }
-            
-            // 3. RSSI threshold check
-            if let effectiveRSSI = rssi ?? self.peripheralRSSI[peripheral.identifier], effectiveRSSI < self.MINIMUM_RSSI_TO_CONNECT {
-                if self.logThrottler.shouldLog(key: "rssi_skip_\(peripheral.identifier.uuidString)", interval: 10) {
-                    self.emitDiagnostic("debug", "Skipping BLE connect due to weak RSSI", context: [
-                        "rssi": effectiveRSSI,
-                        "threshold": self.MINIMUM_RSSI_TO_CONNECT,
-                        "reason": reason
-                    ])
-                }
-                return
-            }
-            
-            // 4. Connection capacity check (atomic with the connect call)
-            if self.currentConnectionCount() >= self.MAX_CONNECTIONS_PER_DEVICE {
-                if self.logThrottler.shouldLog(key: "mesh_conn_cap_ios", interval: 10) {
-                    print("[BleManager] Connection cap reached, not connecting to \(peripheral.identifier)")
-                }
-                return
-            }
-            
-            // 5. Double-check peripheral state before connecting
-            guard peripheral.state != .connecting else {
-                if self.logThrottler.shouldLog(key: "already_connecting_\(peripheral.identifier.uuidString)", interval: 5) {
-                    print("[BleManager] Already connecting to \(peripheral.identifier)")
-                }
-                return
-            }
-            
-            // All checks passed - proceed with connection
-            self.connectionAttemptTimestamps[peripheral.identifier] = now
-            if let desiredRole = desiredRole {
-                self.connections.setPendingRole(desiredRole, for: peripheral.identifier)
-            } else if self.connections.pendingRole(for: peripheral.identifier) == nil {
-                self.connections.setPendingRole(.member, for: peripheral.identifier)
-            }
-            peripheral.delegate = self
-            
-            if peripheral.state == .connected {
-                self.connections.registerPeripheral(peripheral)
-                if let service = peripheral.services?.first(where: { $0.uuid == self.SERVICE_UUID }) {
-                    peripheral.discoverCharacteristics([self.MESSAGE_CHAR_UUID, self.DEVICE_ID_CHAR_UUID, self.IDENTITY_CHAR_UUID], for: service)
-                } else {
-                    peripheral.discoverServices([self.SERVICE_UUID])
-                }
-                return
-            }
-            
-            self.centralManager?.connect(peripheral, options: nil)
-            if self.logThrottler.shouldLog(key: "connect_attempt_\(peripheral.identifier.uuidString)", interval: 10) {
-                print("[BleManager] Attempting connection to \(peripheral.identifier) (reason: \(reason))")
-                var context: [String: Any] = [
-                    "identifier": peripheral.identifier.uuidString,
+            self.performConnectionAttempt(to: peripheral, reason: reason, rssi: rssi, desiredRole: desiredRole)
+        }
+    }
+
+    /// Core connection logic — must be called on the main thread.
+    private func performConnectionAttempt(to peripheral: CBPeripheral, reason: String, rssi: Int16? = nil, desiredRole: MeshController.MeshRole? = nil) {
+        // Atomic check-and-connect: all checks must pass before proceeding
+        // This prevents race conditions when multiple discovery callbacks try to connect
+
+        // 1. Already connected check
+        if connections.connectedPeripheral(for: peripheral.identifier) != nil {
+            return
+        }
+
+        // 2. Recent attempt cooldown check
+        let now = Date()
+        if let lastAttempt = connectionAttemptTimestamps[peripheral.identifier], now.timeIntervalSince(lastAttempt) < MIN_RECONNECT_INTERVAL {
+            return
+        }
+
+        // 3. RSSI threshold check
+        if let effectiveRSSI = rssi ?? peripheralRSSI[peripheral.identifier], effectiveRSSI < MINIMUM_RSSI_TO_CONNECT {
+            if logThrottler.shouldLog(key: "rssi_skip_\(peripheral.identifier.uuidString)", interval: 10) {
+                emitDiagnostic("debug", "Skipping BLE connect due to weak RSSI", context: [
+                    "rssi": effectiveRSSI,
+                    "threshold": MINIMUM_RSSI_TO_CONNECT,
                     "reason": reason
-                ]
-                if let rssi = rssi {
-                    context["rssi"] = rssi
-                }
-                self.emitDiagnostic("info", "Connecting to BLE peripheral", context: context)
+                ])
             }
+            return
+        }
+
+        // 4. Connection capacity check (atomic with the connect call)
+        if currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE {
+            if logThrottler.shouldLog(key: "mesh_conn_cap_ios", interval: 10) {
+                print("[BleManager] Connection cap reached, not connecting to \(peripheral.identifier)")
+            }
+            return
+        }
+
+        // 5. Double-check peripheral state before connecting
+        guard peripheral.state != .connecting else {
+            if logThrottler.shouldLog(key: "already_connecting_\(peripheral.identifier.uuidString)", interval: 5) {
+                print("[BleManager] Already connecting to \(peripheral.identifier)")
+            }
+            return
+        }
+
+        // All checks passed - proceed with connection
+        connectionAttemptTimestamps[peripheral.identifier] = now
+        if let desiredRole = desiredRole {
+            connections.setPendingRole(desiredRole, for: peripheral.identifier)
+        } else if connections.pendingRole(for: peripheral.identifier) == nil {
+            connections.setPendingRole(.member, for: peripheral.identifier)
+        }
+        peripheral.delegate = self
+
+        if peripheral.state == .connected {
+            connections.registerPeripheral(peripheral)
+            if let service = peripheral.services?.first(where: { $0.uuid == SERVICE_UUID }) {
+                peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
+            } else {
+                peripheral.discoverServices([SERVICE_UUID])
+            }
+            return
+        }
+
+        centralManager?.connect(peripheral, options: nil)
+        if logThrottler.shouldLog(key: "connect_attempt_\(peripheral.identifier.uuidString)", interval: 10) {
+            print("[BleManager] Attempting connection to \(peripheral.identifier) (reason: \(reason))")
+            var context: [String: Any] = [
+                "identifier": peripheral.identifier.uuidString,
+                "reason": reason
+            ]
+            if let rssi = rssi {
+                context["rssi"] = rssi
+            }
+            emitDiagnostic("info", "Connecting to BLE peripheral", context: context)
         }
     }
 
@@ -1084,11 +1088,11 @@ public class BleManager: NSObject, TransportManager {
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
                     if let identifier = self.connections.peripheralIdentifier(for: recipientId),
                        reconnectAttempted.insert(identifier).inserted {
-                        // Dispatch to main: discoveredPeripherals is only safe to read from the main thread
+                        // Dispatch to main: discoveredPeripherals and connection logic must run on the main thread
                         DispatchQueue.main.async { [weak self] in
                             guard let self = self else { return }
                             if let peripheral = self.discoveredPeripherals[identifier] {
-                                self.attemptConnection(to: peripheral, reason: "fragment_drain_reconnect")
+                                self.performConnectionAttempt(to: peripheral, reason: "fragment_drain_reconnect")
                             } else {
                                 self.emitDiagnostic("debug", "Known peripheral not in discoveredPeripherals, skipping reconnect",
                                                    context: ["recipientId": recipientId, "identifier": identifier.uuidString])
