@@ -45,6 +45,7 @@ private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
  */
 class BleManager(
     private val context: Context,
+    // Thread-safe: OfflineProtocol uses Mutex/RwLock internally (see offline-protocol-uniffi)
     private val protocol: OfflineProtocol,
     private val deviceId: String,
     private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
@@ -266,7 +267,7 @@ class BleManager(
     
     // Track outbound fragments with timestamps for timeout handling
     private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
-    private val pendingOutboundFragments = mutableMapOf<String, ArrayDeque<OutboundFragment>>()
+    private val pendingOutboundFragments = ConcurrentHashMap<String, ArrayDeque<OutboundFragment>>()
     private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
     private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()

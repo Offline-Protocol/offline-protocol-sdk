@@ -74,6 +74,7 @@ public class BleManager: NSObject, TransportManager {
     
     // MARK: - Properties
     
+    // Thread-safe: OfflineProtocol uses Mutex/RwLock internally (see offline-protocol-uniffi)
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
     private let meshController: MeshController
@@ -1310,8 +1311,13 @@ public class BleManager: NSObject, TransportManager {
         connections.removeCentralDeviceId(for: identifier)
         connections.removeConnectionRole(for: deviceId)
         peripheralRSSI.removeValue(forKey: identifier)
-        pendingFragments.removeValue(forKey: identifier)
-        pendingOutboundFragments.removeValue(forKey: deviceId)
+        // Dispatch to fragmentQueue since these dictionaries are owned by that queue
+        let evictedIdentifier = identifier
+        let evictedDeviceId = deviceId
+        fragmentQueue.async { [weak self] in
+            self?.pendingFragments.removeValue(forKey: evictedIdentifier)
+            self?.pendingOutboundFragments.removeValue(forKey: evictedDeviceId)
+        }
         connectionAttemptTimestamps.removeValue(forKey: identifier)
         connectionRetryCount.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
