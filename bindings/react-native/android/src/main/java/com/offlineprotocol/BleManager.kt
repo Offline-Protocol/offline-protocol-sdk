@@ -2119,6 +2119,18 @@ class BleManager(
                 protocol.bleFragmentReceived(deviceId, bytes)
                 bytesReceived += fragment.data.size
                 fragmentsReceived++
+
+                // Drain all completed messages (a multi-fragment message may complete here)
+                var msg = protocol.receiveMessage()
+                while (msg != null) {
+                    Log.i(TAG, "🎉 Complete message assembled from queued fragments for $deviceId")
+                    emitDiagnostic("info", "Complete message assembled from queued fragments", mapOf(
+                        "senderId" to deviceId,
+                        "messageContent" to msg
+                    ))
+                    learnRouteFromMessage(msg, deviceId, address)
+                    msg = protocol.receiveMessage()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error processing pending fragment", e)
             }

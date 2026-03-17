@@ -1451,9 +1451,8 @@ public class BleManager: NSObject, TransportManager {
             // If there are pending fragments for this sender, append to maintain ordering.
             // processPendingFragments() will handle them all in FIFO order.
             if let centralId = centralId,
-               let pending = self.pendingFragments[centralId],
-               !pending.isEmpty {
-                self.pendingFragments[centralId]!.append((data, Date()))
+               self.pendingFragments[centralId]?.isEmpty == false {
+                self.pendingFragments[centralId, default: []].append((data, Date()))
                 return
             }
 
