@@ -36,6 +36,43 @@ use std::time::SystemTime;
 // Include the UniFFI scaffolding
 uniffi::include_scaffolding!("offline_protocol");
 
+// ---------------------------------------------------------------------------
+// Poison-recovery utilities for non-Result methods.
+//
+// The UniFFI layer targets mobile platforms where a process crash is worse
+// than operating on potentially inconsistent state.  Result-returning methods
+// use the `lock_inner()` / `lock_ble()` / … helpers that propagate
+// `ProtocolError::LockPoisoned`.  Non-Result methods cannot propagate errors,
+// so they recover via `into_inner()` and log a warning for observability.
+// ---------------------------------------------------------------------------
+
+fn recover_mutex<'a, T>(lock: &'a Mutex<T>, name: &str) -> std::sync::MutexGuard<'a, T> {
+    lock.lock().unwrap_or_else(|e| {
+        tracing::warn!(lock = name, "Mutex poisoned — recovering with inner value");
+        e.into_inner()
+    })
+}
+
+fn recover_rwlock_read<'a, T>(
+    lock: &'a RwLock<T>,
+    name: &str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|e| {
+        tracing::warn!(lock = name, "RwLock poisoned — recovering with inner value");
+        e.into_inner()
+    })
+}
+
+fn recover_rwlock_write<'a, T>(
+    lock: &'a RwLock<T>,
+    name: &str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|e| {
+        tracing::warn!(lock = name, "RwLock poisoned — recovering with inner value");
+        e.into_inner()
+    })
+}
+
 /// Per-peer establishment state (for SessionNotReady and get_establishment_state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstablishmentState {
@@ -905,7 +942,6 @@ struct WifiDirectState {
     /// Whether WiFi Direct is connected to a peer group
     is_connected: bool,
     /// Peer device address (if connected)
-    #[allow(dead_code)]
     connected_peer: Option<String>,
 }
 
@@ -972,9 +1008,7 @@ impl OfflineProtocol {
                 // Clone callback Arc outside the lock to avoid holding the
                 // RwLock during callback invocation (prevents deadlock if the
                 // callback re-enters the protocol).
-                let callback_arc = event_callback_clone
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
+                let callback_arc = recover_rwlock_read(&event_callback_clone, "event_callback")
                     .as_ref()
                     .cloned();
                 if let Some(callback) = callback_arc {
@@ -982,7 +1016,7 @@ impl OfflineProtocol {
                 }
 
                 // Add to event queue for polling
-                let mut queue = event_queue_clone.lock().unwrap_or_else(|e| e.into_inner());
+                let mut queue = recover_mutex(&event_queue_clone, "event_queue");
                 queue.push_back(event_json);
 
                 // Limit queue size to prevent memory issues
@@ -1023,11 +1057,12 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // LOCK HELPERS (poison-safe wrappers)
+    // LOCK HELPERS (poison-safe wrappers for Result-returning methods)
     //
-    // Some helpers are only used in throwing methods (Result-returning).
-    // Non-throwing methods use unwrap_or_else directly. Keep all helpers
-    // available for future use.
+    // Result-returning methods use these helpers to propagate
+    // `ProtocolError::LockPoisoned`.  Non-Result methods use the
+    // module-level `recover_mutex` / `recover_rwlock_read` /
+    // `recover_rwlock_write` utilities instead.
     // ========================================================================
 
     /// Lock the core protocol mutex, converting poison errors.
@@ -1069,53 +1104,11 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::LockPoisoned(format!("visualizer: {}", e)))
     }
 
-    /// Lock the path selector mutex, converting poison errors.
-    #[allow(dead_code)]
-    fn lock_path_selector(&self) -> Result<std::sync::MutexGuard<'_, PathSelector>, ProtocolError> {
-        self.path_selector
-            .lock()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("path_selector: {}", e)))
-    }
-
-    /// Read-lock the protocol state, converting poison errors.
-    #[allow(dead_code)]
-    fn read_state(&self) -> Result<std::sync::RwLockReadGuard<'_, ProtocolState>, ProtocolError> {
-        self.state
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("state: {}", e)))
-    }
-
     /// Write-lock the protocol state, converting poison errors.
     fn write_state(&self) -> Result<std::sync::RwLockWriteGuard<'_, ProtocolState>, ProtocolError> {
         self.state
             .write()
             .map_err(|e| ProtocolError::LockPoisoned(format!("state: {}", e)))
-    }
-
-    /// Read-lock the battery level, converting poison errors.
-    #[allow(dead_code)]
-    fn read_battery(&self) -> Result<std::sync::RwLockReadGuard<'_, Option<u8>>, ProtocolError> {
-        self.battery_level
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("battery_level: {}", e)))
-    }
-
-    /// Write-lock the battery level, converting poison errors.
-    #[allow(dead_code)]
-    fn write_battery(&self) -> Result<std::sync::RwLockWriteGuard<'_, Option<u8>>, ProtocolError> {
-        self.battery_level
-            .write()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("battery_level: {}", e)))
-    }
-
-    /// Read-lock the relay priority, converting poison errors.
-    #[allow(dead_code)]
-    fn read_relay_priority(
-        &self,
-    ) -> Result<std::sync::RwLockReadGuard<'_, RelayPriority>, ProtocolError> {
-        self.relay_priority
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("relay_priority: {}", e)))
     }
 
     /// Write-lock the relay priority, converting poison errors.
@@ -1145,16 +1138,6 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::LockPoisoned(format!("forced_transport: {}", e)))
     }
 
-    /// Read-lock the DORS config, converting poison errors.
-    #[allow(dead_code)]
-    fn read_dors_config(
-        &self,
-    ) -> Result<std::sync::RwLockReadGuard<'_, Option<DorsConfig>>, ProtocolError> {
-        self.dors_config
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("dors_config: {}", e)))
-    }
-
     /// Write-lock the DORS config, converting poison errors.
     fn write_dors_config(
         &self,
@@ -1162,37 +1145,6 @@ impl OfflineProtocol {
         self.dors_config
             .write()
             .map_err(|e| ProtocolError::LockPoisoned(format!("dors_config: {}", e)))
-    }
-
-    /// Read-lock the event callback, converting poison errors.
-    #[allow(dead_code)]
-    fn read_event_callback(
-        &self,
-    ) -> Result<std::sync::RwLockReadGuard<'_, Option<Arc<dyn EventCallback>>>, ProtocolError> {
-        self.event_callback
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("event_callback: {}", e)))
-    }
-
-    /// Write-lock the event callback, converting poison errors.
-    #[allow(dead_code)]
-    fn write_event_callback(
-        &self,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, Option<Arc<dyn EventCallback>>>, ProtocolError>
-    {
-        self.event_callback
-            .write()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("event_callback: {}", e)))
-    }
-
-    /// Lock the event queue mutex, converting poison errors.
-    #[allow(dead_code)]
-    fn lock_event_queue(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, VecDeque<String>>, ProtocolError> {
-        self.event_queue
-            .lock()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("event_queue: {}", e)))
     }
 
     // ========================================================================
@@ -1245,7 +1197,7 @@ impl OfflineProtocol {
 
     /// Gets the current protocol state
     pub fn get_state(&self) -> ProtocolState {
-        *self.state.read().unwrap_or_else(|e| e.into_inner())
+        *recover_rwlock_read(&self.state, "state")
     }
 
     /// Process internal protocol operations
@@ -1265,10 +1217,7 @@ impl OfflineProtocol {
 
     /// Sets the event callback
     pub fn set_event_callback(&self, callback: Box<dyn EventCallback>) {
-        *self
-            .event_callback
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::from(callback));
+        *recover_rwlock_write(&self.event_callback, "event_callback") = Some(Arc::from(callback));
     }
 
     /// Internal: Emit an event through the callback
@@ -1276,17 +1225,14 @@ impl OfflineProtocol {
         // Convert event to JSON
         if let Ok(event_json) = event.to_json() {
             // Call the callback if set
-            if let Some(callback) = self
-                .event_callback
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
+            if let Some(callback) =
+                recover_rwlock_read(&self.event_callback, "event_callback").as_ref()
             {
                 callback.on_event(event_json.clone());
             }
 
             // Also queue it for polling
-            let mut queue = self.event_queue.lock().unwrap_or_else(|e| e.into_inner());
+            let mut queue = recover_mutex(&self.event_queue, "event_queue");
             queue.push_back(event_json);
 
             // Limit queue size to prevent memory issues
@@ -1299,7 +1245,7 @@ impl OfflineProtocol {
     /// Polls for the next event (returns JSON string or None)
     pub fn poll_event(&self) -> Option<String> {
         // Get from queue
-        let mut queue = self.event_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = recover_mutex(&self.event_queue, "event_queue");
         queue.pop_front()
     }
 
@@ -1323,12 +1269,12 @@ impl OfflineProtocol {
     /// should call `ble_get_next_fragment()` inside the callback.
     pub fn set_ble_transport_callback(&self, callback: Box<dyn BleTransportCallback>) {
         let callback: Arc<dyn BleTransportCallback> = Arc::from(callback);
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::BLE)
         {
-            let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let transport = recover_mutex(&transport_arc, "transport");
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 let cb = callback.clone();
                 ble_transport.set_on_fragments_available(Arc::new(move || {
@@ -1345,12 +1291,12 @@ impl OfflineProtocol {
         callback: Box<dyn WifiDirectTransportCallback>,
     ) {
         let callback: Arc<dyn WifiDirectTransportCallback> = Arc::from(callback);
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
         {
-            let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let transport = recover_mutex(&transport_arc, "transport");
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 let cb = callback.clone();
                 wifi_transport.set_on_messages_available(Arc::new(move || {
@@ -1404,9 +1350,10 @@ impl OfflineProtocol {
 
     /// Receives the next message (returns JSON string or None)
     pub fn receive_message(&self) -> Option<String> {
-        let mut protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut protocol = recover_mutex(&self.inner, "inner");
         protocol.receive_message().and_then(|msg| {
-            serde_json::to_string(&serde_json::json!({
+            let msg_id = msg.id.as_str().to_string();
+            match serde_json::to_string(&serde_json::json!({
                 "id": msg.id.as_str(),
                 "sender": msg.sender.as_str(),
                 "recipient": msg.recipient.as_str(),
@@ -1415,8 +1362,17 @@ impl OfflineProtocol {
                 "lamport_clock": msg.lamport_clock.value(),
                 "hop_count": msg.hop_count.value(),
                 "priority": format!("{:?}", msg.priority),
-            }))
-            .ok()
+            })) {
+                Ok(json) => Some(json),
+                Err(e) => {
+                    tracing::error!(
+                        message_id = %msg_id,
+                        error = %e,
+                        "Failed to serialize received message — message lost"
+                    );
+                    None
+                }
+            }
         })
     }
 
@@ -1697,12 +1653,12 @@ impl OfflineProtocol {
     /// BLE: Get next fragment to send
     pub fn ble_get_next_fragment(&self) -> Option<BleFragment> {
         //  Ensure BLE transport is available for fragment polling
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::BLE)
         {
-            let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let transport = recover_mutex(&transport_arc, "transport");
 
             // Safe downcast to BleTransport using Any trait
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
@@ -1724,7 +1680,7 @@ impl OfflineProtocol {
         }
 
         // Fallback to local queue for backwards compatibility
-        let mut ble_state = self.ble_state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ble_state = recover_mutex(&self.ble_state, "ble_state");
         if let Some((recipient, data)) = ble_state.fragments.pop_front() {
             return Some(BleFragment {
                 recipient_id: recipient,
@@ -1743,7 +1699,7 @@ impl OfflineProtocol {
 
     /// BLE: Get peer count
     pub fn ble_get_peer_count(&self) -> u32 {
-        let ble_state = self.ble_state.lock().unwrap_or_else(|e| e.into_inner());
+        let ble_state = recover_mutex(&self.ble_state, "ble_state");
         ble_state.peer_count
     }
 
@@ -1802,7 +1758,7 @@ impl OfflineProtocol {
             let mut protocol = self.lock_inner()?;
             if let Err(e) = protocol.process() {
                 // Log but don't fail - outbox flush is best-effort
-                eprintln!("Warning: Failed to flush outbox on reconnect: {}", e);
+                tracing::warn!(error = %e, "Failed to flush outbox on reconnect");
             }
         }
 
@@ -1877,21 +1833,18 @@ impl OfflineProtocol {
     /// to close the feedback loop.
     pub fn internet_get_next_message(&self) -> Option<InternetMessage> {
         {
-            let internet_state = self
-                .internet_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let internet_state = recover_mutex(&self.internet_state, "internet_state");
             if !internet_state.is_connected {
                 return None;
             }
         }
 
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let transport = recover_mutex(&transport_arc, "transport");
             if let Some(internet_transport) =
                 transport
                     .as_any()
@@ -1916,16 +1869,13 @@ impl OfflineProtocol {
         // Fallback to local queue.
         // Loop so that un-deserializable entries are skipped rather than
         // blocking the rest of the queue.
-        let mut internet_state = self
-            .internet_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut internet_state = recover_mutex(&self.internet_state, "internet_state");
         while let Some((recipient, data)) = internet_state.outgoing_messages.pop_front() {
             let parsed = if let Some(transport_arc) = protocol
                 .transport_manager()
                 .get_transport(CoreTransportType::Internet)
             {
-                let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let transport = recover_mutex(&transport_arc, "transport");
                 transport
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::internet::InternetTransport>()
@@ -1973,7 +1923,7 @@ impl OfflineProtocol {
     /// This feeds real delivery data into transport metrics so DORS can make
     /// accurate routing decisions.
     pub fn internet_confirm_sent(&self, message_id: String) {
-        let mut protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut protocol = recover_mutex(&self.inner, "inner");
         if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
             tracing::warn!(
                 message_id = %message_id,
@@ -1985,7 +1935,7 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let transport = recover_mutex(&transport_arc, "transport");
             if let Some(internet_transport) =
                 transport
                     .as_any()
@@ -2011,7 +1961,7 @@ impl OfflineProtocol {
     /// `reason` should carry platform-specific error context so reliability
     /// telemetry can classify root causes more accurately.
     pub fn internet_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
-        let mut protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut protocol = recover_mutex(&self.inner, "inner");
         if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
             tracing::warn!(
                 message_id = %message_id,
@@ -2023,7 +1973,7 @@ impl OfflineProtocol {
             .transport_manager()
             .get_transport(CoreTransportType::Internet)
         {
-            let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let transport = recover_mutex(&transport_arc, "transport");
             if let Some(internet_transport) =
                 transport
                     .as_any()
@@ -2131,22 +2081,19 @@ impl OfflineProtocol {
     pub fn wifi_direct_get_next_message(&self) -> Option<WifiDirectMessage> {
         // Check if connected
         {
-            let wifi_direct_state = self
-                .wifi_direct_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let wifi_direct_state = recover_mutex(&self.wifi_direct_state, "wifi_direct_state");
             if !wifi_direct_state.is_connected {
                 return None;
             }
         }
 
         // Try to get message from the WiFi Direct transport
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         if let Some(transport_arc) = protocol
             .transport_manager()
             .get_transport(CoreTransportType::WiFiDirect)
         {
-            let transport = transport_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let transport = recover_mutex(&transport_arc, "transport");
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 if let Ok(Some((recipient, data))) = wifi_transport.get_next_message() {
                     return Some(WifiDirectMessage {
@@ -2158,10 +2105,7 @@ impl OfflineProtocol {
         }
 
         // Fallback to local queue
-        let mut wifi_direct_state = self
-            .wifi_direct_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut wifi_direct_state = recover_mutex(&self.wifi_direct_state, "wifi_direct_state");
         if let Some((recipient, data)) = wifi_direct_state.outgoing_messages.pop_front() {
             return Some(WifiDirectMessage {
                 recipient_id: recipient,
@@ -2260,7 +2204,7 @@ impl OfflineProtocol {
 
     /// Gets list of active transports
     pub fn get_active_transports(&self) -> Vec<String> {
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         let transports = protocol.transport_manager().get_active_transports();
         transports.iter().map(|t| format!("{:?}", t)).collect()
     }
@@ -2282,7 +2226,7 @@ impl OfflineProtocol {
 
     /// Checks if should escalate to WiFi
     pub fn should_escalate_to_wifi(&self) -> bool {
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         protocol.transport_manager().should_escalate_to_wifi()
     }
 
@@ -2358,7 +2302,7 @@ impl OfflineProtocol {
 
     /// Gets file transfer progress.
     pub fn get_file_progress(&self, file_id: String) -> Option<FileProgress> {
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         let core_progress = protocol.file_transfer_manager().get_progress(&file_id)?;
 
         Some(FileProgress {
@@ -2435,7 +2379,7 @@ impl OfflineProtocol {
 
     /// Gets message statistics
     pub fn get_message_stats(&self) -> Vec<MessageStats> {
-        let visualizer = self.visualizer.lock().unwrap_or_else(|e| e.into_inner());
+        let visualizer = recover_mutex(&self.visualizer, "visualizer");
         let core_stats = visualizer.get_message_stats();
 
         core_stats
@@ -2457,19 +2401,19 @@ impl OfflineProtocol {
 
     /// Gets delivery success rate
     pub fn get_delivery_success_rate(&self) -> f32 {
-        let visualizer = self.visualizer.lock().unwrap_or_else(|e| e.into_inner());
+        let visualizer = recover_mutex(&self.visualizer, "visualizer");
         visualizer.delivery_success_rate()
     }
 
     /// Gets median latency
     pub fn get_median_latency(&self) -> u64 {
-        let visualizer = self.visualizer.lock().unwrap_or_else(|e| e.into_inner());
+        let visualizer = recover_mutex(&self.visualizer, "visualizer");
         visualizer.median_latency().unwrap_or(0)
     }
 
     /// Gets median hop count
     pub fn get_median_hops(&self) -> u8 {
-        let visualizer = self.visualizer.lock().unwrap_or_else(|e| e.into_inner());
+        let visualizer = recover_mutex(&self.visualizer, "visualizer");
         visualizer.median_hops().unwrap_or(0)
     }
 
@@ -2479,15 +2423,12 @@ impl OfflineProtocol {
 
     /// Sets the battery level for relay decisions
     pub fn set_battery_level(&self, level: u8) {
-        *self
-            .battery_level
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(level.min(100));
+        *recover_rwlock_write(&self.battery_level, "battery_level") = Some(level.min(100));
     }
 
     /// Gets the current battery level
     pub fn get_battery_level(&self) -> Option<u8> {
-        *self.battery_level.read().unwrap_or_else(|e| e.into_inner())
+        *recover_rwlock_read(&self.battery_level, "battery_level")
     }
 
     // ========================================================================
@@ -2502,17 +2443,14 @@ impl OfflineProtocol {
 
     /// Gets the current relay priority
     pub fn get_relay_priority(&self) -> RelayPriority {
-        *self
-            .relay_priority
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        *recover_rwlock_read(&self.relay_priority, "relay_priority")
     }
 
     /// Checks if this device is currently acting as a relay
     pub fn is_relay(&self) -> bool {
         // Check if we have enough connections and battery to be a relay
         let battery = self.get_battery_level();
-        let ble_state = self.ble_state.lock().unwrap_or_else(|e| e.into_inner());
+        let ble_state = recover_mutex(&self.ble_state, "ble_state");
         let peer_count = ble_state.peer_count;
         drop(ble_state);
 
@@ -2563,10 +2501,7 @@ impl OfflineProtocol {
 
     /// Releases the transport lock and lets DORS make decisions again
     pub fn release_transport_lock(&self) {
-        *self
-            .forced_transport
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+        *recover_rwlock_write(&self.forced_transport, "forced_transport") = None;
     }
 
     // ========================================================================
@@ -2611,12 +2546,7 @@ impl OfflineProtocol {
 
     /// Gets the current DORS configuration
     pub fn get_dors_config(&self) -> DorsConfig {
-        if let Some(config) = self
-            .dors_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
+        if let Some(config) = recover_rwlock_read(&self.dors_config, "dors_config").clone() {
             return config;
         }
 
@@ -2657,7 +2587,7 @@ impl OfflineProtocol {
         quality: f32,
         sequence_number: u32,
     ) {
-        let mut path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
         path_selector.routing_table_mut().learn_route(
             &destination,
             &next_hop,
@@ -2670,7 +2600,7 @@ impl OfflineProtocol {
     /// Gets the best (highest quality) route to a destination.
     /// Returns None if no route is known or all routes have expired.
     pub fn get_best_route(&self, destination: String) -> Option<RouteEntry> {
-        let path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let path_selector = recover_mutex(&self.path_selector, "path_selector");
         path_selector.get_route_to(&destination).map(|entry| {
             let elapsed = entry.last_seen.elapsed();
             let last_seen_ms = SystemTime::now()
@@ -2691,7 +2621,7 @@ impl OfflineProtocol {
     /// Gets all valid (non-expired) routes to a destination.
     /// Routes are returned in no particular order.
     pub fn get_all_routes(&self, destination: String) -> Vec<RouteEntry> {
-        let mut path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
         let now = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -2717,27 +2647,27 @@ impl OfflineProtocol {
 
     /// Checks if a route exists to the destination.
     pub fn has_route(&self, destination: String) -> bool {
-        let path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let path_selector = recover_mutex(&self.path_selector, "path_selector");
         path_selector.has_route_to(&destination)
     }
 
     /// Removes all routes through a neighbor.
     /// Call this when a neighbor disconnects to clean up stale routes.
     pub fn remove_neighbor_routes(&self, neighbor_id: String) {
-        let mut path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
         path_selector.remove_neighbor_routes(&neighbor_id);
     }
 
     /// Cleans up expired routes.
     /// Call this periodically (e.g., every 30 seconds) for maintenance.
     pub fn cleanup_expired_routes(&self) {
-        let mut path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
         path_selector.cleanup_routes();
     }
 
     /// Gets routing table statistics for monitoring.
     pub fn get_routing_stats(&self) -> RoutingStats {
-        let path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let path_selector = recover_mutex(&self.path_selector, "path_selector");
         let (destination_count, route_count) = path_selector.routing_stats();
 
         RoutingStats {
@@ -2756,7 +2686,7 @@ impl OfflineProtocol {
         };
 
         // Create a new PathSelector with the updated routing config
-        let mut path_selector = self.path_selector.lock().unwrap_or_else(|e| e.into_inner());
+        let mut path_selector = recover_mutex(&self.path_selector, "path_selector");
         let mut path_config = path_selector.config().clone();
         path_config.gradient_routing = core_config;
         *path_selector =
@@ -2769,7 +2699,7 @@ impl OfflineProtocol {
             default_timeout_ms: config.default_timeout_ms,
             max_pending_acks: config.max_pending_acks as usize,
         };
-        let mut protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut protocol = recover_mutex(&self.inner, "inner");
         protocol.update_ack_config(core_config);
     }
 
@@ -2782,7 +2712,7 @@ impl OfflineProtocol {
             backoff_multiplier: config.backoff_multiplier,
             outbox_max_lifetime_ms: config.outbox_max_lifetime_ms,
         };
-        let mut protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut protocol = recover_mutex(&self.inner, "inner");
         protocol.update_retry_config(core_config);
     }
 
@@ -2793,13 +2723,13 @@ impl OfflineProtocol {
             retention_time_secs: config.retention_time_secs,
             ..Default::default()
         };
-        let mut protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut protocol = recover_mutex(&self.inner, "inner");
         protocol.update_dedup_config(core_config);
     }
 
     /// Gets deduplicator statistics for monitoring.
     pub fn get_dedup_stats(&self) -> DedupStats {
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         let stats = protocol.deduplicator_stats();
         DedupStats {
             total_tracked: stats.total_tracked as u64,
@@ -2811,13 +2741,13 @@ impl OfflineProtocol {
 
     /// Gets the number of pending ACKs.
     pub fn get_pending_ack_count(&self) -> u64 {
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         protocol.pending_ack_count() as u64
     }
 
     /// Gets the retry queue size.
     pub fn get_retry_queue_size(&self) -> u64 {
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         protocol.retry_queue_size() as u64
     }
 
@@ -2838,10 +2768,7 @@ impl OfflineProtocol {
         // - CoreProtocol owns the only MlsManager instance for this runtime.
         // - UniFFI manual MLS APIs must route through that owner.
         // - Repeated calls are idempotent and never replace the existing manager.
-        let mut protocol = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut protocol = self.lock_inner()?;
         if protocol.is_mls_initialized() {
             return Ok(());
         }
@@ -2853,7 +2780,7 @@ impl OfflineProtocol {
 
     /// Check if MLS is initialized
     pub fn is_mls_initialized(&self) -> bool {
-        let protocol = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let protocol = recover_mutex(&self.inner, "inner");
         protocol.is_mls_initialized()
     }
 
@@ -2863,10 +2790,7 @@ impl OfflineProtocol {
     /// create or cache an independent manager because that would diverge
     /// key-package/session/group state from auto-encryption flows.
     fn get_mls_manager(&self) -> Result<Arc<RwLock<CoreMlsManager>>, ProtocolError> {
-        let protocol = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let protocol = self.lock_inner()?;
         protocol
             .mls_manager()
             .cloned()
@@ -2878,7 +2802,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .generate_key_package()
             .map(MlsKeyPackageBundle::from)
@@ -2890,7 +2814,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .get_or_create_key_package()
             .map(MlsKeyPackageBundle::from)
@@ -2906,7 +2830,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .import_key_package(&user_id, &key_package_data)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2935,7 +2859,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .mark_key_package_synced(&package_id)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -2970,10 +2894,7 @@ impl OfflineProtocol {
         &self,
         peer_id: String,
     ) -> Result<EstablishmentState, ProtocolError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let guard = self.lock_inner()?;
         guard
             .get_establishment_state(&peer_id)
             .map(Into::into)
@@ -2990,10 +2911,7 @@ impl OfflineProtocol {
         &self,
         peer_id: String,
     ) -> Result<Option<MlsWelcomeMessage>, ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
 
         guard
             .establish_secure_session(&peer_id)
@@ -3006,10 +2924,7 @@ impl OfflineProtocol {
         &self,
         other_user_id: String,
     ) -> Result<MlsWelcomeMessage, ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .manual_mls_create_session(&other_user_id)
             .map(MlsWelcomeMessage::from)
@@ -3022,10 +2937,7 @@ impl OfflineProtocol {
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
         let core_welcome: CoreWelcomeMessage = welcome.into();
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .manual_mls_join_session(&core_welcome)
             .map(MlsGroupInfo::from)
@@ -3041,7 +2953,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .encrypt_for_user(&other_user_id, &plaintext)
             .map(MlsEncryptedMessage::from)
@@ -3054,10 +2966,7 @@ impl OfflineProtocol {
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
         let core_encrypted: CoreEncryptedMessage = encrypted.into();
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .manual_mls_decrypt_from_user(&core_encrypted)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3078,10 +2987,7 @@ impl OfflineProtocol {
 
     /// Delete a 1:1 session
     pub fn mls_delete_session(&self, other_user_id: String) -> Result<(), ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .manual_mls_delete_session(&other_user_id)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3103,7 +3009,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .clear_pending_welcome(&other_user_id)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3114,7 +3020,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .create_group(&group_name)
             .map(MlsGroupInfo::from)
@@ -3133,7 +3039,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
             .map(|(welcome, commit)| MlsAddMemberResult {
@@ -3152,7 +3058,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .remove_group_member(&CoreGroupId::new(group_id), &member_id)
             .map(MlsEncryptedMessage::from)
@@ -3164,7 +3070,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .leave_group(&CoreGroupId::new(group_id))
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3179,7 +3085,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .encrypt_for_group(&CoreGroupId::new(group_id), &plaintext)
             .map(MlsEncryptedMessage::from)
@@ -3194,7 +3100,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .decrypt_from_group(&encrypted.into())
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3208,7 +3114,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .join_group(&welcome.into())
             .map(MlsGroupInfo::from)
@@ -3250,10 +3156,7 @@ impl OfflineProtocol {
         encrypted: MlsEncryptedMessage,
     ) -> Result<Option<Vec<u8>>, ProtocolError> {
         let core_encrypted: CoreEncryptedMessage = encrypted.into();
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .manual_mls_decrypt(&core_encrypted)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3265,10 +3168,7 @@ impl OfflineProtocol {
         welcome: MlsWelcomeMessage,
     ) -> Result<MlsGroupInfo, ProtocolError> {
         let core_welcome: CoreWelcomeMessage = welcome.into();
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .manual_mls_process_welcome(&core_welcome)
             .map(MlsGroupInfo::from)
@@ -3287,7 +3187,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .get_identity_public_key()
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3308,7 +3208,7 @@ impl OfflineProtocol {
         let manager = self.get_mls_manager()?;
         let guard = manager
             .read()
-            .map_err(|_| ProtocolError::LockPoisoned("mls_manager".to_string()))?;
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .sign_data(&data)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
@@ -3457,10 +3357,7 @@ impl OfflineProtocol {
 
     /// Create a new MLS group.
     pub fn create_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .create_group(&group_name)
             .map(MlsGroupInfo::from)
@@ -3481,10 +3378,7 @@ impl OfflineProtocol {
             MessagePriority::High => CorePriority::High,
             MessagePriority::Critical => CorePriority::Critical,
         });
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .send_group_message(&group_id, &content, core_priority, reply_to_msg.as_deref())
             .map(|ids| ids.into_iter().map(|id| id.as_str().to_string()).collect())
@@ -3497,10 +3391,7 @@ impl OfflineProtocol {
         group_id: String,
         invitee_user_id: String,
     ) -> Result<(), ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .invite_to_group(&group_id, &invitee_user_id)
             .map_err(|e| ProtocolError::Other(e.to_string()))
@@ -3512,10 +3403,7 @@ impl OfflineProtocol {
         group_id: String,
         member_id: String,
     ) -> Result<(), ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .remove_from_group(&group_id, &member_id)
             .map_err(|e| ProtocolError::Other(e.to_string()))
@@ -3523,10 +3411,7 @@ impl OfflineProtocol {
 
     /// Leave an MLS group.
     pub fn leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .leave_group(&group_id)
             .map_err(|e| ProtocolError::Other(e.to_string()))
@@ -3534,10 +3419,7 @@ impl OfflineProtocol {
 
     /// List all MLS groups (excluding 1:1 sessions).
     pub fn list_groups(&self) -> Result<Vec<String>, ProtocolError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let guard = self.lock_inner()?;
         guard
             .list_groups()
             .map_err(|e| ProtocolError::Other(e.to_string()))
@@ -3549,10 +3431,7 @@ impl OfflineProtocol {
 
     /// Reset the TOFU-pinned public key for a peer, allowing re-pinning on next contact.
     pub fn reset_tofu_for_peer(&self, peer_id: String) -> Result<(), ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard
             .reset_tofu_for_peer(&peer_id)
             .map_err(ProtocolError::from)
@@ -3564,37 +3443,25 @@ impl OfflineProtocol {
 
     /// Block a user (silently drops all their messages, no notification sent).
     pub fn block_user(&self, user_id: String) -> Result<(), ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard.block_user(&user_id).map_err(ProtocolError::from)
     }
 
     /// Unblock a previously blocked user.
     pub fn unblock_user(&self, user_id: String) -> Result<(), ProtocolError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let mut guard = self.lock_inner()?;
         guard.unblock_user(&user_id).map_err(ProtocolError::from)
     }
 
     /// Get list of currently blocked user IDs.
     pub fn get_blocked_users(&self) -> Result<Vec<String>, ProtocolError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let guard = self.lock_inner()?;
         Ok(guard.get_blocked_users())
     }
 
     /// Check if a user is currently blocked.
     pub fn is_user_blocked(&self, user_id: String) -> Result<bool, ProtocolError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|_| ProtocolError::LockPoisoned("inner".to_string()))?;
+        let guard = self.lock_inner()?;
         Ok(guard.is_user_blocked(&user_id))
     }
 }
