@@ -1079,6 +1079,12 @@ public class BleManager: NSObject, TransportManager {
                 
                 let hasPeripheral = self.findPeripheral(for: recipientId) != nil
                 if !hasPeripheral {
+                    self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
+                    if let identifier = self.connections.peripheralIdentifier(for: recipientId) {
+                        if let peripheral = self.discoveredPeripherals[identifier] {
+                            self.attemptConnection(to: peripheral, reason: "fragment_drain_reconnect")
+                        }
+                    }
                     consecutiveSkips += 1
                     if consecutiveSkips >= maxConsecutiveSkips {
                         break

@@ -1689,6 +1689,7 @@ class BleManager(
 
                 val hasConnection = resolveTargetAddress(recipientId)?.let { connections.getGatt(it) } != null
                 if (!hasConnection) {
+                    enqueuePendingOutboundFragment(recipientId, data)
                     consecutiveSkips++
                     if (consecutiveSkips >= maxConsecutiveSkips) {
                         break
