@@ -948,6 +948,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func requestPrekeyBundle(username: String) throws  -> String
     
+    func resetTofuForPeer(peerId: String) throws  -> Bool
+    
     func resume() throws 
     
     func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?) throws  -> String
@@ -1867,6 +1869,15 @@ open func requestPrekeyBundle(username: String)throws  -> String  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(username),$0
+    )
+})
+}
+    
+open func resetTofuForPeer(peerId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
     )
 })
 }
@@ -4772,6 +4783,8 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     
     case UserBlocked(message: String)
     
+    case LockPoisoned(message: String)
+    
     case Other(message: String)
     
 
@@ -4845,7 +4858,11 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 12: return .Other(
+        case 12: return .LockPoisoned(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 13: return .Other(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -4882,8 +4899,10 @@ public struct FfiConverterTypeProtocolError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(10))
         case .UserBlocked(_ /* message is ignored*/):
             writeInt(&buf, Int32(11))
-        case .Other(_ /* message is ignored*/):
+        case .LockPoisoned(_ /* message is ignored*/):
             writeInt(&buf, Int32(12))
+        case .Other(_ /* message is ignored*/):
+            writeInt(&buf, Int32(13))
 
         
         }
@@ -6612,6 +6631,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer() != 11300) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {

@@ -265,7 +265,11 @@ class BleManager(
         }
     }
     
-    // Track outbound fragments with timestamps for timeout handling
+    // Track outbound fragments with timestamps for timeout handling.
+    // Thread-safety contract: ArrayDeque values are NOT thread-safe. All mutations
+    // (enqueue/flush/drain) MUST run on mainHandler thread. ConcurrentHashMap is used
+    // only so that evictPeer() and refreshSelfMetrics() can safely remove/read keys
+    // from BLE callback threads without blocking the main-thread hot path.
     private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
     private val pendingOutboundFragments = ConcurrentHashMap<String, ArrayDeque<OutboundFragment>>()
     private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
@@ -494,16 +498,19 @@ class BleManager(
         }
     }
 
+    // Called via runOnMainSync from stop(), so this always executes on the main thread.
+    // removeCallbacks below guarantees no further polling/drain runnables will fire,
+    // making the subsequent .clear() calls safe against concurrent access.
     private fun stopUnsafe() {
         if (state != TransportState.RUNNING && state != TransportState.STARTING) {
             return
         }
-        
+
         updateState(TransportState.STOPPING)
-        
-        // Stop fragment polling
+
+        // Stop fragment polling — must happen before clearing queues
         mainHandler.removeCallbacks(fragmentPollingRunnable)
-        
+
         // Stop routing cleanup
         mainHandler.removeCallbacks(routingCleanupRunnable)
         
@@ -1580,6 +1587,8 @@ class BleManager(
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
         val pendingCount = synchronized(pendingFragmentsLock) { pendingFragments.values.sumOf { it.size } }
+        // ConcurrentHashMap.values is weakly consistent; ArrayDeque.size is an int field
+        // read (atomic on JVM). Safe for best-effort metrics even off main thread.
         val outboundPending = pendingOutboundFragments.values.sumOf { it.size }
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
