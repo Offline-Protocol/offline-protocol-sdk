@@ -1083,11 +1083,14 @@ public class BleManager: NSObject, TransportManager {
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
                     if let identifier = self.connections.peripheralIdentifier(for: recipientId),
                        reconnectAttempted.insert(identifier).inserted {
-                        if let peripheral = self.discoveredPeripherals[identifier] {
-                            self.attemptConnection(to: peripheral, reason: "fragment_drain_reconnect")
-                        } else {
-                            self.emitDiagnostic("debug", "Known peripheral not in discoveredPeripherals, skipping reconnect",
-                                               context: ["recipientId": recipientId, "identifier": identifier.uuidString])
+                        // Dispatch to main: discoveredPeripherals is only safe to read from the main thread
+                        DispatchQueue.main.async {
+                            if let peripheral = self.discoveredPeripherals[identifier] {
+                                self.attemptConnection(to: peripheral, reason: "fragment_drain_reconnect")
+                            } else {
+                                self.emitDiagnostic("debug", "Known peripheral not in discoveredPeripherals, skipping reconnect",
+                                                   context: ["recipientId": recipientId, "identifier": identifier.uuidString])
+                            }
                         }
                     }
                     consecutiveSkips += 1
