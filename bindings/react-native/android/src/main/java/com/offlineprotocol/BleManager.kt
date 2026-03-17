@@ -1587,10 +1587,10 @@ class BleManager(
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
         val pendingCount = synchronized(pendingFragmentsLock) { pendingFragments.values.sumOf { it.size } }
-        // Best-effort: ConcurrentHashMap iteration is weakly consistent; individual
-        // ArrayDeque.size reads are safe but the deque may be mutated on mainHandler.
-        // Catch any concurrent-modification edge case and fall back to 0.
-        val outboundPending = try { pendingOutboundFragments.values.sumOf { it.size } } catch (_: ConcurrentModificationException) { 0 }
+        // Best-effort: ConcurrentHashMap iteration is weakly consistent and
+        // ArrayDeque.size is a single int-field read (atomic on JVM), so this
+        // is always safe — the sum may be slightly stale but never crashes.
+        val outboundPending = pendingOutboundFragments.values.sumOf { it.size }
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
         val batteryPercent = currentBatteryPercent()
@@ -1992,6 +1992,9 @@ class BleManager(
                 // Queue fragment to process later when device ID is available
                 synchronized(pendingFragmentsLock) {
                     val pendingList = pendingFragments.getOrPut(address) { mutableListOf() }
+                    if (pendingList.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
+                        pendingList.removeFirst()
+                    }
                     pendingList.add(PendingFragment(data, System.currentTimeMillis()))
                 }
                 if (logThrottler.shouldLog("queue_pending_$address")) {
@@ -2048,6 +2051,9 @@ class BleManager(
             synchronized(pendingFragmentsLock) {
                 val list = pendingFragments[address]
                 if (list != null && list.isNotEmpty()) {
+                    if (list.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
+                        list.removeFirst()
+                    }
                     list.add(PendingFragment(data, System.currentTimeMillis()))
                     return
                 }

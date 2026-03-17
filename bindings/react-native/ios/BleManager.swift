@@ -1335,11 +1335,9 @@ public class BleManager: NSObject, TransportManager {
         peripheralRSSI.removeValue(forKey: identifier)
         // Remove fragment state on fragmentQueue, then refresh metrics in the same
         // dispatch so the counts reflect the removal (avoids stale reads).
-        let evictedIdentifier = identifier
-        let evictedDeviceId = deviceId
         fragmentQueue.sync { [weak self] in
-            self?.pendingFragments.removeValue(forKey: evictedIdentifier)
-            self?.pendingOutboundFragments.removeValue(forKey: evictedDeviceId)
+            self?.pendingFragments.removeValue(forKey: identifier)
+            self?.pendingOutboundFragments.removeValue(forKey: deviceId)
         }
         connectionAttemptTimestamps.removeValue(forKey: identifier)
         connectionRetryCount.removeValue(forKey: identifier)
@@ -1454,6 +1452,9 @@ public class BleManager: NSObject, TransportManager {
                 if self.pendingFragments[centralId] == nil {
                     self.pendingFragments[centralId] = []
                 }
+                if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
+                    self.pendingFragments[centralId]?.removeFirst()
+                }
                 self.pendingFragments[centralId]?.append((data, Date()))
                 
                 // Clean up old pending fragments
@@ -1481,6 +1482,9 @@ public class BleManager: NSObject, TransportManager {
             // processPendingFragments() will handle them all in FIFO order.
             if let centralId = centralId,
                self.pendingFragments[centralId]?.isEmpty == false {
+                if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
+                    self.pendingFragments[centralId]?.removeFirst()
+                }
                 self.pendingFragments[centralId, default: []].append((data, Date()))
                 return
             }
