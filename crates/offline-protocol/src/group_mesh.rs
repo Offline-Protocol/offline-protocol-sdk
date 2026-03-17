@@ -402,6 +402,7 @@ impl OfflineProtocol {
                 group_id,
                 self.config.user_id.clone(),
                 sender.to_string(),
+                payload.group_name.clone(),
             ));
         }
     }
@@ -561,6 +562,7 @@ impl OfflineProtocol {
                 payload.group_id.clone(),
                 (*member).clone(),
                 sender.to_string(),
+                None,
             ));
         }
         for member in &actual_removed {
@@ -969,6 +971,10 @@ impl OfflineProtocol {
             )));
         }
 
+        // Try loading key package from storage (e.g. after restart or rapid
+        // re-invite where a fresh package arrived between calls).
+        self.try_load_key_package_from_storage_into_memory(invitee_user_id);
+
         // Get the invitee's key package and check expiry
         let now_ms = Utc::now().timestamp_millis() as u64;
         let received_pkg = self
@@ -992,6 +998,23 @@ impl OfflineProtocol {
         let (welcome, commit) = mls_guard.add_group_member(&gid, &key_pkg)?;
         let group_name = welcome.group_name.clone();
         drop(mls_guard);
+
+        // MLS key packages are single-use (RFC 9420). Now that add_group_member
+        // consumed the package, remove it so subsequent group invites for the
+        // same peer don't reuse a stale package.
+        self.pending_key_packages.remove(invitee_user_id);
+        self.delete_peer_key_package_from_storage(invitee_user_id);
+
+        // Send our key package to the invitee. Their message dispatch handler
+        // will reciprocate with a fresh key package, replenishing our supply
+        // for future group invites or 1:1 session creation.
+        if let Err(e) = self.send_key_package_to(invitee_user_id, false) {
+            debug!(
+                invitee = %invitee_user_id,
+                error = %e,
+                "Key package send to invitee deferred (will retry on next discovery)"
+            );
+        }
 
         // Refresh member list after add
         let members = self.refresh_group_members(group_id)?;
@@ -1047,6 +1070,7 @@ impl OfflineProtocol {
             group_id.to_string(),
             invitee_user_id.to_string(),
             self_id,
+            None,
         ));
 
         // Sync membership update to relay

@@ -415,6 +415,22 @@ RCT_EXTERN_METHOD(mlsProcessWelcome:(NSString *)welcomeJson
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// User Blocking
+RCT_EXTERN_METHOD(blockUser:(NSString *)userId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(unblockUser:(NSString *)userId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(getBlockedUsers:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(isUserBlocked:(NSString *)userId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Service Discovery & Request/Response
 RCT_EXTERN_METHOD(registerService:(NSString *)serviceId
                   version:(NSString *)version
@@ -445,50 +461,33 @@ RCT_EXTERN_METHOD(respondToServiceRequest:(NSString *)requestId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-// Group Management (Relay Server API)
-RCT_EXTERN_METHOD(groupCreate:(NSString *)name
+// Mesh Group Management (Protocol-Level MLS Groups)
+RCT_EXTERN_METHOD(meshCreateGroup:(NSString *)groupName
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(groupSendMessage:(NSString *)groupId
+RCT_EXTERN_METHOD(meshInviteToGroup:(NSString *)groupId
+                  inviteeUserId:(NSString *)inviteeUserId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(meshSendGroupMessage:(NSString *)groupId
                   content:(NSString *)content
+                  priority:(NSString * _Nullable)priority
                   replyToMsg:(NSString * _Nullable)replyToMsg
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(groupAddMember:(NSString *)groupId
-                  username:(NSString *)username
+RCT_EXTERN_METHOD(meshRemoveFromGroup:(NSString *)groupId
+                  memberId:(NSString *)memberId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(groupRemoveMember:(NSString *)groupId
-                  username:(NSString *)username
+RCT_EXTERN_METHOD(meshLeaveGroup:(NSString *)groupId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(groupSetAdmin:(NSString *)groupId
-                  username:(NSString *)username
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(groupRemoveAdmin:(NSString *)groupId
-                  username:(NSString *)username
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(groupLeave:(NSString *)groupId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(groupDelete:(NSString *)groupId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(groupGetInfo:(NSString *)groupId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(groupGetUserGroups:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(meshListGroups:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 @end

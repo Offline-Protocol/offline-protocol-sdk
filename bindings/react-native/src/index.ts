@@ -2191,6 +2191,87 @@ export class OfflineProtocol {
     };
   }
 
+  // ============================================================================
+  // HIGH-LEVEL GROUP METHODS (MLS-encrypted, mesh transport)
+  // ============================================================================
+
+  /**
+   * Creates a new MLS group with full protocol integration.
+   * Emits GroupCreated event. Use inviteToGroup() to add members.
+   *
+   * @param groupName - Human-readable group name
+   * @returns Group info
+   */
+  async meshCreateGroup(groupName: string): Promise<MlsGroupInfo> {
+    const result = await OfflineProtocolNativeModule.meshCreateGroup(groupName);
+    return this.normalizeMlsGroupInfo(result);
+  }
+
+  /**
+   * Invites a user to an MLS group.
+   * Sends MLS Welcome to invitee and Commit to existing members.
+   * Emits GroupMemberAdded event on all participants.
+   *
+   * @param groupId - Group ID
+   * @param inviteeUserId - User ID to invite
+   */
+  async meshInviteToGroup(groupId: string, inviteeUserId: string): Promise<void> {
+    await OfflineProtocolNativeModule.meshInviteToGroup(groupId, inviteeUserId);
+  }
+
+  /**
+   * Sends an MLS-encrypted message to all group members via mesh transport.
+   * Handles encryption and fan-out to each member automatically.
+   *
+   * @param groupId - Group ID
+   * @param content - Message content
+   * @param priority - Optional priority ("low", "medium", "high", "critical")
+   * @param replyToMsg - Optional message ID to reply to
+   * @returns Array of per-member message IDs
+   */
+  async meshSendGroupMessage(
+    groupId: string,
+    content: string,
+    priority?: string | null,
+    replyToMsg?: string | null
+  ): Promise<string[]> {
+    return await OfflineProtocolNativeModule.meshSendGroupMessage(
+      groupId,
+      content,
+      priority || null,
+      replyToMsg || null
+    );
+  }
+
+  /**
+   * Removes a member from an MLS group.
+   * Sends removal notification to all members.
+   *
+   * @param groupId - Group ID
+   * @param memberId - Member to remove
+   */
+  async meshRemoveFromGroup(groupId: string, memberId: string): Promise<void> {
+    await OfflineProtocolNativeModule.meshRemoveFromGroup(groupId, memberId);
+  }
+
+  /**
+   * Leaves an MLS group with notification to other members.
+   *
+   * @param groupId - Group ID to leave
+   */
+  async meshLeaveGroup(groupId: string): Promise<void> {
+    await OfflineProtocolNativeModule.meshLeaveGroup(groupId);
+  }
+
+  /**
+   * Lists all MLS groups (excluding 1:1 sessions).
+   *
+   * @returns Array of group IDs
+   */
+  async meshListGroups(): Promise<string[]> {
+    return await OfflineProtocolNativeModule.meshListGroups();
+  }
+
   /**
    * ========================================================================
    * GROUP MANAGEMENT (RELAY SERVER API)
@@ -2311,6 +2392,45 @@ export class OfflineProtocol {
     }
 
     this.initialRuntimeConfigApplied = false;
+  }
+
+  // ─── User Blocking ──────────────────────────────────────────
+
+  /**
+   * Blocks a user. Messages from blocked users are silently dropped at the protocol level.
+   *
+   * @param userId - User ID to block
+   */
+  async blockUser(userId: string): Promise<void> {
+    await OfflineProtocolNativeModule.blockUser(userId);
+  }
+
+  /**
+   * Unblocks a previously blocked user.
+   *
+   * @param userId - User ID to unblock
+   */
+  async unblockUser(userId: string): Promise<void> {
+    await OfflineProtocolNativeModule.unblockUser(userId);
+  }
+
+  /**
+   * Returns the list of blocked user IDs.
+   *
+   * @returns Array of blocked user IDs
+   */
+  async getBlockedUsers(): Promise<string[]> {
+    return await OfflineProtocolNativeModule.getBlockedUsers();
+  }
+
+  /**
+   * Checks if a specific user is blocked.
+   *
+   * @param userId - User ID to check
+   * @returns true if the user is blocked
+   */
+  async isUserBlocked(userId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.isUserBlocked(userId);
   }
 }
 

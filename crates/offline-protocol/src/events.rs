@@ -524,6 +524,9 @@ pub enum Event {
         user_id: String,
         /// User ID of who performed the add.
         added_by: String,
+        /// Human-readable group name (present when the invitee first joins).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group_name: Option<String>,
     },
 
     /// A member was removed from a group (from relay).
@@ -1173,11 +1176,17 @@ impl Event {
     }
 
     /// Creates a GroupMemberAdded event.
-    pub fn group_member_added(group_id: String, user_id: String, added_by: String) -> Self {
+    pub fn group_member_added(
+        group_id: String,
+        user_id: String,
+        added_by: String,
+        group_name: Option<String>,
+    ) -> Self {
         Self::GroupMemberAdded {
             group_id,
             user_id,
             added_by,
+            group_name,
         }
     }
 
@@ -1817,11 +1826,13 @@ impl fmt::Debug for Event {
                 group_id,
                 user_id: _,
                 added_by: _,
+                group_name,
             } => f
                 .debug_struct("GroupMemberAdded")
                 .field("group_id", group_id)
                 .field("user_id", &"[REDACTED]")
                 .field("added_by", &"[REDACTED]")
+                .field("group_name", group_name)
                 .finish(),
             Self::GroupMemberRemoved {
                 group_id,

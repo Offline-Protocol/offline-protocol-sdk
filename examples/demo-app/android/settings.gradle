@@ -1,0 +1,10 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+rootProject.name = 'OfflineDemo'
+include ':app'
+includeBuild('../node_modules/@react-native/gradle-plugin')
+
+// Manually include the local MeshSdk
+include ':offline-protocol_mesh-sdk'
+project(':offline-protocol_mesh-sdk').projectDir = new File(rootProject.projectDir, '../../../bindings/react-native/android')

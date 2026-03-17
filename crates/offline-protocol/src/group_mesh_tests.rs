@@ -1795,7 +1795,7 @@ fn test_group_mls_invite_to_group_end_to_end() {
     // Verify GroupMemberAdded event was emitted
     let events = alice_events.lock().unwrap();
     let added_event = events.iter().find(|e| {
-        matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, added_by }
+        matches!(e, Event::GroupMemberAdded { group_id: gid, user_id, added_by, .. }
             if gid == &group_id && user_id == "bob" && added_by == "alice")
     });
     assert!(
@@ -4655,4 +4655,104 @@ fn test_leave_election_remove_failure_keeps_election_pending() {
         election.last_attempt_at.is_some(),
         "last_attempt_at should be set after failed attempt"
     );
+}
+
+// ========================================================================
+// Key package consumption edge cases
+// ========================================================================
+
+#[test]
+fn test_invite_to_group_consumes_key_package() {
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    alice.initialize_mls(storage_a).unwrap();
+    alice.start().unwrap();
+
+    let group_info = alice.create_group("Consume KP Test").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    // Generate Bob's key package and store it
+    let bob_mls = offline_protocol_mls::MlsManager::new("bob", storage_b).unwrap();
+    let bob_kp = bob_mls.generate_key_package().unwrap();
+
+    use crate::protocol::ReceivedKeyPackage;
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    alice.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_kp.key_package_data,
+            local_expires_at_ms: now_ms + 600_000,
+        },
+    );
+
+    // Invite succeeds
+    alice.invite_to_group(&group_id, "bob").unwrap();
+
+    // Key package must be consumed after invite
+    assert!(
+        !alice.pending_key_packages.contains_key("bob"),
+        "Key package should be removed after invite_to_group consumes it"
+    );
+}
+
+#[test]
+fn test_invite_same_peer_to_two_groups_needs_fresh_key_package() {
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    alice.initialize_mls(storage_a).unwrap();
+    alice.start().unwrap();
+
+    // Create two groups
+    let group1 = alice.create_group("Group One").unwrap();
+    let group1_id = group1.group_id.as_str().to_string();
+    let group2 = alice.create_group("Group Two").unwrap();
+    let group2_id = group2.group_id.as_str().to_string();
+
+    // Generate a single key package for Bob
+    let bob_mls = offline_protocol_mls::MlsManager::new("bob", storage_b).unwrap();
+    let bob_kp = bob_mls.generate_key_package().unwrap();
+
+    use crate::protocol::ReceivedKeyPackage;
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    alice.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_kp.key_package_data,
+            local_expires_at_ms: now_ms + 600_000,
+        },
+    );
+
+    // First invite succeeds and consumes the key package
+    alice.invite_to_group(&group1_id, "bob").unwrap();
+
+    // Second invite fails cleanly with "No key package" (not a stale MLS error)
+    let result = alice.invite_to_group(&group2_id, "bob");
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("No key package"),
+        "Expected clean 'No key package' error, got: {}",
+        err_msg
+    );
+
+    // After supplying a fresh key package, the second invite succeeds
+    let bob_kp2 = bob_mls.generate_key_package().unwrap();
+    alice.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_kp2.key_package_data,
+            local_expires_at_ms: now_ms + 600_000,
+        },
+    );
+    alice
+        .invite_to_group(&group2_id, "bob")
+        .expect("Second invite should succeed with fresh key package");
+
+    // Verify Bob is in both groups
+    let g1_members = alice.group_mesh.members.get(&group1_id).unwrap();
+    let g2_members = alice.group_mesh.members.get(&group2_id).unwrap();
+    assert!(g1_members.contains(&"bob".to_string()));
+    assert!(g2_members.contains(&"bob".to_string()));
 }

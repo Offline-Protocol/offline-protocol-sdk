@@ -167,7 +167,8 @@ impl OfflineProtocol {
     /// implemented, so services more than one hop away will generate responses
     /// that reach intermediate forwarders but not the original querier.
     pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
-        self.ensure_plaintext_control_send_allowed("discover_services")?;
+        // Service discovery messages are internal control messages (not user
+        // content), so they are exempt from require_encryption.
 
         let peers: Vec<String> = self.known_peers.iter().cloned().collect();
         let result = self
@@ -202,7 +203,8 @@ impl OfflineProtocol {
         method: &str,
         body: &str,
     ) -> Result<String> {
-        self.ensure_plaintext_control_send_allowed("send_service_request")?;
+        // Service requests are internal control messages (not user content),
+        // so they are exempt from require_encryption.
 
         let result = self
             .mesh_services
@@ -222,7 +224,8 @@ impl OfflineProtocol {
         status: &str,
         body: &str,
     ) -> Result<MessageId> {
-        self.ensure_plaintext_control_send_allowed("respond_to_service_request")?;
+        // Service responses are internal control messages (not user content),
+        // so they are exempt from require_encryption.
 
         let result = self
             .mesh_services

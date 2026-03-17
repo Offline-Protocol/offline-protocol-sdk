@@ -28,9 +28,9 @@ impl OfflineProtocol {
 
         // Drive confirmation maintenance from receive polling as an additional
         // liveness source when the app does not call process() on a timer.
+        // Uses the same throttle as process() to avoid redundant storage I/O.
         if protocol_running {
-            self.retry_pending_session_confirmations();
-            self.kick_pending_session_reconciliation("receive_message_poll");
+            self.run_throttled_reconciliation("receive_message_poll");
         }
 
         loop {

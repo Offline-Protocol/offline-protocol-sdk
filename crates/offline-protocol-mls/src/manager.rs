@@ -382,6 +382,22 @@ impl MlsManager {
             .encrypt_message(other_user_id, plaintext, &signature_keys)
     }
 
+    /// Encrypts a message for a 1:1 session that is known to exist.
+    ///
+    /// Unlike `encrypt_for_user`, this skips the `has_session()` storage check
+    /// and goes directly to `encrypt_message()`. The caller must guarantee the
+    /// session exists (e.g., via an in-memory cache). If the session was deleted
+    /// externally, `SessionNotFound` is returned.
+    pub fn encrypt_for_existing_session(
+        &self,
+        other_user_id: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptedMessage> {
+        let signature_keys = self.get_signer()?;
+        self.session_manager
+            .encrypt_message(other_user_id, plaintext, &signature_keys)
+    }
+
     /// Gets a pending Welcome message.
     pub fn get_pending_welcome(&self, other_user_id: &str) -> Result<Option<WelcomeMessage>> {
         let key_type = StorageKeyType::PendingWelcome.as_str();

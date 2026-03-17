@@ -754,6 +754,7 @@ fn test_process_internal_message_key_package() {
         key_package_data: vec![1, 2, 3, 4],
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
+        session_reset: false,
     };
     let content = format!(
         "{}{}",
@@ -1747,9 +1748,11 @@ fn test_require_encryption_blocks_plaintext_when_mls_uninitialized() {
 
 #[test]
 fn test_require_encryption_returns_typed_failures() {
+    // With store_pending disabled, require_encryption returns typed errors
     // NoKeyPackage
     let mut no_key_config = create_test_config();
     no_key_config.encryption.require_encryption = true;
+    no_key_config.encryption.store_pending = false;
     let mut no_key_protocol = OfflineProtocol::new(no_key_config).unwrap();
     let mut no_key_transport = MockTransport::new(TransportType::BLE);
     no_key_transport.start().unwrap();
@@ -1770,6 +1773,7 @@ fn test_require_encryption_returns_typed_failures() {
     // SessionPending
     let mut pending_config = create_test_config();
     pending_config.encryption.require_encryption = true;
+    pending_config.encryption.store_pending = false;
     let mut pending_protocol = OfflineProtocol::new(pending_config).unwrap();
     let mut pending_transport = MockTransport::new(TransportType::BLE);
     pending_transport.start().unwrap();
@@ -1822,7 +1826,7 @@ fn test_require_encryption_returns_typed_failures() {
 }
 
 #[test]
-fn test_require_encryption_failure_does_not_send_transport_payload() {
+fn test_require_encryption_queues_when_store_pending_enabled() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
     config.encryption.require_encryption = true;
@@ -1841,12 +1845,19 @@ fn test_require_encryption_failure_does_not_send_transport_payload() {
         .add_transport(TransportType::BLE, Box::new(mock_transport));
     protocol.start().unwrap();
 
-    let result = protocol.send_message("bob", "blocked", None::<MessagePriority>, None::<String>);
-    assert!(matches!(
-        result,
-        Err(Error::SessionNotReady(EstablishmentState::NoKeyPackage))
-    ));
+    // With store_pending=true, messages should be queued (not error) when
+    // session isn't ready, even with require_encryption=true.
+    let result = protocol.send_message("bob", "queued", None::<MessagePriority>, None::<String>);
+    assert!(result.is_ok());
+    // Message is queued, NOT sent via transport
     assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map_or(0, Vec::len),
+        1
+    );
 }
 
 #[test]
@@ -1876,7 +1887,7 @@ fn test_require_encryption_encrypt_failed_emits_send_error_without_transport_out
 }
 
 #[test]
-fn test_require_encryption_strict_mode_is_side_effect_free_on_session_pending() {
+fn test_require_encryption_queues_message_when_session_pending_with_key_package() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
     config.encryption.require_encryption = true;
@@ -1908,23 +1919,27 @@ fn test_require_encryption_strict_mode_is_side_effect_free_on_session_pending() 
 
     let result = protocol.send_message(
         "bob",
-        "strict-no-side-effects",
+        "pending-with-key-pkg",
         None::<MessagePriority>,
         None::<String>,
     );
 
-    // Strict path does not create session; we have key package but no session -> HaveKeyPackage
-    assert!(matches!(
-        result,
-        Err(Error::SessionNotReady(EstablishmentState::HaveKeyPackage))
-    ));
+    // With store_pending=true, the message should be queued for later
+    // delivery rather than returning an error.
+    assert!(result.is_ok());
     assert_eq!(transport_handle.sent_messages().len(), 0);
-    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
-    assert!(!protocol.welcome_lifecycles.contains_key("bob"));
+    assert!(protocol.pending_encrypted_messages.contains_key("bob"));
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map_or(0, Vec::len),
+        1
+    );
 }
 
 #[test]
-fn test_require_encryption_blocks_plaintext_for_send_message_via_transport() {
+fn test_require_encryption_queues_for_send_message_via_transport() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
     config.encryption.require_encryption = true;
@@ -1945,21 +1960,97 @@ fn test_require_encryption_blocks_plaintext_for_send_message_via_transport() {
 
     let result = protocol.send_message_via_transport(
         "bob",
-        "blocked-via-transport",
+        "queued-via-transport",
         None::<MessagePriority>,
         TransportType::BLE,
         None::<String>,
     );
 
-    assert!(matches!(
-        result,
-        Err(Error::SessionNotReady(EstablishmentState::NoKeyPackage))
-    ));
+    // With store_pending=true, message should be queued, not sent plaintext
+    assert!(result.is_ok());
     assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map_or(0, Vec::len),
+        1
+    );
 }
 
 #[test]
-fn test_require_encryption_blocks_plaintext_connection_control_messages() {
+fn test_require_encryption_pending_flush_encrypts_and_delivers() {
+    // End-to-end: message queued during session establishment with
+    // require_encryption + store_pending, then flushed after session
+    // confirmation — the flushed message must be encrypted.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    // Step 1: Send message before session exists — should be queued.
+    let result = protocol.send_message(
+        "bob",
+        "hello encrypted",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    assert!(result.is_ok());
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map_or(0, Vec::len),
+        1
+    );
+
+    // Step 2: Create MLS session (import key package + create session).
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.generate_key_package().unwrap();
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+
+    // Step 3: Confirm the session.
+    protocol.confirm_session_state("bob", "test_setup").unwrap();
+
+    // Step 4: Flush pending messages — they should now encrypt and send.
+    protocol.flush_pending_messages("bob").unwrap();
+
+    // Pending queue should be drained.
+    assert!(!protocol.pending_encrypted_messages.contains_key("bob"));
+
+    // The message should have been sent via transport (encrypted).
+    let sent = transport_handle.sent_messages();
+    assert_eq!(sent.len(), 1);
+    assert!(
+        sent[0].content.starts_with(internal_prefixes::ENCRYPTED),
+        "Flushed message must be encrypted, got: {}",
+        &sent[0].content[..sent[0].content.len().min(60)]
+    );
+}
+
+#[test]
+fn test_require_encryption_allows_connection_control_messages() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
     config.encryption.require_encryption = true;
@@ -1974,16 +2065,18 @@ fn test_require_encryption_blocks_plaintext_connection_control_messages() {
         .add_transport(TransportType::BLE, Box::new(mock_transport));
     protocol.start().unwrap();
 
+    // Connection control messages are internal protocol messages (not user
+    // content), so they must work even with require_encryption=true.
     let request_result = protocol.send_connection_request("bob", "alice", None);
-    assert!(matches!(request_result, Err(Error::EncryptFailed(_))));
+    assert!(request_result.is_ok());
 
     let accept_result = protocol.accept_connection_request("bob", "alice", None);
-    assert!(matches!(accept_result, Err(Error::EncryptFailed(_))));
+    assert!(accept_result.is_ok());
 
     let reject_result = protocol.reject_connection_request("bob");
-    assert!(matches!(reject_result, Err(Error::EncryptFailed(_))));
+    assert!(reject_result.is_ok());
 
-    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert_eq!(transport_handle.sent_messages().len(), 3);
 }
 
 #[test]
@@ -2407,7 +2500,10 @@ fn test_manual_delete_session_failure_keeps_protocol_state_unchanged() {
 }
 
 #[test]
-fn test_is_session_confirmed_clears_stale_confirmed_state_without_mls_session() {
+fn test_is_session_confirmed_trusts_cache_and_encrypt_evicts_stale() {
+    // is_session_confirmed() trusts the in-memory cache without storage I/O.
+    // Stale state (confirmed but no MLS session) is detected lazily when
+    // encrypt_confirmed_session() fails, which evicts the cache entry.
     let mut config = create_test_config_for_user("alice");
     config.encryption.enabled = true;
     config.encryption.store_pending = true;
@@ -2423,8 +2519,135 @@ fn test_is_session_confirmed_clears_stale_confirmed_state_without_mls_session() 
         SessionState::Confirmed
     );
 
+    // Fast path trusts the cache — returns true even without an MLS session
+    assert!(protocol.is_session_confirmed("bob").unwrap());
+    assert!(protocol.confirmed_sessions.contains("bob"));
+
+    // But encryption will fail because there's no actual MLS session,
+    // which evicts the cache entry and returns SessionNotReady (queueable).
+    let mls = protocol.mls_manager.as_ref().unwrap().clone();
+    let result = protocol.encrypt_confirmed_session(&mls, "bob", "test");
+    assert!(matches!(result, Err(Error::SessionNotReady(_))));
+    assert!(!protocol.confirmed_sessions.contains("bob"));
+
+    // After cache eviction, is_session_confirmed falls through to storage.
+    // The storage path detects no MLS session and cleans up stale state.
     assert!(!protocol.is_session_confirmed("bob").unwrap());
     assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
+}
+
+#[test]
+fn test_encrypt_confirmed_session_transient_error_preserves_cache() {
+    // Transient errors (crypto, storage I/O) should NOT evict the cache.
+    // Only SessionNotFound (session deleted externally) evicts.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    // Create a real MLS session
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.generate_key_package().unwrap();
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    assert!(protocol.confirmed_sessions.contains("bob"));
+
+    // Encrypt succeeds on the fast path
+    let mls = protocol.mls_manager.as_ref().unwrap().clone();
+    let result = protocol.encrypt_confirmed_session(&mls, "bob", "hello");
+    assert!(result.is_ok());
+    // Cache still intact after successful encrypt
+    assert!(protocol.confirmed_sessions.contains("bob"));
+
+    // Now delete the session from MLS to simulate external wipe
+    {
+        let manager = mls.read().unwrap();
+        manager.delete_session("bob").unwrap();
+    }
+
+    // Encrypt fails with SessionNotReady (queueable) — cache should be evicted
+    let result2 = protocol.encrypt_confirmed_session(&mls, "bob", "hello again");
+    assert!(matches!(result2, Err(Error::SessionNotReady(_))));
+    assert!(
+        !protocol.confirmed_sessions.contains("bob"),
+        "SessionNotFound must evict the cache"
+    );
+}
+
+#[test]
+fn test_externally_deleted_confirmed_session_queues_message() {
+    // When a confirmed session is externally deleted (e.g., storage corruption),
+    // send_message should queue the message (via SessionNotReady) rather than
+    // dropping it with a terminal EncryptFailed error.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    // Create a real MLS session and confirm it
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.generate_key_package().unwrap();
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    assert!(protocol.confirmed_sessions.contains("bob"));
+
+    // Externally delete the MLS session (simulating storage corruption)
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.delete_session("bob").unwrap();
+    }
+
+    // Send a message — should be queued (not dropped), because the
+    // SessionNotReady error from encrypt_confirmed_session is queueable.
+    let result = protocol.send_message(
+        "bob",
+        "should be queued",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    assert!(result.is_ok(), "Message should be queued, not error: {:?}", result);
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map_or(0, Vec::len),
+        1,
+        "Message should be in the pending queue"
+    );
+    // Cache should be evicted so future sends go through the full path
     assert!(!protocol.confirmed_sessions.contains("bob"));
 }
 
@@ -5335,6 +5558,59 @@ fn test_lamport_clock_restore_with_corrupted_data() {
 }
 
 #[test]
+fn test_lamport_clock_debounce_threshold() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+    protocol.start().unwrap();
+
+    // Send (LAMPORT_PERSIST_INTERVAL - 1) messages — storage should NOT be written yet.
+    let below_threshold = (LAMPORT_PERSIST_INTERVAL - 1) as usize;
+    for i in 0..below_threshold {
+        protocol
+            .send_message(
+                "bob",
+                format!("msg{}", i),
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+    }
+    assert_eq!(protocol.lamport_clock.value(), below_threshold as u64);
+
+    // Storage should still have the initial value (0) — debounce hasn't fired.
+    let raw = storage
+        .load(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
+        .unwrap();
+    assert!(
+        raw.is_none() || raw.as_deref() == Some(&0u64.to_le_bytes()[..]),
+        "Lamport clock should not be persisted below the debounce threshold"
+    );
+
+    // One more send crosses the threshold — storage should now be written.
+    protocol
+        .send_message("bob", "threshold", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert_eq!(protocol.lamport_clock.value(), LAMPORT_PERSIST_INTERVAL);
+
+    let raw = storage
+        .load(storage_keys::LAMPORT_CLOCK, storage_keys::LAMPORT_CLOCK_ID)
+        .unwrap()
+        .expect("Lamport clock should be persisted at the threshold");
+    let persisted = u64::from_le_bytes(raw.try_into().unwrap());
+    assert_eq!(persisted, LAMPORT_PERSIST_INTERVAL);
+}
+
+#[test]
 fn test_lamport_clock_restore_never_goes_backward() {
     let storage = Arc::new(InMemoryStorage::new());
 
@@ -5375,6 +5651,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         key_package_data: vec![5, 6, 7, 8],
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
+        session_reset: false,
     };
     let content = format!(
         "{}{}",
@@ -5598,6 +5875,7 @@ fn test_key_package_remaining_lifetime_ms() {
         key_package_data: vec![1, 2, 3],
         remaining_lifetime_ms: 0,
         timestamp_ms: 12345,
+        session_reset: false,
     };
     let content = format!(
         "{}{}",
@@ -5665,7 +5943,9 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
     let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
-    // First session: receive key package (persisted via process_internal_message)
+    // First session: receive key package — auto_key_exchange causes
+    // handle_key_package_message to auto-establish the session, consuming
+    // the pending key package.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
@@ -5674,6 +5954,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             key_package_data: bob_key_package.key_package_data.clone(),
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
+            session_reset: false,
         };
         let content = format!(
             "{}{}",
@@ -5687,21 +5968,27 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             &content,
         );
         let _ = protocol.process_internal_message(&message);
-        assert!(protocol.pending_key_packages.contains_key("bob"));
+        // Session is auto-established, key package consumed
+        assert!(
+            !protocol.pending_key_packages.contains_key("bob"),
+            "Key package should be consumed by auto-establish"
+        );
+        assert!(
+            protocol.has_mls_session("bob").unwrap(),
+            "Session should be auto-established after key package exchange"
+        );
     }
 
-    // Second session: new protocol, same storage; restore should repopulate pending_key_packages
+    // Second session: new protocol, same storage; MLS session should be
+    // restorable from the shared storage.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
-        assert!(
-            protocol.pending_key_packages.contains_key("bob"),
-            "Key package should be restored from storage"
-        );
+        // Session already exists from the first instance (shared storage)
         let welcome = protocol.establish_secure_session("bob").unwrap();
         assert!(
-            welcome.is_some(),
-            "Session should be created from restored key package"
+            welcome.is_none(),
+            "Session already exists, no new welcome needed"
         );
     }
 }
@@ -5765,7 +6052,8 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
     let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
     let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
 
-    // Persist key package (simulate receive then restart: in-memory cleared)
+    // First session: receive key package — auto-establish creates the session
+    // immediately, consuming the key package.
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
@@ -5774,6 +6062,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             key_package_data: bob_key_package.key_package_data.clone(),
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
+            session_reset: false,
         };
         let content = format!(
             "{}{}",
@@ -5787,22 +6076,29 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             &content,
         );
         let _ = protocol.process_internal_message(&message);
-        assert!(protocol.pending_key_packages.contains_key("bob"));
+        // Auto-establish consumed the key package and created the session
+        assert!(
+            protocol.has_mls_session("bob").unwrap(),
+            "Session should be auto-established after key package receipt"
+        );
     }
 
-    // New protocol instance: restore runs and loads key package from storage
+    // New protocol instance: session should be restorable from shared storage
     {
         let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
         protocol.initialize_mls(storage.clone()).unwrap();
-        // establish_secure_session should try load from storage and create session (no terminal error)
+        // Session already exists from the first instance
         let result = protocol.establish_secure_session("bob");
         assert!(
             result.is_ok(),
-            "establish_secure_session should load from storage and create session, got {:?}",
+            "establish_secure_session should succeed, got {:?}",
             result
         );
         let welcome = result.unwrap();
-        assert!(welcome.is_some());
+        assert!(
+            welcome.is_none(),
+            "Session already exists, no new welcome needed"
+        );
     }
 }
 
@@ -6156,7 +6452,7 @@ fn test_discover_services_no_peers() {
 }
 
 #[test]
-fn test_require_encryption_blocks_service_discovery_control_messages() {
+fn test_require_encryption_allows_service_control_messages() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
     config.encryption.require_encryption = true;
@@ -6165,23 +6461,25 @@ fn test_require_encryption_blocks_service_discovery_control_messages() {
 
     let mut mock_transport = MockTransport::new(TransportType::BLE);
     mock_transport.start().unwrap();
-    let transport_handle = mock_transport.clone();
     protocol
         .transport_manager_mut()
         .add_transport(TransportType::BLE, Box::new(mock_transport));
     protocol.start().unwrap();
 
+    // Service messages are internal protocol messages (not user content),
+    // so they must work even with require_encryption=true.
+    // discover_services with no known peers returns Ok with empty broadcast.
     let discover_result = protocol.discover_services(None);
-    assert!(matches!(discover_result, Err(Error::EncryptFailed(_))));
+    assert!(discover_result.is_ok());
 
+    // Add a known peer so service request has a target
+    protocol.on_neighbor_discovered("bob");
     let request_result = protocol.send_service_request("bob", "echo.v1", "ping", "{}");
-    assert!(matches!(request_result, Err(Error::EncryptFailed(_))));
+    assert!(request_result.is_ok());
 
     let respond_result =
         protocol.respond_to_service_request("req-1", "alice", "echo.v1", "ok", "pong");
-    assert!(matches!(respond_result, Err(Error::EncryptFailed(_))));
-
-    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert!(respond_result.is_ok());
 }
 
 #[test]

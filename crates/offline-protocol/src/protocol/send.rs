@@ -15,8 +15,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
     AppId, ContentType, MediaMetadata, Message, MessageId, MessagePriority, UserId, TTL,
 };
+use offline_protocol_mls::MlsManager;
 use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -347,7 +349,13 @@ impl OfflineProtocol {
             Error::MlsNotInitialized
         })?;
 
-        // Check for existing session
+        // Fast path: if the session is already confirmed (in-memory cache hit),
+        // skip the has_session() storage call — we know the session exists.
+        if self.confirmed_sessions.contains(recipient) {
+            return self.encrypt_confirmed_session(&mls, recipient, content);
+        }
+
+        // Check for existing session (requires storage I/O via load_group)
         let has_session = {
             let manager = mls
                 .read()
@@ -458,6 +466,58 @@ impl OfflineProtocol {
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
+    /// Encrypts content for a recipient whose session is known to be confirmed
+    /// (in-memory cache hit). Uses `encrypt_for_existing_session` to skip both
+    /// the external `has_session()` and the internal one inside `encrypt_for_user`,
+    /// reducing storage I/O from 2 round-trips to 1 (`load_group` for encrypt).
+    ///
+    /// Only evicts the cache on `SessionNotFound` (session deleted externally).
+    /// Transient errors (crypto, storage I/O) propagate without cache eviction
+    /// so the fast path is preserved for the next attempt.
+    pub(super) fn encrypt_confirmed_session(
+        &mut self,
+        mls: &Arc<RwLock<MlsManager>>,
+        recipient: &str,
+        content: &str,
+    ) -> Result<String> {
+        let encrypt_result = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.encrypt_for_existing_session(recipient, content.as_bytes())
+        };
+
+        let encrypted = match encrypt_result {
+            Ok(enc) => enc,
+            Err(offline_protocol_mls::MlsError::SessionNotFound(_)) => {
+                // Session was deleted externally — evict stale cache entry and
+                // return SessionNotReady so the send pipeline can queue the
+                // message (when store_pending is enabled) rather than dropping it.
+                warn!(
+                    recipient = %recipient,
+                    "Confirmed session missing from MLS storage, evicting cache"
+                );
+                self.confirmed_sessions.remove(recipient);
+                let state = self.establishment_state(recipient)
+                    .unwrap_or(crate::EstablishmentState::NoKeyPackage);
+                return Err(Error::SessionNotReady(state));
+            }
+            Err(e) => {
+                // Transient error (crypto, storage I/O, etc.) — do NOT evict
+                // cache, the session likely still exists.
+                return Err(Error::EncryptFailed(format!(
+                    "encryption operation failed: {}",
+                    e
+                )));
+            }
+        };
+
+        let serialized =
+            serde_json::to_string(&encrypted).map_err(|e| Error::Serialization(e.to_string()))?;
+        self.emit_mls_encryption_used(recipient);
+        Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
+    }
+
     pub(super) fn encrypt_content_for_recipient_strict(
         &mut self,
         recipient: &str,
@@ -472,6 +532,11 @@ impl OfflineProtocol {
             );
             Error::MlsNotInitialized
         })?;
+
+        // Fast path: if session is confirmed (in-memory cache), skip has_session() I/O
+        if self.confirmed_sessions.contains(recipient) {
+            return self.encrypt_confirmed_session(&mls, recipient, content);
+        }
 
         let has_session = {
             let manager = mls
@@ -535,17 +600,29 @@ impl OfflineProtocol {
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
             if self.config.encryption.require_encryption {
-                return self
-                    .encrypt_content_for_recipient_strict(recipient, content)
-                    .map(OutboundSendPreparation::Ready);
+                match self.encrypt_content_for_recipient_strict(recipient, content) {
+                    Ok(encrypted) => return Ok(OutboundSendPreparation::Ready(encrypted)),
+                    Err(Error::SessionNotReady(_)) if self.config.encryption.store_pending => {
+                        // Session not ready but store_pending is enabled — queue
+                        // the message so it gets encrypted and sent once the
+                        // session is confirmed, rather than dropping it.
+                        let queued_id = self.queue_message_for_session_establishment(
+                            recipient,
+                            content,
+                            priority,
+                            reply_to_msg_id,
+                            reconciliation_reason,
+                        )?;
+                        return Ok(OutboundSendPreparation::Queued(queued_id));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
 
             match self.encrypt_content_for_recipient(recipient, content, priority) {
                 Ok(encrypted) => Ok(OutboundSendPreparation::Ready(encrypted)),
                 Err(Error::SessionNotReady(state)) => {
-                    if self.config.encryption.require_encryption
-                        || !self.config.encryption.store_pending
-                    {
+                    if !self.config.encryption.store_pending {
                         return Err(Error::SessionNotReady(state));
                     }
 
@@ -567,16 +644,6 @@ impl OfflineProtocol {
         } else {
             Ok(OutboundSendPreparation::Ready(content.to_string()))
         }
-    }
-
-    pub(super) fn ensure_plaintext_control_send_allowed(&self, operation: &str) -> Result<()> {
-        if self.config.encryption.require_encryption {
-            return Err(Error::EncryptFailed(format!(
-                "{} sends plaintext control messages; disable require_encryption for bootstrap flows",
-                operation
-            )));
-        }
-        Ok(())
     }
 
     // ========================================================================
@@ -641,13 +708,14 @@ impl OfflineProtocol {
             queued_at: Utc::now(),
         };
 
-        // Persist to storage first (survives crashes)
-        self.persist_pending_message(recipient, &pending);
-
+        // Push to in-memory queue first, then persist (the in-memory queue
+        // is the source of truth; storage is a crash-recovery backup).
         self.pending_encrypted_messages
             .entry(recipient.to_string())
             .or_default()
             .push(pending);
+
+        self.persist_pending_messages_for_recipient(recipient);
 
         debug!(recipient = %recipient, message_id = %message_id_str, "Queued message pending session establishment");
     }
@@ -1509,17 +1577,18 @@ impl OfflineProtocol {
     /// * `sender_name` - Display name of the sender
     /// * `key_package` - Optional MLS key package for encrypted session setup
     ///
-    /// # Strict Encryption Behavior
+    /// # Encryption
     ///
-    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
-    /// because bootstrap control messages are plaintext by design.
+    /// Connection requests are internal control messages sent in plaintext,
+    /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn send_connection_request(
         &mut self,
         recipient: &str,
         sender_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
-        self.ensure_plaintext_control_send_allowed("send_connection_request")?;
+        // Connection requests are internal control messages (not user content),
+        // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -1549,17 +1618,18 @@ impl OfflineProtocol {
     /// * `accepter_name` - Display name of the accepting party
     /// * `key_package` - Optional MLS key package for encrypted session setup
     ///
-    /// # Strict Encryption Behavior
+    /// # Encryption
     ///
-    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
-    /// because bootstrap control messages are plaintext by design.
+    /// Connection accepts are internal control messages sent in plaintext,
+    /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn accept_connection_request(
         &mut self,
         recipient: &str,
         accepter_name: &str,
         key_package: Option<Vec<u8>>,
     ) -> Result<MessageId> {
-        self.ensure_plaintext_control_send_allowed("accept_connection_request")?;
+        // Accept messages are internal control messages (not user content),
+        // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -1587,12 +1657,13 @@ impl OfflineProtocol {
     ///
     /// * `recipient` - The user ID of the original requester
     ///
-    /// # Strict Encryption Behavior
+    /// # Encryption
     ///
-    /// When `encryption.require_encryption = true`, this API returns `EncryptFailed`
-    /// because bootstrap control messages are plaintext by design.
+    /// Connection rejects are internal control messages sent in plaintext,
+    /// exempt from `require_encryption` (same as key packages and welcome messages).
     pub fn reject_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
-        self.ensure_plaintext_control_send_allowed("reject_connection_request")?;
+        // Reject messages are internal control messages (not user content),
+        // so they are exempt from require_encryption — same as key packages.
         if self.is_user_blocked(recipient) {
             return Err(Error::UserBlocked(recipient.to_string()));
         }
@@ -1719,7 +1790,7 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
-    pub(super) fn send_key_package_to(&mut self, peer_id: &str) -> Result<()> {
+    pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
 
         let key_pkg = {
@@ -1734,6 +1805,7 @@ impl OfflineProtocol {
             key_package_data: key_pkg.key_package_data.clone(),
             remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
             timestamp_ms: Utc::now().timestamp_millis() as u64,
+            session_reset,
         };
 
         let serialized =

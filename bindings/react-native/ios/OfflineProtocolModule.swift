@@ -881,6 +881,67 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    // MARK: - User Blocking
+
+    @objc func blockUser(_ userId: String,
+                         resolver: @escaping RCTPromiseResolveBlock,
+                         rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            try proto.blockUser(userId: userId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_BLOCK_USER", "Failed to block user: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func unblockUser(_ userId: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            try proto.unblockUser(userId: userId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_UNBLOCK_USER", "Failed to unblock user: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func getBlockedUsers(_ resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            let blocked = try proto.getBlockedUsers()
+            resolver(blocked)
+        } catch {
+            rejecter("ERROR_GET_BLOCKED", "Failed to get blocked users: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func isUserBlocked(_ userId: String,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            let blocked = try proto.isUserBlocked(userId: userId)
+            resolver(blocked)
+        } catch {
+            rejecter("ERROR_IS_BLOCKED", "Failed to check blocked status: \(error.localizedDescription)", error)
+        }
+    }
+
     @objc func receiveMessage(_ resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
         if let messageJson = protocolInstance?.receiveMessage() {
@@ -2620,13 +2681,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         do {
             let data = memberKeyPackage.map { UInt8($0.intValue) }
-            let welcome = try proto.mlsAddGroupMember(groupId: groupId, memberKeyPackage: data)
+            let addResult = try proto.mlsAddGroupMember(groupId: groupId, memberKeyPackage: data)
             let result: [String: Any] = [
-                "groupId": welcome.groupId,
-                "welcomeData": welcome.welcomeData.map { NSNumber(value: $0) },
-                "inviterId": welcome.inviterId,
-                "groupName": welcome.groupName ?? NSNull(),
-                "timestampMs": NSNumber(value: welcome.timestampMs)
+                "groupId": addResult.welcome.groupId,
+                "welcomeData": addResult.welcome.welcomeData.map { NSNumber(value: $0) },
+                "inviterId": addResult.welcome.inviterId,
+                "groupName": addResult.welcome.groupName ?? NSNull(),
+                "timestampMs": NSNumber(value: addResult.welcome.timestampMs)
             ]
             resolver(result)
         } catch {
@@ -2853,163 +2914,131 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
     
-    // MARK: - Group Management (Relay Server API)
-    
-    @objc func groupCreate(_ name: String,
-                           resolver: @escaping RCTPromiseResolveBlock,
-                           rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupCreate(name: name)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to create group: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupSendMessage(_ groupId: String,
-                                content: String,
-                                replyToMsg: String?,
-                                resolver: @escaping RCTPromiseResolveBlock,
-                                rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupSendMessage(groupId: groupId, content: content, replyToMsg: replyToMsg)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to send group message: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupAddMember(_ groupId: String,
-                              username: String,
-                              resolver: @escaping RCTPromiseResolveBlock,
-                              rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupAddMember(groupId: groupId, username: username)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to add group member: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupRemoveMember(_ groupId: String,
-                                 username: String,
-                                 resolver: @escaping RCTPromiseResolveBlock,
-                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupRemoveMember(groupId: groupId, username: username)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to remove group member: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupSetAdmin(_ groupId: String,
-                            username: String,
-                            resolver: @escaping RCTPromiseResolveBlock,
-                            rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupSetAdmin(groupId: groupId, username: username)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to set group admin: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupRemoveAdmin(_ groupId: String,
-                               username: String,
+    // MARK: - Mesh Group Management (Protocol-Level MLS Groups)
+
+    /// Create a new MLS group via the mesh transport layer.
+    @objc func meshCreateGroup(_ groupName: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
             return
         }
         do {
-            let json = try proto.groupRemoveAdmin(groupId: groupId, username: username)
-            resolver(json)
+            let info = try proto.createGroup(groupName: groupName)
+            let result: [String: Any] = [
+                "groupId": info.groupId,
+                "groupName": info.name ?? groupName,
+                "memberIds": info.members,
+                "epoch": info.epoch,
+                "createdAt": info.createdAtMs
+            ]
+            resolver(result)
         } catch {
-            rejecter("ERROR_GROUP", "Failed to remove group admin: \(error.localizedDescription)", error)
+            rejecter("ERROR_MESH_GROUP", "Failed to create mesh group: \(error.localizedDescription)", error)
         }
     }
-    
-    @objc func groupLeave(_ groupId: String,
-                         resolver: @escaping RCTPromiseResolveBlock,
-                         rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupLeave(groupId: groupId)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to leave group: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupDelete(_ groupId: String,
-                          resolver: @escaping RCTPromiseResolveBlock,
-                          rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupDelete(groupId: groupId)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to delete group: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupGetInfo(_ groupId: String,
-                           resolver: @escaping RCTPromiseResolveBlock,
-                           rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let json = try proto.groupGetInfo(groupId: groupId)
-            resolver(json)
-        } catch {
-            rejecter("ERROR_GROUP", "Failed to get group info: \(error.localizedDescription)", error)
-        }
-    }
-    
-    @objc func groupGetUserGroups(_ resolver: @escaping RCTPromiseResolveBlock,
+
+    /// Invite a member to an MLS group, sending Welcome+Commit via mesh transport.
+    @objc func meshInviteToGroup(_ groupId: String,
+                                 inviteeUserId: String,
+                                 resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
-            rejecter("ERROR_GROUP", "Protocol not initialized", nil)
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
             return
         }
         do {
-            let json = try proto.groupGetUserGroups()
-            resolver(json)
+            try proto.inviteToGroup(groupId: groupId, inviteeUserId: inviteeUserId)
+            resolver(nil)
         } catch {
-            rejecter("ERROR_GROUP", "Failed to get user groups: \(error.localizedDescription)", error)
+            rejecter("ERROR_MESH_GROUP", "Failed to invite to mesh group: \(error.localizedDescription)", error)
         }
     }
-    
+
+    /// Send an MLS-encrypted message to all group members via mesh transport.
+    @objc func meshSendGroupMessage(_ groupId: String,
+                                    content: String,
+                                    priority: String?,
+                                    replyToMsg: String?,
+                                    resolver: @escaping RCTPromiseResolveBlock,
+                                    rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            var msgPriority: MessagePriority? = nil
+            if let priorityStr = priority {
+                switch priorityStr.lowercased() {
+                case "low":
+                    msgPriority = .low
+                case "medium":
+                    msgPriority = .medium
+                case "high":
+                    msgPriority = .high
+                case "critical":
+                    msgPriority = .critical
+                default:
+                    rejecter("ERROR_MESH_GROUP", "Invalid priority: \(priorityStr). Must be low, medium, high, or critical.", nil)
+                    return
+                }
+            }
+            let messageIds = try proto.sendGroupMessage(groupId: groupId, content: content, priority: msgPriority, replyToMsg: replyToMsg)
+            resolver(messageIds)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to send mesh group message: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Remove a member from an MLS group with notification via mesh transport.
+    @objc func meshRemoveFromGroup(_ groupId: String,
+                                   memberId: String,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.removeFromGroup(groupId: groupId, memberId: memberId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to remove member from mesh group: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Leave an MLS group with notification via mesh transport.
+    @objc func meshLeaveGroup(_ groupId: String,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.leaveGroup(groupId: groupId)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to leave mesh group: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// List all MLS groups the local user belongs to.
+    @objc func meshListGroups(_ resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let groups = try proto.listGroups()
+            resolver(groups)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to list mesh groups: \(error.localizedDescription)", error)
+        }
+    }
+
     // MARK: - Helpers
     
     private func parseInternetConfig(_ config: NSDictionary?) throws -> (String, UInt16) {

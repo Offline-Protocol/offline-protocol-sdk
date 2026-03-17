@@ -22,6 +22,16 @@ pub(crate) const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
 pub(crate) const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
 /// Timeout waiting for explicit internet send confirmation for welcome.
 pub(crate) const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
+/// Minimum interval between session reconciliation scans (list_sessions I/O).
+/// Keeps the expensive Keychain/Keystore I/O out of the hot path so that
+/// sendMessage() is not blocked by Mutex contention on every process tick.
+pub(crate) const RECONCILIATION_THROTTLE_MS: u64 = 2_000;
+/// Lamport clock ticks between storage persistence writes. Avoids a
+/// Keychain/Keystore write on every sent and received message. On crash
+/// recovery, at most this many ticks are lost, which is safe — the clock
+/// is only used for causal ordering and the gap is absorbed on the next
+/// merge with any peer.
+pub(crate) const LAMPORT_PERSIST_INTERVAL: u64 = 64;
 pub(crate) const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 pub(crate) const MAX_KNOWN_PEERS: usize = 1000;
@@ -85,6 +95,17 @@ pub(crate) struct KeyPackagePayload {
     /// backward compatibility with old nodes that may still send it.
     #[serde(default)]
     pub(crate) timestamp_ms: u64,
+    /// When `true`, the sender has reset their MLS session state and the
+    /// receiver should discard any existing session for this peer before
+    /// establishing a new one.
+    ///
+    /// Primary use-case: post-unblock session convergence. When Alice unblocks
+    /// Bob, Alice's side deletes her MLS session and sends a fresh key package
+    /// with `session_reset: true`. Bob deletes his now-orphaned session and
+    /// auto-establishes a new one from Alice's key package, so both sides
+    /// converge on a single fresh MLS group.
+    #[serde(default)]
+    pub(crate) session_reset: bool,
 }
 
 /// Payload for a connection request message.
@@ -170,6 +191,8 @@ pub(crate) struct GroupMemberAddedPayload {
     pub(crate) group_id: String,
     pub(crate) user_id: String,
     pub(crate) added_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

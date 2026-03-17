@@ -16,19 +16,15 @@ impl OfflineProtocol {
     // PENDING MESSAGES PERSISTENCE
     // ========================================================================
 
-    /// Persists a pending message for a recipient to storage.
+    /// Persists the in-memory pending message queue for a recipient to storage.
     ///
-    /// This ensures messages survive app crashes/restarts.
-    pub(crate) fn persist_pending_message(&self, recipient: &str, pending: &PendingMessage) {
-        // Load existing messages for this recipient
-        let mut messages: Vec<PendingMessage> = self
-            .load_pending_messages_from_storage(recipient)
-            .unwrap_or_default();
-
-        // Add the new message
-        messages.push(pending.clone());
-
-        self.persist_pending_messages_snapshot(recipient, &messages);
+    /// Uses `pending_encrypted_messages` as the source of truth rather than
+    /// loading from storage first. The caller must push to the in-memory
+    /// queue before calling this method.
+    pub(crate) fn persist_pending_messages_for_recipient(&self, recipient: &str) {
+        if let Some(messages) = self.pending_encrypted_messages.get(recipient) {
+            self.persist_pending_messages_snapshot(recipient, messages);
+        }
     }
 
     pub(crate) fn persist_pending_messages_snapshot(
@@ -231,7 +227,7 @@ impl OfflineProtocol {
         Ok(Some(state))
     }
 
-    /// Persists session state atomically for a single peer key.
+    /// Persists session state for a single peer key.
     pub(crate) fn persist_session_state(
         &self,
         peer_id: &str,
@@ -253,35 +249,6 @@ impl OfflineProtocol {
                     peer_id, e
                 ))
             })?;
-        let persisted_data = storage
-            .load(storage_keys::SESSION_STATES, peer_id)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to verify persisted session state for {}: {}",
-                    peer_id, e
-                ))
-            })?
-            .ok_or_else(|| {
-                Error::Other(format!(
-                    "Persisted session state missing immediately after write for {}",
-                    peer_id
-                ))
-            })?;
-        let persisted_state =
-            serde_json::from_slice::<SessionState>(&persisted_data).map_err(|e| {
-                Error::Other(format!(
-                    "Failed to deserialize verified session state for {}: {}",
-                    peer_id, e
-                ))
-            })?;
-        if persisted_state != new_state {
-            return Err(Error::Other(format!(
-                "Session state verification mismatch for {}: expected {}, got {}",
-                peer_id,
-                new_state.as_str(),
-                persisted_state.as_str()
-            )));
-        }
 
         if matches!(new_state, SessionState::Confirmed) {
             info!(
@@ -524,18 +491,38 @@ impl OfflineProtocol {
     // LAMPORT CLOCK PERSISTENCE
     // ========================================================================
 
-    pub(crate) fn persist_lamport_clock(&self) {
+    /// Debounced Lamport clock persistence. Only writes to storage when the
+    /// in-memory value has advanced past `last_persisted_lamport` by at least
+    /// `LAMPORT_PERSIST_INTERVAL` ticks. This avoids a Keychain/Keystore
+    /// write on every sent and received message.
+    pub(crate) fn persist_lamport_clock(&mut self) {
+        let current = self.lamport_clock.value();
+        if current.wrapping_sub(self.last_persisted_lamport) < super::LAMPORT_PERSIST_INTERVAL {
+            return;
+        }
+        self.write_lamport_clock_to_storage(current);
+    }
+
+    /// Forces the Lamport clock to storage regardless of debounce state.
+    /// Called on shutdown to avoid losing any un-flushed ticks.
+    pub(crate) fn flush_lamport_clock(&mut self) {
+        self.write_lamport_clock_to_storage(self.lamport_clock.value());
+    }
+
+    fn write_lamport_clock_to_storage(&mut self, value: u64) {
         let Some(storage) = &self.message_storage else {
             return;
         };
-        let value = self.lamport_clock.value().to_le_bytes();
+        let bytes = value.to_le_bytes();
         if let Err(e) = storage.store(
             storage_keys::LAMPORT_CLOCK,
             storage_keys::LAMPORT_CLOCK_ID,
-            &value,
+            &bytes,
         ) {
             warn!(error = %e, "Failed to persist Lamport clock");
+            return;
         }
+        self.last_persisted_lamport = value;
     }
 
     /// Restores the Lamport clock from storage.
@@ -555,6 +542,7 @@ impl OfflineProtocol {
                 if restored_clock > self.lamport_clock {
                     self.lamport_clock = restored_clock;
                 }
+                self.last_persisted_lamport = self.lamport_clock.value();
                 debug!(clock = %self.lamport_clock, "Restored Lamport clock from storage");
             } else {
                 warn!(
