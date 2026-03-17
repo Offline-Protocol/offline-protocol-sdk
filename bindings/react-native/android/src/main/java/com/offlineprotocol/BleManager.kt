@@ -175,6 +175,7 @@ class BleManager(
     private data class PendingFragment(val data: ByteArray, val timestamp: Long)
     private data class MeshObservation(val advertisement: MeshAdvertisementData, val rssi: Int?, val timestamp: Long)
     private val pendingFragments = ConcurrentHashMap<String, MutableList<PendingFragment>>()
+    private val pendingFragmentsLock = Any()
     private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
     private val LOAD_SATURATION_COUNT = 20
@@ -522,7 +523,7 @@ class BleManager(
         }
         connections.clear()
         lastSeenRssi.clear()
-        pendingFragments.clear()
+        synchronized(pendingFragmentsLock) { pendingFragments.clear() }
         pendingOutboundFragments.clear()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
@@ -925,7 +926,8 @@ class BleManager(
                 }
                 
                 // Also check for pending fragments that need device ID resolution
-                for (address in pendingFragments.keys) {
+                val pendingAddresses = synchronized(pendingFragmentsLock) { pendingFragments.keys.toList() }
+                for (address in pendingAddresses) {
                     if (connections.deviceIdForAddress(address) != null) {
                         continue
                     }
@@ -1576,7 +1578,7 @@ class BleManager(
         val signalQuality = averageRssi?.let { rssi ->
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
-        val pendingCount = pendingFragments.values.sumOf { it.size }
+        val pendingCount = synchronized(pendingFragmentsLock) { pendingFragments.values.sumOf { it.size } }
         val outboundPending = pendingOutboundFragments.values.sumOf { it.size }
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
@@ -1634,7 +1636,7 @@ class BleManager(
         connections.removeIdentifiersForDevice(peerId)
         connections.removeConnectionRole(peerId)
         lastSeenRssi.remove(address)
-        pendingFragments.remove(address)
+        synchronized(pendingFragmentsLock) { pendingFragments.remove(address) }
         pendingOutboundFragments.remove(peerId)
         deviceIdResolutionAttempts.remove(address)
         connectionRetryCount.remove(address)
@@ -1711,6 +1713,13 @@ class BleManager(
                     continue
                 }
 
+                // Maintain FIFO ordering: if this recipient has pending fragments,
+                // enqueue instead of sending directly.
+                if (pendingOutboundFragments[recipientId]?.isNotEmpty() == true) {
+                    enqueuePendingOutboundFragment(recipientId, data)
+                    continue
+                }
+
                 consecutiveSkips = 0
 
                 if (!sendFragmentData(recipientId, data)) {
@@ -1767,7 +1776,14 @@ class BleManager(
             
             val recipientId = fragment.recipientId
             val data = fragment.data.map { it.toByte() }.toByteArray()
-            
+
+            // Maintain FIFO ordering: if this recipient has pending fragments,
+            // enqueue instead of sending directly.
+            if (pendingOutboundFragments[recipientId]?.isNotEmpty() == true) {
+                enqueuePendingOutboundFragment(recipientId, data)
+                return
+            }
+
             val sendResult = sendFragmentData(recipientId, data)
             Log.d(TAG, "Fragment send result for $recipientId: $sendResult")
             
@@ -1963,8 +1979,10 @@ class BleManager(
             val senderId = connections.deviceIdForAddress(address)
             if (senderId == null) {
                 // Queue fragment to process later when device ID is available
-                val pendingList = pendingFragments.getOrPut(address) { mutableListOf() }
-                pendingList.add(PendingFragment(data, System.currentTimeMillis()))
+                synchronized(pendingFragmentsLock) {
+                    val pendingList = pendingFragments.getOrPut(address) { mutableListOf() }
+                    pendingList.add(PendingFragment(data, System.currentTimeMillis()))
+                }
                 if (logThrottler.shouldLog("queue_pending_$address")) {
                     Log.d(TAG, "Queued fragment while awaiting device ID for $address")
                     emitDiagnostic(
@@ -2013,6 +2031,17 @@ class BleManager(
                 cleanupPendingFragments()
                 return
             }
+
+            // If pending fragments exist for this address, append to maintain FIFO ordering.
+            // processPendingFragments() will handle them all in order.
+            synchronized(pendingFragmentsLock) {
+                val list = pendingFragments[address]
+                if (list != null && list.isNotEmpty()) {
+                    list.add(PendingFragment(data, System.currentTimeMillis()))
+                    return
+                }
+            }
+
             lastSeenRssi[address]?.toInt()?.let { observedRssi ->
                 meshController.updatePeerMetrics(
                     senderId,
@@ -2021,7 +2050,7 @@ class BleManager(
             }
             meshController.markPeerActive(senderId)
             meshController.markPeerActive(deviceId)
-            
+
             // Convert to UByte list
             val bytes = data.map { it.toUByte() }
             
@@ -2071,7 +2100,7 @@ class BleManager(
     
     private fun processPendingFragments(address: String, deviceId: String) {
         deviceIdResolutionAttempts.remove(address)
-        val fragments = pendingFragments.remove(address) ?: return
+        val fragments = synchronized(pendingFragmentsLock) { pendingFragments.remove(address) } ?: return
         val role = connections.consumePendingRole(address) ?: MeshRole.MEMBER
         meshController.registerConnection(deviceId, role)
         connections.setConnectionRole(deviceId, role)
@@ -2097,15 +2126,17 @@ class BleManager(
     }
     
     private fun cleanupPendingFragments() {
-        val now = System.currentTimeMillis()
-        val addressesToRemove = mutableListOf<String>()
-        for ((address, fragments) in pendingFragments) {
-            fragments.removeAll { now - it.timestamp > PENDING_FRAGMENT_TIMEOUT_MS }
-            if (fragments.isEmpty()) {
-                addressesToRemove.add(address)
+        synchronized(pendingFragmentsLock) {
+            val now = System.currentTimeMillis()
+            val addressesToRemove = mutableListOf<String>()
+            for ((address, fragments) in pendingFragments) {
+                fragments.removeAll { now - it.timestamp > PENDING_FRAGMENT_TIMEOUT_MS }
+                if (fragments.isEmpty()) {
+                    addressesToRemove.add(address)
+                }
             }
+            addressesToRemove.forEach { pendingFragments.remove(it) }
         }
-        addressesToRemove.forEach { pendingFragments.remove(it) }
     }
 
     private fun pruneMeshObservations(now: Long) {

@@ -1106,8 +1106,15 @@ public class BleManager: NSObject, TransportManager {
                     continue
                 }
                 
+                // Maintain FIFO ordering: if this recipient has pending fragments,
+                // enqueue instead of sending directly.
+                if let pending = self.pendingOutboundFragments[recipientId], !pending.isEmpty {
+                    self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
+                    continue
+                }
+
                 consecutiveSkips = 0
-                
+
                 if self.sendFragmentData(recipientId: recipientId, data: data) {
                     self.emitDiagnostic("debug", "Fragment sent successfully", context: ["recipientId": recipientId])
                 } else {
@@ -1438,6 +1445,15 @@ public class BleManager: NSObject, TransportManager {
                         self.emitDiagnostic("warning", "Dropped BLE fragment without sender ID", context: ["length": data.count])
                     }
                 }
+                return
+            }
+
+            // If there are pending fragments for this sender, append to maintain ordering.
+            // processPendingFragments() will handle them all in FIFO order.
+            if let centralId = centralId,
+               let pending = self.pendingFragments[centralId],
+               !pending.isEmpty {
+                self.pendingFragments[centralId]!.append((data, Date()))
                 return
             }
 
