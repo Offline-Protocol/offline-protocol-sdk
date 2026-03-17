@@ -938,6 +938,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remo
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request(
@@ -1254,6 +1256,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_tra
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1742,6 +1746,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer() != 11300.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
@@ -2885,6 +2892,8 @@ public interface OfflineProtocolInterface {
     fun `removeTransport`(`transportType`: TransportType)
     
     fun `requestPrekeyBundle`(`username`: kotlin.String): kotlin.String
+    
+    fun `resetTofuForPeer`(`peerId`: kotlin.String): kotlin.Boolean
     
     fun `resume`()
     
@@ -4293,6 +4302,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(
         it,
         FfiConverterString.lower(`username`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `resetTofuForPeer`(`peerId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu_for_peer(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
 }
     }
     )
@@ -6631,6 +6654,8 @@ sealed class ProtocolException(message: String): kotlin.Exception(message) {
         
         class UserBlocked(message: String) : ProtocolException(message)
         
+        class LockPoisoned(message: String) : ProtocolException(message)
+        
         class Other(message: String) : ProtocolException(message)
         
 
@@ -6657,7 +6682,8 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
             9 -> ProtocolException.MlsNotInitialized(FfiConverterString.read(buf))
             10 -> ProtocolException.MlsException(FfiConverterString.read(buf))
             11 -> ProtocolException.UserBlocked(FfiConverterString.read(buf))
-            12 -> ProtocolException.Other(FfiConverterString.read(buf))
+            12 -> ProtocolException.LockPoisoned(FfiConverterString.read(buf))
+            13 -> ProtocolException.Other(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
         
@@ -6713,8 +6739,12 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
                 buf.putInt(11)
                 Unit
             }
-            is ProtocolException.Other -> {
+            is ProtocolException.LockPoisoned -> {
                 buf.putInt(12)
+                Unit
+            }
+            is ProtocolException.Other -> {
+                buf.putInt(13)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

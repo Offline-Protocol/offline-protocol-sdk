@@ -74,6 +74,7 @@ public class BleManager: NSObject, TransportManager {
     
     // MARK: - Properties
     
+    // Thread-safe: OfflineProtocol uses Mutex/RwLock internally (see offline-protocol-uniffi)
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
     private let meshController: MeshController
@@ -108,12 +109,15 @@ public class BleManager: NSObject, TransportManager {
     private var routingCleanupTimer: Timer?
     private let ROUTING_CLEANUP_INTERVAL: TimeInterval = 30.0
     
-    // Pending fragments waiting for device ID
+    // Pending fragments waiting for device ID.
+    // Thread-safety contract: both pendingFragments and pendingOutboundFragments are
+    // owned by fragmentQueue. ALL reads and writes MUST occur inside fragmentQueue.async.
+    // evictPeer() dispatches removals to fragmentQueue to honour this contract.
     private var pendingFragments: [UUID: [(Data, Date)]] = [:]
     private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 5.0 // For incoming fragments waiting for device ID
     private let PENDING_OUTBOUND_FRAGMENT_TIMEOUT: TimeInterval = 30.0 // For outbound fragments that failed to send
     private let MAX_PENDING_FRAGMENTS_PER_PEER = 100
-    // Track outbound fragments with timestamps for timeout handling
+    // Track outbound fragments with timestamps for timeout handling (owned by fragmentQueue)
     private var pendingOutboundFragments: [String: [(data: Data, timestamp: Date)]] = [:]
     private struct MeshObservation {
         let advertisement: MeshAdvertisementData
@@ -427,8 +431,10 @@ public class BleManager: NSObject, TransportManager {
         connections.reset()
         discoveredPeripherals.removeAll()
         peripheralRSSI.removeAll()
-        pendingFragments.removeAll()
-        pendingOutboundFragments.removeAll()
+        fragmentQueue.sync {
+            self.pendingFragments.removeAll()
+            self.pendingOutboundFragments.removeAll()
+        }
         lastSeenMeshAdvertisements.removeAll()
         unknownBootstrapAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
@@ -740,7 +746,8 @@ public class BleManager: NSObject, TransportManager {
                     self.attemptConnection(to: peripheral, reason: "monitor")
                 }
             }
-            for centralId in self.pendingFragments.keys {
+            let pendingKeys: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
+            for centralId in pendingKeys {
                 if self.connections.centralDeviceId(for: centralId) == nil && self.connections.peripheralDeviceId(for: centralId) == nil {
                     // Ensure we periodically try to resolve device IDs for pending fragments
                     if let last = self.connectionAttemptTimestamps[centralId], now.timeIntervalSince(last) < self.MIN_RECONNECT_INTERVAL {
@@ -1106,8 +1113,15 @@ public class BleManager: NSObject, TransportManager {
                     continue
                 }
                 
+                // Maintain FIFO ordering: if this recipient has pending fragments,
+                // enqueue instead of sending directly.
+                if let pending = self.pendingOutboundFragments[recipientId], !pending.isEmpty {
+                    self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
+                    continue
+                }
+
                 consecutiveSkips = 0
-                
+
                 if self.sendFragmentData(recipientId: recipientId, data: data) {
                     self.emitDiagnostic("debug", "Fragment sent successfully", context: ["recipientId": recipientId])
                 } else {
@@ -1247,7 +1261,10 @@ public class BleManager: NSObject, TransportManager {
         return connections.connectedPeripheralCount() + subscribedCentrals.count
     }
 
-    private func refreshSelfMetrics() {
+    /// Refresh self metrics. When called from `fragmentQueue`, pass the counts directly
+    /// to avoid a deadlock on the serial queue. Off-queue callers omit the parameters
+    /// and the counts are read via `fragmentQueue.sync`.
+    private func refreshSelfMetrics(pendingCount: Int? = nil, outboundCount: Int? = nil) {
         let rssiValues = peripheralRSSI.values.map { Int($0) }
         let averageRssi = rssiValues.isEmpty ? nil : Int(Double(rssiValues.reduce(0, +)) / Double(rssiValues.count))
         let signalQuality = averageRssi.map { rssi -> Int in
@@ -1256,10 +1273,23 @@ public class BleManager: NSObject, TransportManager {
             let scaled = Int((normalized * 100.0).rounded())
             return min(100, max(0, scaled))
         }
-        let pendingCount = pendingFragments.values.reduce(0) { $0 + $1.count }
-        let outboundCount = pendingOutboundFragments.values.reduce(0) { $0 + $1.count }
-        let totalPending = pendingCount + outboundCount
-        let stability = max(0.0, 1.0 - min(1.0, Double(pendingCount) / 10.0))
+        let pc: Int
+        let oc: Int
+        if let p = pendingCount, let o = outboundCount {
+            pc = p
+            oc = o
+        } else {
+            // Read from fragmentQueue synchronously — safe from main thread only
+            var tmpP = 0, tmpO = 0
+            fragmentQueue.sync {
+                tmpP = self.pendingFragments.values.reduce(0) { $0 + $1.count }
+                tmpO = self.pendingOutboundFragments.values.reduce(0) { $0 + $1.count }
+            }
+            pc = tmpP
+            oc = tmpO
+        }
+        let totalPending = pc + oc
+        let stability = max(0.0, 1.0 - min(1.0, Double(pc) / 10.0))
         let loadPercent = min(100, (totalPending * 100) / LOAD_SATURATION_COUNT)
         let uptimeSeconds = transportStartAt.map { max(0, Date().timeIntervalSince($0)) }
         let metrics = MeshController.PeerMetrics(
@@ -1303,8 +1333,12 @@ public class BleManager: NSObject, TransportManager {
         connections.removeCentralDeviceId(for: identifier)
         connections.removeConnectionRole(for: deviceId)
         peripheralRSSI.removeValue(forKey: identifier)
-        pendingFragments.removeValue(forKey: identifier)
-        pendingOutboundFragments.removeValue(forKey: deviceId)
+        // Remove fragment state on fragmentQueue, then refresh metrics in the same
+        // dispatch so the counts reflect the removal (avoids stale reads).
+        fragmentQueue.sync { [weak self] in
+            self?.pendingFragments.removeValue(forKey: identifier)
+            self?.pendingOutboundFragments.removeValue(forKey: deviceId)
+        }
         connectionAttemptTimestamps.removeValue(forKey: identifier)
         connectionRetryCount.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
@@ -1418,6 +1452,9 @@ public class BleManager: NSObject, TransportManager {
                 if self.pendingFragments[centralId] == nil {
                     self.pendingFragments[centralId] = []
                 }
+                if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
+                    self.pendingFragments[centralId]?.removeFirst()
+                }
                 self.pendingFragments[centralId]?.append((data, Date()))
                 
                 // Clean up old pending fragments
@@ -1438,6 +1475,17 @@ public class BleManager: NSObject, TransportManager {
                         self.emitDiagnostic("warning", "Dropped BLE fragment without sender ID", context: ["length": data.count])
                     }
                 }
+                return
+            }
+
+            // If there are pending fragments for this sender, append to maintain ordering.
+            // processPendingFragments() will handle them all in FIFO order.
+            if let centralId = centralId,
+               self.pendingFragments[centralId]?.isEmpty == false {
+                if (self.pendingFragments[centralId]?.count ?? 0) >= self.MAX_PENDING_FRAGMENTS_PER_PEER {
+                    self.pendingFragments[centralId]?.removeFirst()
+                }
+                self.pendingFragments[centralId, default: []].append((data, Date()))
                 return
             }
 
@@ -1511,7 +1559,10 @@ public class BleManager: NSObject, TransportManager {
             self.connections.setConnectionRole(role, for: deviceId)
             self.meshController.markPeerActive(deviceId)
             self.meshController.markPeerActive(self.deviceId)
-            self.refreshSelfMetrics()
+            // Already on fragmentQueue — pass counts directly to avoid deadlock on serial queue
+            let pc = self.pendingFragments.values.reduce(0) { $0 + $1.count }
+            let oc = self.pendingOutboundFragments.values.reduce(0) { $0 + $1.count }
+            self.refreshSelfMetrics(pendingCount: pc, outboundCount: oc)
             if let rssi = self.peripheralRSSI[centralId] {
                 self.meshController.updatePeerMetrics(peerId: deviceId, metrics: MeshController.PeerMetrics(rssi: Int(rssi)))
             }
@@ -1543,6 +1594,7 @@ public class BleManager: NSObject, TransportManager {
                             "messageContent": completedMessage,
                             "messageNumber": messageCount
                         ])
+                        self.learnRouteFromMessage(completedMessage, deliveredBy: deviceId, neighborUUID: centralId)
                     }
                     if messageCount > 0 {
                         print("[BleManager] ✅ Processed \(messageCount) complete message(s) from queued fragments")
@@ -2508,7 +2560,7 @@ extension BleManager: CBPeripheralDelegate {
                 //  Also check all pending fragments and process any that match this device ID
                 // This handles the case where Android wrote to iOS before iOS connected to Android
                 // The central UUID (from write) might be the same as peripheral UUID, but we check all
-                let pendingCentralIds = Array(self.pendingFragments.keys)
+                let pendingCentralIds: [UUID] = self.fragmentQueue.sync { Array(self.pendingFragments.keys) }
                 for centralId in pendingCentralIds {
                     // Check if this central ID now maps to the device ID we just resolved
                     let centralDeviceId = self.connections.centralDeviceId(for: centralId)
