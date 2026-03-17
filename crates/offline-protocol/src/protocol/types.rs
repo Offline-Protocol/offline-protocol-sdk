@@ -53,11 +53,10 @@ pub(crate) const CTRL_SIGN_DOMAIN: &[u8] = b"offline-ctrl-v1";
 /// Entries are persisted via `MlsStorage` (when available) so pinned keys
 /// survive process restarts and prevent key-substitution during re-pinning.
 ///
-/// // TODO(security): There is no mechanism for legitimate key rotation. A peer
-/// // who re-initializes MLS (getting a new identity key) will be permanently
-/// // rejected by all peers who have TOFU-pinned the old key. Implement a key
-/// // rotation protocol (e.g. signed key-update messages) or a manual TOFU
-/// // reset API.
+/// When a peer legitimately re-initializes MLS (e.g. app reinstall), the
+/// application should call `reset_tofu_for_peer()` to allow re-pinning
+/// with the new key. A signed key-rotation protocol may be added in a
+/// future version for automatic cross-device key updates.
 pub(crate) const MAX_TOFU_PEERS: usize = 1000;
 
 /// Maximum number of blocked users to retain.

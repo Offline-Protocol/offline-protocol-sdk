@@ -102,6 +102,7 @@ enum ProtocolError {
     "MlsNotInitialized",
     "MlsError",
     "UserBlocked",
+    "LockPoisoned",
     "Other",
 };
 
@@ -827,6 +828,11 @@ interface OfflineProtocol {
     // List all MLS groups (excluding 1:1 sessions)
     [Throws=ProtocolError]
     sequence<string> list_groups();
+
+    // Reset the TOFU-pinned public key for a peer (allows re-pinning on next contact).
+    // Returns true if an entry was removed, false if no entry existed (idempotent).
+    [Throws=ProtocolError]
+    boolean reset_tofu_for_peer(string peer_id);
 
     // Block a user (silently drops all their messages, no notification sent)
     [Throws=ProtocolError]

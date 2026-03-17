@@ -3,7 +3,7 @@
 //! This module provides high-bandwidth peer-to-peer connectivity via Wi-Fi Direct.
 //! This is primarily for Android devices and offers faster data transfer than BLE.
 
-// Constants are defined but not used in Rust code (used in native Android code)
+use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
@@ -204,6 +204,12 @@ impl WifiDirectTransport {
 
     /// Called when raw data is received (platform callback).
     pub fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
+        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
+            return Err(crate::Error::MessageTooLarge(
+                data.len(),
+                DEFAULT_MAX_MESSAGE_SIZE,
+            ));
+        }
         match self.deserialize_message(&data) {
             Ok(message) => {
                 let mut queue = self.receive_queue.lock().unwrap();
@@ -228,6 +234,12 @@ impl WifiDirectTransport {
     ///   The protocol layer uses this value to verify that `message.sender`
     ///   matches the physical peer that delivered it.
     pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
+        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
+            return Err(crate::Error::MessageTooLarge(
+                data.len(),
+                DEFAULT_MAX_MESSAGE_SIZE,
+            ));
+        }
         match self.deserialize_message(&data) {
             Ok(mut message) => {
                 message.set_transport_peer_id(peer_id)?;
@@ -578,5 +590,29 @@ mod tests {
         assert!(!data.is_empty());
         let deserialized = transport.deserialize_message(&data).unwrap();
         assert_eq!(deserialized.id, message.id);
+    }
+
+    #[test]
+    fn test_on_data_received_rejects_oversized_payload() {
+        let transport = WifiDirectTransport::new("test-device");
+        let oversized = vec![0u8; DEFAULT_MAX_MESSAGE_SIZE + 1];
+        let result = transport.on_data_received(oversized);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::MessageTooLarge(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_on_data_received_from_rejects_oversized_payload() {
+        let transport = WifiDirectTransport::new("test-device");
+        let oversized = vec![0u8; DEFAULT_MAX_MESSAGE_SIZE + 1];
+        let result = transport.on_data_received_from(oversized, "peer1".to_string());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::MessageTooLarge(_, _)
+        ));
     }
 }

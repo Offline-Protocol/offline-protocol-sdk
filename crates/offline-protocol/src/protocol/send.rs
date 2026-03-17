@@ -498,7 +498,8 @@ impl OfflineProtocol {
                     "Confirmed session missing from MLS storage, evicting cache"
                 );
                 self.confirmed_sessions.remove(recipient);
-                let state = self.establishment_state(recipient)
+                let state = self
+                    .establishment_state(recipient)
                     .unwrap_or(crate::EstablishmentState::NoKeyPackage);
                 return Err(Error::SessionNotReady(state));
             }

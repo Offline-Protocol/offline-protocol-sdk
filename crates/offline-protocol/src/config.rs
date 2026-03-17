@@ -6,19 +6,14 @@ use offline_protocol_router::{DorsConfig, PathConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
 
 /// Overflow policy for bounded pending encrypted message queues.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverflowPolicy {
     /// Evict the oldest queued message to make room for the new message.
+    #[default]
     DropOldest,
     /// Drop the newly received message when capacity is reached.
     DropNewest,
-}
-
-impl Default for OverflowPolicy {
-    fn default() -> Self {
-        Self::DropOldest
-    }
 }
 
 /// Configuration for inbound encrypted messages received before session readiness.
@@ -100,6 +95,20 @@ pub struct SecurityConfig {
     /// (`transport_peer_id` is `None`) are rejected. When `false` (default),
     /// missing transport identity emits a `SecurityWarning` but allows the
     /// message through (best-effort / fail-open).
+    ///
+    /// # Security implications of the default (`false`)
+    ///
+    /// With fail-open behavior, an attacker who can inject messages into the
+    /// transport layer (e.g., by compromising a relay server or being in BLE
+    /// range) can send spoofed control messages with a forged `sender` field.
+    /// Ed25519 control-message signing (TOFU) mitigates this for peers whose
+    /// keys have already been pinned, but the first contact with any peer is
+    /// vulnerable to man-in-the-middle if the transport identity is absent.
+    ///
+    /// Set to `true` in production deployments where all transports reliably
+    /// provide peer identity (authenticated WebSocket, bonded BLE devices).
+    /// Leave as `false` during development or when using relay-based mesh
+    /// routing where forwarded messages legitimately lack transport identity.
     pub require_transport_identity: bool,
 }
 

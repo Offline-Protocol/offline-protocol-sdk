@@ -75,3 +75,9 @@ pub const INTERNET_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// Timeout for pending Internet send confirmations in seconds.
 /// Messages awaiting platform confirmation beyond this duration are treated as failed.
 pub const INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 15;
+
+// Transport-wide Constants
+/// Default maximum message size in bytes (1 MB).
+/// Applied at the transport layer before JSON deserialization to prevent
+/// memory exhaustion from oversized payloads.
+pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 1_048_576;

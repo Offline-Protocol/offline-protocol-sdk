@@ -2637,7 +2637,11 @@ fn test_externally_deleted_confirmed_session_queues_message() {
         None::<MessagePriority>,
         None::<String>,
     );
-    assert!(result.is_ok(), "Message should be queued, not error: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Message should be queued, not error: {:?}",
+        result
+    );
     assert_eq!(transport_handle.sent_messages().len(), 0);
     assert_eq!(
         protocol
@@ -8291,4 +8295,79 @@ fn test_tofu_restore_truncation_deterministic_on_equal_timestamps() {
         keys_a, keys_b,
         "Truncation should be deterministic when timestamps are equal"
     );
+}
+
+#[test]
+fn test_reset_tofu_for_peer_removes_pinned_key() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // Pin a key for "alice"
+    protocol.known_peer_public_keys.insert(
+        "alice".to_string(),
+        TofuEntry {
+            public_key: vec![1u8; 32],
+            last_seen_ms: 1000,
+        },
+    );
+    assert!(protocol.known_peer_public_keys.contains_key("alice"));
+
+    // Reset should succeed and return true
+    let removed = protocol.reset_tofu_for_peer("alice");
+    assert!(removed);
+    assert!(!protocol.known_peer_public_keys.contains_key("alice"));
+}
+
+#[test]
+fn test_reset_tofu_for_peer_unknown_peer_is_idempotent() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // Resetting a peer that was never pinned should return false, not error
+    let removed = protocol.reset_tofu_for_peer("nonexistent");
+    assert!(!removed);
+}
+
+#[test]
+fn test_reset_tofu_for_peer_double_reset_is_idempotent() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    protocol.known_peer_public_keys.insert(
+        "alice".to_string(),
+        TofuEntry {
+            public_key: vec![1u8; 32],
+            last_seen_ms: 1000,
+        },
+    );
+
+    assert!(protocol.reset_tofu_for_peer("alice"));
+    // Second reset on same peer should return false (already removed)
+    assert!(!protocol.reset_tofu_for_peer("alice"));
+}
+
+#[test]
+fn test_reset_tofu_for_peer_allows_repinning() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let old_key = vec![1u8; 32];
+    protocol.known_peer_public_keys.insert(
+        "alice".to_string(),
+        TofuEntry {
+            public_key: old_key.clone(),
+            last_seen_ms: 1000,
+        },
+    );
+
+    // Reset the key
+    assert!(protocol.reset_tofu_for_peer("alice"));
+
+    // Simulate re-pinning with a new key
+    let new_key = vec![2u8; 32];
+    protocol.known_peer_public_keys.insert(
+        "alice".to_string(),
+        TofuEntry {
+            public_key: new_key.clone(),
+            last_seen_ms: 2000,
+        },
+    );
+
+    assert_eq!(protocol.known_peer_public_keys["alice"].public_key, new_key);
 }

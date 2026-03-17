@@ -9,7 +9,8 @@
 
 use crate::constants::{
     BLE_FRAGMENT_TIMEOUT_SECS, BLE_MAX_FRAGMENT_ASSEMBLIES, BLE_MAX_FRAGMENT_COUNT,
-    BLE_MAX_FRAGMENT_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC, FRAGMENT_VERSION,
+    BLE_MAX_FRAGMENT_SIZE, DEFAULT_MAX_MESSAGE_SIZE, FRAGMENT_HEADER_FIXED, FRAGMENT_MAGIC,
+    FRAGMENT_VERSION,
 };
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
@@ -405,6 +406,12 @@ impl BleTransport {
         let fragment = decode_fragment(fragment_data)?;
 
         if fragment.total_fragments == 1 {
+            if fragment.data.len() > DEFAULT_MAX_MESSAGE_SIZE {
+                return Err(crate::Error::MessageTooLarge(
+                    fragment.data.len(),
+                    DEFAULT_MAX_MESSAGE_SIZE,
+                ));
+            }
             return Ok(Some(self.deserialize_message(&fragment.data)?));
         }
 
@@ -486,6 +493,13 @@ impl BleTransport {
         }
 
         if let Some(payload) = completed_payload {
+            if payload.len() > DEFAULT_MAX_MESSAGE_SIZE {
+                return Err(crate::Error::MessageTooLarge(
+                    payload.len(),
+                    DEFAULT_MAX_MESSAGE_SIZE,
+                ));
+            }
+
             let start = assembly_started_at.unwrap_or_else(SystemTime::now);
             let latency = SystemTime::now()
                 .duration_since(start)
@@ -1130,5 +1144,38 @@ mod tests {
         let transport = BleTransportBuilder::new("my-device").build();
         assert_eq!(transport.device_id(), "my-device");
         assert_eq!(transport.transport_type(), TransportType::BLE);
+    }
+
+    #[test]
+    fn test_ble_reassembled_payload_rejects_oversized() {
+        let transport = BleTransport::new("test-device");
+        // Split an oversized payload across many fragments so each individual
+        // fragment's data_len fits in a u16 but the reassembled total exceeds
+        // DEFAULT_MAX_MESSAGE_SIZE.
+        let chunk_size: usize = 60_000; // well under u16::MAX
+        let num_fragments = (DEFAULT_MAX_MESSAGE_SIZE / chunk_size) + 2; // guarantees total > limit
+
+        for i in 0..num_fragments {
+            let frag = encode_fragment(
+                b"big",
+                i as u16,
+                num_fragments as u16,
+                &vec![0xAA; chunk_size],
+            )
+            .unwrap();
+
+            let result = transport.process_fragment(&frag);
+            if i < num_fragments - 1 {
+                // Incomplete — should be Ok(None)
+                assert!(result.unwrap().is_none());
+            } else {
+                // Final fragment completes assembly — must reject as too large
+                assert!(result.is_err());
+                assert!(matches!(
+                    result.unwrap_err(),
+                    crate::Error::MessageTooLarge(_, _)
+                ));
+            }
+        }
     }
 }

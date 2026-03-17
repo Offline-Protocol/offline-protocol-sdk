@@ -112,6 +112,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install git-cliff
+        run: cargo install git-cliff --locked
+
+      - name: Generate release notes
+        run: git-cliff --latest --strip header -o RELEASE_NOTES.md
 
       - name: Download iOS Artifacts
         uses: actions/download-artifact@v4
@@ -160,7 +171,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           draft: false
           prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
         env:

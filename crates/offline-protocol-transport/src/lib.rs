@@ -18,6 +18,7 @@ pub mod types;
 pub mod wifi_direct;
 
 pub use ble::{BleTransport, BleTransportBuilder, PeerDevice};
+pub use constants::DEFAULT_MAX_MESSAGE_SIZE;
 pub use error::{Error, Result};
 pub use internet::{InternetConfig, InternetTransport};
 pub use traits::{Transport, TransportStatus};
