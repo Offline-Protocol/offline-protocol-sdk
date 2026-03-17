@@ -23,7 +23,22 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Returns true when persisted state marks this peer session as confirmed.
+    ///
+    /// Uses the in-memory `confirmed_sessions` cache as a fast path to avoid
+    /// hitting persistent storage on every message send. The cache is populated
+    /// when sessions are confirmed and cleared when sessions are invalidated.
     pub(super) fn is_session_confirmed(&mut self, peer_id: &str) -> Result<bool> {
+        // Fast path: check in-memory cache first to avoid storage I/O on the
+        // hot send path. The cache is kept in sync by confirm_session_state()
+        // and all invalidation paths (blocking, stale cleanup, etc.).
+        // Still verify the MLS session exists (cheap in-memory check via RwLock)
+        // to detect stale state from e.g. storage being wiped externally.
+        if self.confirmed_sessions.contains(peer_id) && self.has_mls_session(peer_id)? {
+            return Ok(true);
+        }
+        // If peer was in the cache but MLS session is gone, fall through to the
+        // storage path which performs full stale-state cleanup.
+
         let persisted = self
             .load_session_state_entry(peer_id)?
             .unwrap_or(SessionState::Pending);

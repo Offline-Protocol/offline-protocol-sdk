@@ -1719,7 +1719,7 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
-    pub(super) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
+    pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
 
         let key_pkg = {
