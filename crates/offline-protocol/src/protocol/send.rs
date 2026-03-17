@@ -490,16 +490,17 @@ impl OfflineProtocol {
         let encrypted = match encrypt_result {
             Ok(enc) => enc,
             Err(offline_protocol_mls::MlsError::SessionNotFound(_)) => {
-                // Session was deleted externally — evict stale cache entry so
-                // the next call falls through to the full session check path.
+                // Session was deleted externally — evict stale cache entry and
+                // return SessionNotReady so the send pipeline can queue the
+                // message (when store_pending is enabled) rather than dropping it.
                 warn!(
                     recipient = %recipient,
                     "Confirmed session missing from MLS storage, evicting cache"
                 );
                 self.confirmed_sessions.remove(recipient);
-                return Err(Error::EncryptFailed(
-                    "confirmed session no longer exists in MLS storage".to_string(),
-                ));
+                let state = self.establishment_state(recipient)
+                    .unwrap_or(crate::EstablishmentState::NoKeyPackage);
+                return Err(Error::SessionNotReady(state));
             }
             Err(e) => {
                 // Transient error (crypto, storage I/O, etc.) — do NOT evict

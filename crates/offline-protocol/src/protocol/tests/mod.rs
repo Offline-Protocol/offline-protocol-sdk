@@ -2524,10 +2524,10 @@ fn test_is_session_confirmed_trusts_cache_and_encrypt_evicts_stale() {
     assert!(protocol.confirmed_sessions.contains("bob"));
 
     // But encryption will fail because there's no actual MLS session,
-    // which evicts the cache entry.
+    // which evicts the cache entry and returns SessionNotReady (queueable).
     let mls = protocol.mls_manager.as_ref().unwrap().clone();
     let result = protocol.encrypt_confirmed_session(&mls, "bob", "test");
-    assert!(result.is_err());
+    assert!(matches!(result, Err(Error::SessionNotReady(_))));
     assert!(!protocol.confirmed_sessions.contains("bob"));
 
     // After cache eviction, is_session_confirmed falls through to storage.
@@ -2576,13 +2576,79 @@ fn test_encrypt_confirmed_session_transient_error_preserves_cache() {
         manager.delete_session("bob").unwrap();
     }
 
-    // Encrypt fails with SessionNotFound — cache should be evicted
+    // Encrypt fails with SessionNotReady (queueable) — cache should be evicted
     let result2 = protocol.encrypt_confirmed_session(&mls, "bob", "hello again");
-    assert!(result2.is_err());
+    assert!(matches!(result2, Err(Error::SessionNotReady(_))));
     assert!(
         !protocol.confirmed_sessions.contains("bob"),
         "SessionNotFound must evict the cache"
     );
+}
+
+#[test]
+fn test_externally_deleted_confirmed_session_queues_message() {
+    // When a confirmed session is externally deleted (e.g., storage corruption),
+    // send_message should queue the message (via SessionNotReady) rather than
+    // dropping it with a terminal EncryptFailed error.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let transport_handle = mock_transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    // Create a real MLS session and confirm it
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::mls::MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.generate_key_package().unwrap();
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol.confirm_session_state("bob", "test_setup").unwrap();
+    assert!(protocol.confirmed_sessions.contains("bob"));
+
+    // Externally delete the MLS session (simulating storage corruption)
+    {
+        let mls = protocol.mls_manager.as_ref().unwrap().clone();
+        let manager = mls.read().unwrap();
+        manager.delete_session("bob").unwrap();
+    }
+
+    // Send a message — should be queued (not dropped), because the
+    // SessionNotReady error from encrypt_confirmed_session is queueable.
+    let result = protocol.send_message(
+        "bob",
+        "should be queued",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    assert!(result.is_ok(), "Message should be queued, not error: {:?}", result);
+    assert_eq!(transport_handle.sent_messages().len(), 0);
+    assert_eq!(
+        protocol
+            .pending_encrypted_messages
+            .get("bob")
+            .map_or(0, Vec::len),
+        1,
+        "Message should be in the pending queue"
+    );
+    // Cache should be evicted so future sends go through the full path
+    assert!(!protocol.confirmed_sessions.contains("bob"));
 }
 
 #[test]

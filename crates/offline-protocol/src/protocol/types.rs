@@ -95,9 +95,15 @@ pub(crate) struct KeyPackagePayload {
     /// backward compatibility with old nodes that may still send it.
     #[serde(default)]
     pub(crate) timestamp_ms: u64,
-    /// When `true`, the sender has reset their MLS session state (e.g. after
-    /// unblocking) and the receiver should discard any existing session for
-    /// this peer before establishing a new one.
+    /// When `true`, the sender has reset their MLS session state and the
+    /// receiver should discard any existing session for this peer before
+    /// establishing a new one.
+    ///
+    /// Primary use-case: post-unblock session convergence. When Alice unblocks
+    /// Bob, Alice's side deletes her MLS session and sends a fresh key package
+    /// with `session_reset: true`. Bob deletes his now-orphaned session and
+    /// auto-establishes a new one from Alice's key package, so both sides
+    /// converge on a single fresh MLS group.
     #[serde(default)]
     pub(crate) session_reset: bool,
 }
