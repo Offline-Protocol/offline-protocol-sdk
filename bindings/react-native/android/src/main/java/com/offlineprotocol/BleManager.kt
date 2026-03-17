@@ -265,7 +265,7 @@ class BleManager(
     
     // Track outbound fragments with timestamps for timeout handling
     private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
-    private val pendingOutboundFragments = mutableMapOf<String, MutableList<OutboundFragment>>()
+    private val pendingOutboundFragments = mutableMapOf<String, ArrayDeque<OutboundFragment>>()
     private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
     private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
@@ -1805,11 +1805,11 @@ class BleManager(
             }
             
             // Update queue with only valid fragments (remove expired ones)
-            val mutableQueue = validFragments.toMutableList()
+            val mutableQueue = ArrayDeque(validFragments)
             if (mutableQueue.size < queue.size) {
                 pendingOutboundFragments[recipientId] = mutableQueue
             }
-            
+
             // Try to send each fragment
             val iterator = mutableQueue.iterator()
             while (iterator.hasNext()) {
@@ -1834,11 +1834,11 @@ class BleManager(
     }
 
     private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
-        val queue = pendingOutboundFragments.getOrPut(recipientId) { mutableListOf() }
-        queue.add(OutboundFragment(data, System.currentTimeMillis()))
+        val queue = pendingOutboundFragments.getOrPut(recipientId) { ArrayDeque() }
+        queue.addLast(OutboundFragment(data, System.currentTimeMillis()))
         // Drop oldest fragment if the queue exceeds the per-peer cap
         if (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
-            queue.removeAt(0)
+            queue.removeFirst()
             Log.w(TAG, "Pending outbound fragment queue capped for $recipientId, dropping oldest (max=$MAX_PENDING_FRAGMENTS_PER_PEER)")
         }
     }
