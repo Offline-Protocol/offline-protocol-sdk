@@ -265,8 +265,9 @@ class BleManager(
     
     // Track outbound fragments with timestamps for timeout handling
     private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
-    private val pendingOutboundFragments = mutableMapOf<String, MutableList<OutboundFragment>>()
+    private val pendingOutboundFragments = mutableMapOf<String, ArrayDeque<OutboundFragment>>()
     private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
+    private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
     private var pendingAdvertiseRestart: Runnable? = null
     private var lastAdvertiseRestartAt: Long = 0L
@@ -1675,6 +1676,7 @@ class BleManager(
 
             var consecutiveSkips = 0
             val maxConsecutiveSkips = 5
+            val reconnectAttempted = mutableSetOf<String>()
 
             while (true) {
                 val fragment = try {
@@ -1687,8 +1689,21 @@ class BleManager(
                 val recipientId = fragment.recipientId
                 val data = fragment.data.map { it.toByte() }.toByteArray()
 
-                val hasConnection = resolveTargetAddress(recipientId)?.let { connections.getGatt(it) } != null
+                val address = resolveTargetAddress(recipientId)
+                val hasConnection = address?.let { connections.getGatt(it) } != null
                 if (!hasConnection) {
+                    enqueuePendingOutboundFragment(recipientId, data)
+                    // Proactively attempt reconnection if we know the address (once per peer per drain)
+                    if (address != null && reconnectAttempted.add(address)) {
+                        bluetoothAdapter?.let { adapter ->
+                            try {
+                                val device = adapter.getRemoteDevice(address)
+                                connectToDevice(device)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error attempting reconnection for $recipientId during fragment drain", e)
+                            }
+                        }
+                    }
                     consecutiveSkips++
                     if (consecutiveSkips >= maxConsecutiveSkips) {
                         break
@@ -1790,11 +1805,11 @@ class BleManager(
             }
             
             // Update queue with only valid fragments (remove expired ones)
-            val mutableQueue = validFragments.toMutableList()
+            val mutableQueue = ArrayDeque(validFragments)
             if (mutableQueue.size < queue.size) {
                 pendingOutboundFragments[recipientId] = mutableQueue
             }
-            
+
             // Try to send each fragment
             val iterator = mutableQueue.iterator()
             while (iterator.hasNext()) {
@@ -1819,8 +1834,13 @@ class BleManager(
     }
 
     private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
-        val queue = pendingOutboundFragments.getOrPut(recipientId) { mutableListOf() }
-        queue.add(OutboundFragment(data, System.currentTimeMillis()))
+        val queue = pendingOutboundFragments.getOrPut(recipientId) { ArrayDeque() }
+        queue.addLast(OutboundFragment(data, System.currentTimeMillis()))
+        // Drop oldest fragment if the queue exceeds the per-peer cap
+        if (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
+            queue.removeFirst()
+            Log.w(TAG, "Pending outbound fragment queue capped for $recipientId, dropping oldest (max=$MAX_PENDING_FRAGMENTS_PER_PEER)")
+        }
     }
 
     private fun resolveTargetAddress(recipientId: String): String? {
