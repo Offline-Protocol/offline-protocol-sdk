@@ -1836,9 +1836,10 @@ class BleManager(
     private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
         val queue = pendingOutboundFragments.getOrPut(recipientId) { mutableListOf() }
         queue.add(OutboundFragment(data, System.currentTimeMillis()))
-        // Drop oldest fragments if the queue exceeds the per-peer cap
-        while (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
+        // Drop oldest fragment if the queue exceeds the per-peer cap
+        if (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
             queue.removeAt(0)
+            Log.w(TAG, "Pending outbound fragment queue capped for $recipientId, dropping oldest (max=$MAX_PENDING_FRAGMENTS_PER_PEER)")
         }
     }
 

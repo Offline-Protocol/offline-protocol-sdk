@@ -1237,6 +1237,8 @@ public class BleManager: NSObject, TransportManager {
         if queue.count > MAX_PENDING_FRAGMENTS_PER_PEER {
             let overflow = queue.count - MAX_PENDING_FRAGMENTS_PER_PEER
             queue.removeFirst(overflow)
+            emitDiagnostic("warning", "Pending outbound fragment queue capped, dropping oldest",
+                           context: ["recipientId": recipientId, "dropped": overflow, "max": MAX_PENDING_FRAGMENTS_PER_PEER])
         }
         pendingOutboundFragments[recipientId] = queue
     }
