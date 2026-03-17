@@ -22,6 +22,16 @@ pub(crate) const WELCOME_LIFECYCLE_TTL_SECS: i64 = 300;
 pub(crate) const WELCOME_RETRY_JITTER_RATIO: f64 = 0.2;
 /// Timeout waiting for explicit internet send confirmation for welcome.
 pub(crate) const WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS: i64 = 10;
+/// Minimum interval between session reconciliation scans (list_sessions I/O).
+/// Keeps the expensive Keychain/Keystore I/O out of the hot path so that
+/// sendMessage() is not blocked by Mutex contention on every process tick.
+pub(crate) const RECONCILIATION_THROTTLE_MS: u64 = 2_000;
+/// Lamport clock ticks between storage persistence writes. Avoids a
+/// Keychain/Keystore write on every sent and received message. On crash
+/// recovery, at most this many ticks are lost, which is safe — the clock
+/// is only used for causal ordering and the gap is absorbed on the next
+/// merge with any peer.
+pub(crate) const LAMPORT_PERSIST_INTERVAL: u64 = 64;
 pub(crate) const MEDIA_TRANSFER_STALE_TIMEOUT_SECS: u64 = 300;
 /// Maximum number of tracked known peers for service discovery.
 pub(crate) const MAX_KNOWN_PEERS: usize = 1000;

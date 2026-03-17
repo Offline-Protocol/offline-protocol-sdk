@@ -156,6 +156,27 @@ pub struct OfflineProtocol {
     /// Set of blocked user IDs. Messages from blocked users are silently
     /// dropped (no ACK, no event). Persisted via `MlsStorage`.
     blocked_users: HashSet<String>,
+
+    /// Timestamp of the last `kick_pending_session_reconciliation` execution.
+    /// Used to throttle reconciliation to avoid expensive storage I/O
+    /// (list_sessions → Keychain/Keystore) on every process tick / receive poll.
+    last_reconciliation_at: Option<Instant>,
+
+    /// The Lamport clock value at the time of the last storage write.
+    /// Used to debounce `persist_lamport_clock()` — only write when the
+    /// in-memory value has advanced past this by `LAMPORT_PERSIST_INTERVAL`
+    /// ticks. On crash, at most `LAMPORT_PERSIST_INTERVAL` ticks are lost,
+    /// which is harmless for a logical clock (the gap is absorbed by the
+    /// next merge with any peer).
+    last_persisted_lamport: u64,
+}
+
+impl Drop for OfflineProtocol {
+    fn drop(&mut self) {
+        // Flush debounced Lamport clock so no ticks are lost when the
+        // protocol is dropped without an explicit stop() call.
+        self.flush_lamport_clock();
+    }
 }
 
 impl OfflineProtocol {
@@ -214,6 +235,8 @@ impl OfflineProtocol {
             group_mesh: crate::group_mesh::GroupMeshState::default(),
             known_peer_public_keys: HashMap::new(),
             blocked_users: HashSet::new(),
+            last_reconciliation_at: None,
+            last_persisted_lamport: 0,
             config,
         })
     }
@@ -368,8 +391,9 @@ impl OfflineProtocol {
             return Ok(()); // Already stopped
         }
 
-        // Stop all transports
+        // Flush debounced Lamport clock before stopping so no ticks are lost.
         drop(state);
+        self.flush_lamport_clock();
         self.transport_manager.stop()?;
         let mut state = lock_shared_state(&self.shared_state)?;
 
@@ -380,6 +404,7 @@ impl OfflineProtocol {
 
     /// Pauses the protocol (for background mode).
     pub fn pause(&mut self) -> Result<()> {
+        self.flush_lamport_clock();
         let mut state = lock_shared_state(&self.shared_state)?;
 
         if state.state != ProtocolState::Running {
@@ -902,8 +927,12 @@ impl OfflineProtocol {
         self.process_retry_queue()?;
         self.process_welcome_retry_queue()?;
         self.process_timed_out_acks()?;
-        self.retry_pending_session_confirmations();
-        self.kick_pending_session_reconciliation("process_tick");
+
+        // Throttle session reconciliation to avoid expensive storage I/O
+        // (list_sessions → Keychain/Keystore) on every tick. Only run when
+        // there's pending work AND enough time has elapsed since the last run.
+        self.run_throttled_reconciliation("process_tick");
+
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.pump_media_transfers();
         self.cleanup_expired_entries();

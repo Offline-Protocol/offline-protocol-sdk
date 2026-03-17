@@ -3,8 +3,8 @@
 use super::{
     internal_prefixes, lock_shared_state, OfflineProtocol, SessionState, WelcomeDeliveryState,
     WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS,
-    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS, WELCOME_RETRY_BATCH_SIZE,
-    WELCOME_RETRY_JITTER_RATIO,
+    RECONCILIATION_THROTTLE_MS, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
+    WELCOME_RETRY_BATCH_SIZE, WELCOME_RETRY_JITTER_RATIO,
 };
 use crate::mls_observability::MlsOperationContext;
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
@@ -15,6 +15,7 @@ use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, info, warn};
 
 impl OfflineProtocol {
@@ -28,16 +29,15 @@ impl OfflineProtocol {
     /// hitting persistent storage on every message send. The cache is populated
     /// when sessions are confirmed and cleared when sessions are invalidated.
     pub(super) fn is_session_confirmed(&mut self, peer_id: &str) -> Result<bool> {
-        // Fast path: check in-memory cache first to avoid storage I/O on the
-        // hot send path. The cache is kept in sync by confirm_session_state()
-        // and all invalidation paths (blocking, stale cleanup, etc.).
-        // Still verify the MLS session exists (cheap in-memory check via RwLock)
-        // to detect stale state from e.g. storage being wiped externally.
-        if self.confirmed_sessions.contains(peer_id) && self.has_mls_session(peer_id)? {
+        // Fast path: check in-memory cache only — no I/O. The cache is kept in
+        // sync by confirm_session_state() and all invalidation paths (blocking,
+        // stale cleanup, etc.). We deliberately skip the has_mls_session() guard
+        // here because it calls load_group() which hits MlsStorage (10-100ms on
+        // mobile Keychain/Keystore). If the session was wiped externally, the
+        // encrypt call will fail and we handle it there.
+        if self.confirmed_sessions.contains(peer_id) {
             return Ok(true);
         }
-        // If peer was in the cache but MLS session is gone, fall through to the
-        // storage path which performs full stale-state cleanup.
 
         let persisted = self
             .load_session_state_entry(peer_id)?
@@ -320,6 +320,37 @@ impl OfflineProtocol {
                 );
             }
         }
+    }
+
+    /// Throttled wrapper around session reconciliation. Skips the expensive
+    /// `list_sessions()` storage I/O when there is no pending work or when the
+    /// last scan ran recently (within `RECONCILIATION_THROTTLE_MS`).
+    ///
+    /// This is the entry-point called from `process()` and `receive_message()`
+    /// on every tick/poll. Without throttling, the storage call holds the
+    /// protocol Mutex and blocks `sendMessage()` on mobile platforms.
+    pub(super) fn run_throttled_reconciliation(&mut self, source_event: &str) {
+        // Fast path: nothing pending → skip entirely (no storage I/O)
+        let has_pending_work = !self.pending_encrypted_messages.is_empty()
+            || !self.confirmation_probe_due_at.is_empty()
+            || !self.confirmation_retry_due_at.is_empty();
+
+        if !has_pending_work {
+            return;
+        }
+
+        // Throttle: only run the full scan every RECONCILIATION_THROTTLE_MS
+        let now = Instant::now();
+        let throttle = StdDuration::from_millis(RECONCILIATION_THROTTLE_MS);
+        if let Some(last) = self.last_reconciliation_at {
+            if now.duration_since(last) < throttle {
+                return;
+            }
+        }
+
+        self.last_reconciliation_at = Some(now);
+        self.retry_pending_session_confirmations();
+        self.kick_pending_session_reconciliation(source_event);
     }
 
     pub(super) fn kick_pending_session_reconciliation(&mut self, source_event: &str) {
