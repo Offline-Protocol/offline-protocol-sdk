@@ -76,7 +76,7 @@ impl OfflineProtocol {
                         self.persist_lamport_clock();
 
                         if let Ok(mut state) = lock_shared_state(&self.shared_state) {
-                            state.received_messages.push(decrypted_msg.clone());
+                            state.received_messages.push_back(decrypted_msg.clone());
                             let event = Event::MessageReceived {
                                 message_id: decrypted_msg.id.as_str().to_string(),
                                 sender: decrypted_msg.sender.as_str().to_string(),

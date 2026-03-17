@@ -282,8 +282,18 @@ impl Default for Timestamp {
 /// if message B was sent after receiving message A, then B's clock > A's clock.
 ///
 /// Use this — not wall-clock timestamps — for sorting messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct LamportClock(u64);
+
+impl<'de> serde::Deserialize<'de> for LamportClock {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = u64::deserialize(deserializer)?;
+        Ok(Self(raw.min(LAMPORT_CLOCK_MAX)))
+    }
+}
 
 /// Upper bound for accepted Lamport clock values.
 /// Rejects absurdly large values from malicious or buggy peers.

@@ -21,7 +21,7 @@ impl OfflineProtocol {
         let protocol_running = state.state == ProtocolState::Running;
 
         if !state.received_messages.is_empty() {
-            return Some(state.received_messages.remove(0));
+            return state.received_messages.pop_front();
         }
 
         drop(state);

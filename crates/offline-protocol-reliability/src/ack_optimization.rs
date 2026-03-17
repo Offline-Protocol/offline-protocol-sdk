@@ -257,24 +257,31 @@ impl AckOptimizer {
         }
 
         // Get pending ACKs for this destination
-        let acks = self.flush_pending_acks(message_destination)?;
+        let mut acks = self.flush_pending_acks(message_destination)?;
         if acks.is_empty() {
             return None;
         }
 
-        // Limit size for piggybacking
-        let limited_acks: Vec<_> = acks
-            .into_iter()
-            .take(self.estimate_piggyback_limit())
-            .collect();
+        // Limit size for piggybacking; return overflow back to the queue
+        let limit = self.estimate_piggyback_limit();
+        if acks.len() > limit {
+            let overflow = acks.split_off(limit);
+            self.pending_acks
+                .insert(message_destination.to_string(), overflow);
+            // Preserve pending_since so the overflow batch retains its age
+            // (it was already removed by flush_pending_acks; re-set to now
+            // so the overflow doesn't immediately time-out on the next tick).
+            self.pending_since
+                .insert(message_destination.to_string(), Utc::now());
+        }
 
-        if limited_acks.is_empty() {
+        if acks.is_empty() {
             return None;
         }
 
         Some(PiggybackAckData {
             destination: message_destination.to_string(),
-            acks: limited_acks,
+            acks,
             first_added_at: Utc::now(),
         })
     }

@@ -2,6 +2,7 @@
 
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 /// Mock transport for testing purposes.
@@ -12,7 +13,7 @@ pub struct MockTransport {
     transport_type: TransportType,
     status: Arc<Mutex<TransportStatus>>,
     sent_messages: Arc<Mutex<Vec<Message>>>,
-    receive_queue: Arc<Mutex<Vec<Message>>>,
+    receive_queue: Arc<Mutex<VecDeque<Message>>>,
     metrics: Arc<Mutex<TransportMetrics>>,
     /// When > 0, next send() calls fail this many times (for escalation/fallback tests).
     fail_next_sends: Arc<Mutex<usize>>,
@@ -33,7 +34,7 @@ impl MockTransport {
             transport_type,
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             sent_messages: Arc::new(Mutex::new(Vec::new())),
-            receive_queue: Arc::new(Mutex::new(Vec::new())),
+            receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             fail_next_sends: Arc::new(Mutex::new(0)),
         }
@@ -47,7 +48,7 @@ impl MockTransport {
     /// Adds a message to the receive queue for testing.
     pub fn queue_message(&self, message: Message) {
         let mut queue = self.receive_queue.lock().unwrap();
-        queue.push(message);
+        queue.push_back(message);
     }
 
     /// Adds a message to the receive queue with a transport-verified peer identity.
@@ -56,7 +57,7 @@ impl MockTransport {
             .set_transport_peer_id(peer_id)
             .expect("test must provide non-empty peer_id");
         let mut queue = self.receive_queue.lock().unwrap();
-        queue.push(message);
+        queue.push_back(message);
     }
 
     /// Returns all messages that were sent through this transport.
@@ -130,7 +131,7 @@ impl Transport for MockTransport {
 
     fn receive(&self) -> Result<Option<Message>> {
         let mut queue = self.receive_queue.lock().unwrap();
-        Ok(queue.pop())
+        Ok(queue.pop_front())
     }
 
     fn start(&mut self) -> Result<()> {

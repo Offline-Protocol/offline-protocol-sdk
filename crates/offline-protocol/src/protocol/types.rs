@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use offline_protocol_core::{ContentType, MediaMetadata, Message, MessageId, MessagePriority};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -367,7 +367,7 @@ pub(crate) struct SharedState {
     pub(crate) event_handlers: Vec<EventCallback>,
 
     /// Received messages queue.
-    pub(crate) received_messages: Vec<Message>,
+    pub(crate) received_messages: VecDeque<Message>,
 }
 
 impl SharedState {
@@ -375,7 +375,7 @@ impl SharedState {
         Self {
             state: ProtocolState::Stopped,
             event_handlers: Vec::new(),
-            received_messages: Vec::new(),
+            received_messages: VecDeque::new(),
         }
     }
 

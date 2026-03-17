@@ -124,6 +124,12 @@ impl FileChunk {
         buf
     }
 
+    /// Maximum allowed length for a string field (file_id, file_name, checksum)
+    /// in the binary wire format. Prevents allocation bombs from crafted payloads.
+    const MAX_STRING_FIELD_LEN: usize = 4096;
+    /// Maximum allowed chunk data length in the binary wire format.
+    const MAX_CHUNK_DATA_LEN: usize = 128 * 1024 * 1024; // 128 MB
+
     /// Deserializes from the compact binary format produced by `to_bytes`.
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
         let mut pos = 0;
@@ -156,10 +162,24 @@ impl FileChunk {
         };
 
         let file_id_len = read_u32(&mut pos)? as usize;
+        if file_id_len > Self::MAX_STRING_FIELD_LEN {
+            return Err(format!(
+                "file_id_len {} exceeds maximum {}",
+                file_id_len,
+                Self::MAX_STRING_FIELD_LEN
+            ));
+        }
         let file_id = String::from_utf8(read_bytes(&mut pos, file_id_len)?)
             .map_err(|e| format!("invalid file_id UTF-8: {}", e))?;
 
         let file_name_len = read_u32(&mut pos)? as usize;
+        if file_name_len > Self::MAX_STRING_FIELD_LEN {
+            return Err(format!(
+                "file_name_len {} exceeds maximum {}",
+                file_name_len,
+                Self::MAX_STRING_FIELD_LEN
+            ));
+        }
         let file_name = String::from_utf8(read_bytes(&mut pos, file_name_len)?)
             .map_err(|e| format!("invalid file_name UTF-8: {}", e))?;
 
@@ -168,9 +188,23 @@ impl FileChunk {
         let chunk_index = read_u32(&mut pos)?;
 
         let chunk_data_len = read_u32(&mut pos)? as usize;
+        if chunk_data_len > Self::MAX_CHUNK_DATA_LEN {
+            return Err(format!(
+                "chunk_data_len {} exceeds maximum {}",
+                chunk_data_len,
+                Self::MAX_CHUNK_DATA_LEN
+            ));
+        }
         let chunk_data = read_bytes(&mut pos, chunk_data_len)?;
 
         let checksum_len = read_u32(&mut pos)? as usize;
+        if checksum_len > Self::MAX_STRING_FIELD_LEN {
+            return Err(format!(
+                "checksum_len {} exceeds maximum {}",
+                checksum_len,
+                Self::MAX_STRING_FIELD_LEN
+            ));
+        }
         let file_checksum = String::from_utf8(read_bytes(&mut pos, checksum_len)?)
             .map_err(|e| format!("invalid checksum UTF-8: {}", e))?;
 
@@ -422,18 +456,31 @@ impl FileTransferManager {
 
     /// Finalizes a file transfer and returns the complete file data.
     ///
+    /// Verifies the SHA256 checksum of the reassembled file before returning.
+    ///
     /// # Arguments
     ///
     /// * `file_id` - File identifier
     ///
     /// # Returns
     ///
-    /// Returns `Some(Vec<u8>)` if file is complete, `None` otherwise.
+    /// Returns `Some(Vec<u8>)` if file is complete and checksum matches, `None` otherwise.
     pub fn finalize_file(&mut self, file_id: &str) -> Option<Vec<u8>> {
-        let file_data = self
-            .active_assemblies
-            .get(file_id)
-            .and_then(FileAssembly::reassemble)?;
+        let assembly = self.active_assemblies.get(file_id)?;
+        let file_data = assembly.reassemble()?;
+
+        // Verify checksum before returning
+        let actual_checksum = format!("{:x}", Sha256::digest(&file_data));
+        if actual_checksum != assembly.file_checksum {
+            tracing::warn!(
+                file_id = %file_id,
+                expected = %assembly.file_checksum,
+                actual = %actual_checksum,
+                "File checksum mismatch — corrupted or tampered transfer"
+            );
+            self.active_assemblies.remove(file_id);
+            return None;
+        }
 
         self.active_assemblies.remove(file_id);
         Some(file_data)

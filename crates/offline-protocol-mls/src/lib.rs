@@ -29,6 +29,7 @@
 //! let ciphertext = manager.encrypt_for_user("bob", b"Hello, Bob!")?;
 //! ```
 
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod error;
