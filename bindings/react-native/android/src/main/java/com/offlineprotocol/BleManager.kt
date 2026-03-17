@@ -1675,6 +1675,7 @@ class BleManager(
 
             var consecutiveSkips = 0
             val maxConsecutiveSkips = 5
+            val reconnectAttempted = mutableSetOf<String>()
 
             while (true) {
                 val fragment = try {
@@ -1691,8 +1692,8 @@ class BleManager(
                 val hasConnection = address?.let { connections.getGatt(it) } != null
                 if (!hasConnection) {
                     enqueuePendingOutboundFragment(recipientId, data)
-                    // Proactively attempt reconnection if we know the address
-                    if (address != null) {
+                    // Proactively attempt reconnection if we know the address (once per peer per drain)
+                    if (address != null && reconnectAttempted.add(address)) {
                         bluetoothAdapter?.let { adapter ->
                             try {
                                 val device = adapter.getRemoteDevice(address)
