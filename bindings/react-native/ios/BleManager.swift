@@ -1558,6 +1558,7 @@ public class BleManager: NSObject, TransportManager {
                             "messageContent": completedMessage,
                             "messageNumber": messageCount
                         ])
+                        self.learnRouteFromMessage(completedMessage, deliveredBy: deviceId, neighborUUID: centralId)
                     }
                     if messageCount > 0 {
                         print("[BleManager] ✅ Processed \(messageCount) complete message(s) from queued fragments")

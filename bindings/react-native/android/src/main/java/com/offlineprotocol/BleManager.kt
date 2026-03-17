@@ -2065,20 +2065,20 @@ class BleManager(
                 protocol.bleFragmentReceived(senderId, bytes)
                 Log.i(TAG, "✅ Fragment processed successfully for sender: $senderId")
                 
-                // Immediately check if this completed a message
-                val completedMessage = protocol.receiveMessage()
-                if (completedMessage != null) {
+                // Drain all completed messages (a fragment may complete multiple messages)
+                var completedMessage = protocol.receiveMessage()
+                if (completedMessage == null) {
+                    Log.d(TAG, "📦 Fragment processed, waiting for more fragments to complete message")
+                }
+                while (completedMessage != null) {
                     Log.i(TAG, "🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
                     Log.i(TAG, "📬 Received message: $completedMessage")
                     emitDiagnostic("info", "Complete message assembled from fragments", mapOf(
                         "senderId" to senderId,
                         "messageContent" to completedMessage
                     ))
-                    
-                    // Learn route from the message sender through the delivering neighbor
                     learnRouteFromMessage(completedMessage, senderId, address)
-                } else {
-                    Log.d(TAG, "📦 Fragment processed, waiting for more fragments to complete message")
+                    completedMessage = protocol.receiveMessage()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error processing fragment from $senderId: ${e.message}", e)
