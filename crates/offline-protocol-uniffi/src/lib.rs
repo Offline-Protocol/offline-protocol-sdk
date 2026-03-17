@@ -748,16 +748,11 @@ impl Default for EncryptionConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum OverflowPolicy {
+    #[default]
     DropOldest,
     DropNewest,
-}
-
-impl Default for OverflowPolicy {
-    fn default() -> Self {
-        Self::DropOldest
-    }
 }
 
 #[derive(Debug, Clone)]

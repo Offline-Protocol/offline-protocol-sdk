@@ -48,10 +48,11 @@ impl fmt::Display for MessageId {
 }
 
 /// The type of content carried in a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentType {
     /// Plain text message.
+    #[default]
     Text,
     /// Image attachment (JPEG, PNG, etc.).
     Image,
@@ -67,12 +68,6 @@ pub enum ContentType {
     File,
     /// Internal: a chunk belonging to a multi-part file transfer.
     FileChunk,
-}
-
-impl Default for ContentType {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 impl ContentType {
@@ -144,23 +139,20 @@ pub struct MediaMetadata {
 }
 
 /// Message priority levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum MessagePriority {
     /// Low priority - can be delayed or dropped under congestion.
     Low,
     /// Medium priority - default for most messages.
+    #[default]
     Medium,
     /// High priority - important messages that should be delivered quickly.
     High,
     /// Critical priority - emergency messages, highest delivery guarantee.
     Critical,
-}
-
-impl Default for MessagePriority {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 impl MessagePriority {

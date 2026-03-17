@@ -6,19 +6,14 @@ use offline_protocol_router::{DorsConfig, PathConfig, RelayConfig};
 use serde::{Deserialize, Serialize};
 
 /// Overflow policy for bounded pending encrypted message queues.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverflowPolicy {
     /// Evict the oldest queued message to make room for the new message.
+    #[default]
     DropOldest,
     /// Drop the newly received message when capacity is reached.
     DropNewest,
-}
-
-impl Default for OverflowPolicy {
-    fn default() -> Self {
-        Self::DropOldest
-    }
 }
 
 /// Configuration for inbound encrypted messages received before session readiness.
