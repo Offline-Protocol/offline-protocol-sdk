@@ -105,7 +105,7 @@ impl Eq for RetryEntry {}
 
 impl PartialEq for RetryEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.message.id == other.message.id
+        self.retry_at == other.retry_at && self.message.priority == other.message.priority
     }
 }
 
@@ -144,6 +144,11 @@ impl RetryQueue {
     pub fn enqueue(&mut self, message: Message, retry_count: u32) -> crate::Result<()> {
         if retry_count >= self.config.max_retries {
             return Err(crate::Error::MaxRetriesExceeded);
+        }
+
+        // Prevent duplicate entries for the same message
+        if self.index.contains_key(&message.id.as_str()) {
+            return Ok(());
         }
 
         // Calculate retry delay with exponential backoff
@@ -273,6 +278,7 @@ impl RetryQueue {
         RetryQueueStats {
             total_count: self.len(),
             ready_count,
+            critical_priority_count: priority_counts[&MessagePriority::Critical],
             high_priority_count: priority_counts[&MessagePriority::High],
             medium_priority_count: priority_counts[&MessagePriority::Medium],
             low_priority_count: priority_counts[&MessagePriority::Low],
@@ -307,6 +313,8 @@ pub struct RetryQueueStats {
     pub total_count: usize,
     /// Number of messages ready for retry.
     pub ready_count: usize,
+    /// Number of critical priority messages.
+    pub critical_priority_count: usize,
     /// Number of high priority messages.
     pub high_priority_count: usize,
     /// Number of medium priority messages.

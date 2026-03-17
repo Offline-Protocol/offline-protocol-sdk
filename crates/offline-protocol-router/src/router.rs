@@ -180,7 +180,15 @@ impl GradientRoutingTable {
                     })
                     .then_with(|| a.hop_count.cmp(&b.hop_count))
             });
-            routes.pop();
+            if let Some(evicted) = routes.pop() {
+                // Remove evicted route from reverse mapping
+                if let Some(dests) = self.neighbor_destinations.get_mut(&evicted.next_hop) {
+                    dests.retain(|d| d != destination);
+                    if dests.is_empty() {
+                        self.neighbor_destinations.remove(&evicted.next_hop);
+                    }
+                }
+            }
         }
 
         routes.push(RouteEntry {
@@ -191,11 +199,14 @@ impl GradientRoutingTable {
             sequence_number,
         });
 
-        // Update reverse mapping
-        self.neighbor_destinations
+        // Update reverse mapping (only add if not already present)
+        let dests = self
+            .neighbor_destinations
             .entry(next_hop.to_string())
-            .or_default()
-            .push(destination.to_string());
+            .or_default();
+        if !dests.contains(&destination.to_string()) {
+            dests.push(destination.to_string());
+        }
 
         // Enforce table size limit
         self.enforce_size_limit();
@@ -314,6 +325,13 @@ impl GradientRoutingTable {
                     routes.retain(|r| r.next_hop != next_hop);
                     if routes.is_empty() {
                         self.routes.remove(&dest);
+                    }
+                }
+                // Update reverse mapping
+                if let Some(dests) = self.neighbor_destinations.get_mut(&next_hop) {
+                    dests.retain(|d| d != &dest);
+                    if dests.is_empty() {
+                        self.neighbor_destinations.remove(&next_hop);
                     }
                 }
             } else {

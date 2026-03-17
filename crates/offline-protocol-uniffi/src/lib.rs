@@ -201,13 +201,13 @@ impl CoreMlsStorage for MlsStorageWrapper {
             .load(key_type.to_string(), key_id.to_string())
             .map_err(|e| match e {
                 MlsStorageError::StoreFailed => {
-                    CoreStorageError::LoadFailed("Storage failed".to_string())
+                    CoreStorageError::StoreFailed("Store failed".to_string())
                 }
                 MlsStorageError::LoadFailed => {
                     CoreStorageError::LoadFailed("Load failed".to_string())
                 }
                 MlsStorageError::DeleteFailed => {
-                    CoreStorageError::LoadFailed("Delete failed".to_string())
+                    CoreStorageError::DeleteFailed("Delete failed".to_string())
                 }
                 MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound(key_id.to_string()),
                 MlsStorageError::CorruptedData => {
@@ -248,13 +248,13 @@ impl CoreMlsStorage for MlsStorageWrapper {
             .list_keys(key_type.to_string())
             .map_err(|e| match e {
                 MlsStorageError::StoreFailed => {
-                    CoreStorageError::LoadFailed("Storage failed".to_string())
+                    CoreStorageError::StoreFailed("Store failed".to_string())
                 }
                 MlsStorageError::LoadFailed => {
                     CoreStorageError::LoadFailed("Load failed".to_string())
                 }
                 MlsStorageError::DeleteFailed => {
-                    CoreStorageError::LoadFailed("Delete failed".to_string())
+                    CoreStorageError::DeleteFailed("Delete failed".to_string())
                 }
                 MlsStorageError::KeyNotFound => CoreStorageError::KeyNotFound("".to_string()),
                 MlsStorageError::CorruptedData => {
@@ -970,8 +970,11 @@ impl OfflineProtocol {
         protocol.on_event(move |event| {
             // Convert event to JSON
             if let Ok(event_json) = event.to_json() {
-                // Call the event callback if set
-                if let Some(callback) = event_callback_clone.read().unwrap().as_ref() {
+                // Clone callback Arc outside the lock to avoid holding the
+                // RwLock during callback invocation (prevents deadlock if the
+                // callback re-enters the protocol).
+                let callback_arc = event_callback_clone.read().unwrap().as_ref().cloned();
+                if let Some(callback) = callback_arc {
                     callback.on_event(event_json.clone());
                 }
 

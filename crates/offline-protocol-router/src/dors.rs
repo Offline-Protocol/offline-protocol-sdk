@@ -688,7 +688,7 @@ impl TransportSelector {
 
         // Lower hop count = higher score
         // If message just started (hop_count = 0), give high score
-        if hop_count == 0 {
+        if hop_count == 0 || ttl == 0 {
             100.0
         } else {
             // Score decreases as hop count increases
