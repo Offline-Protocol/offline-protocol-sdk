@@ -745,6 +745,20 @@ pub enum Event {
         reason: String,
     },
 
+    /// A message was relayed (forwarded for a third party).
+    MessageRelayed {
+        /// ID of the relayed message.
+        message_id: String,
+        /// Original sender.
+        sender: String,
+        /// Intended recipient.
+        recipient: String,
+        /// Current hop count after increment.
+        hop_count: u8,
+        /// Remaining TTL after decrement.
+        remaining_ttl: u8,
+    },
+
     /// A user was blocked. Emitted for local UI notification only.
     UserBlocked {
         /// User ID that was blocked.
@@ -1391,6 +1405,23 @@ impl Event {
         Self::SecurityWarning { peer_id, reason }
     }
 
+    /// Creates a MessageRelayed event.
+    pub fn message_relayed(
+        message_id: String,
+        sender: String,
+        recipient: String,
+        hop_count: u8,
+        remaining_ttl: u8,
+    ) -> Self {
+        Self::MessageRelayed {
+            message_id,
+            sender,
+            recipient,
+            hop_count,
+            remaining_ttl,
+        }
+    }
+
     /// Creates a UserBlocked event.
     pub fn user_blocked(user_id: String) -> Self {
         Self::UserBlocked { user_id }
@@ -1993,6 +2024,20 @@ impl fmt::Debug for Event {
                 .debug_struct("SecurityWarning")
                 .field("peer_id", peer_id)
                 .field("reason", reason)
+                .finish(),
+            Self::MessageRelayed {
+                message_id,
+                sender: _,
+                recipient: _,
+                hop_count,
+                remaining_ttl,
+            } => f
+                .debug_struct("MessageRelayed")
+                .field("message_id", message_id)
+                .field("sender", &"[REDACTED]")
+                .field("recipient", &"[REDACTED]")
+                .field("hop_count", hop_count)
+                .field("remaining_ttl", remaining_ttl)
                 .finish(),
             Self::UserBlocked { user_id: _ } => f
                 .debug_struct("UserBlocked")

@@ -33,8 +33,9 @@ pub(super) const PENDING_COMMIT_TTL_SECS: u64 = 120;
 /// remove-commit when the original elected remover fails (30 seconds).
 pub(super) const LEAVE_ELECTION_TIMEOUT_SECS: u64 = 30;
 /// Delay after detecting a potential epoch fork before the leader issues a
-/// resync commit (10 seconds — gives time for buffered commits to drain).
-pub(super) const EPOCH_FORK_RESOLUTION_DELAY_SECS: u64 = 10;
+/// resync commit (30 seconds — gives time for buffered commits to drain and
+/// delayed commits to arrive, reducing false positive fork detections).
+pub(super) const EPOCH_FORK_RESOLUTION_DELAY_SECS: u64 = 30;
 /// Maximum number of tracked epoch fork states to prevent unbounded growth.
 pub(super) const MAX_EPOCH_FORK_ENTRIES: usize = 32;
 /// Maximum number of tracked pending leave elections to prevent unbounded growth.
@@ -1501,6 +1502,14 @@ impl OfflineProtocol {
             .contains_key(&TransportType::Internet)
     }
 
+    /// Reads the current MLS epoch for a group, if available.
+    fn read_current_epoch(&self, group_id: &str) -> Option<u64> {
+        let guard = self.read_mls_guard().ok()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let info = guard.get_group_info(&gid).ok()??;
+        Some(info.epoch)
+    }
+
     // ========================================================================
     // EPOCH FORK RESOLUTION
     // ========================================================================
@@ -1541,6 +1550,24 @@ impl OfflineProtocol {
             .collect();
 
         for fork in ready {
+            // Re-check: if the epoch has advanced since detection, the fork
+            // was a delayed commit, not a real fork — cancel it.
+            if let Some(detected_epoch) = fork.local_epoch {
+                let current_epoch = self.read_current_epoch(&fork.group_id);
+                if let Some(current) = current_epoch {
+                    if current > detected_epoch {
+                        debug!(
+                            group_id = %fork.group_id,
+                            detected_epoch,
+                            current_epoch = current,
+                            "Epoch fork auto-cancelled: epoch advanced since detection"
+                        );
+                        self.group_mesh.epoch_forks.remove(&fork.group_id);
+                        continue;
+                    }
+                }
+            }
+
             // Check if we're the leader for this group
             let members = self
                 .refresh_group_members(&fork.group_id)

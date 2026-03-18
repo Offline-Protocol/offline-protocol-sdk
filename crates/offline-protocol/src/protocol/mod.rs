@@ -48,7 +48,6 @@ pub struct OfflineProtocol {
     pub(crate) transport_manager: TransportManager,
 
     /// Path selector for routing (includes relay scoring logic).
-    #[allow(dead_code)]
     path_selector: PathSelector,
 
     /// ACK manager for tracking acknowledgments.
