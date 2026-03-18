@@ -320,6 +320,47 @@ export interface ProtocolConfig {
 export type TransportType = 'ble' | 'internet' | 'wifiDirect';
 
 /**
+ * Forwarding attribution (present when a message was forwarded).
+ *
+ * **Trust model:** This is a display-level hint, not a cryptographic proof.
+ * UI layers should not rely on it for access-control or security decisions.
+ */
+export interface ForwardInfo {
+  /** The original sender's user ID. */
+  original_sender: string;
+  /** The original message ID. */
+  original_message_id: string;
+  /** The original timestamp (wall-clock ms). */
+  original_timestamp: number;
+  /** Number of times this message has been forwarded. */
+  forward_count: number;
+}
+
+/**
+ * Parameters for forwarding a message to a new recipient
+ */
+export interface ForwardMessageParams {
+  /** The original message JSON (as received from the protocol) */
+  originalMessageJson: string;
+  /** New recipient's user ID */
+  newRecipient: string;
+  /** Message priority (optional, defaults to Medium) */
+  priority?: MessagePriority;
+}
+
+/**
+ * Parameters for forwarding a message to a group
+ */
+export interface ForwardMessageToGroupParams {
+  /** The original message JSON (as received from the protocol) */
+  originalMessageJson: string;
+  /** Group ID to forward to */
+  groupId: string;
+  /** Message priority (optional, defaults to Medium) */
+  priority?: MessagePriority;
+}
+
+/**
  * Parameters for sending a message
  */
 export interface SendMessageParams {
@@ -420,6 +461,8 @@ export interface MessageSentEvent extends BaseEvent {
   timestamp: number;
   /** Lamport logical clock value for causal ordering (0 for legacy messages). */
   lamport_clock: number;
+  /** Forwarding attribution (present when this is a forwarded message). */
+  forward_info?: ForwardInfo;
 }
 
 /**
@@ -450,6 +493,8 @@ export interface MessageReceivedEvent extends BaseEvent {
     height?: number;
     thumbnail_base64?: string;
   };
+  /** Forwarding attribution (present when this is a forwarded message). */
+  forward_info?: ForwardInfo;
 }
 
 /**
@@ -721,6 +766,8 @@ export interface GroupMessageReceivedEvent extends BaseEvent {
   timestamp: string;
   message_id: string;
   reply_to_msg?: string;
+  /** Forwarding attribution (present when this is a forwarded message). */
+  forward_info?: ForwardInfo;
 }
 
 /**

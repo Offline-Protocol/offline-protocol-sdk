@@ -902,19 +902,14 @@ impl OfflineProtocol {
                         }
                     };
 
-                    let mut message = self.create_message(
-                        recipient,
-                        final_content,
-                        Some(msg.priority),
-                        None,
-                    )?;
+                    let mut message =
+                        self.create_message(recipient, final_content, Some(msg.priority), None)?;
                     message.forwarded_from = msg.forwarded_from.clone();
                     message.content_type = msg.content_type;
                     message.media_metadata = msg.media_metadata.clone();
                     self.dispatch_prepared_message(message)
                 } else {
-                    let reply_to_str =
-                        msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
+                    let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
                     self.send_message(
                         recipient,
                         msg.content.clone(),

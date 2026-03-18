@@ -625,6 +625,31 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun forwardMessage(originalMessageJson: String, newRecipient: String, priority: Int?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val msgPriority = priority?.let {
+                when (it) {
+                    0 -> MessagePriority.LOW
+                    1 -> MessagePriority.MEDIUM
+                    2 -> MessagePriority.HIGH
+                    3 -> MessagePriority.CRITICAL
+                    else -> null
+                }
+            }
+            val messageId = proto.forwardMessage(originalMessageJson, newRecipient, msgPriority)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            val mapped = mapProtocolBridgeError(e)
+            if (mapped != null) {
+                promise.reject(mapped.code, mapped.message, e)
+            } else {
+                promise.reject("ERROR_FORWARD", "Failed to forward message: ${e.message}", e)
+            }
+        }
+    }
+
+    @ReactMethod
     fun sendConnectionRequest(recipient: String, senderName: String, keyPackage: ReadableArray?, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
@@ -2854,6 +2879,31 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(result)
         } catch (e: Exception) {
             promise.reject("ERROR_MESH_GROUP", "Failed to send mesh group message: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Forward a message to all members of a mesh group with forwarding attribution.
+     */
+    @ReactMethod
+    fun meshForwardMessageToGroup(originalMessageJson: String, groupId: String, priority: String?, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val msgPriority = priority?.let {
+                when (it.lowercase()) {
+                    "low" -> MessagePriority.LOW
+                    "medium" -> MessagePriority.MEDIUM
+                    "high" -> MessagePriority.HIGH
+                    "critical" -> MessagePriority.CRITICAL
+                    else -> null
+                }
+            }
+            val messageIds = proto.forwardMessageToGroup(originalMessageJson, groupId, msgPriority)
+            val result = Arguments.createArray()
+            messageIds.forEach { result.pushString(it) }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to forward message to group: ${e.message}", e)
         }
     }
 

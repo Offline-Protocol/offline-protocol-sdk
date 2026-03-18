@@ -716,6 +716,40 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Forwards a message to a new recipient with original sender attribution.
+    @objc func forwardMessage(_ originalMessageJson: String,
+                              newRecipient: String,
+                              priority: NSNumber?,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+
+            var msgPriority: MessagePriority? = nil
+            if let p = priority {
+                switch p.intValue {
+                case 0: msgPriority = .low
+                case 1: msgPriority = .medium
+                case 2: msgPriority = .high
+                case 3: msgPriority = .critical
+                default: break
+                }
+            }
+
+            let messageId = try proto.forwardMessage(originalMessageJson: originalMessageJson, newRecipient: newRecipient, priority: msgPriority)
+            resolver(messageId)
+        } catch {
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_FORWARD", "Failed to forward message: \(error.localizedDescription)", error)
+            }
+        }
+    }
+
     @objc func sendConnectionRequest(_ recipient: String,
                                      senderName: String,
                                      keyPackage: [NSNumber]?,
@@ -2988,6 +3022,40 @@ class OfflineProtocolModule: RCTEventEmitter {
             resolver(messageIds)
         } catch {
             rejecter("ERROR_MESH_GROUP", "Failed to send mesh group message: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Forward a message to all members of a group with forwarding attribution.
+    @objc func meshForwardMessageToGroup(_ originalMessageJson: String,
+                                         groupId: String,
+                                         priority: String?,
+                                         resolver: @escaping RCTPromiseResolveBlock,
+                                         rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            var msgPriority: MessagePriority? = nil
+            if let priorityStr = priority {
+                switch priorityStr.lowercased() {
+                case "low":
+                    msgPriority = .low
+                case "medium":
+                    msgPriority = .medium
+                case "high":
+                    msgPriority = .high
+                case "critical":
+                    msgPriority = .critical
+                default:
+                    rejecter("ERROR_MESH_GROUP", "Invalid priority: \(priorityStr). Must be low, medium, high, or critical.", nil)
+                    return
+                }
+            }
+            let messageIds = try proto.forwardMessageToGroup(originalMessageJson: originalMessageJson, groupId: groupId, priority: msgPriority)
+            resolver(messageIds)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to forward message to group: \(error.localizedDescription)", error)
         }
     }
 
