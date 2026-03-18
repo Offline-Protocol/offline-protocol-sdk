@@ -4,7 +4,7 @@ use super::{
     lock_shared_state, InternalMessageResult, OfflineProtocol, PendingMediaMetadataEntry,
     ProtocolState,
 };
-use crate::constants::ACK_FOR_KEY;
+use crate::constants::{ACK_FOR_KEY, RELAY_LEARNED_ROUTE_QUALITY};
 use crate::events::Event;
 use crate::file_transfer::FileChunk;
 use offline_protocol_core::{ContentType, Message};
@@ -196,8 +196,11 @@ impl OfflineProtocol {
         // Note: in multi-hop scenarios this records sender as both destination
         // and next_hop, which is correct for 1-hop but conservative for deeper
         // chains (the transport layer does not expose the immediate peer ID).
-        self.path_selector
-            .learn_route_from_message(message, message.sender.as_str(), 0.5);
+        self.path_selector.learn_route_from_message(
+            message,
+            message.sender.as_str(),
+            RELAY_LEARNED_ROUTE_QUALITY,
+        );
 
         let relay_allowed = self.config.relay.allow_relay
             && self.config.relay.relay_priority != RelayPriority::Never;

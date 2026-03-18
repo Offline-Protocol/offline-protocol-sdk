@@ -4756,3 +4756,55 @@ fn test_invite_same_peer_to_two_groups_needs_fresh_key_package() {
     assert!(g1_members.contains(&"bob".to_string()));
     assert!(g2_members.contains(&"bob".to_string()));
 }
+
+#[test]
+fn test_epoch_fork_cancelled_when_epoch_advanced_since_detection() {
+    // When a fork was detected at epoch N but the current epoch has since
+    // advanced past N (e.g., a delayed commit arrived), the fork should be
+    // auto-cancelled without triggering leader resolution.
+    let (mut protocol, events) = setup_with_events();
+    let info = protocol.create_group("Cancel Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Advance the epoch by issuing a key update — epoch goes from 0 to 1.
+    {
+        let guard = protocol.read_mls_guard().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        guard.update_keys(&gid).expect("key update should succeed");
+        let info = guard.get_group_info(&gid).unwrap().unwrap();
+        assert!(
+            info.epoch > 0,
+            "Epoch should have advanced after key update"
+        );
+    }
+
+    // Insert a fork detected at epoch 0 (before the key update), with delay elapsed.
+    let past = Instant::now() - StdDuration::from_secs(EPOCH_FORK_RESOLUTION_DELAY_SECS + 5);
+    protocol.group_mesh.epoch_forks.insert(
+        group_id.clone(),
+        EpochForkState {
+            group_id: group_id.clone(),
+            local_epoch: Some(0),
+            detected_at: past,
+            resolution_attempted: false,
+        },
+    );
+
+    protocol.check_epoch_forks();
+
+    // Fork should be cancelled (removed), NOT resolved via leader key update.
+    assert!(
+        !protocol.group_mesh.epoch_forks.contains_key(&group_id),
+        "Fork should be auto-cancelled when epoch advanced since detection"
+    );
+
+    // No GroupEpochForkResolved event should be emitted — this was a cancellation,
+    // not a resolution.
+    let events = events.lock().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::GroupEpochForkResolved { .. })),
+        "Cancelled fork should not emit GroupEpochForkResolved"
+    );
+}

@@ -67,3 +67,8 @@ pub const TRANSPORT_PREFERENCE_INTERNET: &str = "internet";
 
 /// Metadata key carrying the original content type on file-chunk messages.
 pub const ORIGINAL_CONTENT_TYPE_KEY: &str = "original_content_type";
+
+/// Default route quality assigned when learning a route from a relayed message.
+/// Conservative (0.5) because the transport layer doesn't expose the immediate
+/// peer identity, so the route may be sub-optimal for multi-hop return paths.
+pub const RELAY_LEARNED_ROUTE_QUALITY: f32 = 0.5;

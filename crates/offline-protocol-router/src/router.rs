@@ -360,6 +360,14 @@ fn seq_is_newer(new: u32, old: u32) -> bool {
 /// Wrapping-aware comparison of two sequence numbers.
 /// Returns `Ordering::Greater` if `a` is newer, `Less` if `b` is newer,
 /// `Equal` if they are the same.
+///
+/// **Note on total order:** When `a` and `b` are exactly `1 << 31` apart,
+/// RFC 1982 declares the relationship *undefined*. This function maps the
+/// ambiguous case to `Less`, which means `seq_cmp(a, b)` and `seq_cmp(b, a)`
+/// can both return `Less`. In practice the half-space boundary is unreachable
+/// (it requires two live sequence numbers that differ by 2 billion), and the
+/// `then_with` tie-breakers on quality/hop_count ensure stable sort results
+/// even if it were hit.
 fn seq_cmp(a: u32, b: u32) -> std::cmp::Ordering {
     if a == b {
         std::cmp::Ordering::Equal
