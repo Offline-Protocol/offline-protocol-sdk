@@ -92,6 +92,7 @@ impl OfflineProtocol {
             &content_str,
             priority,
             reply_to_msg_id.clone(),
+            None,
             "send_message_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
@@ -192,12 +193,14 @@ impl OfflineProtocol {
         // Build ForwardInfo: preserve original attribution, increment count
         let forward_info = ForwardInfo::from_message(original_message);
 
-        // Prepare content (may encrypt)
+        // Prepare content (may encrypt). ForwardInfo is threaded through so
+        // it survives the pending-message queue if the session isn't ready.
         let final_content = match self.prepare_outbound_content(
             &recipient_str,
             &original_message.content,
             priority,
             None,
+            Some(forward_info.clone()),
             "forward_message_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
@@ -342,6 +345,7 @@ impl OfflineProtocol {
             &content_str,
             priority,
             reply_to_msg_id.clone(),
+            None,
             "send_message_via_transport_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
@@ -698,6 +702,7 @@ impl OfflineProtocol {
         content: &str,
         priority: MessagePriority,
         reply_to_msg_id: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
@@ -713,6 +718,7 @@ impl OfflineProtocol {
                             content,
                             priority,
                             reply_to_msg_id,
+                            forwarded_from,
                             reconciliation_reason,
                         )?;
                         return Ok(OutboundSendPreparation::Queued(queued_id));
@@ -733,6 +739,7 @@ impl OfflineProtocol {
                         content,
                         priority,
                         reply_to_msg_id,
+                        forwarded_from,
                         reconciliation_reason,
                     )?;
                     Ok(OutboundSendPreparation::Queued(queued_id))
@@ -758,6 +765,7 @@ impl OfflineProtocol {
         content: &str,
         priority: MessagePriority,
         reply_to_msg_id: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
         reconciliation_reason: &'static str,
     ) -> Result<MessageId> {
         // Generate an ID without ticking the Lamport clock.
@@ -776,6 +784,7 @@ impl OfflineProtocol {
             priority,
             message_id.clone(),
             reply_to_msg_id,
+            forwarded_from,
         );
         self.kick_pending_session_reconciliation(reconciliation_reason);
         if self.has_terminal_welcome_failure(recipient) {
@@ -800,6 +809,7 @@ impl OfflineProtocol {
         priority: MessagePriority,
         message_id: MessageId,
         reply_to_msg: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
     ) {
         let message_id_str = message_id.as_str().to_string();
         let pending = PendingMessage {
@@ -807,6 +817,7 @@ impl OfflineProtocol {
             priority,
             message_id,
             reply_to_msg,
+            forwarded_from,
             queued_at: Utc::now(),
         };
 
@@ -829,15 +840,31 @@ impl OfflineProtocol {
             let mut remaining = Vec::new();
 
             for msg in pending {
-                // Re-attempt to send each pending message
-                // Use the stored message ID by passing reply_to_msg if it exists
                 let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
-                match self.send_message(
-                    recipient,
-                    msg.content.clone(),
-                    Some(msg.priority),
-                    reply_to_str,
-                ) {
+                let result = if msg.forwarded_from.is_some() {
+                    // Re-send as a forwarded message to preserve attribution.
+                    // Build a minimal Message with the stored content and
+                    // ForwardInfo so forward_message can re-derive attribution.
+                    let app_id = AppId::new(&self.config.app_id)
+                        .map_err(|e| Error::Other(format!("Invalid app_id in config: {}", e)))?;
+                    let sender = UserId::new(&self.config.user_id)
+                        .map_err(|e| Error::Other(format!("Invalid user_id in config: {}", e)))?;
+                    let recip = UserId::new(recipient)
+                        .map_err(|e| Error::Other(format!("Invalid recipient: {}", e)))?;
+                    let mut stub = Message::builder(sender, recip, app_id)
+                        .content(&msg.content)
+                        .build();
+                    stub.forwarded_from = msg.forwarded_from.clone();
+                    self.forward_message(&stub, recipient, Some(msg.priority))
+                } else {
+                    self.send_message(
+                        recipient,
+                        msg.content.clone(),
+                        Some(msg.priority),
+                        reply_to_str,
+                    )
+                };
+                match result {
                     Ok(id) => {
                         // Note: The new message will have a new ID, but the original ID was already returned to the caller
                         debug!(original_id = %msg.message_id, new_id = %id, "Sent pending message");

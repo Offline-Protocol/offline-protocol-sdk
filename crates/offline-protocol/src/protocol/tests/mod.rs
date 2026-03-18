@@ -1686,6 +1686,7 @@ fn test_pending_message_queue() {
         MessagePriority::High,
         MessageId::new(),
         None,
+        None,
     );
     protocol.queue_pending_message(
         "bob",
@@ -1693,12 +1694,14 @@ fn test_pending_message_queue() {
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
     );
     protocol.queue_pending_message(
         "alice",
         "Hello Alice!",
         MessagePriority::Low,
         MessageId::new(),
+        None,
         None,
     );
 
@@ -3717,6 +3720,7 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
     );
     assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
 
@@ -3766,6 +3770,7 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
         "queued-before-crash",
         MessagePriority::Medium,
         MessageId::new(),
+        None,
         None,
     );
 
@@ -4434,12 +4439,14 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
     );
     bob.queue_pending_message(
         "alice",
         "queued-before-restart-b2a",
         MessagePriority::Medium,
         MessageId::new(),
+        None,
         None,
     );
 

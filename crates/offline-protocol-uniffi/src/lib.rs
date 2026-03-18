@@ -1371,12 +1371,7 @@ impl OfflineProtocol {
                     e
                 ))
             })?;
-        let core_priority = priority.map(|p| match p {
-            MessagePriority::Low => CorePriority::Low,
-            MessagePriority::Medium => CorePriority::Medium,
-            MessagePriority::High => CorePriority::High,
-            MessagePriority::Critical => CorePriority::Critical,
-        });
+        let core_priority = priority.map(|p| p.into());
         let mut protocol = self.lock_inner()?;
         let message_id = protocol
             .forward_message(&original, &new_recipient, core_priority)
@@ -3417,12 +3412,7 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<String>,
     ) -> Result<Vec<String>, ProtocolError> {
-        let core_priority = priority.map(|p| match p {
-            MessagePriority::Low => CorePriority::Low,
-            MessagePriority::Medium => CorePriority::Medium,
-            MessagePriority::High => CorePriority::High,
-            MessagePriority::Critical => CorePriority::Critical,
-        });
+        let core_priority = priority.map(|p| p.into());
         let mut guard = self.lock_inner()?;
         guard
             .send_group_message(&group_id, &content, core_priority, reply_to_msg.as_deref())
@@ -3444,12 +3434,7 @@ impl OfflineProtocol {
                     e
                 ))
             })?;
-        let core_priority = priority.map(|p| match p {
-            MessagePriority::Low => CorePriority::Low,
-            MessagePriority::Medium => CorePriority::Medium,
-            MessagePriority::High => CorePriority::High,
-            MessagePriority::Critical => CorePriority::Critical,
-        });
+        let core_priority = priority.map(|p| p.into());
         let mut guard = self.lock_inner()?;
         guard
             .forward_message_to_group(&original, &group_id, core_priority)

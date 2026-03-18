@@ -203,8 +203,11 @@ pub(crate) struct RelayGroupBroadcastPayload {
     /// MLS epoch at which the message was encrypted.
     pub(crate) epoch: u64,
     /// Optional reply-to message ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_to: Option<String>,
+    /// Optional forwarding attribution (present when message was forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
 }
 
 /// A commit that arrived out-of-order and is waiting to be processed.
@@ -1241,14 +1244,64 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<&str>,
     ) -> Result<Vec<MessageId>> {
-        let priority = priority.unwrap_or(MessagePriority::Medium);
+        self.send_group_message_inner(
+            group_id,
+            content.as_bytes(),
+            priority.unwrap_or(MessagePriority::Medium),
+            reply_to_msg,
+            None,
+        )
+    }
 
+    /// Forwards a message to all members of a group with forwarding attribution.
+    ///
+    /// Similar to `send_group_message` but attaches `ForwardInfo` to preserve
+    /// the original sender and forward count. The message content is encrypted
+    /// via MLS for the group and fan-out follows the same path as regular
+    /// group messages (including relay broadcast when available).
+    pub fn forward_message_to_group(
+        &mut self,
+        original_message: &Message,
+        group_id: &str,
+        priority: Option<MessagePriority>,
+    ) -> Result<Vec<MessageId>> {
+        // Reject content that starts with an internal control prefix to prevent
+        // injection of protocol-level messages through the forwarding API.
+        if Self::is_internal_prefix(&original_message.content) {
+            return Err(Error::Other(
+                "Cannot forward a message with reserved internal prefix content".to_string(),
+            ));
+        }
+
+        let forward_info = ForwardInfo::from_message(original_message);
+
+        self.send_group_message_inner(
+            group_id,
+            original_message.content.as_bytes(),
+            priority.unwrap_or(MessagePriority::Medium),
+            None,
+            Some(forward_info),
+        )
+    }
+
+    /// Shared implementation for sending and forwarding group messages.
+    ///
+    /// Handles MLS encryption, member list caching, relay broadcast attempt,
+    /// per-member fan-out, and event emission.
+    fn send_group_message_inner(
+        &mut self,
+        group_id: &str,
+        content_bytes: &[u8],
+        priority: MessagePriority,
+        reply_to_msg: Option<&str>,
+        forward_info: Option<ForwardInfo>,
+    ) -> Result<Vec<MessageId>> {
         // Encrypt via MLS — release the guard immediately after encryption
         // to minimize lock contention during the fan-out phase.
         let encrypted = {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
-            mls_guard.encrypt_for_group(&gid, content.as_bytes())?
+            mls_guard.encrypt_for_group(&gid, content_bytes)?
         };
 
         // Read member list from cache, falling back to MLS on cache miss.
@@ -1280,9 +1333,13 @@ impl OfflineProtocol {
         // If Internet is the primary transport and the group is registered,
         // a single relay broadcast is O(1) instead of O(N) individual sends.
         if self.group_mesh.relay_synced.contains(group_id) {
-            if let Ok(mid) =
-                self.try_relay_broadcast(group_id, &ciphertext_b64, epoch, reply_to_msg)
-            {
+            if let Ok(mid) = self.try_relay_broadcast(
+                group_id,
+                &ciphertext_b64,
+                epoch,
+                reply_to_msg,
+                forward_info.clone(),
+            ) {
                 let member_count = members.iter().filter(|m| m.as_str() != self_id).count() as u32;
                 self.emit_event(Event::group_message_sent(
                     group_id.to_string(),
@@ -1294,13 +1351,13 @@ impl OfflineProtocol {
             // Relay broadcast failed — fall through to per-member fan-out
         }
 
-        // Build the internal message payload with reply_to as a proper field
+        // Build the internal message payload
         let msg_payload = GroupMlsMessagePayload {
             group_id: group_id.to_string(),
             ciphertext: ciphertext_b64,
             epoch,
             reply_to: reply_to_msg.map(|s| s.to_string()),
-            forward_info: None,
+            forward_info,
         };
         let base_content = format!(
             "{}{}",
@@ -1351,129 +1408,6 @@ impl OfflineProtocol {
         }
 
         // Emit appropriate event
-        if failed_members.is_empty() {
-            self.emit_event(Event::group_message_sent(
-                group_id.to_string(),
-                message_ids.iter().map(|m| m.as_str().to_string()).collect(),
-                member_count,
-            ));
-        } else {
-            self.emit_event(Event::group_message_partial_failure(
-                group_id.to_string(),
-                failed_members,
-                succeeded_members,
-            ));
-        }
-
-        Ok(message_ids)
-    }
-
-    /// Forwards a message to all members of a group with forwarding attribution.
-    ///
-    /// Similar to `send_group_message` but attaches `ForwardInfo` to preserve
-    /// the original sender and forward count. The message content is encrypted
-    /// via MLS for the group and fan-out follows the same path as regular
-    /// group messages.
-    pub fn forward_message_to_group(
-        &mut self,
-        original_message: &Message,
-        group_id: &str,
-        priority: Option<MessagePriority>,
-    ) -> Result<Vec<MessageId>> {
-        let priority = priority.unwrap_or(MessagePriority::Medium);
-
-        // Reject content that starts with an internal control prefix to prevent
-        // injection of protocol-level messages through the forwarding API.
-        if Self::is_internal_prefix(&original_message.content) {
-            return Err(Error::Other(
-                "Cannot forward a message with reserved internal prefix content".to_string(),
-            ));
-        }
-
-        // Build ForwardInfo
-        let forward_info = ForwardInfo::from_message(original_message);
-
-        // Encrypt content for the group
-        let encrypted = {
-            let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
-            mls_guard.encrypt_for_group(&gid, original_message.content.as_bytes())?
-        };
-
-        let members = match self.group_mesh.members.get(group_id) {
-            Some(m) => m.clone(),
-            None => {
-                let mls_guard = self.read_mls_guard()?;
-                let gid = offline_protocol_mls::GroupId::new(group_id);
-                let info = mls_guard
-                    .get_group_info(&gid)?
-                    .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
-                info.members.clone()
-            }
-        };
-
-        if !self.group_mesh.members.contains_key(group_id) {
-            self.group_mesh
-                .members
-                .insert(group_id.to_string(), members.clone());
-        }
-
-        let ciphertext_b64 = base64_encode(&encrypted.ciphertext);
-        let epoch = encrypted.epoch;
-        let self_id = self.config.user_id.clone();
-
-        let msg_payload = GroupMlsMessagePayload {
-            group_id: group_id.to_string(),
-            ciphertext: ciphertext_b64,
-            epoch,
-            reply_to: None,
-            forward_info: Some(forward_info),
-        };
-        let base_content = format!(
-            "{}{}",
-            internal_prefixes::GROUP_MLS_MSG,
-            serde_json::to_string(&msg_payload)
-                .map_err(|e| Error::Other(format!("Serialize group message: {}", e)))?
-        );
-
-        let mut message_ids = Vec::new();
-        let mut failed_members = Vec::new();
-        let mut succeeded_members = Vec::new();
-
-        for member in &members {
-            if member == &self_id {
-                continue;
-            }
-            match self.send_internal_message(member, base_content.clone(), priority) {
-                Ok(mid) => {
-                    message_ids.push(mid);
-                    succeeded_members.push(member.clone());
-                }
-                Err(e) => {
-                    warn!(
-                        group_id = %group_id,
-                        member = %member,
-                        error = %e,
-                        "Failed to forward group message to member"
-                    );
-                    failed_members.push(member.clone());
-                }
-            }
-        }
-
-        let member_count = succeeded_members.len() as u32;
-        let had_recipients = members.iter().any(|m| m != &self_id);
-        if had_recipients && message_ids.is_empty() {
-            self.emit_event(Event::group_message_partial_failure(
-                group_id.to_string(),
-                failed_members,
-                succeeded_members,
-            ));
-            return Err(Error::Other(
-                "All group forward message sends failed".to_string(),
-            ));
-        }
-
         if failed_members.is_empty() {
             self.emit_event(Event::group_message_sent(
                 group_id.to_string(),
@@ -1607,12 +1541,14 @@ impl OfflineProtocol {
         ciphertext_b64: &str,
         epoch: u64,
         reply_to: Option<&str>,
+        forward_info: Option<ForwardInfo>,
     ) -> Result<MessageId> {
         let payload = RelayGroupBroadcastPayload {
             group_id: group_id.to_string(),
             ciphertext: ciphertext_b64.to_string(),
             epoch,
             reply_to: reply_to.map(|s| s.to_string()),
+            forward_info,
         };
         let content = format!(
             "{}{}",
