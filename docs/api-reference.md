@@ -485,58 +485,16 @@ pub struct FileProgress {
 }
 ```
 
-## FFI API (C)
+## UniFFI Bindings
 
-For native platform integration.
+Native platform integration uses UniFFI-generated type-safe bindings for Swift and Kotlin. The bindings are auto-generated from the UDL definition in `crates/offline-protocol-uniffi/`.
 
-### Functions
-
-```c
-// Lifecycle
-OfflineProtocol* offline_protocol_create(const char* config_json);
-void offline_protocol_destroy(OfflineProtocol* handle);
-int32_t offline_protocol_start(OfflineProtocol* handle);
-int32_t offline_protocol_stop(OfflineProtocol* handle);
-
-// Messaging
-int32_t offline_protocol_send_message(
-    OfflineProtocol* handle,
-    const char* recipient,
-    const char* content,
-    int32_t priority,
-    char* out_message_id,
-    uintptr_t out_len
-);
-
-// Events
-int32_t offline_protocol_poll_event(
-    OfflineProtocol* handle,
-    char* out_event_json,
-    uintptr_t out_len
-);
-
-// Memory
-void offline_protocol_free_string(char* s);
-```
-
-### Error Codes
-
-```c
-#define SUCCESS 0
-#define ERROR_NULL_POINTER -1
-#define ERROR_INVALID_UTF8 -2
-#define ERROR_NOT_STARTED -3
-#define ERROR_ALREADY_STARTED -4
-#define ERROR_SEND_FAILED -5
-#define ERROR_PANIC -99
-#define ERROR_OTHER -100
-```
+See [React Native Integration](react-native-integration.md) for the complete TypeScript API, [iOS Integration](ios-integration.md) for Swift usage, and [Android Integration](android-integration.md) for Kotlin usage.
 
 ## Platform-Specific APIs
 
 See platform-specific documentation:
-- [React Native API](../bindings/react-native/README.md)
-- [Android Integration](android-integration.md)
+- [React Native Integration](react-native-integration.md)
 - [iOS Integration](ios-integration.md)
-- [Web/WASM API](../bindings/web/README.md)
+- [Android Integration](android-integration.md)
 

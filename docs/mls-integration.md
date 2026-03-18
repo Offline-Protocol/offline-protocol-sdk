@@ -45,7 +45,7 @@ The SDK provides end-to-end encryption via the MLS protocol (RFC 9420). MLS prov
 
 ```typescript
 // React Native
-import { OfflineProtocol } from '@anthropic/offline-protocol';
+import { OfflineProtocol } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',

@@ -444,6 +444,6 @@ Each method returns a **JSON string** that your app (or provider) sends to the r
 
 - **Configuration**: `docs/configuration.md` for every tunable parameter.
 - **DORS**: `docs/dors-configuration.md` for algorithm details.
-- **Mesh**: `bindings/react-native/MESH.md` for mesh networking and BLE.
+- **Mesh**: `docs/mesh.md` for mesh networking and BLE.
 - **Architecture**: `docs/architecture.md` for high-level design.
 - **Example app**: `examples/react-native-app` and `ProtocolProvider.tsx` for a full setup with UI.

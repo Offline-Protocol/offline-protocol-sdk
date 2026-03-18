@@ -1,76 +1,6 @@
 # DORS Configuration Guide
 
-## Overview
-
-DORS (Dynamic Offline Relay Switch) is the intelligent transport selection engine at the heart of the Offline Protocol SDK. It automatically chooses and switches between Internet, BLE Mesh, and Wi-Fi Direct based on real-time network conditions, ensuring optimal message delivery.
-
-## How DORS Works
-
-### Multi-Factor Scoring System
-
-DORS evaluates each available transport using multiple factors:
-
-1. **Signal Strength** (RSSI for wireless transports)
-2. **Proximity** (hop count - lower is better)
-3. **Bandwidth** (throughput capability)
-4. **Congestion** (queue depth and failure rate)
-5. **Energy Efficiency** (battery impact)
-6. **Reliability** (recent delivery success ratio)
-7. **Available Capacity** (current queue pressure / load)
-
-Each factor is scored 0-100, then weighted according to the transport type's characteristics.
-
-### Transport-Specific Scoring
-
-**BLE Transport:**
-```
-Total Score = (Signal × 0.30) + (Energy × 0.30) + (Congestion × 0.15)
-            + (Proximity × 0.15) + (Reliability × 0.05) + (Load × 0.05)
-```
-- Optimized for energy efficiency, signal quality, and available capacity
-- Best for: Dense urban areas, low-power devices, short-range mesh
-
-**WiFi Direct Transport:**
-```
-Total Score = (Bandwidth × 0.35) + (Proximity × 0.20) + (Congestion × 0.20)
-            + (Reliability × 0.15) + (Load × 0.10)
-```
-- Optimized for high throughput and direct peer connections
-- Best for: File transfers, video streaming, high-bandwidth needs
-
-**Internet Transport:**
-```
-Baseline Score = preferOnline ? 25.0 : 10.0
-Total Score = clamp(
-  Baseline
-  + (Bandwidth × 0.35)
-  + (Reliability × 0.30)
-  + (Congestion × 0.15)
-  + (Energy × 0.10)
-  + (Load × 0.10),
-  0, 100
-)
-```
-- Prioritises server connectivity while still considering reliability and congestion
-- Best for: Hybrid apps with server infrastructure
-
-### Switching Algorithm
-
-DORS prevents rapid transport switching ("flapping") using three mechanisms:
-
-1. **Hysteresis**: New transport must score significantly higher (default: 15 points)
-2. **Cooldown**: Wait period after switching (default: 20 seconds)
-3. **Stability Window**: New transport must be consistently better (default: 8 seconds)
-
-Only when all three conditions are met will DORS switch transports.
-
-### Escalation Logic
-
-DORS can automatically escalate from BLE to WiFi Direct when:
-- BLE retry failures reach threshold (default: 2 failures)
-- RSSI stays below the threshold for `poorSignalDurationSecs` seconds (default: 10s)
-- Queue depth stays above `congestionQueueThreshold` for `congestionDurationSecs` seconds (default: 10s)
-- Messages repeatedly approach TTL exhaustion (≤ `ttlEscalationThreshold`, default: 2)
+This guide covers configuring DORS parameters for different use cases. For an explanation of how DORS works (scoring, switching safeguards, escalation logic), see the [DORS Deep Dive](dors.md).
 
 ## Configuration Parameters
 
@@ -501,8 +431,8 @@ DORS automatically factors energy efficiency into scoring (30% weight for BLE).
 
 ## Further Reading
 
+- [DORS Deep Dive](dors.md) - How DORS scoring and switching works
 - [Architecture Overview](architecture.md)
-- [Transport Layer Details](../crates/offline-protocol-transport/README.md)
-- [React Native Integration](../bindings/react-native/README.md)
+- [Transport Architecture](transport-architecture.md)
 - [Configuration Reference](configuration.md)
 

@@ -114,11 +114,9 @@ Add to `AndroidManifest.xml`:
 ## Architecture
 
 ```
-Android App (Kotlin/Java)
+Android App (Kotlin)
     ↓
-JNI Bindings
-    ↓
-Rust FFI (C API)
+UniFFI Generated Bindings (Kotlin)
     ↓
 Rust Core (100% safe)
 ```

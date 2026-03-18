@@ -136,20 +136,17 @@ interface TransportManager {
 
 ### WiFi Direct
 
-**Status**: 🚧 Planned
+**Status**: Implemented
 
-**Use Case**: Higher bandwidth peer-to-peer communication for larger files or video
+**Use Case**: Higher bandwidth peer-to-peer communication for larger files or video.
 
-**Implementation Requirements**:
-1. Create `WifiDirectManager.swift` (iOS) and `WifiDirectManager.kt` (Android)
-2. Implement `TransportManager` interface
-3. Handle WiFi Direct connection setup
-4. Integrate with protocol's fragment system
-5. Add to `OfflineProtocolModule` initialization
+**Files**:
+- iOS: `bindings/react-native/ios/WifiDirectManager.swift`
+- Android: `bindings/react-native/android/.../WifiDirectManager.kt`
 
 **Platform Notes**:
-- Android: Use `WifiP2pManager` API
-- iOS: Use `MultipeerConnectivity` framework (Apple's WiFi Direct equivalent)
+- Android: Uses `WifiP2pManager` API
+- iOS: Uses `MultipeerConnectivity` framework
 
 ### Internet (Relay Server)
 
@@ -490,20 +487,6 @@ Test with mock protocol:
 - iOS ↔ Android communication
 - Multiple devices simultaneously
 - Failover between transports
-
-## Future Enhancements
-
-### Multi-Transport Simultaneous Use
-Currently transports operate independently. Future enhancement: send same message over multiple transports for reliability.
-
-### Transport Bonding
-Combine multiple transports for increased bandwidth (channel bonding).
-
-### Smart Transport Switching
-Automatic transparent switching between transports based on availability and performance.
-
-### Transport Priorities
-Allow apps to specify preferred transport order.
 
 ## Reference Implementation
 

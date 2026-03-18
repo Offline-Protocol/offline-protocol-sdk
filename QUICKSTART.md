@@ -61,36 +61,6 @@ protocol.on('relay_promoted', () => {
 
 ---
 
-## For Web Developers
-
-### 1. Install
-
-```bash
-npm install @offlineprotocol/web
-```
-
-### 2. Use
-
-```javascript
-import init, { OfflineProtocol } from '@offlineprotocol/web';
-
-// Initialize WASM
-await init();
-
-// Create and start
-const protocol = new OfflineProtocol(JSON.stringify({
-  appId: 'web-app',
-  userId: 'user123',
-}));
-
-await protocol.start();
-
-// Send
-await protocol.sendMessage('recipient', 'Hello from web!', 1);
-```
-
----
-
 ## For Android Developers
 
 ### 1. Build Rust Library
@@ -157,11 +127,12 @@ let messageId = try protocol.sendMessage(
 ## Next Steps
 
 - **[React Native Example App](examples/react-native-app/README.md)** - Complete working example
-- [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step setup
-- [Complete API Reference](docs/api-reference.md)
+- [React Native Integration Guide](docs/react-native-integration.md) - Full SDK integration walkthrough
+- [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step project setup
+- [API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)
 - [Architecture Overview](docs/architecture.md)
-- [Platform Integration Guides](docs/)
+- [All Documentation](docs/)
 
 ## Common Issues
 
@@ -179,14 +150,11 @@ Ensure `liboffline_protocol.so` is in correct `jniLibs` folder for your architec
 
 Link against the Rust static library in Xcode Build Settings.
 
-### Web: WASM not loading
-
-Make sure to call `await init()` before creating the protocol.
-
 ## Getting Help
 
 - [React Native Example App](examples/react-native-app/README.md) - See complete implementation
-- [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Detailed setup instructions
+- [React Native Integration Guide](docs/react-native-integration.md) - Full SDK integration walkthrough
+- [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step project setup
 - [GitHub Issues](https://github.com/offline-protocol/sdk/issues)
-- [Documentation](docs/)
+- [All Documentation](docs/)
 

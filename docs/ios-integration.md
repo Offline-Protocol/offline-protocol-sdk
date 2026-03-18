@@ -4,7 +4,7 @@ This guide shows how to integrate the Offline Protocol SDK into a native iOS app
 
 ## Prerequisites
 
-- Xcode 14+
+- Xcode 15+
 - Rust toolchain with iOS targets
 - CocoaPods or Swift Package Manager
 
@@ -137,11 +137,9 @@ dependencies: [
 ## Architecture
 
 ```
-iOS App (Swift/Objective-C)
+iOS App (Swift)
     ↓
-Bridging Header (offline_protocol.h)
-    ↓
-Rust FFI (C API)
+UniFFI Generated Bindings (Swift)
     ↓
 Rust Core (100% safe)
 ```

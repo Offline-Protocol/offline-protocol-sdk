@@ -15,8 +15,8 @@ Thank you for your interest in contributing! This document provides guidelines f
 ```bash
 git clone https://github.com/offline-protocol/sdk
 cd offline-protocol-sdk
-cargo build --all
-cargo test --all
+cargo build --workspace
+cargo test --workspace
 ```
 
 ## Code Quality Standards
@@ -27,16 +27,16 @@ Run these checks (they must all pass):
 
 ```bash
 # 1. Build without errors
-cargo build --all
+cargo build --workspace
 
 # 2. All tests pass
-cargo test --all
+cargo test --workspace
 
 # 3. No clippy warnings
-cargo clippy --all -- -D warnings
+cargo clippy --workspace -- -D warnings
 
 # 4. Code is formatted
-cargo fmt --all
+cargo fmt --workspace
 ```
 
 ### Safety Requirements
@@ -79,8 +79,10 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 - `transport`: offline-protocol-transport
 - `router`: offline-protocol-router (DORS)
 - `reliability`: offline-protocol-reliability
+- `mls`: offline-protocol-mls (MLS encryption)
+- `services`: offline-protocol-services (service discovery)
 - `protocol`: offline-protocol (main API)
-- `uniffi`: offline-protocol-uniffi (UniFFI bindings for Swift/Kotlin)
+- `uniffi`: offline-protocol-uniffi (UniFFI bindings)
 - `bindings`: Platform bindings
 
 **Examples**:
@@ -97,7 +99,7 @@ test(dors): add tests for transport switching
 
 1. **Core Logic**: Implement in appropriate Rust crate (100% safe)
 2. **Tests**: Add comprehensive unit tests
-3. **FFI**: Expose via C FFI if needed for platforms
+3. **UniFFI**: Expose via UDL if needed for mobile platforms
 4. **Bindings**: Update platform bindings (React Native, etc.)
 5. **Docs**: Update README and relevant docs
 6. **Commit**: Use conventional commits format
@@ -107,10 +109,18 @@ test(dors): add tests for transport switching
 ```
 offline-protocol-sdk/
 ├── crates/          # Rust crates (core logic)
-├── bindings/        # Platform bindings
+│   ├── offline-protocol-core/
+│   ├── offline-protocol-transport/
+│   ├── offline-protocol-router/
+│   ├── offline-protocol-reliability/
+│   ├── offline-protocol-mls/
+│   ├── offline-protocol-services/
+│   ├── offline-protocol/
+│   ├── offline-protocol-uniffi/
+│   └── offline-protocol-bench/
+├── bindings/        # Platform bindings (React Native)
 ├── docs/            # Documentation
-├── examples/        # Example applications
-└── tests/           # Integration tests
+└── examples/        # Example applications
 ```
 
 ## Pull Request Process
@@ -125,9 +135,9 @@ offline-protocol-sdk/
 
 ### PR Checklist
 
-- [ ] Tests pass (`cargo test --all`)
-- [ ] No clippy warnings (`cargo clippy --all -- -D warnings`)
-- [ ] Code formatted (`cargo fmt --all`)
+- [ ] Tests pass (`cargo test --workspace`)
+- [ ] No clippy warnings (`cargo clippy --workspace -- -D warnings`)
+- [ ] Code formatted (`cargo fmt --workspace`)
 - [ ] Documentation updated
 - [ ] Conventional commit messages
 - [ ] No breaking changes (or clearly documented)
@@ -138,7 +148,7 @@ offline-protocol-sdk/
 
 ```bash
 # All tests
-cargo test --all
+cargo test --workspace
 
 # Specific crate
 cargo test --package offline-protocol-core
@@ -154,33 +164,33 @@ cargo test -- --nocapture
 
 ```bash
 # Check for issues
-cargo clippy --all
+cargo clippy --workspace
 
 # Fix automatically fixable issues
-cargo clippy --all --fix
+cargo clippy --workspace --fix
 
 # Strict mode (required for CI)
-cargo clippy --all -- -D warnings
+cargo clippy --workspace -- -D warnings
 ```
 
 ### Formatting
 
 ```bash
 # Format all code
-cargo fmt --all
+cargo fmt --workspace
 
 # Check formatting without applying
-cargo fmt --all -- --check
+cargo fmt --workspace -- --check
 ```
 
 ### Documentation
 
 ```bash
 # Generate and open docs
-cargo doc --all --open
+cargo doc --workspace --open
 
 # Check doc comments
-cargo doc --all --no-deps
+cargo doc --workspace --no-deps
 ```
 
 ## Architecture Decisions

@@ -8,7 +8,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 2. **Write Once**: Core logic shared across all platforms
 3. **Zero-Copy**: Minimize allocations and copying
 4. **Modular**: Each crate has a single responsibility
-5. **Testable**: 110 tests covering all critical paths
+5. **Testable**: ~800 tests covering all critical paths
 
 ## Crate Organization
 
@@ -117,93 +117,35 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 ### 7. offline-protocol-uniffi
 
-**Purpose:** UniFFI bindings for cross-platform interoperability (replaces old C FFI)
+**Purpose:** UniFFI bindings for cross-platform interoperability.
 
 **Features:**
-- Type-safe Swift and Kotlin bindings (auto-generated from UDL)
-- Zero unsafe application code  
+- Type-safe Swift and Kotlin bindings auto-generated from UDL
 - Automatic memory management
 - Native exception handling
-- Complete API surface (36 methods)
+- Complete API surface
 
 **Key Interfaces:**
 - `OfflineProtocol` - Main protocol instance (lifecycle, messaging, MLS, routing, transports)
 - `MeshServices` - Standalone service discovery and request/response (takes `OfflineProtocol` reference)
 
-**Safety Patterns**:
-- Pointer validation (null checks)
-- Panic catching (`catch_unwind`)
-- SAFETY comments on every `unsafe` block
-- Error codes instead of exceptions
-
-**Safety**: Contains `unsafe` code (~5% of codebase)
+**Safety**: Contains `unsafe` code limited to UniFFI scaffolding.
 - This is the **ONLY** crate with unsafe code
-- All unsafe blocks documented
-- Defensive programming at language boundaries
+- All unsafe blocks documented with SAFETY comments
 
 **Dependencies**: `offline-protocol`
 
 ## DORS Algorithm
 
-### Transport Selection
+See [DORS Deep Dive](dors.md) for the full scoring system and [DORS Configuration Guide](dors-configuration.md) for tuning parameters.
 
-**Input**:
-- Message to send
-- Available transports with metrics
-- Current transport state
-
-**Process**:
-1. Calculate score for each transport
-2. Check hysteresis threshold
-3. Check cooldown period
-4. Check stability window
-5. Select best transport
-
-**Scoring**:
-```
-BLE Score = (signal * 0.3) + (energy * 0.3) + (congestion * 0.2) + (proximity * 0.2)
-WiFi Score = (bandwidth * 0.4) + (proximity * 0.3) + (congestion * 0.3)
-Internet Score = 100 (if prefer_online) or 0
-```
-
-### Escalation Triggers
-
-**BLE → Wi-Fi Direct**:
-- Retry failures ≥ 2
-- RSSI < -85 dBm for 10+ seconds
-- Queue depth > 50 messages
-- TTL exhaustion (message dying)
-- Hop count increasing without delivery
-
-**Wi-Fi Direct → BLE**:
-- BLE recovered (RSSI > -70 dBm for 15+ seconds)
-- Wi-Fi setup time > 8 seconds
-- Battery < 20%
-- Last 3 messages via BLE successful
+**Summary**: DORS evaluates each transport using seven weighted factors (signal, proximity, bandwidth, congestion, energy, reliability, capacity), applies hysteresis + cooldown + stability checks to prevent flapping, and supports automatic escalation from BLE to WiFi Direct when performance degrades.
 
 ## Relay System
 
 ### Promotion Logic
 
-**Conditions**:
-```
-should_promote = 
-    connections >= threshold AND
-    battery >= min_battery AND
-    (battery >= 15% OR charging) AND
-    relay_priority != Never
-```
-
-**Scoring**:
-```
-relay_score = 
-    (connections/10 * 30) +      // Connection factor (0-30)
-    (battery/100 * 20) +         // Battery factor (0-20)
-    (charging ? 20 : 0) +        // Charging bonus (20)
-    (link_quality/100 * 20) +    // Link quality (0-20)
-    -(congestion * 15) +         // Congestion penalty (0-15)
-    -(queue_depth/50 * 15)       // Queue penalty (0-15)
-```
+A device is promoted to relay when it has sufficient connections, battery, and relay priority. Relay scoring considers connection count, battery level, charging state, link quality, congestion, and queue depth.
 
 ### Load Balancing
 
@@ -294,31 +236,11 @@ Max: 30s
 - Static lifetimes for event callbacks
 - Borrowed references in functions (zero-copy)
 
-### FFI Boundary
+### FFI Boundary (UniFFI)
 
-**Pattern**:
-```
-Rust → C:
-    Box::into_raw(Box::new(object))  // Transfer ownership
+The SDK uses [UniFFI](https://mozilla.github.io/uniffi-rs/) to generate type-safe Swift and Kotlin bindings from a UDL (UniFFI Definition Language) file. UniFFI handles memory management, string conversion, and error propagation automatically.
 
-C → Rust:
-    &mut *(handle as *mut T)         // Borrow
-
-C cleanup:
-    Box::from_raw(handle)            // Reclaim ownership
-```
-
-**String Handling**:
-```
-Rust → C:
-    CString::into_raw()              // Allocate
-
-C → Rust:
-    CStr::from_ptr().to_str()        // Borrow
-
-Cleanup:
-    CString::from_raw()              // Free
-```
+**Pattern**: Define the interface in UDL, UniFFI generates the scaffolding. The generated bindings handle ownership transfer, null safety, and exception bridging.
 
 ## Performance Optimizations
 
@@ -331,25 +253,19 @@ Cleanup:
 
 ## Testing Strategy
 
-### Unit Tests (110 total)
+### Test Coverage (~800 tests)
 
-- **Core types**: 12 tests
-- **Transport**: 3 tests  
-- **Router/DORS**: 20 tests
-- **Reliability**: 22 tests
-- **Protocol**: 41 tests
-- **FFI**: 12 tests
+Tests are distributed across all crates and cover:
+- Core types and message construction
+- Transport abstraction and metrics
+- DORS scoring, hysteresis, escalation
+- Reliability (ACK, retry, deduplication)
+- MLS encryption lifecycle
+- Service discovery and request/response
+- Protocol integration and event handling
+- UniFFI bindings
 
-### Integration Tests
-
-*(To be added)*
-
-Planned scenarios:
-- Multi-device message flow
-- Transport switching
-- Network partitions
-- Congestion handling
-- File transfers
+Run all tests with `cargo test --workspace`.
 
 ## Security Considerations
 
@@ -373,10 +289,7 @@ Planned scenarios:
 - All buffer sizes validated
 - All pointers validated before dereference
 
-### Future Enhancements
+### Encryption
 
-- Message encryption (E2E)
-- Authentication (message signatures)
-- Rate limiting
-- DoS protection
+End-to-end encryption is provided via MLS (RFC 9420) with automatic key exchange and session management. See [MLS Integration Guide](mls-integration.md) for details.
 
