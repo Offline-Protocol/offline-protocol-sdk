@@ -259,7 +259,7 @@ impl MeshServices {
         {
             return action;
         }
-        if let Some(action) = self.try_handle_discover_response(content, sender) {
+        if let Some(action) = self.try_handle_discover_response(content, sender, user_id) {
             return action;
         }
         if let Some(action) = self.try_handle_request(content, sender) {
@@ -364,6 +364,7 @@ impl MeshServices {
                 provider_peer_id: user_id.to_string(),
                 capabilities: svc.capabilities.clone(),
                 hop_count,
+                originator: payload.originator.clone(),
             };
             if let Ok(serialized) = serde_json::to_string(&response) {
                 let resp_content = format!("{}{}", SVC_DISCOVER_RESPONSE, serialized);
@@ -426,7 +427,12 @@ impl MeshServices {
         })
     }
 
-    fn try_handle_discover_response(&self, content: &str, sender: &str) -> Option<ServiceAction> {
+    fn try_handle_discover_response(
+        &self,
+        content: &str,
+        sender: &str,
+        user_id: &str,
+    ) -> Option<ServiceAction> {
         let data = content.strip_prefix(SVC_DISCOVER_RESPONSE)?;
 
         if data.len() > MAX_SERVICE_PAYLOAD_SIZE {
@@ -454,6 +460,25 @@ impl MeshServices {
             provider = %payload.provider_peer_id,
             "Service discovered"
         );
+
+        // If we are not the originator, forward the response toward them
+        if !payload.originator.is_empty() && payload.originator != user_id {
+            debug!(
+                query_id = %payload.query_id,
+                originator = %payload.originator,
+                "Forwarding discovery response toward originator"
+            );
+            // Re-serialize and forward as unicast to the originator
+            let fwd_content = content.to_string();
+            return Some(ServiceAction::Consumed {
+                messages_to_send: vec![OutboundMessage {
+                    recipient: payload.originator,
+                    content: fwd_content,
+                    priority: MessagePriority::Medium,
+                }],
+                events_to_emit: vec![],
+            });
+        }
 
         Some(ServiceAction::Consumed {
             messages_to_send: vec![],
@@ -848,6 +873,7 @@ mod tests {
             provider_peer_id: "bob".to_string(),
             capabilities: HashMap::new(),
             hop_count: 1,
+            originator: "user1".to_string(),
         };
         let content = format!(
             "{}{}",
@@ -1308,5 +1334,83 @@ mod tests {
             a, b,
             "Different users should typically select different peers"
         );
+    }
+
+    #[test]
+    fn test_discovery_response_forwarded_to_originator() {
+        let mut svc = MeshServices::new();
+
+        // Response with originator != user_id → should forward
+        let payload = ServiceDiscoveryResponsePayload {
+            query_id: "q-200".to_string(),
+            service_id: "svc1".to_string(),
+            version: "1.0".to_string(),
+            provider_peer_id: "provider1".to_string(),
+            capabilities: HashMap::new(),
+            hop_count: 2,
+            originator: "original_requester".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            SVC_DISCOVER_RESPONSE,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        // We are "relay_node", not the originator
+        let action = svc.handle_incoming_message(&content, "provider1", 0, "relay_node", &[]);
+        match action {
+            ServiceAction::Consumed {
+                messages_to_send,
+                events_to_emit,
+            } => {
+                // Should forward to originator, not emit event
+                assert!(
+                    events_to_emit.is_empty(),
+                    "Relay node should not emit ServiceDiscovered"
+                );
+                assert_eq!(messages_to_send.len(), 1);
+                assert_eq!(messages_to_send[0].recipient, "original_requester");
+            }
+            ServiceAction::NotHandled => panic!("Should have been handled"),
+        }
+    }
+
+    #[test]
+    fn test_discovery_response_consumed_by_originator() {
+        let mut svc = MeshServices::new();
+
+        // Response where originator == user_id → should emit event
+        let payload = ServiceDiscoveryResponsePayload {
+            query_id: "q-300".to_string(),
+            service_id: "svc2".to_string(),
+            version: "1.0".to_string(),
+            provider_peer_id: "provider2".to_string(),
+            capabilities: HashMap::new(),
+            hop_count: 1,
+            originator: "me".to_string(),
+        };
+        let content = format!(
+            "{}{}",
+            SVC_DISCOVER_RESPONSE,
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let action = svc.handle_incoming_message(&content, "relay_node", 0, "me", &[]);
+        match action {
+            ServiceAction::Consumed {
+                messages_to_send,
+                events_to_emit,
+            } => {
+                assert!(messages_to_send.is_empty(), "Originator should not forward");
+                assert_eq!(events_to_emit.len(), 1);
+                match &events_to_emit[0] {
+                    ServiceEvent::ServiceDiscovered { service_id, .. } => {
+                        assert_eq!(service_id, "svc2");
+                    }
+                    other => panic!("Wrong event: {:?}", other),
+                }
+            }
+            ServiceAction::NotHandled => panic!("Should have been handled"),
+        }
     }
 }

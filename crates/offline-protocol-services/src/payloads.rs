@@ -57,6 +57,9 @@ pub(crate) struct ServiceDiscoveryResponsePayload {
     pub provider_peer_id: String,
     pub capabilities: HashMap<String, String>,
     pub hop_count: u8,
+    /// The original query originator — used for multi-hop response routing.
+    #[serde(default)]
+    pub originator: String,
 }
 
 /// Wire-format payload for a service request.

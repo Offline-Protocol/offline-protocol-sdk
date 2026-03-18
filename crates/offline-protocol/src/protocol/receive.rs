@@ -8,6 +8,7 @@ use crate::constants::ACK_FOR_KEY;
 use crate::events::Event;
 use crate::file_transfer::FileChunk;
 use offline_protocol_core::{ContentType, Message};
+use offline_protocol_router::relay::RelayPriority;
 use std::time::Instant;
 use tracing::{debug, error, warn};
 
@@ -59,7 +60,7 @@ impl OfflineProtocol {
                         continue;
                     }
 
-                    if self.deduplicator.is_duplicate(&message.id) {
+                    if self.deduplicator.is_duplicate_mut(&message.id) {
                         // Re-ACK duplicate packets so the sender can stop
                         // retrying — but NOT for blocked users, to avoid
                         // leaking presence information.
@@ -89,6 +90,71 @@ impl OfflineProtocol {
                     }
 
                     self.deduplicator.mark_seen(message.id.clone());
+
+                    // Relay: if this message is not for us, forward it
+                    if message.recipient.as_str() != self.config.user_id {
+                        // Learn route back to sender through whoever gave us this
+                        self.path_selector.learn_route_from_message(
+                            &message,
+                            message.sender.as_str(),
+                            0.5,
+                        );
+
+                        // Check relay config
+                        let relay_allowed = self.config.relay.allow_relay
+                            && self.config.relay.relay_priority != RelayPriority::Never;
+
+                        if relay_allowed {
+                            if message.is_ttl_exhausted() {
+                                debug!(
+                                    message_id = %message.id,
+                                    sender = %message.sender,
+                                    recipient = %message.recipient,
+                                    "Dropping relay message: TTL exhausted"
+                                );
+                            } else {
+                                let mut relay_msg = message.clone();
+                                let _ = relay_msg.decrement_ttl();
+                                let _ = relay_msg.increment_hop();
+
+                                let hop_count = relay_msg.hop_count.value();
+                                let remaining_ttl = relay_msg.ttl.value();
+
+                                match self.transport_manager.send(&relay_msg) {
+                                    Ok(()) => {
+                                        debug!(
+                                            message_id = %relay_msg.id,
+                                            sender = %relay_msg.sender,
+                                            recipient = %relay_msg.recipient,
+                                            hop_count,
+                                            remaining_ttl,
+                                            "Relayed message for third party"
+                                        );
+                                        self.emit_event(Event::message_relayed(
+                                            relay_msg.id.as_str(),
+                                            relay_msg.sender.as_str().to_string(),
+                                            relay_msg.recipient.as_str().to_string(),
+                                            hop_count,
+                                            remaining_ttl,
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            message_id = %relay_msg.id,
+                                            error = %err,
+                                            "Failed to relay message"
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            debug!(
+                                message_id = %message.id,
+                                "Dropping relay message: relay disabled"
+                            );
+                        }
+                        continue;
+                    }
 
                     // Handle internal MLS messages
                     if let Some(result) = self.process_internal_message(&message) {

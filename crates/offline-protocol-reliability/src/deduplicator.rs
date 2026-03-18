@@ -218,6 +218,8 @@ impl RotatingBloomFilter {
 struct SeenEntry {
     /// When this message was first seen.
     seen_at: DateTime<Utc>,
+    /// When this entry was last accessed (for LRU eviction).
+    last_accessed: DateTime<Utc>,
 }
 
 /// Deduplicator for tracking seen messages and preventing duplicates.
@@ -285,14 +287,18 @@ impl Deduplicator {
         }
     }
 
-    /// Checks if a message has been seen before (mutable version for bloom rotation).
+    /// Checks if a message has been seen before (mutable version for bloom rotation
+    /// and LRU access tracking).
     pub fn is_duplicate_mut(&mut self, message_id: &MessageId) -> bool {
         let msg_id_str = message_id.as_str();
 
         if let Some(ref mut bloom) = self.bloom_filter {
             bloom.contains(&msg_id_str)
+        } else if let Some(entry) = self.seen_messages.get_mut(&msg_id_str) {
+            entry.last_accessed = Utc::now();
+            true
         } else {
-            self.seen_messages.contains_key(&msg_id_str)
+            false
         }
     }
 
@@ -327,21 +333,24 @@ impl Deduplicator {
                 self.cleanup_expired();
 
                 if self.seen_messages.len() >= self.config.max_tracked_messages {
-                    if let Some((oldest_id, _)) = self
+                    // LRU eviction: evict the least recently accessed entry
+                    if let Some((lru_id, _)) = self
                         .seen_messages
                         .iter()
-                        .min_by_key(|(_, entry)| entry.seen_at)
+                        .min_by_key(|(_, entry)| entry.last_accessed)
                         .map(|(id, entry)| (id.clone(), entry.clone()))
                     {
-                        self.seen_messages.remove(&oldest_id);
+                        self.seen_messages.remove(&lru_id);
                     }
                 }
             }
 
+            let now = Utc::now();
             self.seen_messages.insert(
                 msg_id_str,
                 SeenEntry {
-                    seen_at: Utc::now(),
+                    seen_at: now,
+                    last_accessed: now,
                 },
             );
 
@@ -778,5 +787,45 @@ mod tests {
         let stats = dedup.stats();
         // False positive rate should still be low
         assert!(stats.false_positive_rate.unwrap() < 0.02);
+    }
+
+    #[test]
+    fn test_lru_eviction_preserves_recently_accessed() {
+        let config = DeduplicatorConfig {
+            max_tracked_messages: 3,
+            retention_time_secs: 3600,
+            use_bloom_filter: false,
+            ..Default::default()
+        };
+        let mut dedup = Deduplicator::with_config(config);
+
+        let msg_a = MessageId::new();
+        let msg_b = MessageId::new();
+        let msg_c = MessageId::new();
+
+        dedup.mark_seen(msg_a.clone());
+        thread::sleep(Duration::from_millis(10));
+        dedup.mark_seen(msg_b.clone());
+        thread::sleep(Duration::from_millis(10));
+        dedup.mark_seen(msg_c.clone());
+
+        // Re-access A so it becomes the most recently accessed
+        assert!(dedup.is_duplicate_mut(&msg_a));
+
+        // Insert D — should evict B (least recently accessed), not A
+        let msg_d = MessageId::new();
+        dedup.mark_seen(msg_d.clone());
+
+        assert_eq!(dedup.tracked_count(), 3);
+        assert!(
+            dedup.is_duplicate(&msg_a),
+            "A was recently accessed, should survive"
+        );
+        assert!(
+            !dedup.is_duplicate(&msg_b),
+            "B should have been evicted (LRU)"
+        );
+        assert!(dedup.is_duplicate(&msg_c), "C should survive");
+        assert!(dedup.is_duplicate(&msg_d), "D was just inserted");
     }
 }

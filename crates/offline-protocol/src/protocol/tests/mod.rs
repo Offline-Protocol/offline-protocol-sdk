@@ -8371,3 +8371,251 @@ fn test_reset_tofu_for_peer_allows_repinning() {
 
     assert_eq!(protocol.known_peer_public_keys["alice"].public_key, new_key);
 }
+
+// ========================================================================
+// RELAY FORWARDING TESTS
+// ========================================================================
+
+#[test]
+fn test_relay_forwards_third_party_message() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let relay_events_clone = relay_events.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::MessageRelayed { .. }) {
+            relay_events_clone.lock().unwrap().push(event);
+        }
+    });
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+
+    // Create a message from alice to bob (not for us = user123)
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "Hello bob via relay",
+    );
+    let original_ttl = msg.ttl.value();
+    let original_hops = msg.hop_count.value();
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    // Receiving should relay the message (not return it to us)
+    let received = protocol.receive_message();
+    assert!(
+        received.is_none(),
+        "Third-party message should be relayed, not returned"
+    );
+
+    // Verify MessageRelayed event was emitted with correct fields
+    let events = relay_events.lock().unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "Should emit exactly one MessageRelayed event"
+    );
+    match &events[0] {
+        Event::MessageRelayed {
+            sender,
+            recipient,
+            hop_count,
+            remaining_ttl,
+            ..
+        } => {
+            assert_eq!(sender, "alice");
+            assert_eq!(recipient, "bob");
+            assert_eq!(*hop_count, original_hops + 1);
+            assert_eq!(*remaining_ttl, original_ttl - 1);
+        }
+        _ => panic!("Expected MessageRelayed event"),
+    }
+}
+
+#[test]
+fn test_relay_drops_exhausted_ttl() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let relay_events_clone = relay_events.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::MessageRelayed { .. }) {
+            relay_events_clone.lock().unwrap().push(event);
+        }
+    });
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+
+    // Create a message from alice to bob, then exhaust its TTL
+    let mut msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "expiring",
+    );
+    // Exhaust TTL by decrementing to 0
+    while !msg.is_ttl_exhausted() {
+        let _ = msg.decrement_ttl();
+    }
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let received = protocol.receive_message();
+    assert!(
+        received.is_none(),
+        "TTL-exhausted message should not be returned"
+    );
+
+    // No relay event should be emitted
+    let events = relay_events.lock().unwrap();
+    assert!(
+        events.is_empty(),
+        "TTL-exhausted message should not emit MessageRelayed"
+    );
+}
+
+#[test]
+fn test_relay_disabled_does_not_forward() {
+    use offline_protocol_router::relay::RelayPriority;
+
+    let mut config = create_test_config();
+    config.relay.relay_priority = RelayPriority::Never;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let relay_events_clone = relay_events.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::MessageRelayed { .. }) {
+            relay_events_clone.lock().unwrap().push(event);
+        }
+    });
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "should not relay",
+    );
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let received = protocol.receive_message();
+    assert!(
+        received.is_none(),
+        "Message for third party should not be returned"
+    );
+
+    let events = relay_events.lock().unwrap();
+    assert!(
+        events.is_empty(),
+        "Relay-disabled node should not emit MessageRelayed"
+    );
+}
+
+#[test]
+fn test_relay_preserves_original_sender() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let relay_events_clone = relay_events.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::MessageRelayed { .. }) {
+            relay_events_clone.lock().unwrap().push(event);
+        }
+    });
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "original content",
+    );
+    let original_id = msg.id.as_str();
+    mock.queue_message(msg);
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    protocol.receive_message();
+
+    let events = relay_events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        Event::MessageRelayed {
+            message_id,
+            sender,
+            recipient,
+            ..
+        } => {
+            assert_eq!(message_id, &original_id, "Message ID must be preserved");
+            assert_eq!(sender, "alice", "Sender must be preserved");
+            assert_eq!(recipient, "bob", "Recipient must be preserved");
+        }
+        _ => panic!("Expected MessageRelayed event"),
+    }
+}
+
+#[test]
+fn test_local_message_not_relayed() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let relay_events_clone = relay_events.clone();
+    protocol.on_event(move |event| {
+        if matches!(event, Event::MessageRelayed { .. }) {
+            relay_events_clone.lock().unwrap().push(event);
+        }
+    });
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+
+    // Message addressed to us (user123)
+    let msg = Message::new(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "Hello user123",
+    );
+    mock.queue_message(msg.clone());
+
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    // Message for us should be returned normally
+    let received = protocol.receive_message();
+    assert!(received.is_some(), "Message for us should be returned");
+    assert_eq!(received.unwrap().id, msg.id);
+
+    // No relay event should be emitted
+    let events = relay_events.lock().unwrap();
+    assert!(
+        events.is_empty(),
+        "Local message should not emit MessageRelayed"
+    );
+}
