@@ -151,6 +151,15 @@ impl OfflineProtocol {
                         continue;
                     }
 
+                    let forward_info = message.forwarded_from.as_ref().map(|fwd| {
+                        crate::events::ForwardInfoEvent {
+                            original_sender: fwd.original_sender.as_str().to_string(),
+                            original_message_id: fwd.original_message_id.as_str(),
+                            original_timestamp: fwd.original_timestamp.as_millis(),
+                            forward_count: fwd.forward_count,
+                        }
+                    });
+
                     let event = Event::MessageReceived {
                         message_id: message.id.as_str(),
                         sender: message.sender.as_str().to_string(),
@@ -166,6 +175,7 @@ impl OfflineProtocol {
                             .map(|id| id.as_str().to_string()),
                         content_type: message.content_type.to_string(),
                         media_metadata: message.media_metadata.clone(),
+                        forward_info,
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {

@@ -13,7 +13,8 @@ use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOpera
 use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
-    AppId, ContentType, MediaMetadata, Message, MessageId, MessagePriority, UserId, TTL,
+    AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, UserId,
+    TTL,
 };
 use offline_protocol_mls::MlsManager;
 use offline_protocol_transport::TransportType;
@@ -138,6 +139,111 @@ impl OfflineProtocol {
                 );
                 Err(Error::Other(format!(
                     "Send failed (message {} deferred for retry): {}",
+                    message.id, err
+                )))
+            }
+        }
+    }
+
+    /// Forwards a message to a new recipient with attribution to the original sender.
+    ///
+    /// Creates a new message with the original content and attaches `ForwardInfo`
+    /// tracking the original sender, message ID, timestamp, and forward count.
+    /// If the message was already forwarded, the original attribution is preserved
+    /// and `forward_count` is incremented.
+    ///
+    /// # Arguments
+    ///
+    /// * `original_message` - The message to forward
+    /// * `new_recipient` - Recipient's user ID
+    /// * `priority` - Message priority (optional, defaults to Medium)
+    ///
+    /// # Returns
+    ///
+    /// Returns the new message ID if successful.
+    pub fn forward_message(
+        &mut self,
+        original_message: &Message,
+        new_recipient: impl Into<String>,
+        priority: Option<MessagePriority>,
+    ) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let recipient_str: String = new_recipient.into();
+        let priority = priority.unwrap_or(MessagePriority::Medium);
+
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::UserBlocked(recipient_str));
+        }
+
+        // Build ForwardInfo: preserve original attribution, increment count
+        let forward_info = match &original_message.forwarded_from {
+            Some(existing) => ForwardInfo {
+                original_sender: existing.original_sender.clone(),
+                original_message_id: existing.original_message_id.clone(),
+                original_timestamp: existing.original_timestamp,
+                forward_count: existing.forward_count + 1,
+            },
+            None => ForwardInfo {
+                original_sender: original_message.sender.clone(),
+                original_message_id: original_message.id.clone(),
+                original_timestamp: original_message.timestamp,
+                forward_count: 1,
+            },
+        };
+
+        // Prepare content (may encrypt)
+        let final_content = match self.prepare_outbound_content(
+            &recipient_str,
+            &original_message.content,
+            priority,
+            None,
+            "forward_message_session_pending",
+        )? {
+            OutboundSendPreparation::Ready(content) => content,
+            OutboundSendPreparation::Queued(message_id) => return Ok(message_id),
+        };
+
+        // Create new message with forwarded content
+        let mut message =
+            self.create_message(&recipient_str, final_content, Some(priority), None)?;
+        message.forwarded_from = Some(forward_info);
+        message.content_type = original_message.content_type;
+        message.media_metadata = original_message.media_metadata.clone();
+
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    message_id = %message.id,
+                    error = %err,
+                    "Forward send failed, message deferred"
+                );
+                Err(Error::Other(format!(
+                    "Forward failed (message {} deferred for retry): {}",
                     message.id, err
                 )))
             }

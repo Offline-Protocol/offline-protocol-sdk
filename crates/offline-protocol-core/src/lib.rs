@@ -16,7 +16,7 @@ pub mod service;
 pub mod types;
 
 pub use error::{Error, Result};
-pub use message::{ContentType, MediaMetadata, Message, MessageId, MessagePriority};
+pub use message::{ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority};
 pub use service::{ServiceDescriptor, ServiceId};
 pub use types::{
     AppId, HopCount, LamportClock, LocalInstant, Timestamp, UserId, WallClockTimestamp, TTL,

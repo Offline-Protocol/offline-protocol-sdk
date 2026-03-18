@@ -154,6 +154,19 @@ pub enum DecryptionFailureCode {
     Unknown,
 }
 
+/// Forwarding attribution in events (mirrors `ForwardInfo` from core).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardInfoEvent {
+    /// The original sender of the message.
+    pub original_sender: String,
+    /// The original message ID.
+    pub original_message_id: String,
+    /// The original timestamp (wall-clock ms).
+    pub original_timestamp: i64,
+    /// Number of times this message has been forwarded.
+    pub forward_count: u32,
+}
+
 /// Events that can occur in the protocol.
 ///
 /// Note: This type implements a custom Debug that redacts sensitive fields
@@ -180,6 +193,9 @@ pub enum Event {
         /// Lamport logical clock value for causal ordering.
         #[serde(default)]
         lamport_clock: u64,
+        /// Forwarding attribution (present when this is a forwarded message).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forward_info: Option<ForwardInfoEvent>,
     },
 
     /// A message was received.
@@ -210,6 +226,9 @@ pub enum Event {
         /// Media metadata (present for non-text content).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         media_metadata: Option<MediaMetadata>,
+        /// Forwarding attribution (present when this is a forwarded message).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forward_info: Option<ForwardInfoEvent>,
     },
 
     /// A message was successfully delivered (ACK received).
@@ -812,6 +831,13 @@ impl Event {
             MessagePriority::Critical => "critical",
         };
 
+        let forward_info = message.forwarded_from.as_ref().map(|fwd| ForwardInfoEvent {
+            original_sender: fwd.original_sender.as_str().to_string(),
+            original_message_id: fwd.original_message_id.as_str(),
+            original_timestamp: fwd.original_timestamp.as_millis(),
+            forward_count: fwd.forward_count,
+        });
+
         Self::MessageSent {
             message_id: message.id.as_str(),
             sender: message.sender.as_str().to_string(),
@@ -821,6 +847,7 @@ impl Event {
             requires_ack: message.requires_ack,
             timestamp: message.timestamp.as_millis(),
             lamport_clock: message.lamport_clock.value(),
+            forward_info,
         }
     }
 
@@ -1510,6 +1537,7 @@ impl fmt::Debug for Event {
                 requires_ack,
                 timestamp,
                 lamport_clock,
+                forward_info,
             } => f
                 .debug_struct("MessageSent")
                 .field("message_id", message_id)
@@ -1520,6 +1548,7 @@ impl fmt::Debug for Event {
                 .field("requires_ack", requires_ack)
                 .field("timestamp", timestamp)
                 .field("lamport_clock", lamport_clock)
+                .field("forward_info", &forward_info.is_some())
                 .finish(),
             Self::MessageReceived {
                 message_id,
@@ -1533,6 +1562,7 @@ impl fmt::Debug for Event {
                 reply_to_msg: _,
                 content_type,
                 media_metadata: _,
+                forward_info,
             } => f
                 .debug_struct("MessageReceived")
                 .field("message_id", message_id)
@@ -1545,6 +1575,7 @@ impl fmt::Debug for Event {
                 .field("lamport_clock", lamport_clock)
                 .field("reply_to_msg", &"[REDACTED]")
                 .field("content_type", content_type)
+                .field("forward_info", &forward_info.is_some())
                 .finish(),
             Self::MessageDelivered {
                 message_id,
@@ -2083,6 +2114,7 @@ mod tests {
                 requires_ack,
                 timestamp,
                 lamport_clock,
+                forward_info,
             } => {
                 assert_eq!(message_id, message.id.as_str());
                 assert_eq!(sender, message.sender.as_str());
@@ -2092,6 +2124,7 @@ mod tests {
                 assert!(requires_ack);
                 assert_eq!(timestamp, message.timestamp.as_millis());
                 assert_eq!(lamport_clock, message.lamport_clock.value());
+                assert!(forward_info.is_none());
             }
             _ => panic!("Wrong event type"),
         }

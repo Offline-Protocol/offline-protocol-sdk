@@ -80,6 +80,14 @@ dictionary MlsGroupInfo {
     u64 last_activity_ms;
 };
 
+// Forwarding attribution for forwarded messages
+dictionary ForwardInfo {
+    string original_sender;
+    string original_message_id;
+    i64 original_timestamp;
+    u32 forward_count;
+};
+
 // Establishment state for a peer (for SessionNotReady and get_establishment_state)
 enum EstablishmentState {
     "NoKeyPackage",
@@ -427,9 +435,13 @@ interface OfflineProtocol {
     // Messaging
     [Throws=ProtocolError]
     string send_message(string recipient, string content, MessagePriority priority, string? reply_to_msg);
-    
+
+    // Forward a message to a new recipient (preserves original sender attribution)
+    [Throws=ProtocolError]
+    string forward_message(string original_message_json, string new_recipient, MessagePriority? priority);
+
     string? receive_message();
-    
+
     // Connection requests (transport-agnostic, routed via DORS)
     [Throws=ProtocolError]
     string send_connection_request(string recipient, string sender_name, sequence<u8>? key_package);
@@ -812,6 +824,10 @@ interface OfflineProtocol {
     // Send an MLS-encrypted message to all group members
     [Throws=ProtocolError]
     sequence<string> send_group_message(string group_id, string content, MessagePriority? priority, string? reply_to_msg);
+
+    // Forward a message to all members of a group (preserves original sender attribution)
+    [Throws=ProtocolError]
+    sequence<string> forward_message_to_group(string original_message_json, string group_id, MessagePriority? priority);
 
     // Invite a user to an MLS group
     [Throws=ProtocolError]
