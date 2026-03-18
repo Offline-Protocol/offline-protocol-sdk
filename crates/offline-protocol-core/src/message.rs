@@ -139,6 +139,11 @@ pub struct MediaMetadata {
 }
 
 /// Information about a forwarded message.
+///
+/// **Trust model:** `ForwardInfo` is an unverified attribution hint, not a
+/// cryptographic proof. A malicious client can forge the `original_sender` or
+/// reset `forward_count`. UI layers should treat this as a display-level hint
+/// and must not rely on it for access-control or security decisions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForwardInfo {
     /// The original sender of the message.

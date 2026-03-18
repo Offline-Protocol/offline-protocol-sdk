@@ -73,15 +73,6 @@ fn recover_rwlock_write<'a, T>(
     })
 }
 
-/// Forwarding attribution for forwarded messages (UniFFI dictionary).
-#[derive(Debug, Clone)]
-pub struct ForwardInfo {
-    pub original_sender: String,
-    pub original_message_id: String,
-    pub original_timestamp: i64,
-    pub forward_count: u32,
-}
-
 /// Per-peer establishment state (for SessionNotReady and get_establishment_state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EstablishmentState {

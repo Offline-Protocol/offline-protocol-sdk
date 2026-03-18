@@ -277,6 +277,12 @@ pub(crate) struct PendingMessage {
     /// Forwarding attribution (preserved so it survives the pending queue).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) forwarded_from: Option<ForwardInfo>,
+    /// Content type of the original message (preserved for forwarded non-text messages).
+    #[serde(default)]
+    pub(crate) content_type: ContentType,
+    /// Media metadata (preserved for forwarded media messages).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) media_metadata: Option<MediaMetadata>,
     /// When the message was queued (for future TTL/expiry support).
     pub(crate) queued_at: DateTime<Utc>,
 }

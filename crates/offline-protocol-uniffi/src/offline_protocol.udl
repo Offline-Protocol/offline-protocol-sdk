@@ -80,14 +80,6 @@ dictionary MlsGroupInfo {
     u64 last_activity_ms;
 };
 
-// Forwarding attribution for forwarded messages
-dictionary ForwardInfo {
-    string original_sender;
-    string original_message_id;
-    i64 original_timestamp;
-    u32 forward_count;
-};
-
 // Establishment state for a peer (for SessionNotReady and get_establishment_state)
 enum EstablishmentState {
     "NoKeyPackage",

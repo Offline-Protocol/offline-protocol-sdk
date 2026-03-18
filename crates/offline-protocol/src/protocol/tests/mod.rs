@@ -4,7 +4,7 @@ use crate::events::{DecryptionFailureCode, PresenceStatus};
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::MlsLifecycleEvent;
 use chrono::Duration as ChronoDuration;
-use offline_protocol_core::{AppId, MessagePriority, ServiceDescriptor, UserId};
+use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{
     mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
 };
@@ -1687,6 +1687,8 @@ fn test_pending_message_queue() {
         MessageId::new(),
         None,
         None,
+        ContentType::default(),
+        None,
     );
     protocol.queue_pending_message(
         "bob",
@@ -1695,6 +1697,8 @@ fn test_pending_message_queue() {
         MessageId::new(),
         None,
         None,
+        ContentType::default(),
+        None,
     );
     protocol.queue_pending_message(
         "alice",
@@ -1702,6 +1706,8 @@ fn test_pending_message_queue() {
         MessagePriority::Low,
         MessageId::new(),
         None,
+        None,
+        ContentType::default(),
         None,
     );
 
@@ -3721,6 +3727,8 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
         MessageId::new(),
         None,
         None,
+        ContentType::default(),
+        None,
     );
     assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
 
@@ -3771,6 +3779,8 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
+        ContentType::default(),
         None,
     );
 
@@ -4440,6 +4450,8 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         MessageId::new(),
         None,
         None,
+        ContentType::default(),
+        None,
     );
     bob.queue_pending_message(
         "alice",
@@ -4447,6 +4459,8 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
+        ContentType::default(),
         None,
     );
 
@@ -8653,6 +8667,8 @@ fn test_pending_forwarded_message_preserves_forward_count() {
         MessageId::new(),
         None,
         Some(forward_info),
+        ContentType::default(),
+        None,
     );
 
     // Verify the stored forward_count is 1
