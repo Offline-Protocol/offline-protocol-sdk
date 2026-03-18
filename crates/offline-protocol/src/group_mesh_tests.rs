@@ -401,6 +401,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
         ciphertext: "dGVzdA==".to_string(),
         epoch: 42,
         reply_to: Some("msg-123".to_string()),
+        forward_info: None,
     };
     let json = serde_json::to_string(&msg_payload).unwrap();
     let parsed: GroupMlsMessagePayload = serde_json::from_str(&json).unwrap();
@@ -415,6 +416,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
         ciphertext: "dGVzdA==".to_string(),
         epoch: 1,
         reply_to: None,
+        forward_info: None,
     };
     let json_no_reply = serde_json::to_string(&msg_no_reply).unwrap();
     assert!(!json_no_reply.contains("reply_to"));
@@ -509,6 +511,7 @@ fn test_group_mls_full_lifecycle_create_invite_send_decrypt() {
         ciphertext: base64_encode(&encrypted.ciphertext),
         epoch: encrypted.epoch,
         reply_to: None,
+        forward_info: None,
     };
     let content = format!(
         "{}{}",
@@ -647,6 +650,7 @@ fn test_group_mls_message_after_leaving() {
         ciphertext: base64_encode(b"encrypted-content"),
         epoch: 1,
         reply_to: None,
+        forward_info: None,
     };
     let content = format!(
         "{}{}",
@@ -680,6 +684,7 @@ fn test_group_mls_oversized_payload_rejected() {
         ciphertext: oversized,
         epoch: 1,
         reply_to: None,
+        forward_info: None,
     };
     let content = format!(
         "{}{}",
@@ -723,6 +728,7 @@ fn test_group_mls_duplicate_message_rejected() {
         ciphertext: base64_encode(&encrypted.ciphertext),
         epoch: encrypted.epoch,
         reply_to: None,
+        forward_info: None,
     };
     let content = format!(
         "{}{}",
@@ -1082,6 +1088,7 @@ fn test_group_mls_dedup_inserted_before_decrypt_attempt() {
         ciphertext: base64_encode(b"definitely-not-valid-mls-ciphertext"),
         epoch: 1,
         reply_to: None,
+        forward_info: None,
     };
     let content = format!(
         "{}{}",
@@ -2338,6 +2345,7 @@ fn test_group_mls_dedup_independent_per_message_id() {
             ciphertext: base64_encode(&encrypted.ciphertext),
             epoch: encrypted.epoch,
             reply_to: None,
+            forward_info: None,
         };
         let content = format!(
             "{}{}",
@@ -2669,6 +2677,7 @@ fn test_handle_relay_group_message_plaintext_passthrough() {
         "2026-03-13T00:00:00Z",
         "msg-relay-001",
         None,
+        None,
     );
 
     let events = events.lock().unwrap();
@@ -2713,6 +2722,7 @@ fn test_handle_relay_group_message_mls_decrypt() {
         "2026-03-13T00:00:00Z",
         "msg-relay-mls-001",
         None,
+        None,
     );
 
     // Verify decrypted content
@@ -2746,6 +2756,7 @@ fn test_handle_relay_group_message_mls_unavailable_emits_raw() {
         &raw_content,
         "2026-03-13T00:00:00Z",
         "msg-relay-no-mls",
+        None,
         None,
     );
 

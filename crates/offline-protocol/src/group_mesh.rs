@@ -12,7 +12,7 @@
 use crate::protocol::{base64_decode, base64_encode, internal_prefixes, OfflineProtocol};
 use crate::{Error, Event, Result};
 use chrono::Utc;
-use offline_protocol_core::{Message, MessageId, MessagePriority};
+use offline_protocol_core::{ForwardInfo, Message, MessageId, MessagePriority};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -111,8 +111,11 @@ pub(crate) struct GroupMlsMessagePayload {
     /// MLS epoch at which the message was encrypted.
     pub(crate) epoch: u64,
     /// Optional reply-to message ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_to: Option<String>,
+    /// Optional forwarding attribution (present when message was forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
 }
 
 /// Payload for MLS Welcome messages (group invites) sent via mesh.
@@ -200,8 +203,11 @@ pub(crate) struct RelayGroupBroadcastPayload {
     /// MLS epoch at which the message was encrypted.
     pub(crate) epoch: u64,
     /// Optional reply-to message ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_to: Option<String>,
+    /// Optional forwarding attribution (present when message was forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
 }
 
 /// A commit that arrived out-of-order and is waiting to be processed.
@@ -341,6 +347,10 @@ impl OfflineProtocol {
             let msg_id = message.id.as_str().to_string();
             let timestamp = chrono::Utc::now().to_rfc3339();
             info!(group_id = %payload.group_id, "Decrypted mesh group message");
+            let forward_info_event = payload
+                .forward_info
+                .as_ref()
+                .map(crate::events::ForwardInfoEvent::from);
             self.emit_event(Event::group_message_received(
                 payload.group_id,
                 sender.to_string(),
@@ -348,6 +358,7 @@ impl OfflineProtocol {
                 timestamp,
                 msg_id,
                 payload.reply_to,
+                forward_info_event,
             ));
         }
     }
@@ -1233,14 +1244,72 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<&str>,
     ) -> Result<Vec<MessageId>> {
-        let priority = priority.unwrap_or(MessagePriority::Medium);
+        self.send_group_message_inner(
+            group_id,
+            content.as_bytes(),
+            priority.unwrap_or(MessagePriority::Medium),
+            reply_to_msg,
+            None,
+        )
+    }
 
+    /// Forwards a message to all members of a group with forwarding attribution.
+    ///
+    /// Similar to `send_group_message` but attaches `ForwardInfo` to preserve
+    /// the original sender and forward count. The message content is encrypted
+    /// via MLS for the group and fan-out follows the same path as regular
+    /// group messages (including relay broadcast when available).
+    pub fn forward_message_to_group(
+        &mut self,
+        original_message: &Message,
+        group_id: &str,
+        priority: Option<MessagePriority>,
+    ) -> Result<Vec<MessageId>> {
+        // Reject content that starts with an internal control prefix to prevent
+        // injection of protocol-level messages through the forwarding API.
+        if Self::is_internal_prefix(&original_message.content) {
+            return Err(Error::Other(
+                "Cannot forward a message with reserved internal prefix content".to_string(),
+            ));
+        }
+
+        let forward_info = ForwardInfo::from_message(original_message);
+
+        if forward_info.forward_count > crate::constants::MAX_FORWARD_COUNT {
+            return Err(Error::Other(format!(
+                "Forward count {} exceeds maximum of {}",
+                forward_info.forward_count,
+                crate::constants::MAX_FORWARD_COUNT,
+            )));
+        }
+
+        self.send_group_message_inner(
+            group_id,
+            original_message.content.as_bytes(),
+            priority.unwrap_or(MessagePriority::Medium),
+            None,
+            Some(forward_info),
+        )
+    }
+
+    /// Shared implementation for sending and forwarding group messages.
+    ///
+    /// Handles MLS encryption, member list caching, relay broadcast attempt,
+    /// per-member fan-out, and event emission.
+    fn send_group_message_inner(
+        &mut self,
+        group_id: &str,
+        content_bytes: &[u8],
+        priority: MessagePriority,
+        reply_to_msg: Option<&str>,
+        forward_info: Option<ForwardInfo>,
+    ) -> Result<Vec<MessageId>> {
         // Encrypt via MLS — release the guard immediately after encryption
         // to minimize lock contention during the fan-out phase.
         let encrypted = {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
-            mls_guard.encrypt_for_group(&gid, content.as_bytes())?
+            mls_guard.encrypt_for_group(&gid, content_bytes)?
         };
 
         // Read member list from cache, falling back to MLS on cache miss.
@@ -1272,9 +1341,13 @@ impl OfflineProtocol {
         // If Internet is the primary transport and the group is registered,
         // a single relay broadcast is O(1) instead of O(N) individual sends.
         if self.group_mesh.relay_synced.contains(group_id) {
-            if let Ok(mid) =
-                self.try_relay_broadcast(group_id, &ciphertext_b64, epoch, reply_to_msg)
-            {
+            if let Ok(mid) = self.try_relay_broadcast(
+                group_id,
+                &ciphertext_b64,
+                epoch,
+                reply_to_msg,
+                forward_info.clone(),
+            ) {
                 let member_count = members.iter().filter(|m| m.as_str() != self_id).count() as u32;
                 self.emit_event(Event::group_message_sent(
                     group_id.to_string(),
@@ -1286,12 +1359,13 @@ impl OfflineProtocol {
             // Relay broadcast failed — fall through to per-member fan-out
         }
 
-        // Build the internal message payload with reply_to as a proper field
+        // Build the internal message payload
         let msg_payload = GroupMlsMessagePayload {
             group_id: group_id.to_string(),
             ciphertext: ciphertext_b64,
             epoch,
             reply_to: reply_to_msg.map(|s| s.to_string()),
+            forward_info,
         };
         let base_content = format!(
             "{}{}",
@@ -1475,12 +1549,14 @@ impl OfflineProtocol {
         ciphertext_b64: &str,
         epoch: u64,
         reply_to: Option<&str>,
+        forward_info: Option<ForwardInfo>,
     ) -> Result<MessageId> {
         let payload = RelayGroupBroadcastPayload {
             group_id: group_id.to_string(),
             ciphertext: ciphertext_b64.to_string(),
             epoch,
             reply_to: reply_to.map(|s| s.to_string()),
+            forward_info,
         };
         let content = format!(
             "{}{}",
@@ -1895,6 +1971,7 @@ impl OfflineProtocol {
     /// from the relay server for a group we have MLS state for. If MLS
     /// decryption fails or the content is not ciphertext, falls back to
     /// emitting the raw content.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_relay_group_message_with_mls(
         &mut self,
         group_id: &str,
@@ -1903,7 +1980,12 @@ impl OfflineProtocol {
         timestamp: &str,
         message_id: &str,
         reply_to_msg: Option<String>,
+        forward_info: Option<offline_protocol_core::ForwardInfo>,
     ) {
+        let forward_info_event = forward_info
+            .as_ref()
+            .map(crate::events::ForwardInfoEvent::from);
+
         // Attempt base64 decode — if it fails, the content is plaintext (legacy)
         let ciphertext_bytes = match base64_decode(content) {
             Ok(bytes) => bytes,
@@ -1916,6 +1998,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
+                    forward_info_event,
                 ));
                 return;
             }
@@ -1934,6 +2017,7 @@ impl OfflineProtocol {
                         timestamp.to_string(),
                         message_id.to_string(),
                         reply_to_msg,
+                        forward_info_event,
                     ));
                     return;
                 }
@@ -1966,6 +2050,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
+                    forward_info_event,
                 ));
             }
             None => {
@@ -1980,6 +2065,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
+                    forward_info_event,
                 ));
             }
         }

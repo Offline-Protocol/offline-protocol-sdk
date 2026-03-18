@@ -4,7 +4,7 @@ use crate::events::{DecryptionFailureCode, PresenceStatus};
 #[cfg(feature = "mls-observability")]
 use crate::mls_observability::MlsLifecycleEvent;
 use chrono::Duration as ChronoDuration;
-use offline_protocol_core::{AppId, MessagePriority, ServiceDescriptor, UserId};
+use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{
     mock::MockTransport, Transport, TransportMetrics, TransportStatus, TransportType,
 };
@@ -1686,6 +1686,9 @@ fn test_pending_message_queue() {
         MessagePriority::High,
         MessageId::new(),
         None,
+        None,
+        ContentType::default(),
+        None,
     );
     protocol.queue_pending_message(
         "bob",
@@ -1693,12 +1696,18 @@ fn test_pending_message_queue() {
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
+        ContentType::default(),
+        None,
     );
     protocol.queue_pending_message(
         "alice",
         "Hello Alice!",
         MessagePriority::Low,
         MessageId::new(),
+        None,
+        None,
+        ContentType::default(),
         None,
     );
 
@@ -3717,6 +3726,9 @@ fn test_restore_session_state_keeps_missing_state_pending_when_queue_exists() {
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
+        ContentType::default(),
+        None,
     );
     assert!(protocol.load_session_state_entry("bob").unwrap().is_none());
 
@@ -3766,6 +3778,9 @@ fn test_start_flushes_restored_pending_messages_for_confirmed_session() {
         "queued-before-crash",
         MessagePriority::Medium,
         MessageId::new(),
+        None,
+        None,
+        ContentType::default(),
         None,
     );
 
@@ -4434,12 +4449,18 @@ fn test_receive_poll_drives_pending_session_reconciliation_without_process_or_ne
         MessagePriority::Medium,
         MessageId::new(),
         None,
+        None,
+        ContentType::default(),
+        None,
     );
     bob.queue_pending_message(
         "alice",
         "queued-before-restart-b2a",
         MessagePriority::Medium,
         MessageId::new(),
+        None,
+        None,
+        ContentType::default(),
         None,
     );
 
@@ -8617,5 +8638,117 @@ fn test_local_message_not_relayed() {
     assert!(
         events.is_empty(),
         "Local message should not emit MessageRelayed"
+    );
+}
+
+#[test]
+fn test_pending_forwarded_message_preserves_forward_count() {
+    // Verifies that a forwarded message queued in the pending queue does NOT
+    // double-increment forward_count when flushed.
+    use offline_protocol_core::ForwardInfo;
+
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let original_sender = UserId::new("alice").unwrap();
+    let original_msg_id = MessageId::new();
+    let forward_info = ForwardInfo {
+        original_sender: original_sender.clone(),
+        original_message_id: original_msg_id.clone(),
+        original_timestamp: offline_protocol_core::Timestamp::now(),
+        forward_count: 1,
+    };
+
+    // Queue a forwarded message with forward_count = 1
+    protocol.queue_pending_message(
+        "bob",
+        "Hello from Alice",
+        MessagePriority::Medium,
+        MessageId::new(),
+        None,
+        Some(forward_info),
+        ContentType::default(),
+        None,
+    );
+
+    // Verify the stored forward_count is 1
+    let bob_pending = protocol.pending_encrypted_messages.get("bob").unwrap();
+    assert_eq!(bob_pending.len(), 1);
+    let stored = bob_pending[0].forwarded_from.as_ref().unwrap();
+    assert_eq!(stored.forward_count, 1);
+    assert_eq!(stored.original_sender, original_sender);
+    assert_eq!(stored.original_message_id, original_msg_id);
+}
+
+#[test]
+fn test_forward_message_rejects_internal_prefix_content() {
+    use crate::protocol::internal_prefixes;
+
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let mut transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    // Build a message whose content starts with an internal prefix
+    let malicious_content = format!("{}evil-payload", internal_prefixes::KEY_PACKAGE);
+    let original = offline_protocol_core::Message::builder(
+        UserId::new("attacker").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(&malicious_content)
+    .build();
+
+    let result = protocol.forward_message(&original, "bob", None);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("reserved internal prefix"),
+        "Expected prefix injection error, got: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn test_forward_message_rejects_excessive_forward_count() {
+    use offline_protocol_core::ForwardInfo;
+
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let mut transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    // Build a message that has already been forwarded MAX_FORWARD_COUNT times
+    let forward_info = ForwardInfo {
+        original_sender: UserId::new("alice").unwrap(),
+        original_message_id: MessageId::new(),
+        original_timestamp: offline_protocol_core::Timestamp::now(),
+        forward_count: crate::constants::MAX_FORWARD_COUNT,
+    };
+    let original = offline_protocol_core::Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content("Hello")
+    .forwarded_from(forward_info)
+    .build();
+
+    // from_message will increment to MAX_FORWARD_COUNT + 1, which should be rejected
+    let result = protocol.forward_message(&original, "charlie", None);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("exceeds maximum"),
+        "Expected forward count cap error, got: {}",
+        err_msg
     );
 }

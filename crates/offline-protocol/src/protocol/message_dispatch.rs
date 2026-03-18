@@ -648,6 +648,7 @@ impl OfflineProtocol {
                         &payload.timestamp,
                         &payload.message_id,
                         payload.reply_to_msg,
+                        payload.forward_info,
                     );
                 } else {
                     // Legacy relay-only group — emit raw content
@@ -659,6 +660,7 @@ impl OfflineProtocol {
                             payload.timestamp,
                             payload.message_id,
                             payload.reply_to_msg,
+                            None,
                         ));
                     }
                 }

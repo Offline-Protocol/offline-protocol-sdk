@@ -92,6 +92,10 @@ impl OfflineProtocol {
                                     .map(|id| id.as_str().to_string()),
                                 content_type: decrypted_msg.content_type.to_string(),
                                 media_metadata: decrypted_msg.media_metadata.clone(),
+                                forward_info: decrypted_msg
+                                    .forwarded_from
+                                    .as_ref()
+                                    .map(crate::events::ForwardInfoEvent::from),
                             };
                             state.emit_event(event);
                         }

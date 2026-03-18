@@ -3,7 +3,9 @@
 use crate::events::{Event, EventCallback, PresenceStatus};
 use crate::Error;
 use chrono::{DateTime, Utc};
-use offline_protocol_core::{ContentType, MediaMetadata, Message, MessageId, MessagePriority};
+use offline_protocol_core::{
+    ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority,
+};
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
@@ -181,8 +183,11 @@ pub(crate) struct GroupMessageReceivedPayload {
     pub(crate) content: String,
     pub(crate) timestamp: String,
     pub(crate) message_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_to_msg: Option<String>,
+    /// Forwarding attribution (present when the group message was forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +274,15 @@ pub(crate) struct PendingMessage {
     pub(crate) message_id: MessageId,
     /// Reply-to message ID if applicable.
     pub(crate) reply_to_msg: Option<MessageId>,
+    /// Forwarding attribution (preserved so it survives the pending queue).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forwarded_from: Option<ForwardInfo>,
+    /// Content type of the original message (preserved for forwarded non-text messages).
+    #[serde(default)]
+    pub(crate) content_type: ContentType,
+    /// Media metadata (preserved for forwarded media messages).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) media_metadata: Option<MediaMetadata>,
     /// When the message was queued (for future TTL/expiry support).
     pub(crate) queued_at: DateTime<Utc>,
 }

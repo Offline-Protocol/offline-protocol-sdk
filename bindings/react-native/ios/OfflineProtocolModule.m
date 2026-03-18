@@ -34,6 +34,12 @@ RCT_EXTERN_METHOD(sendMessage:(NSString *)recipient
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(forwardMessage:(NSString *)originalMessageJson
+                  newRecipient:(NSString *)newRecipient
+                  priority:(NSNumber *)priority
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(sendConnectionRequest:(NSString *)recipient
                   senderName:(NSString *)senderName
                   keyPackage:(NSArray *)keyPackage
@@ -475,6 +481,12 @@ RCT_EXTERN_METHOD(meshSendGroupMessage:(NSString *)groupId
                   content:(NSString *)content
                   priority:(NSString * _Nullable)priority
                   replyToMsg:(NSString * _Nullable)replyToMsg
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(meshForwardMessageToGroup:(NSString *)originalMessageJson
+                  groupId:(NSString *)groupId
+                  priority:(NSString * _Nullable)priority
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

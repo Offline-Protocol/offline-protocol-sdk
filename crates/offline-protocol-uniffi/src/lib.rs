@@ -1348,12 +1348,34 @@ impl OfflineProtocol {
         Ok(message_id.as_str())
     }
 
+    /// Forwards a message to a new recipient with original sender attribution.
+    pub fn forward_message(
+        &self,
+        original_message_json: String,
+        new_recipient: String,
+        priority: Option<MessagePriority>,
+    ) -> Result<String, ProtocolError> {
+        let original: offline_protocol_core::Message = serde_json::from_str(&original_message_json)
+            .map_err(|e| {
+                ProtocolError::InvalidConfiguration(format!(
+                    "Failed to parse original message JSON: {}",
+                    e
+                ))
+            })?;
+        let core_priority = priority.map(|p| p.into());
+        let mut protocol = self.lock_inner()?;
+        let message_id = protocol
+            .forward_message(&original, &new_recipient, core_priority)
+            .map_err(ProtocolError::from)?;
+        Ok(message_id.as_str())
+    }
+
     /// Receives the next message (returns JSON string or None)
     pub fn receive_message(&self) -> Option<String> {
         let mut protocol = recover_mutex(&self.inner, "inner");
         protocol.receive_message().and_then(|msg| {
             let msg_id = msg.id.as_str().to_string();
-            match serde_json::to_string(&serde_json::json!({
+            let mut json_value = serde_json::json!({
                 "id": msg.id.as_str(),
                 "sender": msg.sender.as_str(),
                 "recipient": msg.recipient.as_str(),
@@ -1362,7 +1384,16 @@ impl OfflineProtocol {
                 "lamport_clock": msg.lamport_clock.value(),
                 "hop_count": msg.hop_count.value(),
                 "priority": format!("{:?}", msg.priority),
-            })) {
+            });
+            if let Some(ref fwd) = msg.forwarded_from {
+                json_value["forwarded_from"] = serde_json::json!({
+                    "original_sender": fwd.original_sender.as_str(),
+                    "original_message_id": fwd.original_message_id.as_str(),
+                    "original_timestamp": fwd.original_timestamp.as_millis(),
+                    "forward_count": fwd.forward_count,
+                });
+            }
+            match serde_json::to_string(&json_value) {
                 Ok(json) => Some(json),
                 Err(e) => {
                     tracing::error!(
@@ -3372,15 +3403,32 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<String>,
     ) -> Result<Vec<String>, ProtocolError> {
-        let core_priority = priority.map(|p| match p {
-            MessagePriority::Low => CorePriority::Low,
-            MessagePriority::Medium => CorePriority::Medium,
-            MessagePriority::High => CorePriority::High,
-            MessagePriority::Critical => CorePriority::Critical,
-        });
+        let core_priority = priority.map(|p| p.into());
         let mut guard = self.lock_inner()?;
         guard
             .send_group_message(&group_id, &content, core_priority, reply_to_msg.as_deref())
+            .map(|ids| ids.into_iter().map(|id| id.as_str().to_string()).collect())
+            .map_err(|e| ProtocolError::SendFailed(e.to_string()))
+    }
+
+    /// Forward a message to all members of a group with forwarding attribution.
+    pub fn forward_message_to_group(
+        &self,
+        original_message_json: String,
+        group_id: String,
+        priority: Option<MessagePriority>,
+    ) -> Result<Vec<String>, ProtocolError> {
+        let original: offline_protocol_core::Message = serde_json::from_str(&original_message_json)
+            .map_err(|e| {
+                ProtocolError::InvalidConfiguration(format!(
+                    "Failed to parse original message JSON: {}",
+                    e
+                ))
+            })?;
+        let core_priority = priority.map(|p| p.into());
+        let mut guard = self.lock_inner()?;
+        guard
+            .forward_message_to_group(&original, &group_id, core_priority)
             .map(|ids| ids.into_iter().map(|id| id.as_str().to_string()).collect())
             .map_err(|e| ProtocolError::SendFailed(e.to_string()))
     }

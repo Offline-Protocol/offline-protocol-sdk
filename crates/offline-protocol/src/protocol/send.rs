@@ -6,14 +6,17 @@ use super::{
     OutboxEntry, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
     TypingIndicatorPayload, WelcomeDeliveryState, MAX_READ_RECEIPT_IDS,
 };
-use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
+use crate::constants::{
+    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
+};
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::{Error, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{
-    AppId, ContentType, MediaMetadata, Message, MessageId, MessagePriority, UserId, TTL,
+    AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, UserId,
+    TTL,
 };
 use offline_protocol_mls::MlsManager;
 use offline_protocol_transport::TransportType;
@@ -91,6 +94,9 @@ impl OfflineProtocol {
             &content_str,
             priority,
             reply_to_msg_id.clone(),
+            None,
+            ContentType::default(),
+            None,
             "send_message_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
@@ -122,6 +128,125 @@ impl OfflineProtocol {
         let current_transport = self.transport_manager.current_transport();
 
         // Handle send result
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    message_id = %message.id,
+                    error = %err,
+                    "Send failed, message deferred"
+                );
+                Err(Error::Other(format!(
+                    "Send failed (message {} deferred for retry): {}",
+                    message.id, err
+                )))
+            }
+        }
+    }
+
+    /// Forwards a message to a new recipient with attribution to the original sender.
+    ///
+    /// Creates a new message with the original content and attaches `ForwardInfo`
+    /// tracking the original sender, message ID, timestamp, and forward count.
+    /// If the message was already forwarded, the original attribution is preserved
+    /// and `forward_count` is incremented.
+    ///
+    /// # Arguments
+    ///
+    /// * `original_message` - The message to forward
+    /// * `new_recipient` - Recipient's user ID
+    /// * `priority` - Message priority (optional, defaults to Medium)
+    ///
+    /// # Returns
+    ///
+    /// Returns the new message ID if successful.
+    pub fn forward_message(
+        &mut self,
+        original_message: &Message,
+        new_recipient: impl Into<String>,
+        priority: Option<MessagePriority>,
+    ) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let recipient_str: String = new_recipient.into();
+        let priority = priority.unwrap_or(MessagePriority::Medium);
+
+        if self.is_user_blocked(&recipient_str) {
+            return Err(Error::UserBlocked(recipient_str));
+        }
+
+        // Reject content that starts with an internal control prefix to prevent
+        // injection of protocol-level messages through the forwarding API.
+        if Self::is_internal_prefix(&original_message.content) {
+            return Err(Error::Other(
+                "Cannot forward a message with reserved internal prefix content".to_string(),
+            ));
+        }
+
+        // Build ForwardInfo: preserve original attribution, increment count
+        let forward_info = ForwardInfo::from_message(original_message);
+
+        if forward_info.forward_count > MAX_FORWARD_COUNT {
+            return Err(Error::Other(format!(
+                "Forward count {} exceeds maximum of {}",
+                forward_info.forward_count, MAX_FORWARD_COUNT,
+            )));
+        }
+
+        // Prepare content (may encrypt). ForwardInfo is threaded through so
+        // it survives the pending-message queue if the session isn't ready.
+        let final_content = match self.prepare_outbound_content(
+            &recipient_str,
+            &original_message.content,
+            priority,
+            None,
+            Some(forward_info.clone()),
+            original_message.content_type,
+            original_message.media_metadata.clone(),
+            "forward_message_session_pending",
+        )? {
+            OutboundSendPreparation::Ready(content) => content,
+            OutboundSendPreparation::Queued(message_id) => return Ok(message_id),
+        };
+
+        // Create and dispatch the forwarded message
+        let mut message =
+            self.create_message(&recipient_str, final_content, Some(priority), None)?;
+        message.forwarded_from = Some(forward_info);
+        message.content_type = original_message.content_type;
+        message.media_metadata = original_message.media_metadata.clone();
+
+        self.dispatch_prepared_message(message)
+    }
+
+    /// Shared send path: dedup, transport send, success/failure handling, event emission.
+    ///
+    /// Used by `forward_message`, `flush_pending_messages` (for forwarded messages),
+    /// and any path that has a fully-constructed `Message` ready to send.
+    fn dispatch_prepared_message(&mut self, message: Message) -> Result<MessageId> {
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
         match send_result {
             Ok(()) => {
                 self.handle_send_success(&message, current_transport)?;
@@ -241,6 +366,9 @@ impl OfflineProtocol {
             &content_str,
             priority,
             reply_to_msg_id.clone(),
+            None,
+            ContentType::default(),
+            None,
             "send_message_via_transport_session_pending",
         )? {
             OutboundSendPreparation::Ready(content) => content,
@@ -591,12 +719,16 @@ impl OfflineProtocol {
         Ok(format!("{}{}", internal_prefixes::ENCRYPTED, serialized))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_outbound_content(
         &mut self,
         recipient: &str,
         content: &str,
         priority: MessagePriority,
         reply_to_msg_id: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
         if self.should_auto_encrypt() {
@@ -612,6 +744,9 @@ impl OfflineProtocol {
                             content,
                             priority,
                             reply_to_msg_id,
+                            forwarded_from,
+                            content_type,
+                            media_metadata,
                             reconciliation_reason,
                         )?;
                         return Ok(OutboundSendPreparation::Queued(queued_id));
@@ -632,6 +767,9 @@ impl OfflineProtocol {
                         content,
                         priority,
                         reply_to_msg_id,
+                        forwarded_from,
+                        content_type,
+                        media_metadata,
                         reconciliation_reason,
                     )?;
                     Ok(OutboundSendPreparation::Queued(queued_id))
@@ -651,12 +789,16 @@ impl OfflineProtocol {
     // PENDING / FLUSH
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_message_for_session_establishment(
         &mut self,
         recipient: &str,
         content: &str,
         priority: MessagePriority,
         reply_to_msg_id: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
         reconciliation_reason: &'static str,
     ) -> Result<MessageId> {
         // Generate an ID without ticking the Lamport clock.
@@ -675,6 +817,9 @@ impl OfflineProtocol {
             priority,
             message_id.clone(),
             reply_to_msg_id,
+            forwarded_from,
+            content_type,
+            media_metadata,
         );
         self.kick_pending_session_reconciliation(reconciliation_reason);
         if self.has_terminal_welcome_failure(recipient) {
@@ -692,6 +837,7 @@ impl OfflineProtocol {
     }
 
     /// Queues a message with a specific message ID for later sending when session is established.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn queue_pending_message(
         &mut self,
         recipient: &str,
@@ -699,6 +845,9 @@ impl OfflineProtocol {
         priority: MessagePriority,
         message_id: MessageId,
         reply_to_msg: Option<MessageId>,
+        forwarded_from: Option<ForwardInfo>,
+        content_type: ContentType,
+        media_metadata: Option<MediaMetadata>,
     ) {
         let message_id_str = message_id.as_str().to_string();
         let pending = PendingMessage {
@@ -706,6 +855,9 @@ impl OfflineProtocol {
             priority,
             message_id,
             reply_to_msg,
+            forwarded_from,
+            content_type,
+            media_metadata,
             queued_at: Utc::now(),
         };
 
@@ -728,15 +880,44 @@ impl OfflineProtocol {
             let mut remaining = Vec::new();
 
             for msg in pending {
-                // Re-attempt to send each pending message
-                // Use the stored message ID by passing reply_to_msg if it exists
-                let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
-                match self.send_message(
-                    recipient,
-                    msg.content.clone(),
-                    Some(msg.priority),
-                    reply_to_str,
-                ) {
+                let result = if msg.forwarded_from.is_some() {
+                    // Re-send with the stored ForwardInfo directly (don't
+                    // re-derive via forward_message to avoid double-incrementing
+                    // forward_count). Also restore content_type and media_metadata.
+                    let final_content = match self.prepare_outbound_content(
+                        recipient,
+                        &msg.content,
+                        msg.priority,
+                        None,
+                        msg.forwarded_from.clone(),
+                        msg.content_type,
+                        msg.media_metadata.clone(),
+                        "forward_message_flush_pending",
+                    )? {
+                        OutboundSendPreparation::Ready(c) => c,
+                        OutboundSendPreparation::Queued(message_id) => {
+                            // Re-queued for later (session still not ready).
+                            debug!(original_id = %msg.message_id, new_id = %message_id, "Forwarded pending message re-queued");
+                            continue;
+                        }
+                    };
+
+                    let mut message =
+                        self.create_message(recipient, final_content, Some(msg.priority), None)?;
+                    message.forwarded_from = msg.forwarded_from.clone();
+                    message.content_type = msg.content_type;
+                    message.media_metadata = msg.media_metadata.clone();
+                    self.dispatch_prepared_message(message)
+                } else {
+                    let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
+                    self.send_message(
+                        recipient,
+                        msg.content.clone(),
+                        Some(msg.priority),
+                        reply_to_str,
+                    )
+                };
+                match result {
                     Ok(id) => {
                         // Note: The new message will have a new ID, but the original ID was already returned to the caller
                         debug!(original_id = %msg.message_id, new_id = %id, "Sent pending message");

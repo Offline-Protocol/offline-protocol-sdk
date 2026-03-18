@@ -8,6 +8,8 @@ import { NativeModules, NativeEventEmitter, EmitterSubscription } from 'react-na
 import type {
   ProtocolConfig,
   SendMessageParams,
+  ForwardMessageParams,
+  ForwardMessageToGroupParams,
   SendConnectionRequestParams,
   AcceptConnectionRequestParams,
   RejectConnectionRequestParams,
@@ -708,6 +710,26 @@ export class OfflineProtocol {
       params.content,
       priority,
       params.replyToMsg ?? null
+    );
+    return messageId;
+  }
+
+  /**
+   * Forwards a message to a new recipient with original sender attribution.
+   *
+   * Creates a new message with the original content and attaches forwarding
+   * metadata tracking the original sender, message ID, timestamp, and forward count.
+   *
+   * @param params - Forward message parameters
+   * @returns New message ID
+   * @throws Error if forwarding fails
+   */
+  async forwardMessage(params: ForwardMessageParams): Promise<string> {
+    const priority = params.priority ?? null;
+    const messageId = await OfflineProtocolNativeModule.forwardMessage(
+      params.originalMessageJson,
+      params.newRecipient,
+      priority
     );
     return messageId;
   }
@@ -2240,6 +2262,33 @@ export class OfflineProtocol {
       content,
       priority || null,
       replyToMsg || null
+    );
+  }
+
+  /**
+   * Forwards a message to all members of a group with forwarding attribution.
+   *
+   * The message content is encrypted via MLS for the group and fan-out follows
+   * the same path as regular group messages.
+   *
+   * @param params - Forward to group parameters
+   * @returns Array of per-member message IDs
+   */
+  async meshForwardMessageToGroup(params: ForwardMessageToGroupParams): Promise<string[]> {
+    let priorityStr: string | null = null;
+    if (params.priority != null) {
+      const map: Record<number, string> = {
+        [MessagePriority.Low]: 'low',
+        [MessagePriority.Medium]: 'medium',
+        [MessagePriority.High]: 'high',
+        [MessagePriority.Critical]: 'critical',
+      };
+      priorityStr = map[params.priority] ?? null;
+    }
+    return await OfflineProtocolNativeModule.meshForwardMessageToGroup(
+      params.originalMessageJson,
+      params.groupId,
+      priorityStr
     );
   }
 

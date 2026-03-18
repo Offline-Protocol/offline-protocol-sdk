@@ -151,6 +151,11 @@ impl OfflineProtocol {
                         continue;
                     }
 
+                    let forward_info = message
+                        .forwarded_from
+                        .as_ref()
+                        .map(crate::events::ForwardInfoEvent::from);
+
                     let event = Event::MessageReceived {
                         message_id: message.id.as_str(),
                         sender: message.sender.as_str().to_string(),
@@ -166,6 +171,7 @@ impl OfflineProtocol {
                             .map(|id| id.as_str().to_string()),
                         content_type: message.content_type.to_string(),
                         media_metadata: message.media_metadata.clone(),
+                        forward_info,
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {

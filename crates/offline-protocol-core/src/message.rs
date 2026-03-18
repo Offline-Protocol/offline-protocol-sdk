@@ -138,6 +138,48 @@ pub struct MediaMetadata {
     pub thumbnail_base64: Option<String>,
 }
 
+/// Information about a forwarded message.
+///
+/// **Trust model:** `ForwardInfo` is an unverified attribution hint, not a
+/// cryptographic proof. A malicious client can forge the `original_sender` or
+/// reset `forward_count`. UI layers should treat this as a display-level hint
+/// and must not rely on it for access-control or security decisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForwardInfo {
+    /// The original sender of the message.
+    pub original_sender: UserId,
+    /// The original message ID.
+    pub original_message_id: MessageId,
+    /// The original timestamp (wall-clock, for display).
+    pub original_timestamp: Timestamp,
+    /// Number of times this message has been forwarded.
+    pub forward_count: u32,
+}
+
+impl ForwardInfo {
+    /// Creates `ForwardInfo` from a message being forwarded.
+    ///
+    /// If the message was already forwarded, the original attribution is preserved
+    /// and `forward_count` is incremented. Otherwise, the message's sender becomes
+    /// the original sender with `forward_count = 1`.
+    pub fn from_message(message: &Message) -> Self {
+        match &message.forwarded_from {
+            Some(existing) => ForwardInfo {
+                original_sender: existing.original_sender.clone(),
+                original_message_id: existing.original_message_id.clone(),
+                original_timestamp: existing.original_timestamp,
+                forward_count: existing.forward_count + 1,
+            },
+            None => ForwardInfo {
+                original_sender: message.sender.clone(),
+                original_message_id: message.id.clone(),
+                original_timestamp: message.timestamp,
+                forward_count: 1,
+            },
+        }
+    }
+}
+
 /// Message priority levels.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -227,6 +269,10 @@ pub struct Message {
     #[serde(default)]
     pub reply_to_msg: Option<MessageId>,
 
+    /// Forwarding attribution (present when this message was forwarded from another user).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_from: Option<ForwardInfo>,
+
     /// Transport-verified peer identity.
     ///
     /// Set by the transport layer when a message is received, binding the message
@@ -282,6 +328,7 @@ impl Message {
             metadata: HashMap::new(),
             requires_ack: true,
             reply_to_msg: None,
+            forwarded_from: None,
             transport_peer_id: None,
         }
     }
@@ -392,6 +439,7 @@ pub struct MessageBuilder {
     metadata: HashMap<String, String>,
     requires_ack: bool,
     reply_to_msg: Option<MessageId>,
+    forwarded_from: Option<ForwardInfo>,
 }
 
 impl MessageBuilder {
@@ -410,6 +458,7 @@ impl MessageBuilder {
             metadata: HashMap::new(),
             requires_ack: true,
             reply_to_msg: None,
+            forwarded_from: None,
         }
     }
 
@@ -461,6 +510,12 @@ impl MessageBuilder {
         self
     }
 
+    /// Sets forwarding attribution on the message.
+    pub fn forwarded_from(mut self, info: ForwardInfo) -> Self {
+        self.forwarded_from = Some(info);
+        self
+    }
+
     /// Sets the Lamport clock value for this message.
     pub fn lamport_clock(mut self, clock: LamportClock) -> Self {
         self.lamport_clock = clock;
@@ -486,6 +541,7 @@ impl MessageBuilder {
             metadata: self.metadata,
             requires_ack: self.requires_ack,
             reply_to_msg: self.reply_to_msg,
+            forwarded_from: self.forwarded_from,
             transport_peer_id: None,
         }
     }
@@ -574,5 +630,84 @@ mod tests {
         assert_eq!(MessagePriority::Medium.score(), 2);
         assert_eq!(MessagePriority::High.score(), 3);
         assert_eq!(MessagePriority::Critical.score(), 4);
+    }
+
+    #[test]
+    fn test_forward_info_serialization() {
+        use crate::types::Timestamp;
+
+        let info = ForwardInfo {
+            original_sender: UserId::new("alice").unwrap(),
+            original_message_id: MessageId::new(),
+            original_timestamp: Timestamp::now(),
+            forward_count: 1,
+        };
+
+        let msg = Message::builder(
+            UserId::new("bob").unwrap(),
+            UserId::new("charlie").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content("Forwarded message")
+        .forwarded_from(info.clone())
+        .build();
+
+        assert!(msg.forwarded_from.is_some());
+        let fwd = msg.forwarded_from.as_ref().unwrap();
+        assert_eq!(fwd.original_sender.as_str(), "alice");
+        assert_eq!(fwd.forward_count, 1);
+
+        // Round-trip through JSON
+        let json = msg.to_json().unwrap();
+        let deserialized = Message::from_json(&json).unwrap();
+        let fwd2 = deserialized.forwarded_from.as_ref().unwrap();
+        assert_eq!(fwd2.original_sender.as_str(), "alice");
+        assert_eq!(fwd2.forward_count, 1);
+    }
+
+    #[test]
+    fn test_backward_compat_no_forwarded_from() {
+        // Old messages without forwarded_from should deserialize with None
+        let msg = create_test_message();
+        let json = msg.to_json().unwrap();
+
+        // Verify forwarded_from is not in the JSON (skip_serializing_if = None)
+        assert!(!json.contains("forwarded_from"));
+
+        let deserialized = Message::from_json(&json).unwrap();
+        assert!(deserialized.forwarded_from.is_none());
+    }
+
+    #[test]
+    fn test_forward_chain_increment() {
+        // Simulate: Alice sends original → Bob forwards (count=1) → Charlie forwards (count=2)
+        let original_msg = Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content("Hello from Alice")
+        .build();
+
+        // Bob forwards to Charlie — ForwardInfo::from_message creates attribution
+        let first_forward = ForwardInfo::from_message(&original_msg);
+        assert_eq!(first_forward.original_sender.as_str(), "alice");
+        assert_eq!(first_forward.original_message_id, original_msg.id);
+        assert_eq!(first_forward.forward_count, 1);
+
+        // Charlie forwards to Dave — should carry original_sender and increment count
+        let forwarded_msg = Message::builder(
+            UserId::new("bob").unwrap(),
+            UserId::new("charlie").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content("Hello from Alice")
+        .forwarded_from(first_forward)
+        .build();
+
+        let second_forward = ForwardInfo::from_message(&forwarded_msg);
+        assert_eq!(second_forward.original_sender.as_str(), "alice");
+        assert_eq!(second_forward.forward_count, 2);
+        assert_eq!(second_forward.original_message_id, original_msg.id);
     }
 }
