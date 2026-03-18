@@ -280,11 +280,21 @@ mod tests {
 
     #[test]
     fn test_relay_continues_for_blocked_user() {
+        use crate::events::Event;
         use offline_protocol_core::{AppId, Message, UserId};
         use offline_protocol_transport::{mock::MockTransport, TransportType};
+        use std::sync::{Arc, Mutex};
 
         let mut proto = make_protocol("alice");
         proto.block_user("mallory").unwrap();
+
+        let relay_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+        let relay_events_clone = relay_events.clone();
+        proto.on_event(move |event| {
+            if matches!(event, Event::MessageRelayed { .. }) {
+                relay_events_clone.lock().unwrap().push(event);
+            }
+        });
 
         let mut mock = MockTransport::new(TransportType::BLE);
         mock.start().unwrap();
@@ -312,6 +322,24 @@ mod tests {
             received.is_none(),
             "Relay messages for third parties should be forwarded, not returned"
         );
+
+        // Verify that a MessageRelayed event was emitted — blocking must not
+        // suppress relay forwarding for messages addressed to third parties.
+        let events = relay_events.lock().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "Blocked-user relay to third party must emit MessageRelayed"
+        );
+        match &events[0] {
+            Event::MessageRelayed {
+                sender, recipient, ..
+            } => {
+                assert_eq!(sender, "mallory");
+                assert_eq!(recipient, "charlie");
+            }
+            _ => panic!("Expected MessageRelayed event"),
+        }
     }
 
     #[test]

@@ -93,66 +93,7 @@ impl OfflineProtocol {
 
                     // Relay: if this message is not for us, forward it
                     if message.recipient.as_str() != self.config.user_id {
-                        // Learn route back to sender through whoever gave us this
-                        self.path_selector.learn_route_from_message(
-                            &message,
-                            message.sender.as_str(),
-                            0.5,
-                        );
-
-                        // Check relay config
-                        let relay_allowed = self.config.relay.allow_relay
-                            && self.config.relay.relay_priority != RelayPriority::Never;
-
-                        if relay_allowed {
-                            if message.is_ttl_exhausted() {
-                                debug!(
-                                    message_id = %message.id,
-                                    sender = %message.sender,
-                                    recipient = %message.recipient,
-                                    "Dropping relay message: TTL exhausted"
-                                );
-                            } else {
-                                let mut relay_msg = message.clone();
-                                let _ = relay_msg.decrement_ttl();
-                                let _ = relay_msg.increment_hop();
-
-                                let hop_count = relay_msg.hop_count.value();
-                                let remaining_ttl = relay_msg.ttl.value();
-
-                                match self.transport_manager.send(&relay_msg) {
-                                    Ok(()) => {
-                                        debug!(
-                                            message_id = %relay_msg.id,
-                                            sender = %relay_msg.sender,
-                                            recipient = %relay_msg.recipient,
-                                            hop_count,
-                                            remaining_ttl,
-                                            "Relayed message for third party"
-                                        );
-                                        self.emit_event(Event::message_relayed(
-                                            relay_msg.id.as_str(),
-                                            relay_msg.sender.as_str().to_string(),
-                                            relay_msg.recipient.as_str().to_string(),
-                                            hop_count,
-                                            remaining_ttl,
-                                        ));
-                                    }
-                                    Err(err) => {
-                                        warn!(
-                                            message_id = %relay_msg.id,
-                                            error = %err,
-                                            "Failed to relay message"
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            debug!(
-                                message_id = %message.id,
-                                "Dropping relay message: relay disabled"
-                            );
-                        }
+                        self.try_relay_message(&message);
                         continue;
                     }
 
@@ -241,6 +182,75 @@ impl OfflineProtocol {
                     error!(error = %err, "Transport receive error");
                     return None;
                 }
+            }
+        }
+    }
+
+    /// Attempts to relay (forward) a message destined for a third party.
+    ///
+    /// Learns a route back to the sender, checks relay configuration and TTL,
+    /// then forwards the message with hop count incremented and TTL decremented.
+    /// Emits a `MessageRelayed` event on success.
+    fn try_relay_message(&mut self, message: &Message) {
+        // Learn route back to sender through whoever gave us this message.
+        // Note: in multi-hop scenarios this records sender as both destination
+        // and next_hop, which is correct for 1-hop but conservative for deeper
+        // chains (the transport layer does not expose the immediate peer ID).
+        self.path_selector
+            .learn_route_from_message(message, message.sender.as_str(), 0.5);
+
+        let relay_allowed = self.config.relay.allow_relay
+            && self.config.relay.relay_priority != RelayPriority::Never;
+
+        if !relay_allowed {
+            debug!(
+                message_id = %message.id,
+                "Dropping relay message: relay disabled"
+            );
+            return;
+        }
+
+        if message.is_ttl_exhausted() {
+            debug!(
+                message_id = %message.id,
+                sender = %message.sender,
+                recipient = %message.recipient,
+                "Dropping relay message: TTL exhausted"
+            );
+            return;
+        }
+
+        let mut relay_msg = message.clone();
+        let _ = relay_msg.decrement_ttl();
+        let _ = relay_msg.increment_hop();
+
+        let hop_count = relay_msg.hop_count.value();
+        let remaining_ttl = relay_msg.ttl.value();
+
+        match self.transport_manager.send(&relay_msg) {
+            Ok(()) => {
+                debug!(
+                    message_id = %relay_msg.id,
+                    sender = %relay_msg.sender,
+                    recipient = %relay_msg.recipient,
+                    hop_count,
+                    remaining_ttl,
+                    "Relayed message for third party"
+                );
+                self.emit_event(Event::message_relayed(
+                    relay_msg.id.as_str(),
+                    relay_msg.sender.as_str().to_string(),
+                    relay_msg.recipient.as_str().to_string(),
+                    hop_count,
+                    remaining_ttl,
+                ));
+            }
+            Err(err) => {
+                warn!(
+                    message_id = %relay_msg.id,
+                    error = %err,
+                    "Failed to relay message"
+                );
             }
         }
     }

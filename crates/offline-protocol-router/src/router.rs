@@ -171,8 +171,7 @@ impl GradientRoutingTable {
         if routes.len() >= self.config.max_routes_per_destination {
             // Sort best-first so worst is last; pop() removes worst (lowest seq, lowest quality, highest hop_count)
             routes.sort_by(|a, b| {
-                b.sequence_number
-                    .cmp(&a.sequence_number)
+                seq_cmp(b.sequence_number, a.sequence_number)
                     .then_with(|| {
                         b.quality
                             .partial_cmp(&a.quality)
@@ -222,13 +221,13 @@ impl GradientRoutingTable {
         let ttl = Duration::from_secs(self.config.route_ttl_secs);
         let now = Instant::now();
 
-        // Find best non-expired route: prefer higher sequence (fresher), then quality, then lower hop_count
+        // Find best non-expired route: prefer higher sequence (fresher, wrapping-aware),
+        // then quality, then lower hop_count
         routes
             .iter()
             .filter(|r| now.duration_since(r.last_seen) < ttl)
             .max_by(|a, b| {
-                a.sequence_number
-                    .cmp(&b.sequence_number)
+                seq_cmp(a.sequence_number, b.sequence_number)
                     .then_with(|| {
                         a.quality
                             .partial_cmp(&b.quality)
@@ -356,6 +355,19 @@ impl GradientRoutingTable {
 fn seq_is_newer(new: u32, old: u32) -> bool {
     // When new == old, not newer. Otherwise, check sign of difference.
     new != old && new.wrapping_sub(old) < (1u32 << 31)
+}
+
+/// Wrapping-aware comparison of two sequence numbers.
+/// Returns `Ordering::Greater` if `a` is newer, `Less` if `b` is newer,
+/// `Equal` if they are the same.
+fn seq_cmp(a: u32, b: u32) -> std::cmp::Ordering {
+    if a == b {
+        std::cmp::Ordering::Equal
+    } else if seq_is_newer(a, b) {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Less
+    }
 }
 
 /// Computes a composite score for eviction: quality * recency_factor.
@@ -1240,5 +1252,77 @@ mod tests {
             route.sequence_number, 0,
             "Wrapped sequence should be accepted"
         );
+    }
+
+    #[test]
+    fn test_seq_cmp_basic_and_wrapping() {
+        use std::cmp::Ordering;
+        assert_eq!(seq_cmp(5, 5), Ordering::Equal);
+        assert_eq!(seq_cmp(10, 5), Ordering::Greater);
+        assert_eq!(seq_cmp(5, 10), Ordering::Less);
+        // Wrapping: 0 is newer than MAX
+        assert_eq!(seq_cmp(0, u32::MAX), Ordering::Greater);
+        assert_eq!(seq_cmp(u32::MAX, 0), Ordering::Less);
+    }
+
+    #[test]
+    fn test_get_route_prefers_wrapped_sequence() {
+        let mut table = GradientRoutingTable::new();
+        let dest = "alice";
+
+        // Route A has seq near MAX, route B wrapped to 1
+        table.learn_route(dest, "peer_old", 2, 0.9, u32::MAX - 1);
+        table.learn_route(dest, "peer_new", 3, 0.7, 1);
+
+        let route = table.get_route(dest).expect("should have route");
+        assert_eq!(
+            route.next_hop, "peer_new",
+            "get_route must prefer wrapped (newer) sequence number"
+        );
+        assert_eq!(route.sequence_number, 1);
+    }
+
+    #[test]
+    fn test_per_dest_eviction_respects_wrapping() {
+        let config = GradientRoutingConfig {
+            max_routes_per_destination: 2,
+            ..Default::default()
+        };
+        let mut table = GradientRoutingTable::with_config(config);
+        let dest = "bob";
+
+        // Two routes with pre-wrap sequences
+        table.learn_route(dest, "hop_old", 2, 0.8, u32::MAX - 5);
+        table.learn_route(dest, "hop_mid", 2, 0.8, u32::MAX);
+
+        // Third route with wrapped sequence — should evict the oldest (MAX-5)
+        table.learn_route(dest, "hop_new", 2, 0.8, 2);
+
+        let routes = table.get_routes(dest);
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes.iter().any(|r| r.next_hop == "hop_new"),
+            "Wrapped-sequence route must survive"
+        );
+        assert!(
+            routes.iter().any(|r| r.next_hop == "hop_mid"),
+            "Second-best sequence route must survive"
+        );
+        assert!(
+            !routes.iter().any(|r| r.next_hop == "hop_old"),
+            "Oldest sequence route should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_seq_is_newer_half_space_boundary() {
+        // At exactly half the sequence space, RFC 1982 says the result is
+        // undefined. Our implementation treats it as "not newer".
+        let half = 1u32 << 31;
+        assert!(
+            !seq_is_newer(half, 0),
+            "Half-space distance is ambiguous, should not be newer"
+        );
+        assert!(!seq_is_newer(0, half), "Reverse half-space also not newer");
     }
 }
