@@ -151,14 +151,10 @@ impl OfflineProtocol {
                         continue;
                     }
 
-                    let forward_info = message.forwarded_from.as_ref().map(|fwd| {
-                        crate::events::ForwardInfoEvent {
-                            original_sender: fwd.original_sender.as_str().to_string(),
-                            original_message_id: fwd.original_message_id.as_str(),
-                            original_timestamp: fwd.original_timestamp.as_millis(),
-                            forward_count: fwd.forward_count,
-                        }
-                    });
+                    let forward_info = message
+                        .forwarded_from
+                        .as_ref()
+                        .map(crate::events::ForwardInfoEvent::from);
 
                     let event = Event::MessageReceived {
                         message_id: message.id.as_str(),

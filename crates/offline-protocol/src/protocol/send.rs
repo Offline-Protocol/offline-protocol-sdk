@@ -181,21 +181,16 @@ impl OfflineProtocol {
             return Err(Error::UserBlocked(recipient_str));
         }
 
+        // Reject content that starts with an internal control prefix to prevent
+        // injection of protocol-level messages through the forwarding API.
+        if Self::is_internal_prefix(&original_message.content) {
+            return Err(Error::Other(
+                "Cannot forward a message with reserved internal prefix content".to_string(),
+            ));
+        }
+
         // Build ForwardInfo: preserve original attribution, increment count
-        let forward_info = match &original_message.forwarded_from {
-            Some(existing) => ForwardInfo {
-                original_sender: existing.original_sender.clone(),
-                original_message_id: existing.original_message_id.clone(),
-                original_timestamp: existing.original_timestamp,
-                forward_count: existing.forward_count + 1,
-            },
-            None => ForwardInfo {
-                original_sender: original_message.sender.clone(),
-                original_message_id: original_message.id.clone(),
-                original_timestamp: original_message.timestamp,
-                forward_count: 1,
-            },
-        };
+        let forward_info = ForwardInfo::from_message(original_message);
 
         // Prepare content (may encrypt)
         let final_content = match self.prepare_outbound_content(

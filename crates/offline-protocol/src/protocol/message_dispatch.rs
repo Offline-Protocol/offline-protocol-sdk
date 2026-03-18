@@ -659,6 +659,7 @@ impl OfflineProtocol {
                             payload.timestamp,
                             payload.message_id,
                             payload.reply_to_msg,
+                            None,
                         ));
                     }
                 }

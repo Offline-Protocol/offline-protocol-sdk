@@ -167,6 +167,17 @@ pub struct ForwardInfoEvent {
     pub forward_count: u32,
 }
 
+impl From<&offline_protocol_core::ForwardInfo> for ForwardInfoEvent {
+    fn from(fwd: &offline_protocol_core::ForwardInfo) -> Self {
+        Self {
+            original_sender: fwd.original_sender.as_str().to_string(),
+            original_message_id: fwd.original_message_id.as_str(),
+            original_timestamp: fwd.original_timestamp.as_millis(),
+            forward_count: fwd.forward_count,
+        }
+    }
+}
+
 /// Events that can occur in the protocol.
 ///
 /// Note: This type implements a custom Debug that redacts sensitive fields
@@ -531,8 +542,11 @@ pub enum Event {
         /// Unique message identifier.
         message_id: String,
         /// Optional reply-to message ID.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to_msg: Option<String>,
+        /// Forwarding attribution (present when this is a forwarded message).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forward_info: Option<ForwardInfoEvent>,
     },
 
     /// A member was added to a group (from relay).
@@ -831,12 +845,7 @@ impl Event {
             MessagePriority::Critical => "critical",
         };
 
-        let forward_info = message.forwarded_from.as_ref().map(|fwd| ForwardInfoEvent {
-            original_sender: fwd.original_sender.as_str().to_string(),
-            original_message_id: fwd.original_message_id.as_str(),
-            original_timestamp: fwd.original_timestamp.as_millis(),
-            forward_count: fwd.forward_count,
-        });
+        let forward_info = message.forwarded_from.as_ref().map(ForwardInfoEvent::from);
 
         Self::MessageSent {
             message_id: message.id.as_str(),
@@ -1211,6 +1220,7 @@ impl Event {
         timestamp: String,
         message_id: String,
         reply_to_msg: Option<String>,
+        forward_info: Option<ForwardInfoEvent>,
     ) -> Self {
         Self::GroupMessageReceived {
             group_id,
@@ -1219,6 +1229,7 @@ impl Event {
             timestamp,
             message_id,
             reply_to_msg,
+            forward_info,
         }
     }
 
@@ -1888,12 +1899,14 @@ impl fmt::Debug for Event {
                 group_id,
                 sender: _,
                 content,
+                forward_info,
                 ..
             } => f
                 .debug_struct("GroupMessageReceived")
                 .field("group_id", group_id)
                 .field("sender", &"[REDACTED]")
                 .field("content", &format!("[REDACTED {} bytes]", content.len()))
+                .field("forward_info", &forward_info.is_some())
                 .finish(),
             Self::GroupMemberAdded {
                 group_id,

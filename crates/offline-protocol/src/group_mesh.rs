@@ -111,8 +111,11 @@ pub(crate) struct GroupMlsMessagePayload {
     /// MLS epoch at which the message was encrypted.
     pub(crate) epoch: u64,
     /// Optional reply-to message ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_to: Option<String>,
+    /// Optional forwarding attribution (present when message was forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
 }
 
 /// Payload for MLS Welcome messages (group invites) sent via mesh.
@@ -341,6 +344,10 @@ impl OfflineProtocol {
             let msg_id = message.id.as_str().to_string();
             let timestamp = chrono::Utc::now().to_rfc3339();
             info!(group_id = %payload.group_id, "Decrypted mesh group message");
+            let forward_info_event = payload
+                .forward_info
+                .as_ref()
+                .map(crate::events::ForwardInfoEvent::from);
             self.emit_event(Event::group_message_received(
                 payload.group_id,
                 sender.to_string(),
@@ -348,6 +355,7 @@ impl OfflineProtocol {
                 timestamp,
                 msg_id,
                 payload.reply_to,
+                forward_info_event,
             ));
         }
     }
@@ -1292,6 +1300,7 @@ impl OfflineProtocol {
             ciphertext: ciphertext_b64,
             epoch,
             reply_to: reply_to_msg.map(|s| s.to_string()),
+            forward_info: None,
         };
         let base_content = format!(
             "{}{}",
@@ -1373,21 +1382,16 @@ impl OfflineProtocol {
     ) -> Result<Vec<MessageId>> {
         let priority = priority.unwrap_or(MessagePriority::Medium);
 
+        // Reject content that starts with an internal control prefix to prevent
+        // injection of protocol-level messages through the forwarding API.
+        if Self::is_internal_prefix(&original_message.content) {
+            return Err(Error::Other(
+                "Cannot forward a message with reserved internal prefix content".to_string(),
+            ));
+        }
+
         // Build ForwardInfo
-        let forward_info = match &original_message.forwarded_from {
-            Some(existing) => ForwardInfo {
-                original_sender: existing.original_sender.clone(),
-                original_message_id: existing.original_message_id.clone(),
-                original_timestamp: existing.original_timestamp,
-                forward_count: existing.forward_count + 1,
-            },
-            None => ForwardInfo {
-                original_sender: original_message.sender.clone(),
-                original_message_id: original_message.id.clone(),
-                original_timestamp: original_message.timestamp,
-                forward_count: 1,
-            },
-        };
+        let forward_info = ForwardInfo::from_message(original_message);
 
         // Encrypt content for the group
         let encrypted = {
@@ -1418,15 +1422,12 @@ impl OfflineProtocol {
         let epoch = encrypted.epoch;
         let self_id = self.config.user_id.clone();
 
-        // Attach forward_info as JSON in the payload metadata
-        let forward_info_json = serde_json::to_string(&forward_info)
-            .map_err(|e| Error::Other(format!("Serialize forward info: {}", e)))?;
-
         let msg_payload = GroupMlsMessagePayload {
             group_id: group_id.to_string(),
             ciphertext: ciphertext_b64,
             epoch,
             reply_to: None,
+            forward_info: Some(forward_info),
         };
         let base_content = format!(
             "{}{}",
@@ -1486,11 +1487,6 @@ impl OfflineProtocol {
                 succeeded_members,
             ));
         }
-
-        // Note: forward_info is embedded in the encrypted group payload metadata.
-        // The receiving side will see it when decrypting the group message.
-        // For now, the forward_info_json is kept for future per-member metadata support.
-        let _ = forward_info_json;
 
         Ok(message_ids)
     }
@@ -2052,6 +2048,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
+                    None,
                 ));
                 return;
             }
@@ -2070,6 +2067,7 @@ impl OfflineProtocol {
                         timestamp.to_string(),
                         message_id.to_string(),
                         reply_to_msg,
+                        None,
                     ));
                     return;
                 }
@@ -2102,6 +2100,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
+                    None,
                 ));
             }
             None => {
@@ -2116,6 +2115,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
+                    None,
                 ));
             }
         }

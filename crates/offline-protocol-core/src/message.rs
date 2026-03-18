@@ -139,7 +139,7 @@ pub struct MediaMetadata {
 }
 
 /// Information about a forwarded message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForwardInfo {
     /// The original sender of the message.
     pub original_sender: UserId,
@@ -149,6 +149,30 @@ pub struct ForwardInfo {
     pub original_timestamp: Timestamp,
     /// Number of times this message has been forwarded.
     pub forward_count: u32,
+}
+
+impl ForwardInfo {
+    /// Creates `ForwardInfo` from a message being forwarded.
+    ///
+    /// If the message was already forwarded, the original attribution is preserved
+    /// and `forward_count` is incremented. Otherwise, the message's sender becomes
+    /// the original sender with `forward_count = 1`.
+    pub fn from_message(message: &Message) -> Self {
+        match &message.forwarded_from {
+            Some(existing) => ForwardInfo {
+                original_sender: existing.original_sender.clone(),
+                original_message_id: existing.original_message_id.clone(),
+                original_timestamp: existing.original_timestamp,
+                forward_count: existing.forward_count + 1,
+            },
+            None => ForwardInfo {
+                original_sender: message.sender.clone(),
+                original_message_id: message.id.clone(),
+                original_timestamp: message.timestamp,
+                forward_count: 1,
+            },
+        }
+    }
 }
 
 /// Message priority levels.
@@ -651,29 +675,34 @@ mod tests {
 
     #[test]
     fn test_forward_chain_increment() {
-        use crate::types::Timestamp;
+        // Simulate: Alice sends original → Bob forwards (count=1) → Charlie forwards (count=2)
+        let original_msg = Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content("Hello from Alice")
+        .build();
 
-        // Simulate: Alice → Bob → Charlie (forward count goes 1 → 2)
-        let original_id = MessageId::new();
-        let original_ts = Timestamp::now();
-
-        let first_forward = ForwardInfo {
-            original_sender: UserId::new("alice").unwrap(),
-            original_message_id: original_id.clone(),
-            original_timestamp: original_ts,
-            forward_count: 1,
-        };
+        // Bob forwards to Charlie — ForwardInfo::from_message creates attribution
+        let first_forward = ForwardInfo::from_message(&original_msg);
+        assert_eq!(first_forward.original_sender.as_str(), "alice");
+        assert_eq!(first_forward.original_message_id, original_msg.id);
+        assert_eq!(first_forward.forward_count, 1);
 
         // Charlie forwards to Dave — should carry original_sender and increment count
-        let second_forward = ForwardInfo {
-            original_sender: first_forward.original_sender.clone(),
-            original_message_id: first_forward.original_message_id.clone(),
-            original_timestamp: first_forward.original_timestamp,
-            forward_count: first_forward.forward_count + 1,
-        };
+        let forwarded_msg = Message::builder(
+            UserId::new("bob").unwrap(),
+            UserId::new("charlie").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content("Hello from Alice")
+        .forwarded_from(first_forward)
+        .build();
 
+        let second_forward = ForwardInfo::from_message(&forwarded_msg);
         assert_eq!(second_forward.original_sender.as_str(), "alice");
         assert_eq!(second_forward.forward_count, 2);
-        assert_eq!(second_forward.original_message_id, original_id);
+        assert_eq!(second_forward.original_message_id, original_msg.id);
     }
 }

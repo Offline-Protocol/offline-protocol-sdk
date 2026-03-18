@@ -380,7 +380,7 @@ impl OfflineProtocol {
 
     /// Returns `true` if the message content starts with any internal prefix.
     /// Used for injection prevention on the public send APIs.
-    pub(super) fn is_internal_prefix(content: &str) -> bool {
+    pub(crate) fn is_internal_prefix(content: &str) -> bool {
         INTERNAL_PREFIXES.iter().any(|p| content.starts_with(p))
     }
 
