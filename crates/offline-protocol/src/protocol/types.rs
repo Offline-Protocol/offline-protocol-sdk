@@ -183,8 +183,11 @@ pub(crate) struct GroupMessageReceivedPayload {
     pub(crate) content: String,
     pub(crate) timestamp: String,
     pub(crate) message_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reply_to_msg: Option<String>,
+    /// Forwarding attribution (present when the group message was forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) forward_info: Option<offline_protocol_core::ForwardInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

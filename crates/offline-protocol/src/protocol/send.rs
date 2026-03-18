@@ -6,7 +6,9 @@ use super::{
     OutboxEntry, PendingMessage, PresencePayload, ProtocolState, ReadReceiptPayload,
     TypingIndicatorPayload, WelcomeDeliveryState, MAX_READ_RECEIPT_IDS,
 };
-use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_OUTBOX_ENTRIES};
+use crate::constants::{
+    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
+};
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
@@ -193,6 +195,13 @@ impl OfflineProtocol {
         // Build ForwardInfo: preserve original attribution, increment count
         let forward_info = ForwardInfo::from_message(original_message);
 
+        if forward_info.forward_count > MAX_FORWARD_COUNT {
+            return Err(Error::Other(format!(
+                "Forward count {} exceeds maximum of {}",
+                forward_info.forward_count, MAX_FORWARD_COUNT,
+            )));
+        }
+
         // Prepare content (may encrypt). ForwardInfo is threaded through so
         // it survives the pending-message queue if the session isn't ready.
         let final_content = match self.prepare_outbound_content(
@@ -242,6 +251,68 @@ impl OfflineProtocol {
                 );
                 Err(Error::Other(format!(
                     "Forward failed (message {} deferred for retry): {}",
+                    message.id, err
+                )))
+            }
+        }
+    }
+
+    /// Sends a forwarded message with a pre-built `ForwardInfo`, skipping re-derivation.
+    ///
+    /// Used by `flush_pending_messages` to avoid double-incrementing `forward_count`
+    /// when resending a queued forwarded message.
+    fn send_forwarded_message_direct(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        forward_info: ForwardInfo,
+        priority: MessagePriority,
+    ) -> Result<MessageId> {
+        // Prepare content (may encrypt). ForwardInfo is threaded through so
+        // it survives re-queue if the session still isn't ready.
+        let final_content = match self.prepare_outbound_content(
+            recipient,
+            content,
+            priority,
+            None,
+            Some(forward_info.clone()),
+            "forward_message_flush_pending",
+        )? {
+            OutboundSendPreparation::Ready(c) => c,
+            OutboundSendPreparation::Queued(message_id) => return Ok(message_id),
+        };
+
+        let mut message = self.create_message(recipient, final_content, Some(priority), None)?;
+        message.forwarded_from = Some(forward_info);
+
+        let message_id = message.id.clone();
+
+        if self.deduplicator.is_duplicate(&message_id) {
+            return Err(crate::Error::Other("Duplicate message".to_string()));
+        }
+
+        self.deduplicator.mark_seen(message_id.clone());
+
+        let previous_transport = self.transport_manager.current_transport();
+        let send_result = self.transport_manager.send(&message);
+        let current_transport = self.transport_manager.current_transport();
+
+        match send_result {
+            Ok(()) => {
+                self.handle_send_success(&message, current_transport)?;
+                self.emit_transport_switch_event(previous_transport, current_transport)?;
+                self.emit_message_sent_event(&message)?;
+                Ok(message_id)
+            }
+            Err(err) => {
+                self.handle_send_failure(&message, current_transport.or(previous_transport))?;
+                warn!(
+                    message_id = %message.id,
+                    error = %err,
+                    "Forward flush send failed, message deferred"
+                );
+                Err(Error::Other(format!(
+                    "Forward flush failed (message {} deferred for retry): {}",
                     message.id, err
                 )))
             }
@@ -841,21 +912,16 @@ impl OfflineProtocol {
 
             for msg in pending {
                 let reply_to_str = msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string());
-                let result = if msg.forwarded_from.is_some() {
-                    // Re-send as a forwarded message to preserve attribution.
-                    // Build a minimal Message with the stored content and
-                    // ForwardInfo so forward_message can re-derive attribution.
-                    let app_id = AppId::new(&self.config.app_id)
-                        .map_err(|e| Error::Other(format!("Invalid app_id in config: {}", e)))?;
-                    let sender = UserId::new(&self.config.user_id)
-                        .map_err(|e| Error::Other(format!("Invalid user_id in config: {}", e)))?;
-                    let recip = UserId::new(recipient)
-                        .map_err(|e| Error::Other(format!("Invalid recipient: {}", e)))?;
-                    let mut stub = Message::builder(sender, recip, app_id)
-                        .content(&msg.content)
-                        .build();
-                    stub.forwarded_from = msg.forwarded_from.clone();
-                    self.forward_message(&stub, recipient, Some(msg.priority))
+                let result = if let Some(forward_info) = msg.forwarded_from.clone() {
+                    // Re-send with the stored ForwardInfo directly (don't
+                    // re-derive via forward_message to avoid double-incrementing
+                    // forward_count).
+                    self.send_forwarded_message_direct(
+                        recipient,
+                        &msg.content,
+                        forward_info,
+                        msg.priority,
+                    )
                 } else {
                     self.send_message(
                         recipient,

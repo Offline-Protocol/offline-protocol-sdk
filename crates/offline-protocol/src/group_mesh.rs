@@ -1275,6 +1275,14 @@ impl OfflineProtocol {
 
         let forward_info = ForwardInfo::from_message(original_message);
 
+        if forward_info.forward_count > crate::constants::MAX_FORWARD_COUNT {
+            return Err(Error::Other(format!(
+                "Forward count {} exceeds maximum of {}",
+                forward_info.forward_count,
+                crate::constants::MAX_FORWARD_COUNT,
+            )));
+        }
+
         self.send_group_message_inner(
             group_id,
             original_message.content.as_bytes(),
@@ -1963,6 +1971,7 @@ impl OfflineProtocol {
     /// from the relay server for a group we have MLS state for. If MLS
     /// decryption fails or the content is not ciphertext, falls back to
     /// emitting the raw content.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_relay_group_message_with_mls(
         &mut self,
         group_id: &str,
@@ -1971,7 +1980,12 @@ impl OfflineProtocol {
         timestamp: &str,
         message_id: &str,
         reply_to_msg: Option<String>,
+        forward_info: Option<offline_protocol_core::ForwardInfo>,
     ) {
+        let forward_info_event = forward_info
+            .as_ref()
+            .map(crate::events::ForwardInfoEvent::from);
+
         // Attempt base64 decode — if it fails, the content is plaintext (legacy)
         let ciphertext_bytes = match base64_decode(content) {
             Ok(bytes) => bytes,
@@ -1984,7 +1998,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
-                    None,
+                    forward_info_event,
                 ));
                 return;
             }
@@ -2003,7 +2017,7 @@ impl OfflineProtocol {
                         timestamp.to_string(),
                         message_id.to_string(),
                         reply_to_msg,
-                        None,
+                        forward_info_event,
                     ));
                     return;
                 }
@@ -2036,7 +2050,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
-                    None,
+                    forward_info_event,
                 ));
             }
             None => {
@@ -2051,7 +2065,7 @@ impl OfflineProtocol {
                     timestamp.to_string(),
                     message_id.to_string(),
                     reply_to_msg,
-                    None,
+                    forward_info_event,
                 ));
             }
         }

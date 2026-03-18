@@ -2677,6 +2677,7 @@ fn test_handle_relay_group_message_plaintext_passthrough() {
         "2026-03-13T00:00:00Z",
         "msg-relay-001",
         None,
+        None,
     );
 
     let events = events.lock().unwrap();
@@ -2721,6 +2722,7 @@ fn test_handle_relay_group_message_mls_decrypt() {
         "2026-03-13T00:00:00Z",
         "msg-relay-mls-001",
         None,
+        None,
     );
 
     // Verify decrypted content
@@ -2754,6 +2756,7 @@ fn test_handle_relay_group_message_mls_unavailable_emits_raw() {
         &raw_content,
         "2026-03-13T00:00:00Z",
         "msg-relay-no-mls",
+        None,
         None,
     );
 
