@@ -2705,6 +2705,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun meshRenameGroup(groupId: String, newName: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.renameGroup(groupId, newName)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to rename group: ${e.message}", e)
+        }
+    }
+
     /**
      * Wire Rust transport callbacks for event-driven sending.
      *

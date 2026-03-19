@@ -2225,6 +2225,18 @@ export class OfflineProtocol {
   }
 
   /**
+   * Renames an MLS group (admin only).
+   * Broadcasts the rename to all group members.
+   *
+   * @param groupId - Group ID
+   * @param newName - New group name
+   * @throws Error if not admin or group not found
+   */
+  async meshRenameGroup(groupId: string, newName: string): Promise<void> {
+    await OfflineProtocolNativeModule.meshRenameGroup(groupId, newName);
+  }
+
+  /**
    * Destroys the protocol instance and cleans up resources
    */
   async destroy(): Promise<void> {

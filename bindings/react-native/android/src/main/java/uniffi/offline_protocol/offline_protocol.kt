@@ -924,6 +924,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remo
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reset_tofu_for_peer(
@@ -1231,6 +1233,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_fro
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_neighbor_routes(`ptr`: Long,`neighborId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`newName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_prekey_bundle(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1705,6 +1709,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 32723.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933.toShort()) {
@@ -2820,6 +2827,8 @@ public interface OfflineProtocolInterface {
     fun `removeNeighborRoutes`(`neighborId`: kotlin.String)
     
     fun `removeTransport`(`transportType`: TransportType)
+    
+    fun `renameGroup`(`groupId`: kotlin.String, `newName`: kotlin.String)
     
     fun `requestPrekeyBundle`(`username`: kotlin.String): kotlin.String
     
@@ -4142,6 +4151,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(
         it,
         FfiConverterTypeTransportType.lower(`transportType`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `renameGroup`(`groupId`: kotlin.String, `newName`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(
+        it,
+        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`newName`),_status)
 }
     }
     

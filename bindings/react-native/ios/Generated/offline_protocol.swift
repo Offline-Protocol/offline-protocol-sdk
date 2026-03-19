@@ -918,6 +918,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func removeTransport(transportType: TransportType) throws 
     
+    func renameGroup(groupId: String, newName: String) throws 
+    
     func requestPrekeyBundle(username: String) throws  -> String
     
     func resetTofuForPeer(peerId: String) throws  -> Bool
@@ -1786,6 +1788,15 @@ open func removeTransport(transportType: TransportType)throws   {try rustCallWit
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(
             self.uniffiCloneHandle(),
         FfiConverterTypeTransportType_lower(transportType),$0
+    )
+}
+}
+    
+open func renameGroup(groupId: String, newName: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(newName),$0
     )
 }
 }
@@ -6532,6 +6543,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 32723) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_prekey_bundle() != 50933) {

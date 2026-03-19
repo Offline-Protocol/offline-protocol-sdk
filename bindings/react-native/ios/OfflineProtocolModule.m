@@ -482,5 +482,10 @@ RCT_EXTERN_METHOD(meshGetGroupRoles:(NSString *)groupId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(meshRenameGroup:(NSString *)groupId
+                  newName:(NSString *)newName
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 @end
 

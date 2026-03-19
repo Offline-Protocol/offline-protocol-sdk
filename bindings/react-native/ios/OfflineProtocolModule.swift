@@ -3011,6 +3011,23 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Rename a group (admin only, broadcasts to all members).
+    @objc func meshRenameGroup(_ groupId: String,
+                                newName: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.renameGroup(groupId: groupId, newName: newName)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to rename group: \(error.localizedDescription)", error)
+        }
+    }
+
     // MARK: - Helpers
     
     private func parseInternetConfig(_ config: NSDictionary?) throws -> (String, UInt16) {
