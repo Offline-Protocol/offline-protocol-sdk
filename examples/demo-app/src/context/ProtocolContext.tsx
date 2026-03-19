@@ -11,11 +11,10 @@ import {
   MeshServices,
   MessagePriority,
 } from '@offline-protocol/mesh-sdk';
-import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, DiscoveredService, ServiceLogEntry, ForwardInfo} from '../types';
+import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, DiscoveredService, ServiceLogEntry, ForwardInfo, PresenceStatus} from '../types';
 import {
-  PRESENCE_MESSAGE_PREFIX,
-  PRESENCE_REBROADCAST_INTERVAL_MS,
-  MAX_PRESENCE_SENDS_PER_TICK,
+  PRESENCE_BROADCAST_INTERVAL_MS,
+  TYPING_INDICATOR_TIMEOUT_MS,
   NEARBY_THRESHOLD_MS,
   PROTOCOL_CONFIG,
 } from '../constants';
@@ -37,6 +36,8 @@ interface ProtocolContextValue {
   registeredServices: string[];
   discoveredServices: DiscoveredService[];
   serviceLog: ServiceLogEntry[];
+  /** Map of peerId → timestamp when they started typing */
+  typingPeers: Map<string, number>;
 
   // Actions
   initialize: (userId: string, userName: string) => Promise<void>;
@@ -56,6 +57,7 @@ interface ProtocolContextValue {
   markChatRead: (peerId: string) => void;
   blockUser: (peerId: string) => Promise<void>;
   unblockUser: (peerId: string) => Promise<void>;
+  sendTypingIndicator: (recipientId: string, isTyping: boolean) => Promise<void>;
 }
 
 const ProtocolContext = createContext<ProtocolContextValue | null>(null);
@@ -84,6 +86,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const [registeredServices, setRegisteredServices] = useState<string[]>([]);
   const [discoveredServices, setDiscoveredServices] = useState<DiscoveredService[]>([]);
   const [serviceLog, setServiceLog] = useState<ServiceLogEntry[]>([]);
+  const [typingPeers, setTypingPeers] = useState<Map<string, number>>(new Map());
 
   const MAX_SERVICE_LOG = 100;
   const appendServiceLog = useCallback((entry: ServiceLogEntry) => {
@@ -224,6 +227,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             isNearby: neighborsRef.current.has(peerId),
             hasSession: existing?.hasSession || false,
             isBlocked: false,
+            presenceStatus: existing?.presenceStatus || 'offline',
           });
           return next;
         });
@@ -250,6 +254,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             isNearby: neighborsRef.current.has(peerId),
             hasSession: true,
             isBlocked: false,
+            presenceStatus: existing?.presenceStatus || 'offline',
           });
           return next;
         });
@@ -265,28 +270,6 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         if (blockedUsersRef.current.has(senderId)) {break;}
         if (processedMessagesRef.current.has(msgId)) {break;}
         processedMessagesRef.current.add(msgId);
-
-        // Handle presence messages
-        if (content.startsWith(PRESENCE_MESSAGE_PREFIX)) {
-          const presenceData = content.slice(PRESENCE_MESSAGE_PREFIX.length);
-          try {
-            const parsed = JSON.parse(presenceData);
-            setContacts(prev => {
-              const next = new Map(prev);
-              const existing = next.get(senderId);
-              if (existing) {
-                next.set(senderId, {
-                  ...existing,
-                  name: parsed.name || existing.name,
-                  lastSeen: Date.now(),
-                  isNearby: true,
-                });
-              }
-              return next;
-            });
-          } catch { /* ignore malformed presence */ }
-          break;
-        }
 
         // Regular chat message
         const chatMsg: ChatMessage = {
@@ -566,6 +549,104 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         break;
       }
 
+      case 'presence_updated': {
+        const peerId = event.peer_id || event.peerId;
+        const status: PresenceStatus = event.status || 'offline';
+        if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
+        setContacts(prev => {
+          const next = new Map(prev);
+          const existing = next.get(peerId);
+          if (existing) {
+            next.set(peerId, {
+              ...existing,
+              presenceStatus: status,
+              lastSeen: Date.now(),
+              isNearby: status === 'online' || existing.isNearby,
+            });
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'typing_indicator_received': {
+        const senderId = event.sender || event.peer_id || event.peerId;
+        const isTyping = event.is_typing ?? event.isTyping ?? false;
+        if (!senderId || blockedUsersRef.current.has(senderId)) {break;}
+        setTypingPeers(prev => {
+          const next = new Map(prev);
+          if (isTyping) {
+            next.set(senderId, Date.now());
+          } else {
+            next.delete(senderId);
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'read_receipt_received': {
+        const senderId = event.sender || event.peer_id || event.peerId;
+        const messageIds: string[] = event.message_ids || event.messageIds || [];
+        if (!senderId || messageIds.length === 0) {break;}
+        const idSet = new Set(messageIds);
+        setChats(prev => {
+          const next = new Map(prev);
+          const chat = next.get(senderId);
+          if (chat) {
+            let changed = false;
+            const msgs = chat.messages.map(m => {
+              if (m.isOutgoing && idSet.has(m.id) && m.status !== 'read' && m.status !== 'failed') {
+                changed = true;
+                return {...m, status: 'read' as const};
+              }
+              return m;
+            });
+            if (changed) {
+              next.set(senderId, {...chat, messages: msgs});
+            }
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'message_relayed': {
+        const msgId = event.message_id || event.messageId;
+        const sender = event.sender || 'unknown';
+        const recipient = event.recipient || 'unknown';
+        appendServiceLog({
+          type: 'response',
+          from: 'relay',
+          body: `Relayed ${msgId} from ${sender} to ${recipient}`,
+          timestamp: Date.now(),
+        });
+        break;
+      }
+
+      case 'message_deferred': {
+        const msgId = event.message_id || event.messageId;
+        if (!msgId) {break;}
+        // Update message status to indicate it's queued
+        setChats(prev => {
+          const next = new Map(prev);
+          for (const [peerId, chat] of next) {
+            const msgIndex = chat.messages.findIndex(m => m.id === msgId);
+            if (msgIndex >= 0) {
+              const msgs = [...chat.messages];
+              // Keep 'sending' status — the message is queued, not failed
+              if (msgs[msgIndex].status === 'sending') {
+                msgs[msgIndex] = {...msgs[msgIndex]};
+              }
+              next.set(peerId, {...chat, messages: msgs});
+              break;
+            }
+          }
+          return next;
+        });
+        break;
+      }
+
       default:
         break;
     }
@@ -603,34 +684,24 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   useEffect(() => {
     if (!isStarted || !protocolRef.current) {return;}
 
-    const interval = setInterval(async () => {
+    const broadcastPresence = async () => {
       const proto = protocolRef.current;
       if (!proto) {return;}
 
-      const presencePayload = JSON.stringify({
-        name: userNameRef.current,
-        timestamp: Date.now(),
-      });
-      const presenceContent = `${PRESENCE_MESSAGE_PREFIX}${presencePayload}`;
-
-      let sendCount = 0;
       for (const [peerId, contact] of contactsRef.current) {
-        if (sendCount >= MAX_PRESENCE_SENDS_PER_TICK) {break;}
-        if (!contact.hasSession || !contact.isNearby || contact.isBlocked) {continue;}
-
+        if (!contact.hasSession || contact.isBlocked) {continue;}
         try {
-          await proto.sendMessage({
-            recipient: peerId,
-            content: presenceContent,
-            priority: MessagePriority.Low,
-          });
-          sendCount++;
+          await proto.sendPresenceUpdate(peerId, 'online');
         } catch {
           // Ignore presence send failures
         }
       }
-    }, PRESENCE_REBROADCAST_INTERVAL_MS);
+    };
 
+    // Send initial presence immediately
+    broadcastPresence();
+
+    const interval = setInterval(broadcastPresence, PRESENCE_BROADCAST_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [isStarted]);
 
@@ -659,6 +730,19 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         for (const [peerId, contact] of next) {
           if (contact.isNearby && now - contact.lastSeen > NEARBY_THRESHOLD_MS) {
             next.set(peerId, {...contact, isNearby: false});
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+
+      // Expire stale typing indicators
+      setTypingPeers(prev => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [peerId, ts] of next) {
+          if (now - ts > TYPING_INDICATOR_TIMEOUT_MS) {
+            next.delete(peerId);
             changed = true;
           }
         }
@@ -758,6 +842,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         isNearby: neighborsRef.current.has(peerId),
         hasSession: existing?.hasSession || false,
         isBlocked: false,
+        presenceStatus: existing?.presenceStatus || 'offline',
       });
       return next;
     });
@@ -874,6 +959,15 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     setChats(prev => {
       const chat = prev.get(peerId);
       if (!chat || chat.unreadCount === 0) {return prev;}
+
+      // Send read receipts for unread incoming messages
+      const unreadIds = chat.messages
+        .filter(m => !m.isOutgoing && m.status === 'delivered')
+        .map(m => m.id);
+      if (unreadIds.length > 0 && protocolRef.current) {
+        protocolRef.current.sendReadReceipt(peerId, unreadIds).catch(() => {});
+      }
+
       const next = new Map(prev);
       next.set(peerId, {...chat, unreadCount: 0});
       return next;
@@ -893,7 +987,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       const next = new Map(prev);
       const contact = next.get(peerId);
       if (contact) {
-        next.set(peerId, {...contact, isBlocked: true});
+        next.set(peerId, {...contact, isBlocked: true, presenceStatus: 'offline' as PresenceStatus});
       }
       return next;
     });
@@ -914,7 +1008,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       const next = new Map(prev);
       const contact = next.get(peerId);
       if (contact) {
-        next.set(peerId, {...contact, isBlocked: false, hasSession: false});
+        next.set(peerId, {...contact, isBlocked: false, hasSession: false, presenceStatus: 'offline' as PresenceStatus});
       }
       return next;
     });
@@ -1035,6 +1129,16 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     });
   }, []);
 
+  const sendTypingIndicatorAction = useCallback(async (recipientId: string, isTyping: boolean) => {
+    if (!protocolRef.current) {return;}
+    if (blockedUsersRef.current.has(recipientId)) {return;}
+    try {
+      await protocolRef.current.sendTypingIndicator(recipientId, recipientId, isTyping);
+    } catch {
+      // Ignore typing indicator failures
+    }
+  }, []);
+
   // ─── Context Value ───────────────────────────────────────
 
   const value: ProtocolContextValue = {
@@ -1051,6 +1155,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     registeredServices,
     discoveredServices,
     serviceLog,
+    typingPeers,
     initialize,
     sendMessage,
     sendConnectionRequest: sendConnectionRequestAction,
@@ -1068,6 +1173,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     markChatRead,
     blockUser: blockUserAction,
     unblockUser: unblockUserAction,
+    sendTypingIndicator: sendTypingIndicatorAction,
   };
 
   return (

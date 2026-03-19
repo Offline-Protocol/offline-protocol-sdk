@@ -14,6 +14,7 @@ const STATUS_ICONS: Record<string, string> = {
   sending: '⏳',
   sent: '✓',
   delivered: '✓✓',
+  read: '✓✓',
   failed: '✗',
 };
 
@@ -44,7 +45,7 @@ export function MessageBubble({message, showSender, senderName, onLongPress}: Me
           </Text>
           {isOutgoing && (
             <>
-              <Text style={[styles.status, message.status === 'failed' && styles.statusFailed]}>
+              <Text style={[styles.status, message.status === 'failed' && styles.statusFailed, message.status === 'read' && styles.statusRead]}>
                 {STATUS_ICONS[message.status] || ''}
               </Text>
               <Text style={styles.lock}>🔒</Text>
@@ -131,6 +132,9 @@ const styles = StyleSheet.create({
   },
   statusFailed: {
     color: '#FF3B30',
+  },
+  statusRead: {
+    color: '#34C759',
   },
   lock: {
     fontSize: 9,

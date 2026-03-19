@@ -13,7 +13,7 @@ import {PresenceIndicator} from '../components/PresenceIndicator';
 import {MessageBubble} from '../components/MessageBubble';
 import {QuickMessages} from '../components/QuickMessages';
 import {formatRelativeTime, formatUserId} from '../utils';
-import type {Chat, ChatMessage} from '../types';
+import type {Chat, ChatMessage, PresenceStatus} from '../types';
 
 interface ChatsScreenProps {
   initialPeerId?: string | null;
@@ -22,7 +22,7 @@ interface ChatsScreenProps {
 
 export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProps) {
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
-  const {chats, contacts, groups, sendMessage, markChatRead, userId, unblockUser, forwardMessage, forwardMessageToGroup} = useProtocol();
+  const {chats, contacts, groups, sendMessage, markChatRead, userId, unblockUser, forwardMessage, forwardMessageToGroup, typingPeers} = useProtocol();
   const listRef = useRef<FlatList>(null);
 
   // Handle navigation from People tab
@@ -97,8 +97,9 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
             </Text>
             {contact && !isBlocked && (
               <PresenceIndicator
-                isNearby={contact.isNearby}
+                presenceStatus={contact.presenceStatus}
                 lastSeen={contact.lastSeen}
+                isTyping={typingPeers.has(selectedPeerId)}
               />
             )}
             {isBlocked && (
@@ -160,7 +161,7 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
 
   // ─── Chat List ───────────────────────────────────────────
 
-  const chatList: (Chat & {contactName: string; isNearby: boolean; lastSeen: number; isBlocked: boolean})[] = [];
+  const chatList: (Chat & {contactName: string; isNearby: boolean; lastSeen: number; isBlocked: boolean; presenceStatus: PresenceStatus})[] = [];
 
   // Include chats with messages
   for (const [peerId, chat] of chats) {
@@ -171,6 +172,7 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
       isNearby: contact?.isNearby || false,
       lastSeen: contact?.lastSeen || 0,
       isBlocked: contact?.isBlocked || false,
+      presenceStatus: contact?.presenceStatus || 'offline',
     });
   }
 
@@ -185,6 +187,7 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
         isNearby: contact.isNearby,
         lastSeen: contact.lastSeen,
         isBlocked: false,
+        presenceStatus: contact.presenceStatus,
       });
     }
   }
@@ -241,8 +244,9 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
                 <View style={styles.chatPreviewRow}>
                   {!item.isBlocked && (
                     <PresenceIndicator
-                      isNearby={item.isNearby}
+                      presenceStatus={item.presenceStatus}
                       lastSeen={item.lastSeen}
+                      isTyping={typingPeers.has(item.peerId)}
                       compact
                     />
                   )}

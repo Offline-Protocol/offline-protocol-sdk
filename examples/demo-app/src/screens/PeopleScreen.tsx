@@ -166,7 +166,7 @@ export function PeopleScreen({onOpenChat}: PeopleScreenProps) {
           <Text style={styles.name} numberOfLines={1}>
             {item.name || formatUserId(item.peerId)}
           </Text>
-          <PresenceIndicator isNearby={item.isNearby} lastSeen={item.lastSeen} />
+          <PresenceIndicator presenceStatus={item.presenceStatus} lastSeen={item.lastSeen} />
         </View>
         {item.hasSession && <Text style={styles.lock}>🔒</Text>}
       </TouchableOpacity>

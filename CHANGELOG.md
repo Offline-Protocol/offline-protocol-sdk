@@ -101,7 +101,7 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 - **User-level message forwarding with attribution** ([#61](https://github.com/Offline-Protocol/sdk/pull/61))
   Introduced first-class message forwarding as a protocol feature. Forwarded messages carry a `ForwardInfo` struct containing the original sender, original message ID, original timestamp, and a forward count. Both 1:1 (`forward_message()`) and group (`forward_message_to_group()`) forwarding are supported. The pending queue preserves forwarding attribution through retries, relay broadcast handles forwarded group messages, and a `MAX_FORWARD_COUNT=100` cap prevents infinite forwarding chains. Content type and media metadata are preserved through the forwarding path. Full React Native bindings included.
 
-- **Demo app** — Added a simple demo app (`examples/demo-app/`) showcasing all SDK features including messaging, groups, presence, service discovery, blocking, and forwarding.
+- **Demo app** — Added a simple demo app (`examples/demo-app/`) showcasing all SDK features including messaging, groups, presence (via `sendPresenceUpdate`), typing indicators, read receipts, service discovery, blocking, forwarding, and message relay/deferral tracking. Uses the production-recommended reliability config (10 retries, 10s ACK timeout).
 
 ### Performance
 

@@ -11,11 +11,9 @@ export const QUICK_MESSAGES = [
   {text: 'Emergency - need help!', emoji: '🚨', priority: 'critical' as const},
 ];
 
-export const PRESENCE_MESSAGE_PREFIX = '__presence__::';
+export const PRESENCE_BROADCAST_INTERVAL_MS = 15 * 1000;
 
-export const PRESENCE_REBROADCAST_INTERVAL_MS = 15 * 1000;
-
-export const MAX_PRESENCE_SENDS_PER_TICK = 3;
+export const TYPING_INDICATOR_TIMEOUT_MS = 10 * 1000;
 
 export const NEARBY_THRESHOLD_MS = 30 * 1000;
 
@@ -31,4 +29,8 @@ export const PROTOCOL_CONFIG = {
     requireEncryption: true,
   },
   network: {initialTtl: 8},
+  reliability: {
+    ack: {defaultTimeoutMs: 10000},
+    retry: {maxRetries: 10},
+  },
 };

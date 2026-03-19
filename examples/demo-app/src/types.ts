@@ -1,3 +1,5 @@
+export type PresenceStatus = 'online' | 'away' | 'offline';
+
 export interface Contact {
   peerId: string;
   name: string;
@@ -5,6 +7,7 @@ export interface Contact {
   isNearby: boolean;
   hasSession: boolean;
   isBlocked: boolean;
+  presenceStatus: PresenceStatus;
 }
 
 export interface Neighbor {
@@ -35,7 +38,7 @@ export interface ChatMessage {
   groupId?: string;
   content: string;
   timestamp: number;
-  status: 'sending' | 'sent' | 'delivered' | 'failed';
+  status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
   isOutgoing: boolean;
   forwardInfo?: ForwardInfo;
   /** Raw event JSON — used as input when forwarding this message */
