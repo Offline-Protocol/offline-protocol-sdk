@@ -38,6 +38,7 @@ import type {
   MlsSessionInfo,
   MlsGroupInfo,
   EstablishmentState,
+  PresenceStatus,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
@@ -2441,6 +2442,63 @@ export class OfflineProtocol {
     }
 
     this.initialRuntimeConfigApplied = false;
+  }
+
+  // ─── Presence, Typing, Read Receipts ────────────────────────
+
+  /**
+   * Sends a presence update to a peer.
+   *
+   * @param recipient - Recipient's user ID
+   * @param status - Presence status ('online', 'away', or 'offline')
+   * @returns Message ID
+   */
+  async sendPresenceUpdate(
+    recipient: string,
+    status: 'online' | 'away' | 'offline'
+  ): Promise<string> {
+    const statusCode = status === 'online' ? 0 : status === 'away' ? 1 : 2;
+    return await OfflineProtocolNativeModule.sendPresenceUpdate(
+      recipient,
+      statusCode
+    );
+  }
+
+  /**
+   * Sends a typing indicator to a peer.
+   *
+   * @param recipient - Recipient's user ID
+   * @param conversationId - Conversation identifier (recipient username for DMs, group_id for groups)
+   * @param isTyping - Whether the user is currently typing
+   * @returns Message ID
+   */
+  async sendTypingIndicator(
+    recipient: string,
+    conversationId: string,
+    isTyping: boolean
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.sendTypingIndicator(
+      recipient,
+      conversationId,
+      isTyping
+    );
+  }
+
+  /**
+   * Sends a read receipt to a peer.
+   *
+   * @param recipient - Recipient's user ID
+   * @param messageIds - Array of message IDs that were read
+   * @returns Message ID
+   */
+  async sendReadReceipt(
+    recipient: string,
+    messageIds: string[]
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.sendReadReceipt(
+      recipient,
+      messageIds
+    );
   }
 
   // ─── User Blocking ──────────────────────────────────────────

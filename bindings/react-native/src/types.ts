@@ -879,6 +879,73 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
 }
 
 // ============================================================================
+// PRESENCE, TYPING, READ RECEIPTS EVENTS
+// ============================================================================
+
+/**
+ * Presence status values
+ */
+export type PresenceStatus = 'online' | 'away' | 'offline';
+
+/**
+ * Presence updated event — a peer sent a presence update
+ */
+export interface PresenceUpdatedEvent extends BaseEvent {
+  type: 'presence_updated';
+  peer_id: string;
+  status: PresenceStatus;
+  timestamp: number;
+}
+
+/**
+ * Typing indicator received event
+ */
+export interface TypingIndicatorReceivedEvent extends BaseEvent {
+  type: 'typing_indicator_received';
+  sender: string;
+  conversation_id: string;
+  is_typing: boolean;
+  timestamp: number;
+}
+
+/**
+ * Read receipt received event
+ */
+export interface ReadReceiptReceivedEvent extends BaseEvent {
+  type: 'read_receipt_received';
+  sender: string;
+  message_ids: string[];
+  timestamp: number;
+}
+
+// ============================================================================
+// MESSAGE RELAY & DEFERRAL EVENTS
+// ============================================================================
+
+/**
+ * Message relayed event — this node forwarded a message for another peer
+ */
+export interface MessageRelayedEvent extends BaseEvent {
+  type: 'message_relayed';
+  message_id: string;
+  sender: string;
+  recipient: string;
+  hop_count: number;
+  remaining_ttl: number;
+}
+
+/**
+ * Message deferred event — a message was queued because no transport was available
+ */
+export interface MessageDeferredEvent extends BaseEvent {
+  type: 'message_deferred';
+  message_id: string;
+  reason: string;
+  retry_count: number;
+  next_retry_at?: number;
+}
+
+// ============================================================================
 // DORS OBSERVABILITY EVENTS (from SDK DORS decision / escalation)
 // ============================================================================
 
@@ -985,7 +1052,12 @@ export type ProtocolEvent =
   | DorsEscalationTriggeredEvent
   | ServiceDiscoveredEvent
   | ServiceRequestReceivedEvent
-  | ServiceResponseReceivedEvent;
+  | ServiceResponseReceivedEvent
+  | PresenceUpdatedEvent
+  | TypingIndicatorReceivedEvent
+  | ReadReceiptReceivedEvent
+  | MessageRelayedEvent
+  | MessageDeferredEvent;
 
 /**
  * Event listener type

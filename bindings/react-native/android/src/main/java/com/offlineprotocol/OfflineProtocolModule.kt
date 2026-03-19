@@ -763,6 +763,51 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // ─── Presence, Typing, Read Receipts ───────────────────────
+
+    @ReactMethod
+    fun sendPresenceUpdate(recipient: String, status: Int, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val presenceStatus = when (status) {
+                0 -> uniffi.offline_protocol.PresenceStatus.ONLINE
+                1 -> uniffi.offline_protocol.PresenceStatus.AWAY
+                2 -> uniffi.offline_protocol.PresenceStatus.OFFLINE
+                else -> uniffi.offline_protocol.PresenceStatus.ONLINE
+            }
+            val messageId = proto.sendPresenceUpdate(recipient, presenceStatus)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_PRESENCE_UPDATE", "Failed to send presence update: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun sendTypingIndicator(recipient: String, conversationId: String, isTyping: Boolean, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val messageId = proto.sendTypingIndicator(recipient, conversationId, isTyping)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_TYPING_INDICATOR", "Failed to send typing indicator: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun sendReadReceipt(recipient: String, messageIds: ReadableArray, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val msgIds = mutableListOf<String>()
+            for (i in 0 until messageIds.size()) {
+                msgIds.add(messageIds.getString(i))
+            }
+            val messageId = proto.sendReadReceipt(recipient, msgIds)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_READ_RECEIPT", "Failed to send read receipt: ${e.message}", e)
+        }
+    }
+
     // Service Discovery & Request/Response (via MeshServices)
 
     @ReactMethod
