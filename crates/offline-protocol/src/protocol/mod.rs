@@ -487,12 +487,16 @@ impl OfflineProtocol {
         let mut to_send: Vec<(Message, u32)> = Vec::new();
 
         for entry in self.outbox.values() {
-            if entry.message.recipient.as_str() == peer_id {
+            if entry.message.recipient.as_str() == peer_id
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
                 to_send.push((entry.message.clone(), entry.attempt_count));
             }
         }
         for entry in self.media_outbox.values() {
-            if entry.message.recipient.as_str() == peer_id {
+            if entry.message.recipient.as_str() == peer_id
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
                 to_send.push((entry.message.clone(), entry.attempt_count));
             }
         }

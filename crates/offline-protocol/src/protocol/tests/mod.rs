@@ -9346,3 +9346,42 @@ fn test_flush_outbox_all_includes_media_outbox() {
         "Stranded media outbox message should be sent by flush_outbox_all"
     );
 }
+
+#[test]
+fn test_flush_outbox_for_peer_skips_messages_awaiting_ack() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    protocol.start().unwrap();
+
+    // Send a message — succeeds, enters ACK tracking
+    let _msg_id = protocol
+        .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Message was sent successfully: it should be in outbox (awaiting ACK)
+    // but NOT in the retry queue
+    assert_eq!(protocol.retry_queue_size(), 0);
+    assert!(protocol.outbox_entry_count() > 0);
+
+    let sent_before = mock_clone.sent_messages().len();
+
+    // Discovering the peer again should NOT re-send the message because it
+    // already has a pending ACK
+    protocol.on_neighbor_discovered("bob");
+
+    let sent_after = mock_clone.sent_messages().len();
+    assert_eq!(
+        sent_before, sent_after,
+        "flush_outbox_for_peer should not re-send messages awaiting ACK"
+    );
+}
