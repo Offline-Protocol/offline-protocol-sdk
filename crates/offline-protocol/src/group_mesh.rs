@@ -1124,6 +1124,10 @@ impl OfflineProtocol {
     /// If Internet is available the group is also registered with the
     /// relay server for optimized fan-out.
     pub fn create_group(&mut self, group_name: &str) -> Result<offline_protocol_mls::GroupInfo> {
+        let trimmed = group_name.trim();
+        if trimmed.is_empty() {
+            return Err(Error::Other("Group name cannot be empty".to_string()));
+        }
         let mls_guard = self.read_mls_guard()?;
         let group_info = mls_guard.create_group(group_name)?;
         let group_id = group_info.group_id.as_str().to_string();
@@ -2020,6 +2024,10 @@ impl OfflineProtocol {
     /// Renames a group (admin only).
     /// Updates the local group name and broadcasts the change to all members.
     pub fn rename_group(&mut self, group_id: &str, new_name: &str) -> Result<()> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err(Error::Other("Group name cannot be empty".to_string()));
+        }
         let self_id = self.config.user_id.clone();
         if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::Other("Only admins can rename groups".to_string()));

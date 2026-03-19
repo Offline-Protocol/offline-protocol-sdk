@@ -6531,3 +6531,31 @@ fn test_rename_group_payload_serialization() {
     assert_eq!(parsed.new_name, "Test Name");
     assert_eq!(parsed.renamed_by, "alice");
 }
+
+#[test]
+fn test_rename_group_empty_name_rejected() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Original Name");
+
+    let result = alice.rename_group(&group_id, "");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+
+    let result = alice.rename_group(&group_id, "   ");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+}
+
+#[test]
+fn test_create_group_empty_name_rejected() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let result = protocol.create_group("");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+
+    let result = protocol.create_group("   ");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+}
