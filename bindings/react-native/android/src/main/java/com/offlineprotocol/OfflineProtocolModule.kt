@@ -2466,245 +2466,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Create a new group
-     */
-    @ReactMethod
-    fun mlsCreateGroup(groupName: String, _memberIds: ReadableArray?, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val info = proto.mlsCreateGroup(groupName)
-            val result = Arguments.createMap().apply {
-                putString("groupId", info.groupId)
-                putString("name", info.name)
-                val members = Arguments.createArray()
-                info.members.forEach { members.pushString(it) }
-                putArray("members", members)
-                putDouble("epoch", info.epoch.toDouble())
-                putBoolean("isSession", info.isSession)
-                putDouble("createdAtMs", info.createdAtMs.toDouble())
-                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to create group: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Add a member to a group
-     */
-    @ReactMethod
-    fun mlsAddGroupMember(groupId: String, memberKeyPackage: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val data = mutableListOf<UByte>()
-            for (i in 0 until memberKeyPackage.size()) {
-                data.add(memberKeyPackage.getInt(i).toUByte())
-            }
-            val welcome = proto.mlsAddGroupMember(groupId, data)
-            val result = Arguments.createMap().apply {
-                putString("groupId", welcome.groupId)
-                val welcomeDataArray = Arguments.createArray()
-                welcome.welcomeData.forEach { welcomeDataArray.pushInt(it.toInt()) }
-                putArray("welcomeData", welcomeDataArray)
-                putString("inviterId", welcome.inviterId)
-                putString("groupName", welcome.groupName)
-                putDouble("timestampMs", welcome.timestampMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to add group member: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Remove a member from a group
-     */
-    @ReactMethod
-    fun mlsRemoveGroupMember(groupId: String, memberId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val commit = proto.mlsRemoveGroupMember(groupId, memberId)
-            val result = Arguments.createMap().apply {
-                putString("groupId", commit.groupId)
-                putString("messageType", commit.messageType)
-                putDouble("epoch", commit.epoch.toDouble())
-                val ciphertextArray = Arguments.createArray()
-                commit.ciphertext.forEach { ciphertextArray.pushInt(it.toInt()) }
-                putArray("ciphertext", ciphertextArray)
-                putString("senderId", commit.senderId)
-                putDouble("timestampMs", commit.timestampMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to remove group member: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Leave a group
-     */
-    @ReactMethod
-    fun mlsLeaveGroup(groupId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            proto.mlsLeaveGroup(groupId)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to leave group: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Encrypt a message for a group
-     */
-    @ReactMethod
-    fun mlsEncryptForGroup(groupId: String, plaintext: ReadableArray, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val data = mutableListOf<UByte>()
-            for (i in 0 until plaintext.size()) {
-                data.add(plaintext.getInt(i).toUByte())
-            }
-            val encrypted = proto.mlsEncryptForGroup(groupId, data)
-            val result = Arguments.createMap().apply {
-                putString("groupId", encrypted.groupId)
-                putString("messageType", encrypted.messageType)
-                putDouble("epoch", encrypted.epoch.toDouble())
-                val ciphertextArray = Arguments.createArray()
-                encrypted.ciphertext.forEach { ciphertextArray.pushInt(it.toInt()) }
-                putArray("ciphertext", ciphertextArray)
-                putString("senderId", encrypted.senderId)
-                putDouble("timestampMs", encrypted.timestampMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to encrypt message for group: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Decrypt a message from a group
-     */
-    @ReactMethod
-    fun mlsDecryptFromGroup(encryptedJson: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = JSONObject(encryptedJson)
-            
-            val ciphertextArray = json.optJSONArray("ciphertext") ?: JSONArray()
-            val ciphertext = mutableListOf<UByte>()
-            for (i in 0 until ciphertextArray.length()) {
-                ciphertext.add(ciphertextArray.getInt(i).toUByte())
-            }
-            
-            val encrypted = MlsEncryptedMessage(
-                groupId = json.optString("groupId", ""),
-                messageType = json.optString("messageType", "Application"),
-                epoch = json.optLong("epoch", 0).toULong(),
-                ciphertext = ciphertext,
-                senderId = json.optString("senderId", ""),
-                timestampMs = json.optLong("timestampMs", 0).toULong()
-            )
-            
-            val plaintext = proto.mlsDecryptFromGroup(encrypted)
-            if (plaintext != null) {
-                val result = Arguments.createArray()
-                plaintext.forEach { result.pushInt(it.toInt()) }
-                promise.resolve(result)
-            } else {
-                promise.resolve(null)
-            }
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to decrypt message from group: ${e.message}", e)
-        }
-    }
-
-    /**
-     * Join a group using a Welcome message
-     */
-    @ReactMethod
-    fun mlsJoinGroup(welcomeJson: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = JSONObject(welcomeJson)
-            
-            val welcomeDataArray = json.optJSONArray("welcomeData") ?: JSONArray()
-            val welcomeData = mutableListOf<UByte>()
-            for (i in 0 until welcomeDataArray.length()) {
-                welcomeData.add(welcomeDataArray.getInt(i).toUByte())
-            }
-            
-            val welcome = MlsWelcomeMessage(
-                groupId = json.optString("groupId", ""),
-                welcomeData = welcomeData,
-                inviterId = json.optString("inviterId", ""),
-                groupName = json.optString("groupName", null),
-                timestampMs = json.optLong("timestampMs", 0).toULong()
-            )
-            
-            val info = proto.mlsJoinGroup(welcome)
-            val result = Arguments.createMap().apply {
-                putString("groupId", info.groupId)
-                putString("name", info.name)
-                val members = Arguments.createArray()
-                info.members.forEach { members.pushString(it) }
-                putArray("members", members)
-                putDouble("epoch", info.epoch.toDouble())
-                putBoolean("isSession", info.isSession)
-                putDouble("createdAtMs", info.createdAtMs.toDouble())
-                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
-            }
-            promise.resolve(result)
-        } catch (e: Exception) {
-            promise.reject("ERROR_MLS", "Failed to join group: ${e.message}", e)
-        }
-    }
-
-    /**
-     * List all groups
-     */
-    @ReactMethod
-    fun mlsListGroups(promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.resolve(Arguments.createArray())
-            return
-        }
-        val groups = proto.mlsListGroups()
-        promise.resolve(Arguments.fromList(groups))
-    }
-
-    /**
-     * Get group information
-     */
-    @ReactMethod
-    fun mlsGetGroupInfo(groupId: String, promise: Promise) {
-        val proto = protocol
-        if (proto == null) {
-            promise.reject("ERROR_MLS", "Protocol not initialized", null)
-            return
-        }
-        val info = proto.mlsGetGroupInfo(groupId)
-        if (info != null) {
-            val result = Arguments.createMap().apply {
-                putString("groupId", info.groupId)
-                putString("name", info.name)
-                val members = Arguments.createArray()
-                info.members.forEach { members.pushString(it) }
-                putArray("members", members)
-                putDouble("epoch", info.epoch.toDouble())
-                putBoolean("isSession", info.isSession)
-                putDouble("createdAtMs", info.createdAtMs.toDouble())
-                putDouble("lastActivityMs", info.lastActivityMs.toDouble())
-            }
-            promise.resolve(result)
-        } else {
-            promise.resolve(null)
-        }
-    }
-
-    /**
      * Process a Welcome message
      */
     @ReactMethod
@@ -2879,6 +2640,35 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(result)
         } catch (e: Exception) {
             promise.reject("ERROR_MESH_GROUP", "Failed to list mesh groups: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Get group information via high-level API.
+     */
+    @ReactMethod
+    fun meshGetGroupInfo(groupId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val info = proto.getGroupInfo(groupId)
+            if (info != null) {
+                val result = Arguments.createMap().apply {
+                    putString("groupId", info.groupId)
+                    putString("name", info.name)
+                    val members = Arguments.createArray()
+                    info.members.forEach { members.pushString(it) }
+                    putArray("members", members)
+                    putDouble("epoch", info.epoch.toDouble())
+                    putBoolean("isSession", info.isSession)
+                    putDouble("createdAtMs", info.createdAtMs.toDouble())
+                    putDouble("lastActivityMs", info.lastActivityMs.toDouble())
+                }
+                promise.resolve(result)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to get group info: ${e.message}", e)
         }
     }
 

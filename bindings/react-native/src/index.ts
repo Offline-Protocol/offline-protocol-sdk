@@ -2053,166 +2053,6 @@ export class OfflineProtocol {
   // MLS GROUP METHODS
   // ============================================================================
 
-  /**
-   * Creates a new MLS group.
-   *
-   * @param groupName - Human-readable group name
-   * @returns Group info
-   * @throws Error if creation fails
-   */
-  async mlsCreateGroup(groupName: string): Promise<MlsGroupInfo> {
-    const result = await OfflineProtocolNativeModule.mlsCreateGroup(groupName, []);
-    return {
-      groupId: result.groupId,
-      groupName: result.groupName ?? result.name ?? '',
-      memberIds: result.memberIds ?? result.members ?? [],
-      epoch: result.epoch,
-      createdAt: result.createdAt ?? result.createdAtMs ?? 0,
-    };
-  }
-
-  /**
-   * Adds a member to an MLS group.
-   *
-   * @param groupId - Group ID
-   * @param memberKeyPackage - New member's key package data
-   * @returns Welcome message to send to the new member
-   * @throws Error if addition fails
-   */
-  async mlsAddGroupMember(
-    groupId: string,
-    memberKeyPackage: number[]
-  ): Promise<MlsWelcome> {
-    const result = await OfflineProtocolNativeModule.mlsAddGroupMember(
-      groupId,
-      memberKeyPackage
-    );
-    return {
-      groupId: result.groupId,
-      welcomeData: result.welcomeData,
-      inviterId: result.inviterId,
-      timestampMs: result.timestampMs,
-    };
-  }
-
-  /**
-   * Removes a member from an MLS group.
-   *
-   * @param groupId - Group ID
-   * @param memberId - Member to remove
-   * @throws Error if removal fails
-   */
-  async mlsRemoveGroupMember(groupId: string, memberId: string): Promise<void> {
-    await OfflineProtocolNativeModule.mlsRemoveGroupMember(groupId, memberId);
-  }
-
-  /**
-   * Leaves an MLS group.
-   *
-   * @param groupId - Group ID to leave
-   * @throws Error if leaving fails
-   */
-  async mlsLeaveGroup(groupId: string): Promise<void> {
-    return await OfflineProtocolNativeModule.mlsLeaveGroup(groupId);
-  }
-
-  /**
-   * Encrypts a message for an MLS group.
-   *
-   * @param groupId - Group ID
-   * @param plaintext - Message content as bytes
-   * @returns Encrypted message
-   * @throws Error if encryption fails
-   */
-  async mlsEncryptForGroup(
-    groupId: string,
-    plaintext: number[]
-  ): Promise<MlsEncryptedMessage> {
-    const result = await OfflineProtocolNativeModule.mlsEncryptForGroup(
-      groupId,
-      plaintext
-    );
-    return {
-      groupId: result.groupId,
-      messageType: result.messageType,
-      epoch: result.epoch,
-      ciphertext: result.ciphertext,
-      senderId: result.senderId,
-      timestampMs: result.timestampMs,
-    };
-  }
-
-  /**
-   * Decrypts a message from an MLS group.
-   *
-   * @param encrypted - Encrypted message
-   * @returns Decrypted plaintext as bytes, or null if decryption fails
-   */
-  async mlsDecryptFromGroup(
-    encrypted: MlsEncryptedMessage
-  ): Promise<number[] | null> {
-    const encryptedJson = JSON.stringify({
-      groupId: encrypted.groupId,
-      messageType: encrypted.messageType,
-      epoch: encrypted.epoch,
-      ciphertext: encrypted.ciphertext,
-      senderId: encrypted.senderId,
-      timestampMs: encrypted.timestampMs,
-    });
-    return await OfflineProtocolNativeModule.mlsDecryptFromGroup(encryptedJson);
-  }
-
-  /**
-   * Joins an MLS group from a Welcome message.
-   *
-   * @param welcome - Welcome message from group admin
-   * @returns Group info
-   * @throws Error if joining fails
-   */
-  async mlsJoinGroup(welcome: MlsWelcome): Promise<MlsGroupInfo> {
-    const welcomeJson = JSON.stringify({
-      groupId: welcome.groupId,
-      welcomeData: welcome.welcomeData,
-      inviterId: welcome.inviterId,
-      timestampMs: welcome.timestampMs,
-    });
-    const result = await OfflineProtocolNativeModule.mlsJoinGroup(welcomeJson);
-    return {
-      groupId: result.groupId,
-      groupName: result.groupName,
-      memberIds: result.memberIds,
-      epoch: result.epoch,
-      createdAt: result.createdAt,
-    };
-  }
-
-  /**
-   * Lists all MLS groups.
-   *
-   * @returns Array of group IDs
-   */
-  async mlsListGroups(): Promise<string[]> {
-    return await OfflineProtocolNativeModule.mlsListGroups();
-  }
-
-  /**
-   * Gets information about an MLS group.
-   *
-   * @param groupId - Group ID
-   * @returns Group info or null if not found
-   */
-  async mlsGetGroupInfo(groupId: string): Promise<MlsGroupInfo | null> {
-    const result = await OfflineProtocolNativeModule.mlsGetGroupInfo(groupId);
-    if (!result) return null;
-    return {
-      groupId: result.groupId,
-      groupName: result.groupName,
-      memberIds: result.memberIds,
-      epoch: result.epoch,
-      createdAt: result.createdAt,
-    };
-  }
-
   // ============================================================================
   // HIGH-LEVEL GROUP METHODS (MLS-encrypted, mesh transport)
   // ============================================================================
@@ -2319,6 +2159,24 @@ export class OfflineProtocol {
    */
   async meshListGroups(): Promise<string[]> {
     return await OfflineProtocolNativeModule.meshListGroups();
+  }
+
+  /**
+   * Gets information about an MLS group.
+   *
+   * @param groupId - Group ID
+   * @returns Group info or null if not found
+   */
+  async meshGetGroupInfo(groupId: string): Promise<MlsGroupInfo | null> {
+    const result = await OfflineProtocolNativeModule.meshGetGroupInfo(groupId);
+    if (!result) return null;
+    return {
+      groupId: result.groupId,
+      groupName: result.groupName ?? result.name ?? '',
+      memberIds: result.memberIds ?? result.members ?? [],
+      epoch: result.epoch,
+      createdAt: result.createdAt ?? result.createdAtMs ?? 0,
+    };
   }
 
   /**

@@ -378,45 +378,6 @@ RCT_EXTERN_METHOD(mlsDecrypt:(NSString *)encryptedJson
 RCT_EXTERN_METHOD(mlsListSessions:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(mlsCreateGroup:(NSString *)groupName
-                  memberIds:(NSArray *)memberIds
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsAddGroupMember:(NSString *)groupId
-                  memberId:(NSArray *)memberId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsRemoveGroupMember:(NSString *)groupId
-                  memberId:(NSString *)memberId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsLeaveGroup:(NSString *)groupId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsEncryptForGroup:(NSString *)groupId
-                  plaintext:(NSArray *)plaintext
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsDecryptFromGroup:(NSString *)encryptedJson
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsJoinGroup:(NSString *)welcomeJson
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsListGroups:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(mlsGetGroupInfo:(NSString *)groupId
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
 RCT_EXTERN_METHOD(mlsProcessWelcome:(NSString *)welcomeJson
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
@@ -500,6 +461,10 @@ RCT_EXTERN_METHOD(meshLeaveGroup:(NSString *)groupId
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(meshListGroups:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(meshGetGroupInfo:(NSString *)groupId
+                  resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(meshSetMemberRole:(NSString *)groupId

@@ -1767,6 +1767,16 @@ impl OfflineProtocol {
         Ok(groups.into_iter().map(|g| g.as_str().to_string()).collect())
     }
 
+    /// Gets information about an MLS group.
+    pub fn get_group_info(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<offline_protocol_mls::GroupInfo>> {
+        let mls_guard = self.read_mls_guard()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        Ok(mls_guard.get_group_info(&gid)?)
+    }
+
     // ========================================================================
     // GROUP ROLES
     // ========================================================================

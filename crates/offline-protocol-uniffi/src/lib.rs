@@ -3008,141 +3008,6 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
-    /// Create a new group
-    pub fn mls_create_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .create_group(&group_name)
-            .map(MlsGroupInfo::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Add a member to a group.
-    ///
-    /// Returns both the Welcome (for the invitee) and the Commit (to distribute
-    /// to existing members so they advance their MLS epoch).
-    pub fn mls_add_group_member(
-        &self,
-        group_id: String,
-        member_key_package: Vec<u8>,
-    ) -> Result<MlsAddMemberResult, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
-            .map(|(welcome, commit)| MlsAddMemberResult {
-                welcome: MlsWelcomeMessage::from(welcome),
-                commit: MlsEncryptedMessage::from(commit),
-            })
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Remove a member from a group
-    pub fn mls_remove_group_member(
-        &self,
-        group_id: String,
-        member_id: String,
-    ) -> Result<MlsEncryptedMessage, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .remove_group_member(&CoreGroupId::new(group_id), &member_id)
-            .map(MlsEncryptedMessage::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Leave a group
-    pub fn mls_leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .leave_group(&CoreGroupId::new(group_id))
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Encrypt a message for a group
-    pub fn mls_encrypt_for_group(
-        &self,
-        group_id: String,
-        plaintext: Vec<u8>,
-    ) -> Result<MlsEncryptedMessage, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .encrypt_for_group(&CoreGroupId::new(group_id), &plaintext)
-            .map(MlsEncryptedMessage::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Decrypt a message from a group
-    pub fn mls_decrypt_from_group(
-        &self,
-        encrypted: MlsEncryptedMessage,
-    ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .decrypt_from_group(&encrypted.into())
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Join a group using a Welcome message
-    pub fn mls_join_group(
-        &self,
-        welcome: MlsWelcomeMessage,
-    ) -> Result<MlsGroupInfo, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .join_group(&welcome.into())
-            .map(MlsGroupInfo::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// List all groups
-    pub fn mls_list_groups(&self) -> Vec<String> {
-        let manager = match self.get_mls_manager() {
-            Ok(m) => m,
-            Err(_) => return Vec::new(),
-        };
-        let guard = match manager.read() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard
-            .list_groups()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|g| g.as_str().to_string())
-            .collect()
-    }
-
-    /// Get information about a group
-    pub fn mls_get_group_info(&self, group_id: String) -> Option<MlsGroupInfo> {
-        let manager = self.get_mls_manager().ok()?;
-        let guard = manager.read().ok()?;
-        guard
-            .get_group_info(&CoreGroupId::new(group_id))
-            .ok()
-            .flatten()
-            .map(MlsGroupInfo::from)
-    }
-
     /// Decrypt any encrypted message
     pub fn mls_decrypt(
         &self,
@@ -3433,6 +3298,15 @@ impl OfflineProtocol {
         guard
             .list_groups()
             .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Get information about an MLS group.
+    pub fn get_group_info(&self, group_id: String) -> Result<Option<MlsGroupInfo>, ProtocolError> {
+        let guard = self.lock_inner()?;
+        Ok(guard
+            .get_group_info(&group_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))?
+            .map(MlsGroupInfo::from))
     }
 
     /// Set a member's role in a group (admin only).
@@ -3733,7 +3607,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mls_manual_and_core_paths_share_single_state_under_concurrency() {
+    fn test_mls_high_level_and_core_paths_share_single_state_under_concurrency() {
         let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
         protocol
             .initialize_mls(Box::new(TestMlsStorageProvider::default()))
@@ -3744,15 +3618,6 @@ mod tests {
             core_guard.mls_manager().cloned().unwrap()
         };
 
-        let manual_protocol = Arc::clone(&protocol);
-        let manual_thread = thread::spawn(move || {
-            for i in 0..20 {
-                manual_protocol
-                    .mls_create_group(format!("manual-group-{}", i))
-                    .unwrap();
-            }
-        });
-
         let core_thread = thread::spawn(move || {
             for i in 0..20 {
                 let manager = core_mls_handle.read().unwrap();
@@ -3760,10 +3625,9 @@ mod tests {
             }
         });
 
-        manual_thread.join().unwrap();
         core_thread.join().unwrap();
 
-        let from_manual_api = protocol.mls_list_groups();
+        let from_high_level = protocol.list_groups().unwrap();
         let from_core_api = {
             let core_guard = protocol.inner.lock().unwrap();
             let manager = core_guard.mls_manager().cloned().unwrap();
@@ -3778,9 +3642,9 @@ mod tests {
             groups
         };
 
-        assert_eq!(from_manual_api.len(), from_core_api.len());
+        assert_eq!(from_high_level.len(), from_core_api.len());
         for group_id in from_core_api {
-            assert!(from_manual_api.contains(&group_id));
+            assert!(from_high_level.contains(&group_id));
         }
     }
 

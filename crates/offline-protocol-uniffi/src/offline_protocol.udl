@@ -679,40 +679,6 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     void mls_clear_pending_welcome(string other_user_id);
     
-    // Create a new group
-    [Throws=ProtocolError]
-    MlsGroupInfo mls_create_group(string group_name);
-    
-    // Add a member to a group (returns Welcome for invitee + Commit for existing members)
-    [Throws=ProtocolError]
-    MlsAddMemberResult mls_add_group_member(string group_id, sequence<u8> member_key_package);
-    
-    // Remove a member from a group
-    [Throws=ProtocolError]
-    MlsEncryptedMessage mls_remove_group_member(string group_id, string member_id);
-    
-    // Leave a group
-    [Throws=ProtocolError]
-    void mls_leave_group(string group_id);
-    
-    // Encrypt a message for a group
-    [Throws=ProtocolError]
-    MlsEncryptedMessage mls_encrypt_for_group(string group_id, sequence<u8> plaintext);
-    
-    // Decrypt a message from a group
-    [Throws=ProtocolError]
-    sequence<u8>? mls_decrypt_from_group(MlsEncryptedMessage encrypted);
-    
-    // Join a group using a Welcome message
-    [Throws=ProtocolError]
-    MlsGroupInfo mls_join_group(MlsWelcomeMessage welcome);
-    
-    // List all groups (excluding 1:1 sessions)
-    sequence<string> mls_list_groups();
-    
-    // Get information about a group
-    MlsGroupInfo? mls_get_group_info(string group_id);
-    
     // Decrypt any encrypted message (auto-detects session vs group)
     [Throws=ProtocolError]
     sequence<u8>? mls_decrypt(MlsEncryptedMessage encrypted);
@@ -828,6 +794,10 @@ interface OfflineProtocol {
     // List all MLS groups (excluding 1:1 sessions)
     [Throws=ProtocolError]
     sequence<string> list_groups();
+
+    // Get information about an MLS group
+    [Throws=ProtocolError]
+    MlsGroupInfo? get_group_info(string group_id);
 
     // Set a member's role in a group (admin only, broadcasts to all members)
     [Throws=ProtocolError]
