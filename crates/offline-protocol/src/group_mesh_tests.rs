@@ -6182,17 +6182,18 @@ fn test_plaintext_removal_notification_from_non_admin_member_rejected() {
 fn test_plaintext_removal_notification_from_relay_allowed() {
     let (mut protocol, events) = setup_started_with_events();
 
-    // Create a group
+    // Create a group — "user123" (test default) is creator/admin
     let info = protocol.create_group("Relay Test").unwrap();
     let group_id = info.group_id.as_str().to_string();
 
     // Simulate a relay-originated removal notification.
-    // The relay server ("relay-server") is NOT in the group member list,
-    // so the handler should allow it through (relay trust).
+    // The relay server ("relay-server") is NOT in the group member list.
+    // The removed_by field must reference a verified admin ("user123")
+    // so the handler can validate the removal is legitimate.
     let payload = crate::protocol::GroupMemberRemovedPayload {
         group_id: group_id.clone(),
         user_id: "user123".to_string(),
-        removed_by: "some-admin".to_string(),
+        removed_by: "user123".to_string(),
     };
     let content = format!(
         "{}{}",
@@ -6203,14 +6204,48 @@ fn test_plaintext_removal_notification_from_relay_allowed() {
     let result = protocol.process_internal_message(&message);
     assert!(matches!(result, Some(InternalMessageResult::Consumed)));
 
-    // Event should be emitted (relay-originated messages are trusted)
+    // Event should be emitted (removed_by is a verified admin)
     let events = events.lock().unwrap();
     let removal = events
         .iter()
         .find(|e| matches!(e, Event::GroupMemberRemoved { .. }));
     assert!(
         removal.is_some(),
-        "Should emit GroupMemberRemoved from relay (non-member sender)"
+        "Should emit GroupMemberRemoved from relay when removed_by is verified admin"
+    );
+}
+
+#[test]
+fn test_plaintext_removal_notification_from_relay_unverifiable_rejected() {
+    let (mut protocol, events) = setup_started_with_events();
+
+    // Create a group — "user123" is creator/admin
+    let info = protocol.create_group("Relay Security Test").unwrap();
+    let group_id = info.group_id.as_str().to_string();
+
+    // Non-member sender with a removed_by that is NOT a known admin
+    let payload = crate::protocol::GroupMemberRemovedPayload {
+        group_id: group_id.clone(),
+        user_id: "user123".to_string(),
+        removed_by: "fake-admin".to_string(),
+    };
+    let content = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MEMBER_REMOVED,
+        serde_json::to_string(&payload).unwrap()
+    );
+    let message = make_message("attacker", "user123", &content);
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    // Should NOT emit event — removed_by is not a verified admin
+    let events = events.lock().unwrap();
+    let removal = events
+        .iter()
+        .find(|e| matches!(e, Event::GroupMemberRemoved { .. }));
+    assert!(
+        removal.is_none(),
+        "Should NOT process removal from non-member sender with unverifiable removed_by"
     );
 }
 

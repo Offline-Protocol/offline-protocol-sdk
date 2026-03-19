@@ -703,34 +703,39 @@ impl OfflineProtocol {
                 if self_removed {
                     // SECURITY: Verify the sender is authorized to remove us.
                     // If the sender is a known group member, they must be an admin.
-                    // If the sender is not a member (e.g. relay server), allow the
-                    // message through (relay-originated events are trusted).
+                    // If the sender is not a member (e.g. relay server), verify
+                    // that removed_by in the payload is a known admin to prevent
+                    // arbitrary non-member senders from forging removals.
                     let sender_is_member = self
                         .group_mesh
                         .members
                         .get(&payload.group_id)
                         .map(|m| m.contains(&sender.to_string()))
                         .unwrap_or(false);
-                    if sender_is_member {
-                        match self.check_is_admin(&payload.group_id, sender) {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                error!(
-                                    sender = %sender,
-                                    group_id = %payload.group_id,
-                                    "SECURITY: Group removal notification from non-admin member, ignoring"
-                                );
-                                return;
-                            }
-                            Err(e) => {
-                                warn!(
-                                    sender = %sender,
-                                    group_id = %payload.group_id,
-                                    error = %e,
-                                    "Failed to verify admin status for removal notification"
-                                );
-                                return;
-                            }
+                    let admin_to_verify = if sender_is_member {
+                        sender
+                    } else {
+                        &payload.removed_by
+                    };
+                    match self.check_is_admin(&payload.group_id, admin_to_verify) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            error!(
+                                sender = %sender,
+                                verified_id = %admin_to_verify,
+                                group_id = %payload.group_id,
+                                "SECURITY: Group removal notification with unverifiable admin, ignoring"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            warn!(
+                                sender = %sender,
+                                group_id = %payload.group_id,
+                                error = %e,
+                                "Failed to verify admin status for removal notification"
+                            );
+                            return;
                         }
                     }
                     info!(

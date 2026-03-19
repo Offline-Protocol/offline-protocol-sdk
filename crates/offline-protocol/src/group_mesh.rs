@@ -742,30 +742,13 @@ impl OfflineProtocol {
 
         // Auto-promote if removal left zero admins and other members remain
         if !actual_removed.is_empty() {
-            if let Ok(mls_guard) = self.read_mls_guard() {
-                let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                    let mut remaining_members = self
-                        .group_mesh
-                        .members
-                        .get(&payload.group_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    // Sort for deterministic election: all nodes must pick the
-                    // same member to promote, regardless of local insertion order.
-                    remaining_members.sort();
-                    if !metadata.has_any_admin() && !remaining_members.is_empty() {
-                        let promote_id = &remaining_members[0];
-                        if let Err(e) =
-                            mls_guard.set_member_role(&gid, promote_id, GroupRole::Admin)
-                        {
-                            warn!(user_id = %promote_id, error = %e, "Failed to auto-promote member to admin after last admin removed (incoming commit)");
-                        } else {
-                            info!(user_id = %promote_id, group_id = %payload.group_id, "Auto-promoted member to admin after last admin was removed (incoming commit)");
-                        }
-                    }
-                }
-            }
+            let remaining = self
+                .group_mesh
+                .members
+                .get(&payload.group_id)
+                .cloned()
+                .unwrap_or_default();
+            self.auto_promote_if_no_admin(&payload.group_id, &remaining);
         }
 
         // Only clear fork tracking when a KeyUpdate commit succeeds — these
@@ -1327,19 +1310,32 @@ impl OfflineProtocol {
     ///
     /// Sends a Commit to all remaining members.
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
-        // Admin check
         let self_id = self.config.user_id.clone();
-        if !self.check_is_admin(group_id, &self_id)? {
-            return Err(Error::Other("Only admins can remove members".to_string()));
-        }
 
-        // Block removing the last admin if other members will remain
+        // Admin check + last-admin guard (single metadata load)
         {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
-            if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                if metadata.get_role(member_id) == GroupRole::Admin {
-                    let admin_count = metadata
+            let metadata = mls_guard.get_group_metadata(&gid)?;
+
+            let is_admin = if let Some(ref meta) = metadata {
+                if meta.has_any_admin() {
+                    meta.get_role(&self_id) == GroupRole::Admin
+                } else if let Some(ref creator) = meta.created_by {
+                    creator == &self_id
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !is_admin {
+                return Err(Error::Other("Only admins can remove members".to_string()));
+            }
+
+            if let Some(ref meta) = metadata {
+                if meta.get_role(member_id) == GroupRole::Admin {
+                    let admin_count = meta
                         .get_all_roles()
                         .values()
                         .filter(|r| **r == GroupRole::Admin)
@@ -1371,28 +1367,15 @@ impl OfflineProtocol {
 
         // Refresh member list after removal
         let members = self.refresh_group_members(group_id)?;
-        // Clean up removed member's role metadata and auto-promote if no admin remains
+        // Clean up removed member's role metadata
         if let Ok(mls_guard) = self.read_mls_guard() {
             let gid = offline_protocol_mls::GroupId::new(group_id);
             if let Err(e) = mls_guard.remove_member_role(&gid, member_id) {
                 warn!(member = %member_id, error = %e, "Failed to clean up role metadata for removed member");
             }
-            // If no admin remains and there are still members, promote the
-            // lexicographically first remaining member for deterministic election
-            // (all nodes must agree on the same candidate).
-            if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                let mut sorted_members = members.clone();
-                sorted_members.sort();
-                if !metadata.has_any_admin() && !sorted_members.is_empty() {
-                    let promote_id = &sorted_members[0];
-                    if let Err(e) = mls_guard.set_member_role(&gid, promote_id, GroupRole::Admin) {
-                        warn!(user_id = %promote_id, error = %e, "Failed to auto-promote member to admin after last admin removed");
-                    } else {
-                        info!(user_id = %promote_id, group_id = %group_id, "Auto-promoted member to admin after last admin was removed");
-                    }
-                }
-            }
         }
+        // Auto-promote if removal left zero admins
+        self.auto_promote_if_no_admin(group_id, &members);
 
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.to_string(),
@@ -1446,7 +1429,7 @@ impl OfflineProtocol {
             let removed_content = format!("{}{}", internal_prefixes::GROUP_MEMBER_REMOVED, json);
             if let Err(e) = self.send_internal_message(
                 member_id,
-                removed_content.clone(),
+                removed_content,
                 MessagePriority::High,
             ) {
                 warn!(
@@ -1455,9 +1438,6 @@ impl OfflineProtocol {
                     error = %e,
                     "Failed to send removal notification to removed member"
                 );
-                // Best-effort retry
-                let _ =
-                    self.send_internal_message(member_id, removed_content, MessagePriority::High);
             }
         }
 
@@ -1792,6 +1772,31 @@ impl OfflineProtocol {
     // ========================================================================
     // GROUP ROLES
     // ========================================================================
+
+    /// Deterministically promotes the lexicographically-first remaining member
+    /// to admin if no admin role remains. All nodes use the same sort order,
+    /// so the promotion converges to the same candidate network-wide.
+    fn auto_promote_if_no_admin(&self, group_id: &str, members: &[String]) {
+        if members.is_empty() {
+            return;
+        }
+        if let Ok(mls_guard) = self.read_mls_guard() {
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                if metadata.has_any_admin() {
+                    return;
+                }
+                let mut sorted = members.to_vec();
+                sorted.sort();
+                let promote_id = &sorted[0];
+                if let Err(e) = mls_guard.set_member_role(&gid, promote_id, GroupRole::Admin) {
+                    warn!(user_id = %promote_id, error = %e, "Failed to auto-promote member to admin");
+                } else {
+                    info!(user_id = %promote_id, group_id = %group_id, "Auto-promoted member to admin after last admin was removed");
+                }
+            }
+        }
+    }
 
     /// Checks if a user is an admin of the given group.
     ///
