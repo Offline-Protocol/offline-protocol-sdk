@@ -9010,7 +9010,7 @@ fn test_ack_receipt_cleans_up_retry_queue() {
 
     // Manually enqueue into retry queue to simulate a retry-in-flight scenario
     let msg = protocol.outbox_messages().next().unwrap().clone();
-    let _ = protocol.retry_queue_mut().enqueue(msg, 1);
+    protocol.retry_queue_mut().enqueue(msg, 1);
     assert!(protocol.retry_queue_size() > 0);
 
     // Simulate receiving an ACK from bob for this message
@@ -9207,7 +9207,12 @@ fn test_cleanup_outbox_removes_retry_queue_entry() {
 
     // Send a message — deferred, enters outbox + retry queue
     let _ = protocol
-        .send_message("bob", "will expire", None::<MessagePriority>, None::<String>)
+        .send_message(
+            "bob",
+            "will expire",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
     assert_eq!(protocol.retry_queue_size(), 1);
     assert!(protocol.outbox_entry_count() > 0);
@@ -9274,7 +9279,7 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
     );
 
     // Also enqueue in retry queue
-    let _ = protocol.retry_queue_mut().enqueue(media_msg, 0);
+    protocol.retry_queue_mut().enqueue(media_msg, 0);
     assert_eq!(protocol.retry_queue_size(), 1);
 
     // Discover the peer — should flush the media outbox message too
@@ -9283,7 +9288,10 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
     // The media message should have been sent
     let sent = mock_clone.sent_messages();
     let found = sent.iter().any(|m| m.id == media_msg_id);
-    assert!(found, "Media outbox message should be sent on peer discovery");
+    assert!(
+        found,
+        "Media outbox message should be sent on peer discovery"
+    );
 
     // Retry queue should be empty
     assert_eq!(

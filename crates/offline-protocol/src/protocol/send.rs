@@ -1420,7 +1420,7 @@ impl OfflineProtocol {
         self.ensure_outbox_entry(message);
 
         // Schedule retry (enqueue is infallible — no attempt limit)
-        let _ = self.retry_queue.enqueue(message.clone(), 0);
+        self.retry_queue.enqueue(message.clone(), 0);
 
         warn!(
             message_id = %message.id,

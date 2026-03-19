@@ -577,7 +577,7 @@ impl OfflineProtocol {
 
         // Re-enqueue any messages beyond the batch limit so they aren't lost
         for (message, attempt_count) in iter {
-            let _ = self.retry_queue.enqueue(message, attempt_count);
+            self.retry_queue.enqueue(message, attempt_count);
         }
     }
 
@@ -613,9 +613,7 @@ impl OfflineProtocol {
                 debug!(message_id = %message.id, "Flush send succeeded");
             }
             Err(e) => {
-                if let Err(eq_err) = self.retry_queue.enqueue(message.clone(), attempt_count) {
-                    warn!(message_id = %message.id, error = %eq_err, "Failed to re-enqueue after flush failure");
-                }
+                self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
             }
         }
@@ -1092,7 +1090,7 @@ impl OfflineProtocol {
     /// - Properly tracks retry counts and transport failures
     fn process_retry_queue(&mut self) -> Result<()> {
         // Limit batch size to prevent blocking on large queues
-        let max_batch_size = 20;
+        let max_batch_size = crate::constants::FLUSH_BATCH_LIMIT;
         let mut processed = 0;
 
         while processed < max_batch_size {
@@ -1140,19 +1138,9 @@ impl OfflineProtocol {
                     );
                 }
                 Err(e) => {
-                    // Re-enqueue with incremented retry count
-                    // If this fails (max retries), the message remains in outbox
-                    if self
-                        .retry_queue
-                        .enqueue(entry.message.clone(), entry.retry_count + 1)
-                        .is_err()
-                    {
-                        warn!(
-                            message_id = %entry.message.id,
-                            retry_count = entry.retry_count,
-                            "Max retries exceeded, message remains in outbox for recovery"
-                        );
-                    }
+                    // Re-enqueue with incremented retry count for backoff
+                    self.retry_queue
+                        .enqueue(entry.message.clone(), entry.retry_count + 1);
 
                     if let Some(transport) = forced_transport.or(previous_transport) {
                         self.transport_manager.record_retry_failure(transport);
@@ -1234,7 +1222,7 @@ impl OfflineProtocol {
             let last_transport = entry.last_transport;
 
             // enqueue is infallible (retry queue has no attempt limit)
-            let _ = self.retry_queue.enqueue(message_clone, retry_count);
+            self.retry_queue.enqueue(message_clone, retry_count);
             if let Some(transport) = last_transport {
                 self.transport_manager.record_retry_failure(transport);
             }

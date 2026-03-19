@@ -138,19 +138,16 @@ impl RetryQueue {
     /// retry limit.  ACK-level retry limits are enforced by the ACK manager in
     /// the protocol layer.
     ///
+    /// Duplicate messages (same ID already in queue) are silently ignored.
+    ///
     /// # Arguments
     ///
     /// * `message` - The message to queue for retry
     /// * `retry_count` - Current retry count (used for backoff calculation)
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` if queued. Duplicate messages (same ID already in
-    /// queue) are silently ignored.
-    pub fn enqueue(&mut self, message: Message, retry_count: u32) -> crate::Result<()> {
+    pub fn enqueue(&mut self, message: Message, retry_count: u32) {
         // Prevent duplicate entries for the same message
         if self.index.contains_key(&message.id.as_str()) {
-            return Ok(());
+            return;
         }
 
         // Calculate retry delay with exponential backoff
@@ -178,8 +175,6 @@ impl RetryQueue {
 
         self.index.insert(message.id.as_str(), ());
         self.queue.push(entry);
-
-        Ok(())
     }
 
     /// Dequeues the next message that is ready for retry.
@@ -370,7 +365,7 @@ mod tests {
         let mut queue = RetryQueue::with_config(config);
 
         let msg = create_test_message(MessagePriority::Medium);
-        queue.enqueue(msg.clone(), 0).unwrap();
+        queue.enqueue(msg.clone(), 0);
 
         assert_eq!(queue.len(), 1);
         assert!(queue.contains(&msg.id.as_str()));
@@ -425,17 +420,17 @@ mod tests {
 
         // enqueue no longer rejects based on max_retries — it's a pure
         // scheduling mechanism. ACK timeouts govern permanent failure.
-        assert!(queue.enqueue(msg.clone(), 0).is_ok());
+        queue.enqueue(msg.clone(), 0);
         queue.dequeue_ready(); // Clear queue
 
-        assert!(queue.enqueue(msg.clone(), 1).is_ok());
+        queue.enqueue(msg.clone(), 1);
         queue.dequeue_ready();
 
         // Previously this would fail; now it should succeed
-        assert!(queue.enqueue(msg.clone(), 2).is_ok());
+        queue.enqueue(msg.clone(), 2);
         queue.dequeue_ready();
 
-        assert!(queue.enqueue(msg.clone(), 100).is_ok());
+        queue.enqueue(msg.clone(), 100);
     }
 
     #[test]
@@ -450,9 +445,9 @@ mod tests {
         let msg2 = create_test_message(MessagePriority::Low);
         let msg3 = create_test_message(MessagePriority::Medium);
 
-        queue.enqueue(msg1.clone(), 0).unwrap();
-        queue.enqueue(msg2.clone(), 0).unwrap();
-        queue.enqueue(msg3.clone(), 0).unwrap();
+        queue.enqueue(msg1.clone(), 0);
+        queue.enqueue(msg2.clone(), 0);
+        queue.enqueue(msg3.clone(), 0);
 
         // Nothing should be ready (long delay)
         assert!(queue.dequeue_ready().is_none());
@@ -479,9 +474,9 @@ mod tests {
         let high = create_test_message(MessagePriority::High);
         let medium = create_test_message(MessagePriority::Medium);
 
-        queue.enqueue(low.clone(), 0).unwrap();
-        queue.enqueue(high.clone(), 0).unwrap();
-        queue.enqueue(medium.clone(), 0).unwrap();
+        queue.enqueue(low.clone(), 0);
+        queue.enqueue(high.clone(), 0);
+        queue.enqueue(medium.clone(), 0);
 
         thread::sleep(Duration::from_millis(60));
 
@@ -532,7 +527,7 @@ mod tests {
         let mut queue = RetryQueue::new();
         let msg = create_test_message(MessagePriority::Medium);
 
-        queue.enqueue(msg.clone(), 0).unwrap();
+        queue.enqueue(msg.clone(), 0);
         assert!(queue.contains(&msg.id.as_str()));
 
         assert!(queue.remove(&msg.id.as_str()));
@@ -549,7 +544,7 @@ mod tests {
         let mut queue = RetryQueue::with_config(config);
 
         let msg = create_test_message(MessagePriority::Medium);
-        queue.enqueue(msg, 0).unwrap();
+        queue.enqueue(msg, 0);
 
         // Wait for expiration
         thread::sleep(Duration::from_millis(150));
@@ -567,18 +562,10 @@ mod tests {
         };
         let mut queue = RetryQueue::with_config(config);
 
-        queue
-            .enqueue(create_test_message(MessagePriority::High), 0)
-            .unwrap();
-        queue
-            .enqueue(create_test_message(MessagePriority::High), 0)
-            .unwrap();
-        queue
-            .enqueue(create_test_message(MessagePriority::Medium), 0)
-            .unwrap();
-        queue
-            .enqueue(create_test_message(MessagePriority::Low), 0)
-            .unwrap();
+        queue.enqueue(create_test_message(MessagePriority::High), 0);
+        queue.enqueue(create_test_message(MessagePriority::High), 0);
+        queue.enqueue(create_test_message(MessagePriority::Medium), 0);
+        queue.enqueue(create_test_message(MessagePriority::Low), 0);
 
         let stats = queue.stats();
         assert_eq!(stats.total_count, 4);
