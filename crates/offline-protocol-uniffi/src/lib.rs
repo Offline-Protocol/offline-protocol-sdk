@@ -378,10 +378,8 @@ pub enum TransportType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolState {
     Stopped,
-    Starting,
     Running,
     Paused,
-    Stopping,
 }
 
 /// Relay priority
@@ -930,9 +928,6 @@ struct InternetState {
     outgoing_messages: VecDeque<(String, Vec<u8>)>,
     /// Whether internet transport is connected
     is_connected: bool,
-    /// Server URL (used when configuring internet transport)
-    #[allow(dead_code)]
-    server_url: Option<String>,
 }
 
 /// Internal state for WiFi Direct transport operations
@@ -960,8 +955,6 @@ pub struct OfflineProtocol {
     relay_priority: RwLock<RelayPriority>,
     forced_transport: RwLock<Option<TransportType>>,
     dors_config: RwLock<Option<DorsConfig>>,
-    #[allow(dead_code)]
-    user_id: String,
 }
 
 impl OfflineProtocol {
@@ -1039,7 +1032,6 @@ impl OfflineProtocol {
             internet_state: Mutex::new(InternetState {
                 outgoing_messages: VecDeque::new(),
                 is_connected: false,
-                server_url: None,
             }),
             wifi_direct_state: Mutex::new(WifiDirectState {
                 outgoing_messages: VecDeque::new(),
@@ -1052,7 +1044,6 @@ impl OfflineProtocol {
             relay_priority: RwLock::new(RelayPriority::Medium),
             forced_transport: RwLock::new(None),
             dors_config: RwLock::new(None),
-            user_id,
         })
     }
 
@@ -2188,31 +2179,6 @@ impl OfflineProtocol {
     // ========================================================================
     // TRANSPORT MANAGEMENT
     // ========================================================================
-
-    /// Adds Internet transport
-    pub fn add_internet_transport(
-        &self,
-        _server_url: String,
-        _port: u16,
-    ) -> Result<(), ProtocolError> {
-        // Internet transport requires server infrastructure
-        // This would need to be implemented by creating an InternetTransport instance
-        // and adding it via transport_manager_mut().add_transport()
-        // For now, this is not implemented as it requires network server setup
-        Err(ProtocolError::Other(
-            "Internet transport requires server infrastructure setup".to_string(),
-        ))
-    }
-
-    /// Adds Wi-Fi Direct transport
-    pub fn add_wifi_direct_transport(&self) -> Result<(), ProtocolError> {
-        // WiFi Direct transport would need to be created and added dynamically
-        // This requires platform-specific WiFi Direct implementation
-        // For now, this is not implemented as it's platform-specific
-        Err(ProtocolError::Other(
-            "WiFi Direct transport must be added by platform code".to_string(),
-        ))
-    }
 
     /// Removes a transport
     pub fn remove_transport(&self, transport_type: TransportType) -> Result<(), ProtocolError> {

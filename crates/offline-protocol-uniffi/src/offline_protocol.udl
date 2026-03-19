@@ -131,10 +131,8 @@ enum TransportType {
 // Protocol state
 enum ProtocolState {
     "Stopped",
-    "Starting",
     "Running",
     "Paused",
-    "Stopping",
 };
 
 // Relay priority
@@ -500,12 +498,6 @@ interface OfflineProtocol {
     void wifi_direct_peer_disconnected(string peer_id);
     
     // Transport management
-    [Throws=ProtocolError]
-    void add_internet_transport(string server_url, u16 port);
-    
-    [Throws=ProtocolError]
-    void add_wifi_direct_transport();
-    
     [Throws=ProtocolError]
     void remove_transport(TransportType transport_type);
     
