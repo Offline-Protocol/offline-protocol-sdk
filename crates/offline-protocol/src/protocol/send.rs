@@ -1417,25 +1417,8 @@ impl OfflineProtocol {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
 
-        // Schedule retry. If queuing fails, treat this as a terminal failure.
-        if let Err(e) = self.retry_queue.enqueue(message.clone(), 0) {
-            warn!(
-                message_id = %message.id,
-                error = %e,
-                "Failed to enqueue message for retry"
-            );
-            if message.content_type == ContentType::FileChunk {
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::message_failed(
-                        message.id.clone(),
-                        "Retry queue unavailable".to_string(),
-                        0,
-                    ));
-                }
-                self.handle_outbound_media_chunk_failed(&message.id, "retry queue unavailable");
-                self.remove_outbox_entry(&message.id);
-            }
-        }
+        // Schedule retry (enqueue is infallible — no attempt limit)
+        let _ = self.retry_queue.enqueue(message.clone(), 0);
 
         warn!(
             message_id = %message.id,

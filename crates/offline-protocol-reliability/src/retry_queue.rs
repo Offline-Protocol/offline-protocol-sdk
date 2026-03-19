@@ -133,14 +133,19 @@ impl RetryQueue {
 
     /// Adds a message to the retry queue.
     ///
+    /// The retry queue is a pure scheduling mechanism — it does not enforce a
+    /// retry limit.  ACK-level retry limits are enforced by the ACK manager in
+    /// the protocol layer.
+    ///
     /// # Arguments
     ///
     /// * `message` - The message to queue for retry
-    /// * `retry_count` - Current retry count (0 for first retry)
+    /// * `retry_count` - Current retry count (used for backoff calculation)
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if queued, `Err` if max retries exceeded.
+    /// Returns `Ok(())` if queued. Duplicate messages (same ID already in
+    /// queue) are silently ignored.
     pub fn enqueue(&mut self, message: Message, retry_count: u32) -> crate::Result<()> {
         // Prevent duplicate entries for the same message
         if self.index.contains_key(&message.id.as_str()) {

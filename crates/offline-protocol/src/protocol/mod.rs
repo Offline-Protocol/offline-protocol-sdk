@@ -501,44 +501,16 @@ impl OfflineProtocol {
             return;
         }
 
-        let batch_limit = 20;
-        let count = to_send.len().min(batch_limit);
+        let count = to_send.len().min(crate::constants::FLUSH_BATCH_LIMIT);
         debug!(peer_id = %peer_id, count = count, "Flushing outbox for discovered peer");
 
-        for (message, attempt_count) in to_send.into_iter().take(batch_limit) {
+        for (message, attempt_count) in to_send
+            .into_iter()
+            .take(crate::constants::FLUSH_BATCH_LIMIT)
+        {
             // Remove from retry queue since we're sending immediately
             self.retry_queue.remove(&message.id.as_str());
-
-            let forced_transport = self.pinned_media_transport_for_message(&message.id);
-            let send_result = if let Some(transport) = forced_transport {
-                self.transport_manager
-                    .send_via_transport(&message, transport)
-            } else {
-                self.transport_manager.send(&message)
-            };
-            let current_transport =
-                forced_transport.or_else(|| self.transport_manager.current_transport());
-
-            match send_result {
-                Ok(()) => {
-                    if let Err(e) = self.ensure_ack_registration(&message) {
-                        warn!(message_id = %message.id, error = %e, "ACK registration failed during flush");
-                    }
-                    self.mark_message_sent(
-                        &message,
-                        current_transport,
-                        Some(attempt_count.saturating_add(1)),
-                    );
-                    debug!(message_id = %message.id, "Flush send succeeded for peer");
-                }
-                Err(e) => {
-                    // Re-enqueue to retry queue with current attempt count for backoff
-                    if let Err(eq_err) = self.retry_queue.enqueue(message.clone(), attempt_count) {
-                        warn!(message_id = %message.id, error = %eq_err, "Failed to re-enqueue after flush failure");
-                    }
-                    debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
-                }
-            }
+            self.try_flush_send(message, attempt_count);
         }
     }
 
@@ -576,46 +548,55 @@ impl OfflineProtocol {
             return;
         }
 
-        let batch_limit = 20;
-        let count = all_messages.len().min(batch_limit);
+        let count = all_messages.len().min(crate::constants::FLUSH_BATCH_LIMIT);
         debug!(
             count = count,
             total = all_messages.len(),
             "Flushing all outbox messages"
         );
 
-        for (message, attempt_count) in all_messages.into_iter().take(batch_limit) {
+        for (message, attempt_count) in all_messages
+            .into_iter()
+            .take(crate::constants::FLUSH_BATCH_LIMIT)
+        {
             self.ensure_outbox_entry(&message);
+            self.try_flush_send(message, attempt_count);
+        }
+    }
 
-            let forced_transport = self.pinned_media_transport_for_message(&message.id);
-            let send_result = if let Some(transport) = forced_transport {
-                self.transport_manager
-                    .send_via_transport(&message, transport)
-            } else {
-                self.transport_manager.send(&message)
-            };
-            let current_transport =
-                forced_transport.or_else(|| self.transport_manager.current_transport());
+    /// Attempts to send a single message as part of a flush operation.
+    ///
+    /// On success, registers ACK tracking and updates the outbox entry.
+    /// On failure, re-enqueues the message to the retry queue with its
+    /// current attempt count so backoff resumes.
+    fn try_flush_send(&mut self, message: Message, attempt_count: u32) {
+        let forced_transport = self.pinned_media_transport_for_message(&message.id);
+        let send_result = if let Some(transport) = forced_transport {
+            self.transport_manager
+                .send_via_transport(&message, transport)
+        } else {
+            self.transport_manager.send(&message)
+        };
+        let current_transport =
+            forced_transport.or_else(|| self.transport_manager.current_transport());
 
-            match send_result {
-                Ok(()) => {
-                    if let Err(e) = self.ensure_ack_registration(&message) {
-                        warn!(message_id = %message.id, error = %e, "ACK registration failed during flush");
-                    }
-                    self.mark_message_sent(
-                        &message,
-                        current_transport,
-                        Some(attempt_count.saturating_add(1)),
-                    );
-                    debug!(message_id = %message.id, "Flush send succeeded");
+        match send_result {
+            Ok(()) => {
+                if let Err(e) = self.ensure_ack_registration(&message) {
+                    warn!(message_id = %message.id, error = %e, "ACK registration failed during flush");
                 }
-                Err(e) => {
-                    // Re-enqueue with current attempt count for backoff
-                    if let Err(eq_err) = self.retry_queue.enqueue(message.clone(), attempt_count) {
-                        warn!(message_id = %message.id, error = %eq_err, "Failed to re-enqueue after flush failure");
-                    }
-                    debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
+                self.mark_message_sent(
+                    &message,
+                    current_transport,
+                    Some(attempt_count.saturating_add(1)),
+                );
+                debug!(message_id = %message.id, "Flush send succeeded");
+            }
+            Err(e) => {
+                if let Err(eq_err) = self.retry_queue.enqueue(message.clone(), attempt_count) {
+                    warn!(message_id = %message.id, error = %eq_err, "Failed to re-enqueue after flush failure");
                 }
+                debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
             }
         }
     }
@@ -1232,48 +1213,13 @@ impl OfflineProtocol {
             let message_clone = entry.message.clone();
             let last_transport = entry.last_transport;
 
-            match self.retry_queue.enqueue(message_clone, retry_count) {
-                Ok(()) => {
-                    if let Some(transport) = last_transport {
-                        self.transport_manager.record_retry_failure(transport);
-                    }
-                }
-                Err(_) => {
-                    self.handle_retry_queue_unavailable(message_id, retry_count)?;
-                }
+            // enqueue is infallible (retry queue has no attempt limit)
+            let _ = self.retry_queue.enqueue(message_clone, retry_count);
+            if let Some(transport) = last_transport {
+                self.transport_manager.record_retry_failure(transport);
             }
         } else {
             self.handle_missing_outbox_entry(message_id, retry_count)?;
-        }
-        Ok(())
-    }
-
-    /// Handles the case when retry queue is unavailable.
-    fn handle_retry_queue_unavailable(
-        &mut self,
-        message_id: &MessageId,
-        retry_count: u32,
-    ) -> Result<()> {
-        let state = lock_shared_state(&self.shared_state).map_err(|e| {
-            error!(
-                "Failed to lock shared state for retry queue error event: {}",
-                e
-            );
-            e
-        })?;
-        state.emit_event(Event::message_failed(
-            message_id.clone(),
-            "Retry queue unavailable".to_string(),
-            retry_count,
-        ));
-        drop(state);
-
-        self.handle_outbound_media_chunk_failed(message_id, "retry queue unavailable");
-        self.ack_manager.remove_ack(message_id);
-        if let Some(entry) = self.remove_outbox_entry(message_id) {
-            if let Some(transport) = entry.last_transport {
-                self.transport_manager.record_delivery_failure(transport);
-            }
         }
         Ok(())
     }

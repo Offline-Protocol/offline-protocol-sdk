@@ -12,10 +12,6 @@ pub enum Error {
     #[error("ACK timeout for message {0}")]
     AckTimeout(String),
 
-    /// Maximum retries exceeded.
-    #[error("Maximum retries exceeded")]
-    MaxRetriesExceeded,
-
     /// Core error.
     #[error("Core error: {0}")]
     Core(#[from] offline_protocol_core::Error),
