@@ -826,11 +826,15 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getFileProgress(fileId: String)  -> FileProgress?
     
+    func getGroupRoles(groupId: String) throws  -> [String: String]
+    
     func getIdentityPublicKey() throws  -> [UInt8]
     
     func getMedianHops()  -> UInt8
     
     func getMedianLatency()  -> UInt64
+    
+    func getMemberRole(groupId: String, userId: String) throws  -> String
     
     func getMessageStats()  -> [MessageStats]
     
@@ -977,6 +981,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func setBleTransportCallback(callback: BleTransportCallback) 
     
     func setEventCallback(callback: EventCallback) 
+    
+    func setMemberRole(groupId: String, userId: String, role: String) throws 
     
     func setRelayPriority(priority: RelayPriority) throws 
     
@@ -1358,6 +1364,15 @@ open func getFileProgress(fileId: String) -> FileProgress?  {
 })
 }
     
+open func getGroupRoles(groupId: String)throws  -> [String: String]  {
+    return try  FfiConverterDictionaryStringString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_roles(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
 open func getIdentityPublicKey()throws  -> [UInt8]  {
     return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(
@@ -1378,6 +1393,16 @@ open func getMedianLatency() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_latency(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getMemberRole(groupId: String, userId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(userId),$0
     )
 })
 }
@@ -2025,6 +2050,16 @@ open func setEventCallback(callback: EventCallback)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(
             self.uniffiCloneHandle(),
         FfiConverterCallbackInterfaceEventCallback_lower(callback),$0
+    )
+}
+}
+    
+open func setMemberRole(groupId: String, userId: String, role: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_member_role(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),
+        FfiConverterString.lower(userId),
+        FfiConverterString.lower(role),$0
     )
 }
 }
@@ -6476,6 +6511,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 44654) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 21794) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6483,6 +6521,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 9158) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 61568) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 30825) {
@@ -6702,6 +6743,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 14659) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 56849) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715) {
