@@ -9057,6 +9057,57 @@ fn test_ack_receipt_cleans_up_retry_queue() {
 }
 
 #[test]
+fn test_flush_outbox_all_re_enqueues_overflow_beyond_batch_limit() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails to fill the outbox
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Queue more messages than the batch limit across different peers
+    let total = crate::constants::FLUSH_BATCH_LIMIT + 10;
+    for i in 0..total {
+        let _ = protocol.send_message(
+            &format!("peer-{}", i),
+            &format!("msg-{}", i),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+    assert_eq!(protocol.retry_queue_size(), total);
+
+    // Replace with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    // Flush all — should send FLUSH_BATCH_LIMIT and re-enqueue the rest
+    protocol.flush_outbox_all();
+
+    // The overflow messages must still be in the retry queue, not lost
+    assert_eq!(
+        protocol.retry_queue_size(),
+        10,
+        "Overflow messages beyond batch limit should be re-enqueued"
+    );
+
+    // Outbox entries for overflowed messages should still exist
+    assert!(
+        protocol.outbox_entry_count() >= 10,
+        "Outbox entries for overflow messages should survive"
+    );
+}
+
+#[test]
 fn test_flush_send_failure_re_enqueues_message() {
     let mut config = create_test_config();
     config.reliability.retry.initial_delay_ms = 60_000;

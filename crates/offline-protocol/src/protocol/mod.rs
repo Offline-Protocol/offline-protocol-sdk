@@ -555,11 +555,15 @@ impl OfflineProtocol {
             "Flushing all outbox messages"
         );
 
-        for (message, attempt_count) in all_messages
-            .into_iter()
-            .take(crate::constants::FLUSH_BATCH_LIMIT)
-        {
+        let mut iter = all_messages.into_iter();
+
+        for (message, attempt_count) in iter.by_ref().take(crate::constants::FLUSH_BATCH_LIMIT) {
             self.try_flush_send(message, attempt_count);
+        }
+
+        // Re-enqueue any messages beyond the batch limit so they aren't lost
+        for (message, attempt_count) in iter {
+            let _ = self.retry_queue.enqueue(message, attempt_count);
         }
     }
 
