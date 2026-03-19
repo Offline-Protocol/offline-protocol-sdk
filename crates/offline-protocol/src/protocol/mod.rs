@@ -1020,6 +1020,12 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_ROLE_CHANGE) {
+            let mid = message.id.as_str();
+            self.handle_group_role_change(&mid, sender, data);
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Group (relay) and service messages ---
 
         if content.starts_with(internal_prefixes::GROUP_CREATED)

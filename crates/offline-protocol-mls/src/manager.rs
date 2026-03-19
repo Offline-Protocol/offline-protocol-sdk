@@ -447,8 +447,9 @@ impl MlsManager {
             .group_manager
             .create_group(&group_id, &credential, &signature_keys)?;
 
-        // Store group metadata
-        let metadata = GroupMetadata::new(Some(group_name.to_string()));
+        // Store group metadata with creator as admin
+        let mut metadata = GroupMetadata::new(Some(group_name.to_string()));
+        metadata.set_role(&self.user_id, "admin");
         self.save_group_metadata(&group_id, &metadata)?;
 
         let mut info = self.group_manager.get_group_info(&group, &group_id);
@@ -701,6 +702,16 @@ impl MlsManager {
             .load_group_metadata(group_id)?
             .unwrap_or_else(|| GroupMetadata::new(None));
         metadata.custom.insert(key.to_string(), value.to_string());
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
+    /// Removes a custom metadata key for a group.
+    pub fn remove_group_custom_metadata(&self, group_id: &GroupId, key: &str) -> Result<()> {
+        let mut metadata = self
+            .load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.custom.remove(key);
         metadata.touch();
         self.save_group_metadata(group_id, &metadata)
     }

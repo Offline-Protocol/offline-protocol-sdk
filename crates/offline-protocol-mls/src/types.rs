@@ -309,6 +309,36 @@ impl GroupMetadata {
     pub fn touch(&mut self) {
         self.last_activity_ms = chrono::Utc::now().timestamp_millis() as u64;
     }
+
+    /// Gets the role for a user, defaulting to `"member"` if not set.
+    pub fn get_role(&self, user_id: &str) -> String {
+        self.custom
+            .get(&format!("role:{}", user_id))
+            .cloned()
+            .unwrap_or_else(|| "member".to_string())
+    }
+
+    /// Sets the role for a user.
+    pub fn set_role(&mut self, user_id: &str, role: &str) {
+        self.custom
+            .insert(format!("role:{}", user_id), role.to_string());
+    }
+
+    /// Removes role metadata for a user (on removal from group).
+    pub fn remove_role(&mut self, user_id: &str) {
+        self.custom.remove(&format!("role:{}", user_id));
+    }
+
+    /// Returns all `user_id -> role` mappings.
+    pub fn get_all_roles(&self) -> std::collections::HashMap<String, String> {
+        self.custom
+            .iter()
+            .filter_map(|(k, v)| {
+                k.strip_prefix("role:")
+                    .map(|uid| (uid.to_string(), v.clone()))
+            })
+            .collect()
+    }
 }
 
 /// Storage key types for organizing MLS data.

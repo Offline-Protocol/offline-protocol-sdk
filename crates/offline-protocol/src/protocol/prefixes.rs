@@ -95,6 +95,8 @@ define_internal_prefixes! {
     GROUP_RELAY_REGISTER = "__GRP_RELAY_REG__",
     /// Prefix for relay group broadcast (SDK → relay server fan-out).
     GROUP_RELAY_BROADCAST = "__GRP_RELAY_BCAST__",
+    /// Prefix for group role change notifications.
+    GROUP_ROLE_CHANGE = "__GRP_ROLE_CHG__",
     /// Prefix for presence update messages.
     PRESENCE = "__PRESENCE__",
     /// Prefix for typing indicator messages.

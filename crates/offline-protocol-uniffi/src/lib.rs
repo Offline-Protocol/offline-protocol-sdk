@@ -3469,6 +3469,42 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
+    /// Set a member's role in a group (admin only).
+    pub fn set_member_role(
+        &self,
+        group_id: String,
+        user_id: String,
+        role: String,
+    ) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .set_member_role(&group_id, &user_id, &role)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Get a member's role in a group.
+    pub fn get_member_role(
+        &self,
+        group_id: String,
+        user_id: String,
+    ) -> Result<String, ProtocolError> {
+        let guard = self.lock_inner()?;
+        guard
+            .get_member_role(&group_id, &user_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Get all member roles in a group.
+    pub fn get_group_roles(
+        &self,
+        group_id: String,
+    ) -> Result<std::collections::HashMap<String, String>, ProtocolError> {
+        let guard = self.lock_inner()?;
+        guard
+            .get_group_roles(&group_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
     // ========================================================================
     // TOFU MANAGEMENT
     // ========================================================================

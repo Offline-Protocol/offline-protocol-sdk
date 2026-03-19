@@ -4,7 +4,7 @@ use crate::protocol::{base64_decode, base64_encode, internal_prefixes, InternalM
 use crate::{Event, OfflineProtocol};
 use offline_protocol_core::{AppId, UserId};
 use offline_protocol_transport::{Transport, TransportType};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -298,6 +298,7 @@ fn test_group_mls_process_commit_empty_ciphertext_no_event() {
         ciphertext: String::new(),
         epoch: 1,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -429,6 +430,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
         group_name: Some("Test Group".to_string()),
         welcome_data: "d2VsY29tZQ==".to_string(),
         member_list: vec!["alice".to_string(), "bob".to_string()],
+        member_roles: HashMap::new(),
     };
     let json = serde_json::to_string(&welcome_payload).unwrap();
     let parsed: GroupMlsWelcomePayload = serde_json::from_str(&json).unwrap();
@@ -442,6 +444,7 @@ fn test_group_mls_payload_serialization_roundtrip() {
         ciphertext: "Y29tbWl0".to_string(),
         epoch: 5,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let json = serde_json::to_string(&commit_payload).unwrap();
     let parsed: GroupMlsCommitPayload = serde_json::from_str(&json).unwrap();
@@ -608,6 +611,7 @@ fn test_group_mls_commit_unknown_group() {
         ciphertext: base64_encode(b"fake-commit-data"),
         epoch: 1,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -924,6 +928,7 @@ fn test_group_mls_welcome_bad_data_no_panic() {
         group_name: Some("Bad Group".to_string()),
         welcome_data: "not-valid-base64!!!".to_string(),
         member_list: vec!["alice".to_string()],
+        member_roles: HashMap::new(),
     };
     let content = format!(
         "{}{}",
@@ -956,6 +961,7 @@ fn test_group_mls_welcome_valid_base64_bad_mls_no_panic() {
         group_name: Some("Garbage MLS".to_string()),
         welcome_data: base64_encode(b"this is not valid MLS data"),
         member_list: vec!["alice".to_string()],
+        member_roles: HashMap::new(),
     };
     let content = format!(
         "{}{}",
@@ -1024,6 +1030,7 @@ fn test_group_mls_commit_oversized_ciphertext_rejected() {
         ciphertext: oversized,
         epoch: 1,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -1213,6 +1220,7 @@ fn test_group_mls_commit_failure_buffers_for_retry() {
             ciphertext: base64_encode(b"commit-data"),
             epoch: 99,
             affected_member: Some("new-member".to_string()),
+            role: None,
         })
         .unwrap(),
         buffered_at: Instant::now(),
@@ -1257,6 +1265,7 @@ fn test_group_mls_pending_commit_buffer_cap() {
             ciphertext: base64_encode(format!("commit-{}", i).as_bytes()),
             epoch: i as u64,
             affected_member: None,
+            role: None,
         })
         .unwrap();
         protocol.buffer_pending_commit(&group_id, "alice", &data);
@@ -1327,6 +1336,7 @@ fn test_group_mls_commit_empty_ciphertext_not_buffered() {
         ciphertext: String::new(),
         epoch: 1,
         affected_member: None,
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -1546,6 +1556,7 @@ fn test_group_mls_drain_pending_commits_no_double_buffering() {
         ciphertext: base64_encode(b"not-a-real-mls-commit"),
         epoch: 99,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let bad_data = serde_json::to_string(&bad_commit).unwrap();
 
@@ -1597,6 +1608,7 @@ fn test_group_mls_drain_pending_commits_expired_entries_dropped() {
         ciphertext: base64_encode(b"stale-commit"),
         epoch: 1,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let data = serde_json::to_string(&bad_commit).unwrap();
 
@@ -1636,6 +1648,7 @@ fn test_group_mls_handle_commit_permanent_failure_not_buffered() {
         ciphertext: base64_encode(b"fake-but-decodable-commit"),
         epoch: 42,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -1671,6 +1684,7 @@ fn test_group_mls_commit_rejected_not_buffered() {
         ciphertext: String::new(),
         epoch: 1,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -2133,6 +2147,7 @@ fn test_group_mls_commit_group_not_found_is_rejected_not_retriable() {
         ciphertext: base64_encode(b"some-commit-data"),
         epoch: 1,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -2168,6 +2183,7 @@ fn test_group_mls_commit_bad_deserialization_is_rejected_not_retriable() {
         ciphertext: base64_encode(b"this-is-not-mls"),
         epoch: 1,
         affected_member: Some("carol".to_string()),
+        role: None,
     };
     let content = format!(
         "{}{}",
@@ -2409,6 +2425,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
             ciphertext: base64_encode(b"commit-1"),
             epoch: 1,
             affected_member: None,
+            role: None,
         })
         .unwrap(),
         buffered_at: Instant::now(),
@@ -2422,6 +2439,7 @@ fn test_group_mls_pending_commit_drain_cascades() {
             ciphertext: base64_encode(b"commit-2"),
             epoch: 2,
             affected_member: None,
+            role: None,
         })
         .unwrap(),
         buffered_at: Instant::now(),
@@ -3111,6 +3129,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
         ciphertext: base64_encode(&bob_commit.ciphertext),
         epoch: bob_commit.epoch,
         affected_member: None,
+        role: None,
     };
     let data = serde_json::to_string(&commit_payload).unwrap();
 
@@ -3384,6 +3403,7 @@ fn test_key_update_commit_type_serialization() {
         ciphertext: "abc".to_string(),
         epoch: 5,
         affected_member: None,
+        role: None,
     };
 
     let json = serde_json::to_string(&payload).unwrap();
@@ -4079,6 +4099,7 @@ fn test_non_key_update_commit_does_not_clear_fork_state() {
         ciphertext: base64_encode(&bob_update.ciphertext),
         epoch: bob_update.epoch,
         affected_member: Some("charlie".to_string()),
+        role: None,
     };
     let data = serde_json::to_string(&add_commit_payload).unwrap();
 
@@ -4119,6 +4140,7 @@ fn test_key_update_commit_clears_fork_state() {
         ciphertext: base64_encode(&bob_update.ciphertext),
         epoch: bob_update.epoch,
         affected_member: None,
+        role: None,
     };
     let data = serde_json::to_string(&ku_commit_payload).unwrap();
 

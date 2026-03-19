@@ -3165,6 +3165,57 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Set a member's role in a group (admin only).
+    @objc func meshSetMemberRole(_ groupId: String,
+                                  userId: String,
+                                  role: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.setMemberRole(groupId: groupId, userId: userId, role: role)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to set member role: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Get a member's role in a group.
+    @objc func meshGetMemberRole(_ groupId: String,
+                                  userId: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let role = try proto.getMemberRole(groupId: groupId, userId: userId)
+            resolver(role)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to get member role: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Get all member roles in a group.
+    @objc func meshGetGroupRoles(_ groupId: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let roles = try proto.getGroupRoles(groupId: groupId)
+            resolver(roles)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to get group roles: \(error.localizedDescription)", error)
+        }
+    }
+
     // MARK: - Helpers
     
     private func parseInternetConfig(_ config: NSDictionary?) throws -> (String, UInt16) {
