@@ -1548,14 +1548,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         switch state {
         case .stopped:
             stateString = "Stopped"
-        case .starting:
-            stateString = "Starting"
         case .running:
             stateString = "Running"
         case .paused:
             stateString = "Paused"
-        case .stopping:
-            stateString = "Stopping"
         @unknown default:
             stateString = "Unknown"
         }

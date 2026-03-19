@@ -1374,10 +1374,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val state = protocol?.getState()
         val stateString = when (state) {
             uniffi.offline_protocol.ProtocolState.STOPPED -> "Stopped"
-            uniffi.offline_protocol.ProtocolState.STARTING -> "Starting"
             uniffi.offline_protocol.ProtocolState.RUNNING -> "Running"
             uniffi.offline_protocol.ProtocolState.PAUSED -> "Paused"
-            uniffi.offline_protocol.ProtocolState.STOPPING -> "Stopping"
             else -> "Stopped"
         }
         promise.resolve(stateString)

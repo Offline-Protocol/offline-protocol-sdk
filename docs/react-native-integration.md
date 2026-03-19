@@ -405,23 +405,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 ---
 
-### 11.13 MLS Groups
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| **mlsCreateGroup** | `mlsCreateGroup(groupName): Promise<MlsGroupInfo>` | Creates MLS group. |
-| **mlsAddGroupMember** | `mlsAddGroupMember(groupId, memberKeyPackage: number[]): Promise<MlsWelcome>` | Adds member; returns Welcome for new member. |
-| **mlsRemoveGroupMember** | `mlsRemoveGroupMember(groupId, memberId): Promise<void>` | Removes member from MLS group. |
-| **mlsLeaveGroup** | `mlsLeaveGroup(groupId): Promise<void>` | Leaves MLS group. |
-| **mlsEncryptForGroup** | `mlsEncryptForGroup(groupId, plaintext: number[]): Promise<MlsEncryptedMessage>` | Encrypts for group. |
-| **mlsDecryptFromGroup** | `mlsDecryptFromGroup(encrypted): Promise<number[] \| null>` | Decrypts message from group. |
-| **mlsJoinGroup** | `mlsJoinGroup(welcome: MlsWelcome): Promise<MlsGroupInfo>` | Joins group from Welcome. |
-| **mlsListGroups** | `mlsListGroups(): Promise<string[]>` | All MLS group IDs. |
-| **mlsGetGroupInfo** | `mlsGetGroupInfo(groupId): Promise<MlsGroupInfo \| null>` | MLS group info. |
-
----
-
-### 11.14 Mesh Group Messaging (MLS-Encrypted)
+### 11.13 Mesh Group Messaging (MLS-Encrypted)
 
 High-level group methods that handle MLS encryption and mesh fan-out automatically.
 
@@ -434,10 +418,11 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 | **meshRemoveFromGroup** | `meshRemoveFromGroup(groupId, memberId): Promise<void>` | Removes member (admin only). |
 | **meshLeaveGroup** | `meshLeaveGroup(groupId): Promise<void>` | Leaves group with notification. |
 | **meshListGroups** | `meshListGroups(): Promise<string[]>` | Lists all group IDs (excluding 1:1 sessions). |
+| **meshGetGroupInfo** | `meshGetGroupInfo(groupId): Promise<MlsGroupInfo \| null>` | Gets group info (members, epoch, etc.). |
 
 ---
 
-### 11.15 Group Role Management
+### 11.14 Group Role Management
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -453,7 +438,7 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 
 ---
 
-### 11.16 Group Management (Relay Server API)
+### 11.15 Group Management (Relay Server API)
 
 Each method returns a **JSON string** that your app (or provider) sends to the relay. The SDK does not open or manage the connection. In the example app, ProtocolProvider owns the relay and exposes group actions that call these methods and send the JSON for you.
 

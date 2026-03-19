@@ -3607,26 +3607,23 @@ mod tests {
     }
 
     #[test]
-    fn test_mls_high_level_and_core_paths_share_single_state_under_concurrency() {
+    fn test_high_level_api_sees_groups_created_via_core() {
         let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
         protocol
             .initialize_mls(Box::new(TestMlsStorageProvider::default()))
             .unwrap();
 
-        let core_mls_handle = {
+        // Create groups through the core MlsManager directly.
+        {
             let core_guard = protocol.inner.lock().unwrap();
-            core_guard.mls_manager().cloned().unwrap()
-        };
-
-        let core_thread = thread::spawn(move || {
+            let manager = core_guard.mls_manager().cloned().unwrap();
+            let guard = manager.read().unwrap();
             for i in 0..20 {
-                let manager = core_mls_handle.read().unwrap();
-                manager.create_group(&format!("core-group-{}", i)).unwrap();
+                guard.create_group(&format!("core-group-{}", i)).unwrap();
             }
-        });
+        }
 
-        core_thread.join().unwrap();
-
+        // The high-level API should see the same groups.
         let from_high_level = protocol.list_groups().unwrap();
         let from_core_api = {
             let core_guard = protocol.inner.lock().unwrap();
@@ -3643,6 +3640,7 @@ mod tests {
         };
 
         assert_eq!(from_high_level.len(), from_core_api.len());
+        assert_eq!(from_high_level.len(), 20);
         for group_id in from_core_api {
             assert!(from_high_level.contains(&group_id));
         }

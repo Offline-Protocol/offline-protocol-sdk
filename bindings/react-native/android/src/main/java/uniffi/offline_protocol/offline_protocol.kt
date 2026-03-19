@@ -752,10 +752,6 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregis
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_internet_transport(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_wifi_direct_transport(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment(
@@ -816,6 +812,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key(
@@ -874,29 +872,19 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leav
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_group(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_group(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_group(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_group_info(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package(
 ): Short
@@ -908,21 +896,13 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package(
 ): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_group(
-): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_leave_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_groups(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_remove_group_member(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause(
 ): Short
@@ -1080,10 +1060,6 @@ external fun uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(`
 ): Long
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`accepterName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_internet_transport(`ptr`: Long,`serverUrl`: RustBuffer.ByValue,`port`: Short,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_wifi_direct_transport(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`fragment`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_next_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1144,6 +1120,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establ
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_info(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_roles(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1202,29 +1180,19 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_grou
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_add_group_member(`ptr`: Long,`groupId`: RustBuffer.ByValue,`memberKeyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(`ptr`: Long,`encrypted`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_group(`ptr`: Long,`encrypted`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_user(`ptr`: Long,`encrypted`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_delete_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_user(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_generate_key_package(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_group_info(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_or_create_key_package(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1236,21 +1204,13 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_has_se
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_import_key_package(`ptr`: Long,`userId`: RustBuffer.ByValue,`keyPackageData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_group(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_leave_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_groups(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_mark_key_package_synced(`ptr`: Long,`packageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_remove_group_member(`ptr`: Long,`groupId`: RustBuffer.ByValue,`memberId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1489,12 +1449,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_internet_transport() != 42106.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_wifi_direct_transport() != 19197.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 44733.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1585,6 +1539,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() != 40065.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 44654.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1672,13 +1629,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 60142.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member() != 27167.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_group() != 33552.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 13910.toShort()) {
@@ -1687,25 +1638,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 52691.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_group() != 58575.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 30590.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 59813.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_group() != 21857.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 4753.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 29747.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_group_info() != 41.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 16795.toShort()) {
@@ -1723,16 +1665,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 47052.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_group() != 22372.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 32375.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_leave_group() != 62572.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_groups() != 49898.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 9128.toShort()) {
@@ -1742,9 +1675,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 44299.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_remove_group_member() != 60202.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362.toShort()) {
@@ -2120,29 +2050,6 @@ public object FfiConverterUByte: FfiConverter<UByte, Byte> {
 
     override fun write(value: UByte, buf: ByteBuffer) {
         buf.put(value.toByte())
-    }
-}
-
-/**
- * @suppress
- */
-public object FfiConverterUShort: FfiConverter<UShort, Short> {
-    override fun lift(value: Short): UShort {
-        return value.toUShort()
-    }
-
-    override fun read(buf: ByteBuffer): UShort {
-        return lift(buf.getShort())
-    }
-
-    override fun lower(value: UShort): Short {
-        return value.toShort()
-    }
-
-    override fun allocationSize(value: UShort) = 2UL
-
-    override fun write(value: UShort, buf: ByteBuffer) {
-        buf.putShort(value.toShort())
     }
 }
 
@@ -2742,10 +2649,6 @@ public interface OfflineProtocolInterface {
     
     fun `acceptConnectionRequest`(`recipient`: kotlin.String, `accepterName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
     
-    fun `addInternetTransport`(`serverUrl`: kotlin.String, `port`: kotlin.UShort)
-    
-    fun `addWifiDirectTransport`()
-    
     fun `bleFragmentReceived`(`senderId`: kotlin.String, `fragment`: List<kotlin.UByte>)
     
     fun `bleGetNextFragment`(): BleFragment?
@@ -2806,6 +2709,8 @@ public interface OfflineProtocolInterface {
     
     fun `getFileProgress`(`fileId`: kotlin.String): FileProgress?
     
+    fun `getGroupInfo`(`groupId`: kotlin.String): MlsGroupInfo?
+    
     fun `getGroupRoles`(`groupId`: kotlin.String): Map<kotlin.String, kotlin.String>
     
     fun `getIdentityPublicKey`(): List<kotlin.UByte>
@@ -2864,29 +2769,19 @@ public interface OfflineProtocolInterface {
     
     fun `listGroups`(): List<kotlin.String>
     
-    fun `mlsAddGroupMember`(`groupId`: kotlin.String, `memberKeyPackage`: List<kotlin.UByte>): MlsAddMemberResult
-    
     fun `mlsClearPendingWelcome`(`otherUserId`: kotlin.String)
-    
-    fun `mlsCreateGroup`(`groupName`: kotlin.String): MlsGroupInfo
     
     fun `mlsCreateSession`(`otherUserId`: kotlin.String): MlsWelcomeMessage
     
     fun `mlsDecrypt`(`encrypted`: MlsEncryptedMessage): List<kotlin.UByte>?
     
-    fun `mlsDecryptFromGroup`(`encrypted`: MlsEncryptedMessage): List<kotlin.UByte>?
-    
     fun `mlsDecryptFromUser`(`encrypted`: MlsEncryptedMessage): List<kotlin.UByte>?
     
     fun `mlsDeleteSession`(`otherUserId`: kotlin.String)
     
-    fun `mlsEncryptForGroup`(`groupId`: kotlin.String, `plaintext`: List<kotlin.UByte>): MlsEncryptedMessage
-    
     fun `mlsEncryptForUser`(`otherUserId`: kotlin.String, `plaintext`: List<kotlin.UByte>): MlsEncryptedMessage
     
     fun `mlsGenerateKeyPackage`(): MlsKeyPackageBundle
-    
-    fun `mlsGetGroupInfo`(`groupId`: kotlin.String): MlsGroupInfo?
     
     fun `mlsGetOrCreateKeyPackage`(): MlsKeyPackageBundle
     
@@ -2898,21 +2793,13 @@ public interface OfflineProtocolInterface {
     
     fun `mlsImportKeyPackage`(`userId`: kotlin.String, `keyPackageData`: List<kotlin.UByte>)
     
-    fun `mlsJoinGroup`(`welcome`: MlsWelcomeMessage): MlsGroupInfo
-    
     fun `mlsJoinSession`(`welcome`: MlsWelcomeMessage): MlsGroupInfo
-    
-    fun `mlsLeaveGroup`(`groupId`: kotlin.String)
-    
-    fun `mlsListGroups`(): List<kotlin.String>
     
     fun `mlsListSessions`(): List<kotlin.String>
     
     fun `mlsMarkKeyPackageSynced`(`packageId`: kotlin.String)
     
     fun `mlsProcessWelcome`(`welcome`: MlsWelcomeMessage): MlsGroupInfo
-    
-    fun `mlsRemoveGroupMember`(`groupId`: kotlin.String, `memberId`: kotlin.String): MlsEncryptedMessage
     
     fun `pause`()
     
@@ -3125,32 +3012,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     )
     }
-    
-
-    
-    @Throws(ProtocolException::class)override fun `addInternetTransport`(`serverUrl`: kotlin.String, `port`: kotlin.UShort)
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_internet_transport(
-        it,
-        FfiConverterString.lower(`serverUrl`),FfiConverterUShort.lower(`port`),_status)
-}
-    }
-    
-    
-
-    
-    @Throws(ProtocolException::class)override fun `addWifiDirectTransport`()
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_wifi_direct_transport(
-        it,
-        _status)
-}
-    }
-    
     
 
     
@@ -3549,6 +3410,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `getGroupInfo`(`groupId`: kotlin.String): MlsGroupInfo? {
+            return FfiConverterOptionalTypeMlsGroupInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_info(
+        it,
+        FfiConverterString.lower(`groupId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(ProtocolException::class)override fun `getGroupRoles`(`groupId`: kotlin.String): Map<kotlin.String, kotlin.String> {
             return FfiConverterMapStringString.lift(
     callWithHandle {
@@ -3928,20 +3803,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `mlsAddGroupMember`(`groupId`: kotlin.String, `memberKeyPackage`: List<kotlin.UByte>): MlsAddMemberResult {
-            return FfiConverterTypeMlsAddMemberResult.lift(
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_add_group_member(
-        it,
-        FfiConverterString.lower(`groupId`),FfiConverterSequenceUByte.lower(`memberKeyPackage`),_status)
-}
-    }
-    )
-    }
-    
-
-    
     @Throws(ProtocolException::class)override fun `mlsClearPendingWelcome`(`otherUserId`: kotlin.String)
         = 
     callWithHandle {
@@ -3952,20 +3813,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
-    
-
-    
-    @Throws(ProtocolException::class)override fun `mlsCreateGroup`(`groupName`: kotlin.String): MlsGroupInfo {
-            return FfiConverterTypeMlsGroupInfo.lift(
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_group(
-        it,
-        FfiConverterString.lower(`groupName`),_status)
-}
-    }
-    )
-    }
     
 
     
@@ -3988,20 +3835,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(
-        it,
-        FfiConverterTypeMlsEncryptedMessage.lower(`encrypted`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    @Throws(ProtocolException::class)override fun `mlsDecryptFromGroup`(`encrypted`: MlsEncryptedMessage): List<kotlin.UByte>? {
-            return FfiConverterOptionalSequenceUByte.lift(
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_group(
         it,
         FfiConverterTypeMlsEncryptedMessage.lower(`encrypted`),_status)
 }
@@ -4038,20 +3871,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `mlsEncryptForGroup`(`groupId`: kotlin.String, `plaintext`: List<kotlin.UByte>): MlsEncryptedMessage {
-            return FfiConverterTypeMlsEncryptedMessage.lift(
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_group(
-        it,
-        FfiConverterString.lower(`groupId`),FfiConverterSequenceUByte.lower(`plaintext`),_status)
-}
-    }
-    )
-    }
-    
-
-    
     @Throws(ProtocolException::class)override fun `mlsEncryptForUser`(`otherUserId`: kotlin.String, `plaintext`: List<kotlin.UByte>): MlsEncryptedMessage {
             return FfiConverterTypeMlsEncryptedMessage.lift(
     callWithHandle {
@@ -4073,19 +3892,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_generate_key_package(
         it,
         _status)
-}
-    }
-    )
-    }
-    
-
-    override fun `mlsGetGroupInfo`(`groupId`: kotlin.String): MlsGroupInfo? {
-            return FfiConverterOptionalTypeMlsGroupInfo.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_group_info(
-        it,
-        FfiConverterString.lower(`groupId`),_status)
 }
     }
     )
@@ -4159,20 +3965,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
-    @Throws(ProtocolException::class)override fun `mlsJoinGroup`(`welcome`: MlsWelcomeMessage): MlsGroupInfo {
-            return FfiConverterTypeMlsGroupInfo.lift(
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_group(
-        it,
-        FfiConverterTypeMlsWelcomeMessage.lower(`welcome`),_status)
-}
-    }
-    )
-    }
-    
-
-    
     @Throws(ProtocolException::class)override fun `mlsJoinSession`(`welcome`: MlsWelcomeMessage): MlsGroupInfo {
             return FfiConverterTypeMlsGroupInfo.lift(
     callWithHandle {
@@ -4180,32 +3972,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(
         it,
         FfiConverterTypeMlsWelcomeMessage.lower(`welcome`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    @Throws(ProtocolException::class)override fun `mlsLeaveGroup`(`groupId`: kotlin.String)
-        = 
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_leave_group(
-        it,
-        FfiConverterString.lower(`groupId`),_status)
-}
-    }
-    
-    
-
-    override fun `mlsListGroups`(): List<kotlin.String> {
-            return FfiConverterSequenceString.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_groups(
-        it,
-        _status)
 }
     }
     )
@@ -4246,20 +4012,6 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(
         it,
         FfiConverterTypeMlsWelcomeMessage.lower(`welcome`),_status)
-}
-    }
-    )
-    }
-    
-
-    
-    @Throws(ProtocolException::class)override fun `mlsRemoveGroupMember`(`groupId`: kotlin.String, `memberId`: kotlin.String): MlsEncryptedMessage {
-            return FfiConverterTypeMlsEncryptedMessage.lift(
-    callWithHandle {
-    uniffiRustCallWithError(ProtocolException) { _status ->
-    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_remove_group_member(
-        it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`memberId`),_status)
 }
     }
     )
@@ -6872,10 +6624,8 @@ public object FfiConverterTypeProtocolError : FfiConverterRustBuffer<ProtocolExc
 enum class ProtocolState {
     
     STOPPED,
-    STARTING,
     RUNNING,
-    PAUSED,
-    STOPPING;
+    PAUSED;
     companion object
 }
 

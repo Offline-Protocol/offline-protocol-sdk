@@ -441,22 +441,6 @@ fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
-    typealias FfiType = UInt16
-    typealias SwiftType = UInt16
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
-        return try lift(readInt(&buf))
-    }
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterInt16: FfiConverterPrimitive {
     typealias FfiType = Int16
     typealias SwiftType = Int16
@@ -762,10 +746,6 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: [UInt8]?) throws  -> String
     
-    func addInternetTransport(serverUrl: String, port: UInt16) throws 
-    
-    func addWifiDirectTransport() throws 
-    
     func bleFragmentReceived(senderId: String, fragment: [UInt8]) throws 
     
     func bleGetNextFragment()  -> BleFragment?
@@ -826,6 +806,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getFileProgress(fileId: String)  -> FileProgress?
     
+    func getGroupInfo(groupId: String) throws  -> MlsGroupInfo?
+    
     func getGroupRoles(groupId: String) throws  -> [String: String]
     
     func getIdentityPublicKey() throws  -> [UInt8]
@@ -884,29 +866,19 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func listGroups() throws  -> [String]
     
-    func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8]) throws  -> MlsAddMemberResult
-    
     func mlsClearPendingWelcome(otherUserId: String) throws 
-    
-    func mlsCreateGroup(groupName: String) throws  -> MlsGroupInfo
     
     func mlsCreateSession(otherUserId: String) throws  -> MlsWelcomeMessage
     
     func mlsDecrypt(encrypted: MlsEncryptedMessage) throws  -> [UInt8]?
     
-    func mlsDecryptFromGroup(encrypted: MlsEncryptedMessage) throws  -> [UInt8]?
-    
     func mlsDecryptFromUser(encrypted: MlsEncryptedMessage) throws  -> [UInt8]?
     
     func mlsDeleteSession(otherUserId: String) throws 
     
-    func mlsEncryptForGroup(groupId: String, plaintext: [UInt8]) throws  -> MlsEncryptedMessage
-    
     func mlsEncryptForUser(otherUserId: String, plaintext: [UInt8]) throws  -> MlsEncryptedMessage
     
     func mlsGenerateKeyPackage() throws  -> MlsKeyPackageBundle
-    
-    func mlsGetGroupInfo(groupId: String)  -> MlsGroupInfo?
     
     func mlsGetOrCreateKeyPackage() throws  -> MlsKeyPackageBundle
     
@@ -918,21 +890,13 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func mlsImportKeyPackage(userId: String, keyPackageData: [UInt8]) throws 
     
-    func mlsJoinGroup(welcome: MlsWelcomeMessage) throws  -> MlsGroupInfo
-    
     func mlsJoinSession(welcome: MlsWelcomeMessage) throws  -> MlsGroupInfo
-    
-    func mlsLeaveGroup(groupId: String) throws 
-    
-    func mlsListGroups()  -> [String]
     
     func mlsListSessions()  -> [String]
     
     func mlsMarkKeyPackageSynced(packageId: String) throws 
     
     func mlsProcessWelcome(welcome: MlsWelcomeMessage) throws  -> MlsGroupInfo
-    
-    func mlsRemoveGroupMember(groupId: String, memberId: String) throws  -> MlsEncryptedMessage
     
     func pause() throws 
     
@@ -1092,22 +1056,6 @@ open func acceptConnectionRequest(recipient: String, accepterName: String, keyPa
         FfiConverterOptionSequenceUInt8.lower(keyPackage),$0
     )
 })
-}
-    
-open func addInternetTransport(serverUrl: String, port: UInt16)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_internet_transport(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(serverUrl),
-        FfiConverterUInt16.lower(port),$0
-    )
-}
-}
-    
-open func addWifiDirectTransport()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_add_wifi_direct_transport(
-            self.uniffiCloneHandle(),$0
-    )
-}
 }
     
 open func bleFragmentReceived(senderId: String, fragment: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
@@ -1364,6 +1312,15 @@ open func getFileProgress(fileId: String) -> FileProgress?  {
 })
 }
     
+open func getGroupInfo(groupId: String)throws  -> MlsGroupInfo?  {
+    return try  FfiConverterOptionTypeMlsGroupInfo.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_info(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(groupId),$0
+    )
+})
+}
+    
 open func getGroupRoles(groupId: String)throws  -> [String: String]  {
     return try  FfiConverterDictionaryStringString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_roles(
@@ -1610,31 +1567,12 @@ open func listGroups()throws  -> [String]  {
 })
 }
     
-open func mlsAddGroupMember(groupId: String, memberKeyPackage: [UInt8])throws  -> MlsAddMemberResult  {
-    return try  FfiConverterTypeMlsAddMemberResult_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_add_group_member(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterSequenceUInt8.lower(memberKeyPackage),$0
-    )
-})
-}
-    
 open func mlsClearPendingWelcome(otherUserId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(otherUserId),$0
     )
 }
-}
-    
-open func mlsCreateGroup(groupName: String)throws  -> MlsGroupInfo  {
-    return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_group(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupName),$0
-    )
-})
 }
     
 open func mlsCreateSession(otherUserId: String)throws  -> MlsWelcomeMessage  {
@@ -1649,15 +1587,6 @@ open func mlsCreateSession(otherUserId: String)throws  -> MlsWelcomeMessage  {
 open func mlsDecrypt(encrypted: MlsEncryptedMessage)throws  -> [UInt8]?  {
     return try  FfiConverterOptionSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(
-            self.uniffiCloneHandle(),
-        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),$0
-    )
-})
-}
-    
-open func mlsDecryptFromGroup(encrypted: MlsEncryptedMessage)throws  -> [UInt8]?  {
-    return try  FfiConverterOptionSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_group(
             self.uniffiCloneHandle(),
         FfiConverterTypeMlsEncryptedMessage_lower(encrypted),$0
     )
@@ -1681,16 +1610,6 @@ open func mlsDeleteSession(otherUserId: String)throws   {try rustCallWithError(F
 }
 }
     
-open func mlsEncryptForGroup(groupId: String, plaintext: [UInt8])throws  -> MlsEncryptedMessage  {
-    return try  FfiConverterTypeMlsEncryptedMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_group(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterSequenceUInt8.lower(plaintext),$0
-    )
-})
-}
-    
 open func mlsEncryptForUser(otherUserId: String, plaintext: [UInt8])throws  -> MlsEncryptedMessage  {
     return try  FfiConverterTypeMlsEncryptedMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_user(
@@ -1705,15 +1624,6 @@ open func mlsGenerateKeyPackage()throws  -> MlsKeyPackageBundle  {
     return try  FfiConverterTypeMlsKeyPackageBundle_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_generate_key_package(
             self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func mlsGetGroupInfo(groupId: String) -> MlsGroupInfo?  {
-    return try!  FfiConverterOptionTypeMlsGroupInfo.lift(try! rustCall() {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_group_info(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
     )
 })
 }
@@ -1761,36 +1671,11 @@ open func mlsImportKeyPackage(userId: String, keyPackageData: [UInt8])throws   {
 }
 }
     
-open func mlsJoinGroup(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  {
-    return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_group(
-            self.uniffiCloneHandle(),
-        FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
-    )
-})
-}
-    
 open func mlsJoinSession(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  {
     return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(
             self.uniffiCloneHandle(),
         FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
-    )
-})
-}
-    
-open func mlsLeaveGroup(groupId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_leave_group(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
-    )
-}
-}
-    
-open func mlsListGroups() -> [String]  {
-    return try!  FfiConverterSequenceString.lift(try! rustCall() {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_groups(
-            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -1816,16 +1701,6 @@ open func mlsProcessWelcome(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(
             self.uniffiCloneHandle(),
         FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
-    )
-})
-}
-    
-open func mlsRemoveGroupMember(groupId: String, memberId: String)throws  -> MlsEncryptedMessage  {
-    return try  FfiConverterTypeMlsEncryptedMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
-    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_remove_group_member(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),
-        FfiConverterString.lower(memberId),$0
     )
 })
 }
@@ -4991,10 +4866,8 @@ public func FfiConverterTypeProtocolError_lower(_ value: ProtocolError) -> RustB
 public enum ProtocolState: Equatable, Hashable {
     
     case stopped
-    case starting
     case running
     case paused
-    case stopping
 
 
 
@@ -5016,13 +4889,9 @@ public struct FfiConverterTypeProtocolState: FfiConverterRustBuffer {
         
         case 1: return .stopped
         
-        case 2: return .starting
+        case 2: return .running
         
-        case 3: return .running
-        
-        case 4: return .paused
-        
-        case 5: return .stopping
+        case 3: return .paused
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -5036,20 +4905,12 @@ public struct FfiConverterTypeProtocolState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case .starting:
+        case .running:
             writeInt(&buf, Int32(2))
         
         
-        case .running:
-            writeInt(&buf, Int32(3))
-        
-        
         case .paused:
-            writeInt(&buf, Int32(4))
-        
-        
-        case .stopping:
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(3))
         
         }
     }
@@ -6415,12 +6276,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_internet_transport() != 42106) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_add_wifi_direct_transport() != 19197) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 44733) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6511,6 +6366,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() != 40065) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 44654) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6598,13 +6456,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 60142) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_add_group_member() != 27167) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_group() != 33552) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 13910) {
@@ -6613,25 +6465,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 52691) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_group() != 58575) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 30590) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 59813) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_group() != 21857) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 4753) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 29747) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_group_info() != 41) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 16795) {
@@ -6649,16 +6492,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 47052) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_group() != 22372) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 32375) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_leave_group() != 62572) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_groups() != 49898) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 9128) {
@@ -6668,9 +6502,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 44299) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_remove_group_member() != 60202) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362) {
