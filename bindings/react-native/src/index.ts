@@ -38,7 +38,6 @@ import type {
   MlsSessionInfo,
   MlsGroupInfo,
   EstablishmentState,
-  PresenceStatus,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
