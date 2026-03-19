@@ -54,9 +54,7 @@ export function GroupDetailScreen({
 }: GroupDetailScreenProps) {
   const { theme } = useTheme();
   const {
-    send,
     authenticatedUser,
-    relayStatus: status,
     groupDetails,
     getGroupInfo,
     groupMessages,
@@ -110,19 +108,17 @@ export function GroupDetailScreen({
   }, [contextGroupDetails]);
 
   const loadGroupInfo = useCallback(async () => {
-    if (status !== 'authenticated') {
-      console.warn('[GroupDetailScreen] Not authenticated, status:', status);
+    if (!isInitialized) {
       setLoading(false);
       return;
     }
 
-    console.log('[GroupDetailScreen] Requesting group info for:', groupId);
     setLoading(true);
     const sent = await getGroupInfo(groupId);
     if (!sent) {
-      console.error('[GroupDetailScreen] Failed to send group info request');
+      console.error('[GroupDetailScreen] Failed to get group info');
     }
-  }, [groupId, status, getGroupInfo]);
+  }, [groupId, isInitialized, getGroupInfo]);
 
   const handleAddMember = useCallback(async () => {
     const username = usernameInput.trim();
@@ -135,14 +131,6 @@ export function GroupDetailScreen({
       Alert.alert(
         'Protocol Not Ready',
         'The protocol is not initialized yet. Please wait a moment and try again.',
-      );
-      return;
-    }
-
-    if (status !== 'authenticated') {
-      Alert.alert(
-        'WebSocket Not Connected',
-        `WebSocket status: ${status}. Please wait for the connection to be established.`,
       );
       return;
     }
@@ -165,7 +153,6 @@ export function GroupDetailScreen({
     groupId,
     usernameInput,
     addGroupMember,
-    status,
     isInitialized,
     getGroupInfo,
   ]);
@@ -176,13 +163,6 @@ export function GroupDetailScreen({
       Alert.alert(
         'Protocol Not Ready',
         'The protocol is not initialized yet. Please wait a moment and try again.',
-      );
-      return;
-    }
-    if (status !== 'authenticated' && status !== 'connected') {
-      Alert.alert(
-        'WebSocket Not Connected',
-        `WebSocket status: ${status}. Please wait for the connection to be established.`,
       );
       return;
     }
@@ -213,18 +193,17 @@ export function GroupDetailScreen({
     groupId,
     messageInput,
     sendGroupMessage,
-    status,
     isInitialized,
     replyingTo,
   ]);
 
   // Load group info once on mount
   useEffect(() => {
-    if (!hasRequestedInfo.current && status === 'authenticated') {
+    if (!hasRequestedInfo.current && isInitialized) {
       hasRequestedInfo.current = true;
       loadGroupInfo();
     }
-  }, [status, loadGroupInfo]);
+  }, [isInitialized, loadGroupInfo]);
 
   // Update loading state when group info is received
   useEffect(() => {

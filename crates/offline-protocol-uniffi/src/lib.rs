@@ -3469,6 +3469,49 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
+    /// Set a member's role in a group (admin only).
+    /// `role` must be `"admin"` or `"member"`.
+    pub fn set_member_role(
+        &self,
+        group_id: String,
+        user_id: String,
+        role: String,
+    ) -> Result<(), ProtocolError> {
+        let parsed_role: offline_protocol_mls::GroupRole =
+            role.parse().map_err(|e: String| ProtocolError::Other(e))?;
+        let mut guard = self.lock_inner()?;
+        guard
+            .set_member_role(&group_id, &user_id, parsed_role)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Get a member's role in a group.
+    /// Returns `"admin"` or `"member"`.
+    pub fn get_member_role(
+        &self,
+        group_id: String,
+        user_id: String,
+    ) -> Result<String, ProtocolError> {
+        let guard = self.lock_inner()?;
+        guard
+            .get_member_role(&group_id, &user_id)
+            .map(|r| r.to_string())
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Get all member roles in a group.
+    /// Returns a map of user_id -> role string (`"admin"` or `"member"`).
+    pub fn get_group_roles(
+        &self,
+        group_id: String,
+    ) -> Result<std::collections::HashMap<String, String>, ProtocolError> {
+        let guard = self.lock_inner()?;
+        guard
+            .get_group_roles(&group_id)
+            .map(|roles| roles.into_iter().map(|(k, v)| (k, v.to_string())).collect())
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
     // ========================================================================
     // TOFU MANAGEMENT
     // ========================================================================

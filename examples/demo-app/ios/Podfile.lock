@@ -8,7 +8,7 @@ PODS:
   - hermes-engine (0.82.1):
     - hermes-engine/Pre-built (= 0.82.1)
   - hermes-engine/Pre-built (0.82.1)
-  - MeshSdk (0.7.1):
+  - MeshSdk (0.8.0):
     - React-Core
   - RCT-Folly (2024.11.18.00):
     - boost
@@ -2657,7 +2657,7 @@ SPEC CHECKSUMS:
   fmt: a40bb5bd0294ea969aaaba240a927bd33d878cdd
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
   hermes-engine: 273e30e7fb618279934b0b95ffab60ecedb7acf5
-  MeshSdk: df47ff0ea6eba9c6b276f1a2e327bdef89b3f521
+  MeshSdk: c311a91e5d251dae4f1bd3b37ffa3d2ec7e1d7d5
   RCT-Folly: 846fda9475e61ec7bcbf8a3fe81edfcaeb090669
   RCTDeprecation: f17e2ebc07876ca9ab8eb6e4b0a4e4647497ae3a
   RCTRequired: e2c574c1b45231f7efb0834936bd609d75072b63

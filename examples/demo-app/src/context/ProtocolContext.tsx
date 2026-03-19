@@ -11,7 +11,7 @@ import {
   MeshServices,
   MessagePriority,
 } from '@offline-protocol/mesh-sdk';
-import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, DiscoveredService, ServiceLogEntry, ForwardInfo, PresenceStatus} from '../types';
+import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, GroupRole, DiscoveredService, ServiceLogEntry, ForwardInfo, PresenceStatus} from '../types';
 import {
   PRESENCE_BROADCAST_INTERVAL_MS,
   TYPING_INDICATOR_TIMEOUT_MS,
@@ -48,6 +48,11 @@ interface ProtocolContextValue {
   createGroup: (name: string, memberIds: string[]) => Promise<void>;
   sendGroupMessage: (groupId: string, content: string, priority?: 'medium' | 'critical') => Promise<void>;
   leaveGroup: (groupId: string) => Promise<void>;
+  inviteToGroup: (groupId: string, userId: string) => Promise<void>;
+  removeFromGroup: (groupId: string, userId: string) => Promise<void>;
+  setMemberRole: (groupId: string, userId: string, role: GroupRole) => Promise<void>;
+  getGroupRoles: (groupId: string) => Promise<Record<string, string>>;
+  getMemberRole: (groupId: string, userId: string) => GroupRole;
   registerService: (serviceId: string, version: string) => Promise<void>;
   unregisterService: (serviceId: string) => Promise<void>;
   discoverServices: (serviceId?: string) => Promise<void>;
@@ -369,10 +374,12 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         setGroups(prev => {
           const next = new Map(prev);
           if (!next.has(groupId)) {
+            const members = event.members || [userIdRef.current];
             next.set(groupId, {
               id: groupId,
               name: groupName,
-              members: event.members || [userIdRef.current],
+              members,
+              roles: {[userIdRef.current]: 'admin'},
               messages: [],
             });
           }
@@ -409,6 +416,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             id: groupId,
             name: event.groupName || event.group_name || 'Group',
             members: [userIdRef.current],
+            roles: {},
             messages: [],
           };
           next.set(groupId, {
@@ -463,10 +471,15 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
             const members = [memberId];
             if (addedBy && addedBy !== memberId) {members.push(addedBy);}
             if (!members.includes(userIdRef.current)) {members.push(userIdRef.current);}
+            // The inviter (addedBy) is likely admin; invitee is member
+            const roles: Record<string, GroupRole> = {};
+            if (addedBy) {roles[addedBy] = 'admin';}
+            roles[memberId] = 'member';
             next.set(groupId, {
               id: groupId,
               name: groupName || 'Group',
               members,
+              roles,
               messages: [],
             });
           }
@@ -486,14 +499,111 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
           } else {
             const group = next.get(groupId);
             if (group) {
+              const {[memberId]: _, ...remainingRoles} = group.roles;
               next.set(groupId, {
                 ...group,
                 members: group.members.filter(m => m !== memberId),
+                roles: remainingRoles,
               });
             }
           }
           return next;
         });
+        break;
+      }
+
+      case 'group_role_changed': {
+        const groupId = event.groupId || event.group_id;
+        const targetUserId = event.userId || event.user_id;
+        const newRole = (event.newRole || event.new_role || 'member') as GroupRole;
+        if (!groupId || !targetUserId) {break;}
+        setGroups(prev => {
+          const next = new Map(prev);
+          const group = next.get(groupId);
+          if (group) {
+            next.set(groupId, {
+              ...group,
+              roles: {...group.roles, [targetUserId]: newRole},
+            });
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'group_info': {
+        const groupId = event.groupId || event.group_id;
+        const groupName = event.name || event.groupName || event.group_name || 'Group';
+        const members: Array<{user_id: string; role?: string}> = event.members || [];
+        if (!groupId) {break;}
+        setGroups(prev => {
+          const next = new Map(prev);
+          const memberIds = members.map(m => m.user_id);
+          const roles: Record<string, GroupRole> = {};
+          for (const m of members) {
+            roles[m.user_id] = m.role === 'admin' ? 'admin' : 'member';
+          }
+          const existing = next.get(groupId);
+          next.set(groupId, {
+            id: groupId,
+            name: groupName,
+            members: memberIds,
+            roles,
+            messages: existing?.messages || [],
+          });
+          return next;
+        });
+        break;
+      }
+
+      case 'user_groups': {
+        const groupSummaries: Array<{group_id: string; name: string}> = event.groups || [];
+        setGroups(prev => {
+          const next = new Map(prev);
+          for (const g of groupSummaries) {
+            if (!next.has(g.group_id)) {
+              next.set(g.group_id, {
+                id: g.group_id,
+                name: g.name || 'Group',
+                members: [userIdRef.current],
+                roles: {},
+                messages: [],
+              });
+            }
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'group_error': {
+        const reason = event.reason || 'Unknown group error';
+        console.warn('[GroupError]', reason);
+        break;
+      }
+
+      case 'group_message_partial_failure': {
+        const groupId = event.groupId || event.group_id;
+        const failedMembers: string[] = event.failedMembers || event.failed_members || [];
+        if (!groupId || failedMembers.length === 0) {break;}
+        console.warn(`[GroupPartialFailure] group=${groupId} failed=${failedMembers.join(',')}`);
+        break;
+      }
+
+      case 'group_epoch_fork_detected': {
+        const groupId = event.groupId || event.group_id;
+        if (!groupId) {break;}
+        console.warn(`[EpochFork] Detected in group=${groupId}`);
+        break;
+      }
+
+      case 'group_epoch_fork_resolved': {
+        const groupId = event.groupId || event.group_id;
+        const failedMembers: string[] = event.failedMembers || event.failed_members || [];
+        if (!groupId) {break;}
+        if (failedMembers.length > 0) {
+          console.warn(`[EpochFork] Resolved group=${groupId}, unreachable=${failedMembers.join(',')}`);
+        }
         break;
       }
 
@@ -863,10 +973,15 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
     setGroups(prev => {
       const next = new Map(prev);
+      const roles: Record<string, GroupRole> = {[userIdRef.current]: 'admin'};
+      for (const mid of memberIds) {
+        roles[mid] = 'member';
+      }
       next.set(groupId, {
         id: groupId,
         name,
         members: allMembers,
+        roles,
         messages: [],
       });
       return next;
@@ -874,12 +989,33 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
     // Invite each member via the high-level protocol API
     // This sends MLS Welcome to the invitee and Commit to existing members
+    const failedInvites: string[] = [];
     for (const memberId of memberIds) {
       try {
         await protocolRef.current.meshInviteToGroup(groupId, memberId);
       } catch (err) {
         console.warn(`Failed to invite ${memberId} to group (key exchange may still be pending):`, err);
+        failedInvites.push(memberId);
       }
+    }
+
+    // Remove members whose invites failed — they're not actually in MLS
+    if (failedInvites.length > 0) {
+      setGroups(prev => {
+        const next = new Map(prev);
+        const group = next.get(groupId);
+        if (group) {
+          const failedSet = new Set(failedInvites);
+          const filteredRoles = {...group.roles};
+          for (const fm of failedInvites) { delete filteredRoles[fm]; }
+          next.set(groupId, {
+            ...group,
+            members: group.members.filter(m => !failedSet.has(m)),
+            roles: filteredRoles,
+          });
+        }
+        return next;
+      });
     }
   }, []);
 
@@ -918,6 +1054,89 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       return next;
     });
   }, []);
+
+  const inviteToGroupAction = useCallback(async (groupId: string, memberId: string) => {
+    if (!protocolRef.current) {return;}
+    await protocolRef.current.meshInviteToGroup(groupId, memberId);
+    setGroups(prev => {
+      const next = new Map(prev);
+      const group = next.get(groupId);
+      if (group && !group.members.includes(memberId)) {
+        next.set(groupId, {
+          ...group,
+          members: [...group.members, memberId],
+          roles: {...group.roles, [memberId]: 'member'},
+        });
+      }
+      return next;
+    });
+  }, []);
+
+  const removeFromGroupAction = useCallback(async (groupId: string, memberId: string) => {
+    if (!protocolRef.current) {return;}
+    let protocolError: any = null;
+    try {
+      await protocolRef.current.meshRemoveFromGroup(groupId, memberId);
+    } catch (err) {
+      protocolError = err;
+    }
+    // Always update local state — handles phantom members (invite failed
+    // but member was added optimistically) and normal removals alike.
+    setGroups(prev => {
+      const next = new Map(prev);
+      const group = next.get(groupId);
+      if (group) {
+        const {[memberId]: _, ...remainingRoles} = group.roles;
+        next.set(groupId, {
+          ...group,
+          members: group.members.filter(m => m !== memberId),
+          roles: remainingRoles,
+        });
+      }
+      return next;
+    });
+    // Re-throw so callers can still handle real errors (e.g. last-admin guard)
+    if (protocolError) {throw protocolError;}
+  }, []);
+
+  const setMemberRoleAction = useCallback(async (groupId: string, targetUserId: string, role: GroupRole) => {
+    if (!protocolRef.current) {return;}
+    await protocolRef.current.meshSetMemberRole(groupId, targetUserId, role);
+    setGroups(prev => {
+      const next = new Map(prev);
+      const group = next.get(groupId);
+      if (group) {
+        next.set(groupId, {
+          ...group,
+          roles: {...group.roles, [targetUserId]: role},
+        });
+      }
+      return next;
+    });
+  }, []);
+
+  const getGroupRolesAction = useCallback(async (groupId: string): Promise<Record<string, string>> => {
+    if (!protocolRef.current) {return {};}
+    const roles = await protocolRef.current.meshGetGroupRoles(groupId);
+    setGroups(prev => {
+      const next = new Map(prev);
+      const group = next.get(groupId);
+      if (group) {
+        const typedRoles: Record<string, GroupRole> = {};
+        for (const [uid, r] of Object.entries(roles)) {
+          typedRoles[uid] = r === 'admin' ? 'admin' : 'member';
+        }
+        next.set(groupId, {...group, roles: typedRoles});
+      }
+      return next;
+    });
+    return roles;
+  }, []);
+
+  const getMemberRoleAction = useCallback((groupId: string, targetUserId: string): GroupRole => {
+    const group = groups.get(groupId);
+    return group?.roles[targetUserId] || 'member';
+  }, [groups]);
 
   const registerServiceAction = useCallback(async (serviceId: string, version: string) => {
     if (!meshServices) {return;}
@@ -1164,6 +1383,11 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     createGroup: createGroupAction,
     sendGroupMessage: sendGroupMessageAction,
     leaveGroup: leaveGroupAction,
+    inviteToGroup: inviteToGroupAction,
+    removeFromGroup: removeFromGroupAction,
+    setMemberRole: setMemberRoleAction,
+    getGroupRoles: getGroupRolesAction,
+    getMemberRole: getMemberRoleAction,
     registerService: registerServiceAction,
     unregisterService: unregisterServiceAction,
     discoverServices: discoverServicesAction,

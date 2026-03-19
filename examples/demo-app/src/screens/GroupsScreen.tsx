@@ -1,4 +1,4 @@
-import React, {useState, useRef, useEffect} from 'react';
+import React, {useState, useRef, useEffect, useCallback} from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,7 @@ import {Avatar} from '../components/Avatar';
 import {MessageBubble} from '../components/MessageBubble';
 import {QuickMessages} from '../components/QuickMessages';
 import {formatUserId} from '../utils';
-import type {ChatMessage} from '../types';
+import type {ChatMessage, GroupRole} from '../types';
 
 type ViewState = 'list' | 'detail' | 'create';
 
@@ -23,7 +23,21 @@ export function GroupsScreen() {
   const [showMembers, setShowMembers] = useState(false);
   const [createName, setCreateName] = useState('');
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set());
-  const {groups, contacts, createGroup, sendGroupMessage, leaveGroup, userId, forwardMessage, forwardMessageToGroup} = useProtocol();
+  const [inviteInput, setInviteInput] = useState('');
+  const {
+    groups,
+    contacts,
+    createGroup,
+    sendGroupMessage,
+    leaveGroup,
+    inviteToGroup,
+    removeFromGroup,
+    setMemberRole,
+    getGroupRoles,
+    userId,
+    forwardMessage,
+    forwardMessageToGroup,
+  } = useProtocol();
   const listRef = useRef<FlatList>(null);
 
   // Reset to list if the selected group was deleted (e.g. after leaving)
@@ -134,6 +148,9 @@ export function GroupsScreen() {
       return null;
     }
 
+    const myRole: GroupRole = group.roles[userId] || 'member';
+    const isAdmin = myRole === 'admin';
+
     const handleSend = (text: string, priority: 'medium' | 'critical') => {
       sendGroupMessage(selectedGroupId, text, priority);
       setTimeout(() => {
@@ -182,12 +199,101 @@ export function GroupsScreen() {
             try {
               await leaveGroup(selectedGroupId);
               setViewState('list');
-            } catch {
-              Alert.alert('Error', 'Failed to leave group.');
+            } catch (err: any) {
+              const msg = err?.message || String(err);
+              if (msg.includes('last admin')) {
+                Alert.alert(
+                  'Cannot Leave',
+                  'You are the last admin. Promote another member to admin before leaving.',
+                );
+              } else {
+                Alert.alert('Error', 'Failed to leave group.');
+              }
             }
           },
         },
       ]);
+    };
+
+    const handleInvite = async () => {
+      const memberId = inviteInput.trim();
+      if (!memberId) {return;}
+      try {
+        await inviteToGroup(selectedGroupId, memberId);
+        setInviteInput('');
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        Alert.alert('Invite Failed', msg);
+      }
+    };
+
+    const handleMemberAction = (memberId: string) => {
+      if (memberId === userId) {return;} // Can't act on self via this menu
+      if (!isAdmin) {return;}
+
+      const memberRole: GroupRole = group.roles[memberId] || 'member';
+      const buttons: any[] = [];
+
+      if (memberRole === 'member') {
+        buttons.push({
+          text: 'Promote to Admin',
+          onPress: async () => {
+            try {
+              await setMemberRole(selectedGroupId, memberId, 'admin');
+            } catch (err: any) {
+              Alert.alert('Error', err?.message || 'Failed to promote member.');
+            }
+          },
+        });
+      } else {
+        buttons.push({
+          text: 'Demote to Member',
+          onPress: async () => {
+            try {
+              await setMemberRole(selectedGroupId, memberId, 'member');
+            } catch (err: any) {
+              const msg = err?.message || String(err);
+              if (msg.includes('last admin')) {
+                Alert.alert('Cannot Demote', 'Cannot demote the last admin.');
+              } else {
+                Alert.alert('Error', msg);
+              }
+            }
+          },
+        });
+      }
+
+      buttons.push({
+        text: 'Remove from Group',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert('Remove Member', `Remove ${getContactName(memberId)} from the group?`, [
+            {text: 'Cancel', style: 'cancel'},
+            {
+              text: 'Remove',
+              style: 'destructive',
+              onPress: async () => {
+                try {
+                  await removeFromGroup(selectedGroupId, memberId);
+                } catch (err: any) {
+                  const msg = err?.message || String(err);
+                  if (msg.includes('last admin')) {
+                    Alert.alert(
+                      'Cannot Remove',
+                      'Cannot remove the last admin. Promote another member first.',
+                    );
+                  } else {
+                    Alert.alert('Error', msg);
+                  }
+                }
+              },
+            },
+          ]);
+        },
+      });
+
+      buttons.push({text: 'Cancel', style: 'cancel'});
+      Alert.alert(getContactName(memberId), `Role: ${memberRole}`, buttons);
     };
 
     const getContactName = (peerId: string): string => {
@@ -195,17 +301,22 @@ export function GroupsScreen() {
       return contacts.get(peerId)?.name || formatUserId(peerId);
     };
 
+    const getRoleBadge = (memberId: string): string => {
+      const role = group.roles[memberId];
+      return role === 'admin' ? ' (admin)' : '';
+    };
+
     return (
       <View style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => setViewState('list')}>
+          <TouchableOpacity onPress={() => { setViewState('list'); setShowMembers(false); }}>
             <Text style={styles.backText}>{'‹ Back'}</Text>
           </TouchableOpacity>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle} numberOfLines={1}>{group.name}</Text>
             <Text style={styles.headerSubtitle}>
-              {group.members.length} member{group.members.length !== 1 ? 's' : ''} 🔒
+              {group.members.length} member{group.members.length !== 1 ? 's' : ''} {isAdmin ? '(admin)' : ''} 🔒
             </Text>
           </View>
           <TouchableOpacity onPress={handleLeave}>
@@ -222,14 +333,41 @@ export function GroupsScreen() {
           </Text>
         </TouchableOpacity>
         {showMembers && (
-          <View style={styles.membersList}>
-            {group.members.map(memberId => (
-              <View key={memberId} style={styles.memberChip}>
-                <Text style={styles.memberChipText}>
-                  {getContactName(memberId)}
-                </Text>
+          <View>
+            <View style={styles.membersList}>
+              {group.members.map(memberId => (
+                <TouchableOpacity
+                  key={memberId}
+                  style={[
+                    styles.memberChip,
+                    group.roles[memberId] === 'admin' && styles.memberChipAdmin,
+                  ]}
+                  onPress={() => handleMemberAction(memberId)}
+                  disabled={memberId === userId || !isAdmin}>
+                  <Text style={styles.memberChipText}>
+                    {getContactName(memberId)}{getRoleBadge(memberId)}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {/* Invite member (admin only) */}
+            {isAdmin && (
+              <View style={styles.inviteRow}>
+                <TextInput
+                  style={styles.inviteInput}
+                  value={inviteInput}
+                  onChangeText={setInviteInput}
+                  placeholder="User ID to invite..."
+                  autoCapitalize="none"
+                />
+                <TouchableOpacity
+                  style={[styles.inviteButton, !inviteInput.trim() && styles.inviteButtonDisabled]}
+                  onPress={handleInvite}
+                  disabled={!inviteInput.trim()}>
+                  <Text style={styles.inviteButtonText}>Invite</Text>
+                </TouchableOpacity>
               </View>
-            ))}
+            )}
           </View>
         )}
 
@@ -297,6 +435,7 @@ export function GroupsScreen() {
             const lastMsg = item.messages.length > 0
               ? item.messages[item.messages.length - 1]
               : null;
+            const myGroupRole = item.roles[userId];
 
             return (
               <TouchableOpacity
@@ -313,7 +452,7 @@ export function GroupsScreen() {
                 <View style={styles.groupRowContent}>
                   <Text style={styles.groupName} numberOfLines={1}>{item.name}</Text>
                   <Text style={styles.groupMeta} numberOfLines={1}>
-                    {item.members.length} members
+                    {item.members.length} members{myGroupRole === 'admin' ? ' · admin' : ''}
                     {lastMsg ? ` · ${lastMsg.content}` : ''}
                   </Text>
                 </View>
@@ -532,9 +671,47 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 12,
   },
+  memberChipAdmin: {
+    backgroundColor: '#007AFF20',
+    borderWidth: 1,
+    borderColor: '#007AFF',
+  },
   memberChipText: {
     fontSize: 13,
     color: '#3C3C43',
+  },
+  inviteRow: {
+    flexDirection: 'row',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E5E5',
+  },
+  inviteInput: {
+    flex: 1,
+    backgroundColor: '#F2F2F7',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 14,
+    color: '#1C1C1E',
+  },
+  inviteButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    justifyContent: 'center',
+  },
+  inviteButtonDisabled: {
+    opacity: 0.5,
+  },
+  inviteButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '600',
   },
   // Messages
   messageList: {

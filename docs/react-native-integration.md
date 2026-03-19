@@ -246,7 +246,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 | **once** | `once(eventType, listener): this` | Registers a one-time listener. |
 | **removeAllListeners** | `removeAllListeners(eventType?: EventType \| 'all'): this` | Removes listeners for a type or all. |
 
-**Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`.
+**Event types**: `message_sent`, `message_received`, `message_delivered`, `message_failed`, `transport_switched`, `relay_promoted`, `relay_demoted`, `neighbor_discovered`, `neighbor_lost`, `network_metrics`, `file_progress`, `file_received`, `diagnostic`, `secure_session_established`, `secure_session_failed`, `group_created`, `group_message_received`, `group_member_added`, `group_member_removed`, `group_message_sent`, `group_message_partial_failure`, `group_epoch_fork_detected`, `group_epoch_fork_resolved`, `group_role_changed`, `service_discovered`, `service_request_received`, `service_response_received`, `presence_updated`, `typing_indicator_received`, `read_receipt_received`, `message_relayed`, `message_deferred`.
 
 ---
 
@@ -421,7 +421,39 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 ---
 
-### 11.14 Group Management (Relay Server API)
+### 11.14 Mesh Group Messaging (MLS-Encrypted)
+
+High-level group methods that handle MLS encryption and mesh fan-out automatically.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **meshCreateGroup** | `meshCreateGroup(groupName): Promise<MlsGroupInfo>` | Creates group; creator is admin. |
+| **meshInviteToGroup** | `meshInviteToGroup(groupId, inviteeUserId): Promise<void>` | Invites user (admin only); sends Welcome + Commit. |
+| **meshSendGroupMessage** | `meshSendGroupMessage(groupId, content, priority?, replyToMsg?): Promise<string[]>` | Sends encrypted message to all members. |
+| **meshForwardMessageToGroup** | `meshForwardMessageToGroup(params): Promise<string[]>` | Forwards message to group with attribution. |
+| **meshRemoveFromGroup** | `meshRemoveFromGroup(groupId, memberId): Promise<void>` | Removes member (admin only). |
+| **meshLeaveGroup** | `meshLeaveGroup(groupId): Promise<void>` | Leaves group with notification. |
+| **meshListGroups** | `meshListGroups(): Promise<string[]>` | Lists all group IDs (excluding 1:1 sessions). |
+
+---
+
+### 11.15 Group Role Management
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **meshSetMemberRole** | `meshSetMemberRole(groupId, userId, role): Promise<void>` | Sets role (`"admin"` or `"member"`); admin only. |
+| **meshGetMemberRole** | `meshGetMemberRole(groupId, userId): Promise<string>` | Gets member's role. |
+| **meshGetGroupRoles** | `meshGetGroupRoles(groupId): Promise<Record<string, string>>` | Gets all roles as `{ userId: role }`. |
+
+**Security invariants:**
+- The group creator is automatically `Admin`.
+- Only admins can invite, remove, or change roles.
+- The last admin cannot be demoted, removed, or leave (prevents orphaned groups).
+- Deterministic election promotes the lexicographically smallest member if the last admin disconnects.
+
+---
+
+### 11.16 Group Management (Relay Server API)
 
 Each method returns a **JSON string** that your app (or provider) sends to the relay. The SDK does not open or manage the connection. In the example app, ProtocolProvider owns the relay and exposes group actions that call these methods and send the JSON for you.
 

@@ -23,8 +23,6 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
   const { theme } = useTheme();
   const {
     createGroup,
-    authenticatedUser,
-    relayStatus: status,
     isInitialized,
   } = useProtocol();
   const [groupName, setGroupName] = useState('');
@@ -64,14 +62,6 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
       return;
     }
 
-    if (status !== 'authenticated' && status !== 'connected') {
-      Alert.alert(
-        'WebSocket Not Connected',
-        `WebSocket status: ${status}. Please wait for the connection to be established.`,
-      );
-      return;
-    }
-
     setIsCreating(true);
     try {
       const sent = await createGroup(groupName.trim());
@@ -91,7 +81,7 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
     } finally {
       setIsCreating(false);
     }
-  }, [groupName, membersToAdd, createGroup, status, isInitialized, onGroupCreated]);
+  }, [groupName, membersToAdd, createGroup, isInitialized, onGroupCreated]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.colors.background }]}>
@@ -104,18 +94,6 @@ export function CreateGroupModal({ onClose, onGroupCreated }: CreateGroupModalPr
       </View>
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
-        {/* Connection Status Indicator */}
-        {status !== 'authenticated' && (
-          <View style={[styles.statusBanner, { backgroundColor: theme.colors.warning + '20' }]}>
-            <Text style={[styles.statusText, { color: theme.colors.warning }]}>
-              {status === 'connecting' && 'Connecting to server...'}
-              {status === 'connected' && 'Connected, authenticating...'}
-              {status === 'disconnected' && 'Disconnected. Please wait...'}
-              {status === 'error' && 'Connection error. Retrying...'}
-            </Text>
-          </View>
-        )}
-
         <View style={styles.section}>
           <Text style={[styles.label, { color: theme.colors.text }]}>Group Name</Text>
           <TextInput
@@ -295,15 +273,5 @@ const styles = StyleSheet.create({
   createButtonText: {
     fontSize: 16,
     fontWeight: '600',
-  },
-  statusBanner: {
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
-    alignItems: 'center',
-  },
-  statusText: {
-    fontSize: 14,
-    fontWeight: '500',
   },
 });

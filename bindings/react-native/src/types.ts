@@ -837,6 +837,61 @@ export interface GroupErrorEvent extends BaseEvent {
   reason: string;
 }
 
+/**
+ * Group message sent event — a group message was sent to all members via mesh
+ * (MLS-encrypted fan-out).
+ */
+export interface GroupMessageSentEvent extends BaseEvent {
+  type: 'group_message_sent';
+  group_id: string;
+  message_ids: string[];
+  member_count: number;
+}
+
+/**
+ * Group message partial failure — some members could not be reached.
+ */
+export interface GroupMessagePartialFailureEvent extends BaseEvent {
+  type: 'group_message_partial_failure';
+  group_id: string;
+  failed_members: string[];
+  succeeded_members: string[];
+}
+
+/**
+ * Epoch fork detected — concurrent MLS commits caused members to diverge
+ * onto different branches. The deterministic leader will attempt automatic
+ * resolution.
+ */
+export interface GroupEpochForkDetectedEvent extends BaseEvent {
+  type: 'group_epoch_fork_detected';
+  group_id: string;
+  local_epoch?: number;
+}
+
+/**
+ * Epoch fork resolved — the leader re-established a canonical epoch.
+ * Members in `failed_members` could not be reached with the resolution
+ * commit and may need re-inviting.
+ */
+export interface GroupEpochForkResolvedEvent extends BaseEvent {
+  type: 'group_epoch_fork_resolved';
+  group_id: string;
+  resolved_epoch: number;
+  failed_members: string[];
+}
+
+/**
+ * Group role changed — a member's role was changed (e.g. admin ↔ member).
+ */
+export interface GroupRoleChangedEvent extends BaseEvent {
+  type: 'group_role_changed';
+  group_id: string;
+  user_id: string;
+  new_role: string;
+  changed_by: string;
+}
+
 // ============================================================================
 // SERVICE DISCOVERY & REQUEST/RESPONSE EVENTS
 // ============================================================================
@@ -1046,6 +1101,11 @@ export type ProtocolEvent =
   | GroupInfoEvent
   | UserGroupsEvent
   | GroupErrorEvent
+  | GroupMessageSentEvent
+  | GroupMessagePartialFailureEvent
+  | GroupEpochForkDetectedEvent
+  | GroupEpochForkResolvedEvent
+  | GroupRoleChangedEvent
   | DorsScoreUpdatedEvent
   | DorsTransportSelectedEvent
   | DorsTransportSwitchedEvent

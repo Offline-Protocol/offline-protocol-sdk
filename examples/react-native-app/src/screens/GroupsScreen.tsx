@@ -13,7 +13,6 @@ import { useProtocol } from '../hooks/useProtocol';
 import { Icon } from '../components/Icon';
 import { CreateGroupModal } from './CreateGroupModal';
 import { GroupDetailScreen } from './GroupDetailScreen';
-import { HARDCODED_TOKEN } from '../constants';
 
 export interface Group {
   groupId: string;
@@ -31,32 +30,21 @@ export function GroupsScreen({ onNavigateToGroupDetail }: GroupsScreenProps) {
   const { theme } = useTheme();
   const {
     groups,
-    authenticatedUser,
+    isInitialized,
     getUserGroups,
-    relayStatus: status,
-    relayError: error,
-    authenticate,
-    connect,
   } = useProtocol();
   const [currentScreen, setCurrentScreen] = useState<Screen>('list');
   const [selectedGroup, setSelectedGroup] = useState<{ groupId: string; name: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [isAuthenticating, setIsAuthenticating] = useState(false);
-
-  // Derived state for display
-  const isAuthenticated = status === 'authenticated';
-  const isConnected = status === 'connected';
-  const isConnecting = status === 'connecting';
-
 
   const handleRefresh = useCallback(() => {
     setRefreshing(true);
-    if (getUserGroups && authenticatedUser) {
+    if (getUserGroups && isInitialized) {
       getUserGroups();
     }
     setTimeout(() => setRefreshing(false), 1000);
-  }, [getUserGroups, authenticatedUser]);
+  }, [getUserGroups, isInitialized]);
 
   const handleGroupPress = useCallback((group: Group) => {
     if (onNavigateToGroupDetail) {
@@ -81,49 +69,12 @@ export function GroupsScreen({ onNavigateToGroupDetail }: GroupsScreenProps) {
     setSelectedGroup(null);
   }, []);
 
-  const handleAuthenticate = useCallback(() => {
-    console.log('[GroupsScreen] Authenticate button clicked, status:', status);
-    if (status === 'connected') {
-      // If connected but not authenticated, authenticate now
-      console.log('[GroupsScreen] Authenticating with token...');
-      setIsAuthenticating(true);
-      const success = authenticate(HARDCODED_TOKEN);
-      console.log('[GroupsScreen] authenticate() returned:', success);
-      if (!success) {
-        setIsAuthenticating(false);
-      }
-    } else if (status === 'disconnected' || status === 'error') {
-      // If disconnected, connect first (will auto-authenticate via effect)
-      console.log('[GroupsScreen] Connecting to server...');
-      connect();
-    }
-  }, [status, authenticate, connect]);
-
-  // Auto-authenticate when connected
+  // Auto-refresh groups when protocol is initialized
   useEffect(() => {
-    if (status === 'connected' && !isAuthenticating) {
-      console.log('[GroupsScreen] Connected, auto-authenticating...');
-      setIsAuthenticating(true);
-      const success = authenticate(HARDCODED_TOKEN);
-      if (!success) {
-        setIsAuthenticating(false);
-      }
-    }
-  }, [status, authenticate, isAuthenticating]);
-
-  // Reset authenticating state when status changes to authenticated or error
-  useEffect(() => {
-    if (status === 'authenticated' || status === 'error' || status === 'disconnected') {
-      setIsAuthenticating(false);
-    }
-  }, [status]);
-
-  // Auto-refresh groups when authenticated
-  useEffect(() => {
-    if (authenticatedUser && getUserGroups) {
+    if (isInitialized && getUserGroups) {
       getUserGroups();
     }
-  }, [authenticatedUser, getUserGroups]);
+  }, [isInitialized, getUserGroups]);
 
   if (currentScreen === 'detail' && selectedGroup) {
     return (
@@ -154,95 +105,6 @@ export function GroupsScreen({ onNavigateToGroupDetail }: GroupsScreenProps) {
         >
           <Icon name="add" size={24} color={theme.colors.textInverse} />
         </TouchableOpacity>
-      </View>
-
-      {/* Authentication Status Banner */}
-      <View
-        style={[
-          styles.statusBanner,
-          {
-            backgroundColor:
-              isAuthenticated
-                ? theme.colors.success + '20'
-                : status === 'error'
-                  ? theme.colors.error + '20'
-                  : isConnecting || isConnected || isAuthenticating
-                    ? theme.colors.warning + '20'
-                    : theme.colors.textSecondary + '20',
-          },
-        ]}
-      >
-        {isAuthenticated ? (
-          <View style={styles.authButtonContainer}>
-            <Text
-              style={[
-                styles.statusText,
-                { color: theme.colors.success },
-              ]}
-            >
-              ✅ Authenticated as {authenticatedUser?.username || authenticatedUser?.userId}
-            </Text>
-          </View>
-        ) : isAuthenticating ? (
-          <Text
-            style={[
-              styles.statusText,
-              { color: theme.colors.warning },
-            ]}
-          >
-            🔐 Authenticating...
-          </Text>
-        ) : (status === 'disconnected' || status === 'error') ? (
-          <View style={styles.authButtonContainer}>
-            <Text
-              style={[
-                styles.statusText,
-                {
-                  color:
-                    status === 'error'
-                      ? theme.colors.error
-                      : theme.colors.textSecondary,
-                  marginBottom: 12,
-                },
-              ]}
-            >
-              {status === 'disconnected' && '❌ Not connected to server'}
-              {status === 'error' && `❌ Error: ${error || 'Connection failed'}`}
-            </Text>
-            <TouchableOpacity
-              style={[styles.authButton, { backgroundColor: theme.colors.primary }]}
-              onPress={handleAuthenticate}
-            >
-              <Icon name="lock-open" size={20} color={theme.colors.textInverse} />
-              <Text style={[styles.authButtonText, { color: theme.colors.textInverse }]}>
-                Connect & Authenticate
-              </Text>
-            </TouchableOpacity>
-          </View>
-        ) : isConnected ? (
-          <View style={styles.authButtonContainer}>
-            <Text
-              style={[
-                styles.statusText,
-                {
-                  color: theme.colors.warning,
-                  marginBottom: 12,
-                },
-              ]}
-            >
-              ⏳ Connected, authenticating...
-            </Text>
-          </View>
-        ) : (
-          <Text
-            style={[
-              styles.statusText,
-              { color: theme.colors.warning },
-            ]}
-          >
-            {isConnecting && '🔄 Connecting to server...'}
-          </Text>
-        )}
       </View>
 
       {groups.length === 0 ? (
@@ -361,33 +223,5 @@ const styles = StyleSheet.create({
   },
   groupMeta: {
     fontSize: 12,
-  },
-  statusBanner: {
-    padding: 12,
-    marginHorizontal: 16,
-    marginTop: 8,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  statusText: {
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  authButtonContainer: {
-    alignItems: 'center',
-    width: '100%',
-  },
-  authButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-    gap: 8,
-  },
-  authButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
   },
 });

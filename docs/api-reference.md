@@ -429,6 +429,68 @@ NetworkMetrics {
 
 Periodic network statistics.
 
+#### GroupRoleChanged
+
+```rust
+GroupRoleChanged {
+    group_id: String,
+    user_id: String,
+    new_role: String,    // "admin" or "member"
+    changed_by: String,
+}
+```
+
+Emitted when a member's role is changed in a group.
+
+## Group Role Management
+
+The high-level mesh group API includes role-based access control.
+
+### GroupRole
+
+```rust
+pub enum GroupRole {
+    Admin,   // Can invite/remove members and change roles
+    Member,  // Default role, can send/receive messages
+}
+```
+
+### Role Methods
+
+```rust
+/// Set a member's role (admin only).
+pub fn mesh_set_member_role(
+    &mut self,
+    group_id: &str,
+    user_id: &str,
+    role: &str,  // "admin" or "member"
+) -> Result<()>
+```
+
+```rust
+/// Get a member's role.
+pub fn mesh_get_member_role(
+    &self,
+    group_id: &str,
+    user_id: &str,
+) -> Result<String>
+```
+
+```rust
+/// Get all member roles in a group.
+pub fn mesh_get_group_roles(
+    &self,
+    group_id: &str,
+) -> Result<HashMap<String, String>>
+```
+
+### Security Invariants
+
+- The group creator is automatically assigned `Admin`.
+- Only admins can call `mesh_invite_to_group`, `mesh_remove_from_group`, and `mesh_set_member_role`.
+- The last admin cannot be demoted, removed, or leave — returns `Error::LastAdmin`.
+- If the last admin leaves unexpectedly, deterministic election promotes the lexicographically smallest member.
+
 ## File Transfer
 
 ### FileTransferManager

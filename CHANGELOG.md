@@ -8,6 +8,28 @@ All notable changes to the Offline Protocol SDK are documented in this file. Thi
 
 If you are building an app with the React Native bindings, the following changes require updates to your code:
 
+#### New group role management APIs
+
+Three new methods have been added to the high-level mesh group API:
+
+- **`meshSetMemberRole(groupId, userId, role)`** — Change a member's role (admin only). `role` must be `"admin"` or `"member"`.
+- **`meshGetMemberRole(groupId, userId)`** — Get a member's current role.
+- **`meshGetGroupRoles(groupId)`** — Get all member roles as a `Record<string, string>`.
+
+A new event **`group_role_changed`** is emitted when a role changes:
+
+```typescript
+protocol.on('group_role_changed', (event) => {
+  console.log(`${event.user_id} is now ${event.new_role} (changed by ${event.changed_by})`);
+});
+```
+
+If you use exhaustive `switch` statements on `ProtocolEvent['type']`, add a case for `'group_role_changed'`.
+
+#### Admin-only group operations (behavioral change)
+
+`meshInviteToGroup()`, `meshRemoveFromGroup()`, and `meshSetMemberRole()` now enforce admin-only access. If a non-admin calls these methods, they will throw with `Error::NotGroupAdmin`. The group creator is automatically assigned the `Admin` role. If your app previously allowed any member to invite/remove, you must either promote them to admin first or adjust your UI to reflect the new permission model.
+
 #### `mls_add_group_member()` return type changed
 
 The return type of `mlsAddGroupMember()` has changed from a single `MlsWelcomeMessage` to a new `MlsAddMemberResult` containing both a Welcome and a Commit message.
@@ -64,6 +86,7 @@ The following events are emitted at the Rust/UniFFI layer but are not yet expose
 - **`GroupEpochForkDetected`** / **`GroupEpochForkResolved`** — MLS epoch fork lifecycle events.
 - **`SecurityWarning`** — A control message failed authentication or replay checks.
 - **`TofuReset`** — TOFU trust state was reset for a peer.
+- **`GroupRoleChanged`** — A member's role was changed in a group (also bridged to React Native as `group_role_changed`).
 
 #### `ForwardInfo` added to message events
 
@@ -85,6 +108,9 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 ---
 
 ### Features
+
+- **Group role management and security hardening**
+  Added app-layer role tracking for MLS groups with a typed `GroupRole` enum (`Admin` / `Member`). The group creator is automatically assigned the `Admin` role. Admins can invite/remove members and change roles; non-admins are rejected with a typed error. Key security improvements: last-admin invariant prevents orphaned groups (demoting or removing the last admin is blocked), deterministic admin election on leader departure using lexicographic fallback, phantom member cleanup on group join, and removed member notification via a plaintext `__GRP_REMOVED__` control message so kicked members can clean up local state immediately. Key packages are automatically replenished after member removal so subsequent invites don't fail. Includes new `meshSetMemberRole()`, `meshGetMemberRole()`, and `meshGetGroupRoles()` APIs with full UniFFI and React Native bindings, a `GroupRoleChanged` event, and 1200+ lines of new tests.
 
 - **Service discovery and request/response** ([#45](https://github.com/Offline-Protocol/sdk/pull/45))
   Added a new `MeshServices` subsystem that enables peer-to-peer service discovery and typed request/response over the mesh network. Services are advertised via gossip broadcast and discovered without a central registry. Includes auto `not_found` responses for unknown services, known_peers tracking independent of MLS encryption state, configurable max-hops gossip limit to control broadcast radius, payload size limits and capacity bounds to prevent resource exhaustion, sender-based response routing for multi-hop meshes, and the new `OutboundMessage` struct replacing raw tuples throughout the send path. Full UniFFI bindings are included for iOS and Android.
@@ -141,6 +167,14 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 
 - **Decouple transport retries from ACK retries** ([#62](https://github.com/Offline-Protocol/sdk/pull/62))
   Fixed a fundamental reliability issue where messages permanently died after just 3 transport send failures, even though the transport was only temporarily unavailable. The root cause was that the `max_retries` limit was applied at enqueue time rather than being purely a scheduling concern. Now, enqueue is always accepted and the retry queue handles scheduling with exponential backoff. Added `drain_all()` and `flush()` methods so messages are sent immediately when a transport becomes available. Fixed ghost re-sends from un-cleaned retry queue entries, double-sends from concurrent flush paths, and zombie entries that never expired. Returns `Ok` with a `MessageDeferred` event when no transport is available (instead of `Err`). Bumped defaults to 10 retries with 10s ACK timeout for better real-world reliability.
+
+- **Notify removed members and replenish key packages** — Removed members now receive a plaintext `__GRP_REMOVED__` notification so they can clean up local state immediately instead of silently losing access. After member removal, key packages are automatically replenished so subsequent invites don't fail with a stale key package error.
+
+- **Fix phantom members on group join** — Fixed an issue where the local member list could include stale members after joining a group via Welcome. Member lists are now reconciled from the MLS group state on join.
+
+- **Fix deterministic admin election** — Admin election on leader departure now uses a deterministic lexicographic sort, preventing split-brain scenarios where different nodes elect different admins. Election failures are logged rather than silently swallowed.
+
+- **Close last-admin loopholes** — Prevented several edge cases where a group could become orphaned (no admin): demoting the last admin, removing the last admin, and the last admin leaving are all now blocked with explicit errors.
 
 - **Fix message forwarding** — Fixed a bug where forwarded message JSON was never parseable because the serialization format didn't match the deserialization expectation.
 

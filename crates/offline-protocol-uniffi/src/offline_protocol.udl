@@ -837,6 +837,18 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     sequence<string> list_groups();
 
+    // Set a member's role in a group (admin only, broadcasts to all members)
+    [Throws=ProtocolError]
+    void set_member_role(string group_id, string user_id, string role);
+
+    // Get a member's role in a group
+    [Throws=ProtocolError]
+    string get_member_role(string group_id, string user_id);
+
+    // Get all member roles in a group (returns user_id -> role map)
+    [Throws=ProtocolError]
+    record<DOMString, string> get_group_roles(string group_id);
+
     // Reset the TOFU-pinned public key for a peer (allows re-pinning on next contact).
     // Returns true if an entry was removed, false if no entry existed (idempotent).
     [Throws=ProtocolError]

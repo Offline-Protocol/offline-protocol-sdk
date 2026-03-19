@@ -51,10 +51,19 @@ export interface Chat {
   unreadCount: number;
 }
 
+export type GroupRole = 'admin' | 'member';
+
+export interface GroupMember {
+  userId: string;
+  role: GroupRole;
+}
+
 export interface Group {
   id: string;
   name: string;
   members: string[];
+  /** Per-member role map (userId -> role). Empty for legacy groups. */
+  roles: Record<string, GroupRole>;
   messages: ChatMessage[];
 }
 

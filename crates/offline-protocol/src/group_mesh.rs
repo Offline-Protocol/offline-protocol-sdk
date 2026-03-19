@@ -9,10 +9,13 @@
 //! and a relay server supports it, the protocol can send a single relay
 //! broadcast instead of O(N) per-member fan-out.
 
-use crate::protocol::{base64_decode, base64_encode, internal_prefixes, OfflineProtocol};
+use crate::protocol::{
+    base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload, OfflineProtocol,
+};
 use crate::{Error, Event, Result};
 use chrono::Utc;
 use offline_protocol_core::{ForwardInfo, Message, MessageId, MessagePriority};
+use offline_protocol_mls::GroupRole;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -129,6 +132,9 @@ pub(crate) struct GroupMlsWelcomePayload {
     pub(crate) welcome_data: String,
     /// Current member list (user IDs) at the time of invite.
     pub(crate) member_list: Vec<String>,
+    /// Role assignments: user_id -> role.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) member_roles: HashMap<String, GroupRole>,
 }
 
 /// Type of group membership commit operation.
@@ -158,6 +164,9 @@ pub(crate) struct GroupMlsCommitPayload {
     /// User ID of the affected member (added or removed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) affected_member: Option<String>,
+    /// Role assigned to the affected member (for Add commits).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) role: Option<GroupRole>,
 }
 
 /// Payload for group leave notifications sent via mesh.
@@ -167,6 +176,19 @@ pub(crate) struct GroupMlsLeavePayload {
     pub(crate) group_id: String,
     /// User ID of the leaving member.
     pub(crate) leaving_member: String,
+}
+
+/// Payload for group role change notifications sent via mesh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GroupRoleChangePayload {
+    /// MLS group identifier.
+    pub(crate) group_id: String,
+    /// User ID of the member whose role changed.
+    pub(crate) target_user_id: String,
+    /// New role.
+    pub(crate) new_role: GroupRole,
+    /// User ID of who changed the role.
+    pub(crate) changed_by: String,
 }
 
 // --- Relay optimization payloads ---
@@ -430,6 +452,32 @@ impl OfflineProtocol {
         if let Some(members) = join_result {
             let group_id = payload.group_id.clone();
             self.group_mesh.members.insert(group_id.clone(), members);
+
+            // Store member roles from welcome payload
+            if !payload.member_roles.is_empty() {
+                if let Ok(mls_guard) = self.read_mls_guard() {
+                    let gid = offline_protocol_mls::GroupId::new(&group_id);
+                    for (user_id, role) in &payload.member_roles {
+                        if let Err(e) = mls_guard.set_member_role(&gid, user_id, *role) {
+                            warn!(user_id = %user_id, error = %e, "Failed to store member role from welcome");
+                        }
+                    }
+                }
+            }
+
+            // Send a fresh key package to the inviter. The inviter consumed our
+            // previous key package to create this Welcome, so they need a new one
+            // for future group invites. Clear the tracking flag first so the send
+            // isn't suppressed as a duplicate.
+            self.key_package_sent_to.remove(sender);
+            if let Err(e) = self.send_key_package_to(sender, false) {
+                debug!(
+                    inviter = %sender,
+                    error = %e,
+                    "Failed to send fresh key package to inviter after Welcome (will retry on discovery)"
+                );
+            }
+
             self.emit_event(Event::group_member_added(
                 group_id,
                 self.config.user_id.clone(),
@@ -544,6 +592,42 @@ impl OfflineProtocol {
         match mls_result {
             Ok(_) => {}
             Err(ref e) => {
+                // If this is a Remove commit targeting us, we can't decrypt it
+                // because the admin already removed us from the MLS group. But the
+                // commit payload metadata tells us we were removed, so handle it
+                // gracefully: emit the event, clean up local state, and reject the
+                // commit (don't buffer it — it will never succeed).
+                //
+                // SECURITY: Verify the sender is an admin before trusting the
+                // unencrypted commit metadata. Without this check, a non-admin
+                // group member could forge a commit with garbage ciphertext and
+                // affected_member = victim to force group eviction.
+                let self_id = self.config.user_id.clone();
+                if matches!(payload.commit_type, GroupCommitType::Remove)
+                    && payload.affected_member.as_deref() == Some(&self_id)
+                    && self
+                        .check_is_admin(&payload.group_id, sender)
+                        .unwrap_or(false)
+                {
+                    info!(
+                        group_id = %payload.group_id,
+                        "Received remove-commit targeting us — cleaning up local state"
+                    );
+                    // Clean up local MLS state
+                    if let Ok(mls_guard) = self.read_mls_guard() {
+                        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                        let _ = mls_guard.leave_group(&gid);
+                    }
+                    self.group_mesh.members.remove(&payload.group_id);
+                    self.group_mesh.relay_synced.remove(&payload.group_id);
+                    self.emit_event(Event::group_member_removed(
+                        payload.group_id.clone(),
+                        self_id,
+                        sender.to_string(),
+                    ));
+                    return CommitOutcome::Rejected;
+                }
+
                 // Classify MLS errors: permanent failures should not be retried,
                 // only epoch-related decryption failures are worth buffering.
                 let is_permanent = matches!(
@@ -606,6 +690,29 @@ impl OfflineProtocol {
 
         // Emit events based on actual MLS membership changes, not claimed affected_member
         for member in &actual_added {
+            // Store the role from the commit payload only for the specific affected member,
+            // and only if the sender is an admin (prevents non-admins from injecting elevated roles).
+            if let (Some(role), Some(affected)) = (&payload.role, &payload.affected_member) {
+                if *member == affected {
+                    let sender_is_admin = self
+                        .check_is_admin(&payload.group_id, sender)
+                        .unwrap_or(false);
+                    if sender_is_admin {
+                        if let Ok(mls_guard) = self.read_mls_guard() {
+                            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                            if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
+                                warn!(user_id = %member, error = %e, "Failed to store member role from commit");
+                            }
+                        }
+                    } else {
+                        warn!(
+                            sender = %sender,
+                            group_id = %payload.group_id,
+                            "Ignoring role from commit: sender is not admin"
+                        );
+                    }
+                }
+            }
             self.emit_event(Event::group_member_added(
                 payload.group_id.clone(),
                 (*member).clone(),
@@ -614,6 +721,13 @@ impl OfflineProtocol {
             ));
         }
         for member in &actual_removed {
+            // Clean up role metadata for removed members
+            if let Ok(mls_guard) = self.read_mls_guard() {
+                let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                if let Err(e) = mls_guard.remove_member_role(&gid, member) {
+                    warn!(user_id = %member, error = %e, "Failed to clean up role metadata for removed member");
+                }
+            }
             self.emit_event(Event::group_member_removed(
                 payload.group_id.clone(),
                 (*member).clone(),
@@ -624,6 +738,17 @@ impl OfflineProtocol {
             self.group_mesh
                 .pending_leave_elections
                 .remove(&(payload.group_id.clone(), member.to_string()));
+        }
+
+        // Auto-promote if removal left zero admins and other members remain
+        if !actual_removed.is_empty() {
+            let remaining = self
+                .group_mesh
+                .members
+                .get(&payload.group_id)
+                .cloned()
+                .unwrap_or_default();
+            self.auto_promote_if_no_admin(&payload.group_id, &remaining);
         }
 
         // Only clear fork tracking when a KeyUpdate commit succeeds — these
@@ -1014,6 +1139,12 @@ impl OfflineProtocol {
     /// Requires the invitee's key package to be available in `pending_key_packages`.
     /// Sends a Welcome to the invitee and a Commit to all existing members.
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
+        // Admin check
+        let self_id = self.config.user_id.clone();
+        if !self.check_is_admin(group_id, &self_id)? {
+            return Err(Error::Other("Only admins can invite members".to_string()));
+        }
+
         // Check group member cap before adding
         let current_count = self
             .group_mesh
@@ -1071,6 +1202,12 @@ impl OfflineProtocol {
         self.pending_key_packages.remove(invitee_user_id);
         self.delete_peer_key_package_from_storage(invitee_user_id);
 
+        // Clear key-package-sent tracking so the invitee can reciprocate.
+        // Without this, the invitee's handler sees us in `key_package_sent_to`
+        // and skips reciprocation, leaving us without a key package for
+        // future group invites.
+        self.key_package_sent_to.remove(invitee_user_id);
+
         // Send our key package to the invitee. Their message dispatch handler
         // will reciprocate with a fresh key package, replenishing our supply
         // for future group invites or 1:1 session creation.
@@ -1085,12 +1222,28 @@ impl OfflineProtocol {
         // Refresh member list after add
         let members = self.refresh_group_members(group_id)?;
 
+        // Store invitee as member role and load all roles for the welcome payload
+        let member_roles = {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            if let Err(e) = mls_guard.set_member_role(&gid, invitee_user_id, GroupRole::Member) {
+                warn!(invitee = %invitee_user_id, error = %e, "Failed to store invitee role");
+            }
+            mls_guard
+                .get_group_metadata(&gid)
+                .ok()
+                .flatten()
+                .map(|m| m.get_all_roles())
+                .unwrap_or_default()
+        };
+
         // Send Welcome to invitee
         let welcome_payload = GroupMlsWelcomePayload {
             group_id: group_id.to_string(),
             group_name,
             welcome_data: base64_encode(&welcome.welcome_data),
             member_list: members.clone(),
+            member_roles,
         };
         let welcome_content = format!(
             "{}{}",
@@ -1102,13 +1255,13 @@ impl OfflineProtocol {
 
         // Send Commit to all existing members (excluding self and invitee)
         // so they can process it and advance their MLS epoch
-        let self_id = self.config.user_id.clone();
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.to_string(),
             commit_type: GroupCommitType::Add,
             ciphertext: base64_encode(&commit.ciphertext),
             epoch: commit.epoch,
             affected_member: Some(invitee_user_id.to_string()),
+            role: Some(GroupRole::Member),
         };
         let commit_content = format!(
             "{}{}",
@@ -1157,6 +1310,56 @@ impl OfflineProtocol {
     ///
     /// Sends a Commit to all remaining members.
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
+        let self_id = self.config.user_id.clone();
+
+        // Admin check + last-admin guard (single metadata load)
+        {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            let metadata = mls_guard.get_group_metadata(&gid)?;
+
+            let is_admin = if let Some(ref meta) = metadata {
+                if meta.has_any_admin() {
+                    meta.get_role(&self_id) == GroupRole::Admin
+                } else if let Some(ref creator) = meta.created_by {
+                    creator == &self_id
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !is_admin {
+                return Err(Error::Other("Only admins can remove members".to_string()));
+            }
+
+            if let Some(ref meta) = metadata {
+                if meta.get_role(member_id) == GroupRole::Admin {
+                    let admin_count = meta
+                        .get_all_roles()
+                        .values()
+                        .filter(|r| **r == GroupRole::Admin)
+                        .count();
+                    let member_count = self
+                        .group_mesh
+                        .members
+                        .get(group_id)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    // member_count > 2: the count is *before* removal, so > 2
+                    // means at least 2 members will remain after the removal.
+                    // When only 2 members exist (the admin being removed + one
+                    // other), the remaining sole member gets auto-promoted, so
+                    // we allow the removal.
+                    if admin_count <= 1 && member_count > 2 {
+                        return Err(Error::Other(
+                            "Cannot remove the last admin while other members remain. Promote another member to admin first.".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         let commit_msg = mls_guard.remove_group_member(&gid, member_id)?;
@@ -1164,15 +1367,23 @@ impl OfflineProtocol {
 
         // Refresh member list after removal
         let members = self.refresh_group_members(group_id)?;
+        // Clean up removed member's role metadata
+        if let Ok(mls_guard) = self.read_mls_guard() {
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            if let Err(e) = mls_guard.remove_member_role(&gid, member_id) {
+                warn!(member = %member_id, error = %e, "Failed to clean up role metadata for removed member");
+            }
+        }
+        // Auto-promote if removal left zero admins
+        self.auto_promote_if_no_admin(group_id, &members);
 
-        // Fan-out Commit to remaining members
-        let self_id = self.config.user_id.clone();
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.to_string(),
             commit_type: GroupCommitType::Remove,
             ciphertext: base64_encode(&commit_msg.ciphertext),
             epoch: commit_msg.epoch,
             affected_member: Some(member_id.to_string()),
+            role: None,
         };
         let commit_content = format!(
             "{}{}",
@@ -1201,6 +1412,31 @@ impl OfflineProtocol {
         for member in &failed_commit_members {
             let _ =
                 self.send_internal_message(member, commit_content.clone(), MessagePriority::High);
+        }
+
+        // Send a plaintext removal notification directly to the removed member.
+        // The MLS commit alone is insufficient: the removed member cannot decrypt
+        // it (they're no longer in the group), so they would never learn they were
+        // removed. The plaintext notification uses the existing GROUP_MEMBER_REMOVED
+        // prefix which the message dispatcher handles by emitting a
+        // GroupMemberRemoved event and cleaning up local state.
+        let removed_payload = GroupMemberRemovedPayload {
+            group_id: group_id.to_string(),
+            user_id: member_id.to_string(),
+            removed_by: self_id.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&removed_payload) {
+            let removed_content = format!("{}{}", internal_prefixes::GROUP_MEMBER_REMOVED, json);
+            if let Err(e) =
+                self.send_internal_message(member_id, removed_content, MessagePriority::High)
+            {
+                warn!(
+                    group_id = %group_id,
+                    member = %member_id,
+                    error = %e,
+                    "Failed to send removal notification to removed member"
+                );
+            }
         }
 
         self.emit_event(Event::group_member_removed(
@@ -1240,6 +1476,29 @@ impl OfflineProtocol {
             .unwrap_or_default();
 
         let self_id = self.config.user_id.clone();
+
+        // Block last admin from leaving if other members remain
+        let other_members_exist = members.iter().any(|m| m != &self_id);
+        if other_members_exist {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            if let Some(metadata) = mls_guard.get_group_metadata(&gid)? {
+                let is_admin = metadata.get_role(&self_id) == GroupRole::Admin;
+                if is_admin {
+                    let admin_count = metadata
+                        .get_all_roles()
+                        .values()
+                        .filter(|r| **r == GroupRole::Admin)
+                        .count();
+                    if admin_count <= 1 {
+                        return Err(Error::Other(
+                            "Cannot leave group as the last admin while other members remain. Promote another member to admin first.".to_string(),
+                        ));
+                    }
+                }
+            }
+            drop(mls_guard);
+        }
 
         // Build leave notification payload before touching MLS state
         let leave_payload = GroupMlsLeavePayload {
@@ -1506,6 +1765,231 @@ impl OfflineProtocol {
         let mls_guard = self.read_mls_guard()?;
         let groups = mls_guard.list_groups()?;
         Ok(groups.into_iter().map(|g| g.as_str().to_string()).collect())
+    }
+
+    // ========================================================================
+    // GROUP ROLES
+    // ========================================================================
+
+    /// Deterministically promotes the lexicographically-first remaining member
+    /// to admin if no admin role remains. All nodes use the same sort order,
+    /// so the promotion converges to the same candidate network-wide.
+    fn auto_promote_if_no_admin(&self, group_id: &str, members: &[String]) {
+        if members.is_empty() {
+            return;
+        }
+        if let Ok(mls_guard) = self.read_mls_guard() {
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                if metadata.has_any_admin() {
+                    return;
+                }
+                let mut sorted = members.to_vec();
+                sorted.sort();
+                let promote_id = &sorted[0];
+                if let Err(e) = mls_guard.set_member_role(&gid, promote_id, GroupRole::Admin) {
+                    warn!(user_id = %promote_id, error = %e, "Failed to auto-promote member to admin");
+                } else {
+                    info!(user_id = %promote_id, group_id = %group_id, "Auto-promoted member to admin after last admin was removed");
+                }
+            }
+        }
+    }
+
+    /// Checks if a user is an admin of the given group.
+    ///
+    /// Falls back to `created_by` when no admin role has been stored yet
+    /// (handles groups created before role tracking was introduced).
+    pub(crate) fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
+        let mls_guard = self.read_mls_guard()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let metadata = mls_guard.get_group_metadata(&gid)?;
+        drop(mls_guard);
+
+        if let Some(meta) = &metadata {
+            if meta.has_any_admin() {
+                return Ok(meta.get_role(user_id) == GroupRole::Admin);
+            }
+            // No admin role stored — fall back to created_by if available
+            if let Some(creator) = &meta.created_by {
+                return Ok(creator == user_id);
+            }
+        }
+
+        // No metadata at all — deny by default
+        Ok(false)
+    }
+
+    /// Changes a member's role in a group (admin only).
+    /// Broadcasts the change to all group members.
+    pub fn set_member_role(
+        &mut self,
+        group_id: &str,
+        target_user_id: &str,
+        role: GroupRole,
+    ) -> Result<()> {
+        let self_id = self.config.user_id.clone();
+        if !self.check_is_admin(group_id, &self_id)? {
+            return Err(Error::Other("Only admins can change roles".to_string()));
+        }
+
+        // Verify target is a member (before acquiring guard for role operations)
+        let members = self
+            .group_mesh
+            .members
+            .get(group_id)
+            .cloned()
+            .or_else(|| self.refresh_group_members(group_id).ok())
+            .unwrap_or_default();
+        if !members.iter().any(|m| m == target_user_id) {
+            return Err(Error::Other(format!(
+                "User {} is not a member of group {}",
+                target_user_id, group_id
+            )));
+        }
+
+        // Single guard acquisition for both last-admin validation and role write
+        {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+
+            // Prevent demoting the last admin (whether self or another admin)
+            if role == GroupRole::Member {
+                if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                    if metadata.get_role(target_user_id) == GroupRole::Admin {
+                        let admin_count = metadata
+                            .get_all_roles()
+                            .values()
+                            .filter(|r| **r == GroupRole::Admin)
+                            .count();
+                        if admin_count <= 1 {
+                            return Err(Error::Other("Cannot demote the last admin".to_string()));
+                        }
+                    }
+                }
+            }
+
+            // Store locally
+            mls_guard.set_member_role(&gid, target_user_id, role)?;
+        }
+
+        // Broadcast to all members
+        let payload = GroupRoleChangePayload {
+            group_id: group_id.to_string(),
+            target_user_id: target_user_id.to_string(),
+            new_role: role,
+            changed_by: self_id.clone(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_ROLE_CHANGE,
+            serde_json::to_string(&payload)
+                .map_err(|e| Error::Other(format!("Serialize role change: {}", e)))?
+        );
+        for member in &members {
+            if member == &self_id {
+                continue;
+            }
+            if let Err(e) =
+                self.send_internal_message(member, content.clone(), MessagePriority::High)
+            {
+                warn!(member = %member, group_id = %group_id, error = %e, "Failed to send role change broadcast");
+            }
+        }
+
+        self.emit_event(Event::group_role_changed(
+            group_id.to_string(),
+            target_user_id.to_string(),
+            role.to_string(),
+            self_id,
+        ));
+
+        info!(group_id = %group_id, target = %target_user_id, role = %role, "Changed member role");
+        Ok(())
+    }
+
+    /// Gets a member's role in a group.
+    pub fn get_member_role(&self, group_id: &str, user_id: &str) -> Result<GroupRole> {
+        let mls_guard = self.read_mls_guard()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let metadata = mls_guard
+            .get_group_metadata(&gid)?
+            .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
+        Ok(metadata.get_role(user_id))
+    }
+
+    /// Gets all member roles in a group.
+    pub fn get_group_roles(&self, group_id: &str) -> Result<HashMap<String, GroupRole>> {
+        let mls_guard = self.read_mls_guard()?;
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        let metadata = mls_guard
+            .get_group_metadata(&gid)?
+            .ok_or_else(|| Error::Other(format!("Group not found: {}", group_id)))?;
+        Ok(metadata.get_all_roles())
+    }
+
+    /// Handles an incoming group role change notification.
+    pub(crate) fn handle_group_role_change(&mut self, message_id: &str, sender: &str, data: &str) {
+        let payload = match serde_json::from_str::<GroupRoleChangePayload>(data) {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(sender = %sender, "Failed to parse GroupRoleChange payload");
+                return;
+            }
+        };
+
+        // Dedup
+        let dedup_key = message_id.to_string();
+        if self.group_mesh.message_dedup.contains_key(&dedup_key) {
+            return;
+        }
+        self.group_mesh
+            .message_dedup
+            .insert(dedup_key, Instant::now());
+
+        // Verify sender is admin (use transport-authenticated sender, not payload.changed_by)
+        match self.check_is_admin(&payload.group_id, sender) {
+            Ok(true) => {}
+            Ok(false) => {
+                error!(
+                    sender = %sender,
+                    group_id = %payload.group_id,
+                    "SECURITY: Role change from non-admin, ignoring"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    sender = %sender,
+                    group_id = %payload.group_id,
+                    error = %e,
+                    "Failed to verify admin status for role change"
+                );
+                return;
+            }
+        }
+
+        // Store role locally
+        if let Ok(mls_guard) = self.read_mls_guard() {
+            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+            if let Err(e) =
+                mls_guard.set_member_role(&gid, &payload.target_user_id, payload.new_role)
+            {
+                warn!(
+                    target = %payload.target_user_id,
+                    error = %e,
+                    "Failed to store role from incoming role change"
+                );
+            }
+        }
+
+        // Use transport-authenticated sender as changed_by, not the untrusted payload field
+        self.emit_event(Event::group_role_changed(
+            payload.group_id,
+            payload.target_user_id,
+            payload.new_role.to_string(),
+            sender.to_string(),
+        ));
     }
 
     /// Cleans up expired group message dedup entries and enforces size cap.
@@ -1782,6 +2266,7 @@ impl OfflineProtocol {
                         ciphertext: base64_encode(&commit_msg.ciphertext),
                         epoch: commit_msg.epoch,
                         affected_member: None,
+                        role: None,
                     };
                     let commit_content = match serde_json::to_string(&commit_payload) {
                         Ok(json) => format!("{}{}", internal_prefixes::GROUP_MLS_COMMIT, json),

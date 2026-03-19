@@ -502,5 +502,20 @@ RCT_EXTERN_METHOD(meshLeaveGroup:(NSString *)groupId
 RCT_EXTERN_METHOD(meshListGroups:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(meshSetMemberRole:(NSString *)groupId
+                  userId:(NSString *)userId
+                  role:(NSString *)role
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(meshGetMemberRole:(NSString *)groupId
+                  userId:(NSString *)userId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(meshGetGroupRoles:(NSString *)groupId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 @end
 

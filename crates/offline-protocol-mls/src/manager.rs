@@ -7,8 +7,8 @@ use crate::session::SessionManager;
 use crate::storage::MlsStorage;
 use crate::storage_adapter::MlsStorageAdapter;
 use crate::types::{
-    EncryptedMessage, GroupId, GroupInfo, GroupMetadata, KeyPackageBundle, MlsMessageType,
-    StorageKeyType, WelcomeMessage,
+    EncryptedMessage, GroupId, GroupInfo, GroupMetadata, GroupRole, KeyPackageBundle,
+    MlsMessageType, StorageKeyType, WelcomeMessage,
 };
 
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
@@ -447,8 +447,8 @@ impl MlsManager {
             .group_manager
             .create_group(&group_id, &credential, &signature_keys)?;
 
-        // Store group metadata
-        let metadata = GroupMetadata::new(Some(group_name.to_string()));
+        // Store group metadata with creator as admin
+        let metadata = GroupMetadata::new_with_creator(Some(group_name.to_string()), &self.user_id);
         self.save_group_metadata(&group_id, &metadata)?;
 
         let mut info = self.group_manager.get_group_info(&group, &group_id);
@@ -705,6 +705,41 @@ impl MlsManager {
         self.save_group_metadata(group_id, &metadata)
     }
 
+    /// Removes a custom metadata key for a group.
+    pub fn remove_group_custom_metadata(&self, group_id: &GroupId, key: &str) -> Result<()> {
+        let mut metadata = self
+            .load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.custom.remove(key);
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
+    /// Sets a member's role in a group.
+    pub fn set_member_role(
+        &self,
+        group_id: &GroupId,
+        user_id: &str,
+        role: GroupRole,
+    ) -> Result<()> {
+        let mut metadata = self
+            .load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.set_role(user_id, role);
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
+    /// Removes a member's role metadata from a group.
+    pub fn remove_member_role(&self, group_id: &GroupId, user_id: &str) -> Result<()> {
+        let mut metadata = self
+            .load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.remove_role(user_id);
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
     // ========================================================================
     // GENERIC MESSAGE HANDLING
     // ========================================================================
@@ -805,8 +840,21 @@ impl MlsManager {
         let key_type = StorageKeyType::GroupMetadata.as_str();
         match self.storage.load(key_type, group_id.as_str())? {
             Some(data) => {
-                let metadata: GroupMetadata = serde_json::from_slice(&data)
+                let mut metadata: GroupMetadata = serde_json::from_slice(&data)
                     .map_err(|e| MlsError::Deserialization(e.to_string()))?;
+                // Migrate legacy "role:*" keys from `custom` into `roles`
+                if metadata.roles.is_empty()
+                    && metadata
+                        .custom
+                        .keys()
+                        .any(|k| k.starts_with(GroupMetadata::LEGACY_ROLE_KEY_PREFIX))
+                {
+                    metadata.migrate_legacy_roles();
+                    // Persist the migration so it only runs once
+                    if let Err(e) = self.save_group_metadata(group_id, &metadata) {
+                        warn!(group_id = %group_id.as_str(), error = %e, "Failed to persist legacy role migration");
+                    }
+                }
                 Ok(Some(metadata))
             }
             None => Ok(None),

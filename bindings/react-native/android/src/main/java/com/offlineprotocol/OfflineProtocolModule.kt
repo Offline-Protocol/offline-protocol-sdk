@@ -2746,120 +2746,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     // ========================================================================
-    // GROUP MANAGEMENT (RELAY SERVER API)
-    // ========================================================================
-
-    @ReactMethod
-    fun groupCreate(name: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupCreate(name)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to create group: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupSendMessage(groupId: String, content: String, replyToMsg: String?, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupSendMessage(groupId, content, replyToMsg)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to send group message: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupAddMember(groupId: String, username: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupAddMember(groupId, username)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to add group member: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupRemoveMember(groupId: String, username: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupRemoveMember(groupId, username)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to remove group member: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupSetAdmin(groupId: String, username: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupSetAdmin(groupId, username)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to set group admin: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupRemoveAdmin(groupId: String, username: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupRemoveAdmin(groupId, username)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to remove group admin: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupLeave(groupId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupLeave(groupId)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to leave group: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupDelete(groupId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupDelete(groupId)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to delete group: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupGetInfo(groupId: String, promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupGetInfo(groupId)
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to get group info: ${e.message}", e)
-        }
-    }
-
-    @ReactMethod
-    fun groupGetUserGroups(promise: Promise) {
-        try {
-            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val json = proto.groupGetUserGroups()
-            promise.resolve(json)
-        } catch (e: Exception) {
-            promise.reject("ERROR_GROUP", "Failed to get user groups: ${e.message}", e)
-        }
-    }
-
-    // ========================================================================
     // GROUP MANAGEMENT (MESH / MLS PROTOCOL-LEVEL)
     // ========================================================================
 
@@ -2993,6 +2879,41 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(result)
         } catch (e: Exception) {
             promise.reject("ERROR_MESH_GROUP", "Failed to list mesh groups: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun meshSetMemberRole(groupId: String, userId: String, role: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.setMemberRole(groupId, userId, role)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to set member role: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun meshGetMemberRole(groupId: String, userId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val role = proto.getMemberRole(groupId, userId)
+            promise.resolve(role)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to get member role: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun meshGetGroupRoles(groupId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val roles = proto.getGroupRoles(groupId)
+            val result = Arguments.createMap()
+            roles.forEach { (userId, role) -> result.putString(userId, role) }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MESH_GROUP", "Failed to get group roles: ${e.message}", e)
         }
     }
 

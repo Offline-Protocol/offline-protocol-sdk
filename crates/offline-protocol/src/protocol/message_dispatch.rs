@@ -14,7 +14,7 @@ use chrono::Utc;
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
 use offline_protocol_services::ServiceAction;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {
     /// Handles an incoming MLS key package message.
@@ -623,7 +623,7 @@ impl OfflineProtocol {
     }
 
     /// Handles group relay messages (GROUP_CREATED through GROUP_ERROR).
-    pub(crate) fn handle_group_relay_message(&mut self, _sender: &str, content: &str) {
+    pub(crate) fn handle_group_relay_message(&mut self, sender: &str, content: &str) {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_CREATED) {
             if let Ok(payload) = serde_json::from_str::<GroupCreatedPayload>(data) {
                 info!(group_id = %payload.group_id, "Group created");
@@ -696,10 +696,73 @@ impl OfflineProtocol {
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MEMBER_REMOVED) {
             if let Ok(payload) = serde_json::from_str::<GroupMemberRemovedPayload>(data) {
                 info!(group_id = %payload.group_id, user_id = %payload.user_id, "Group member removed");
-                // Reconcile local member cache if we have MLS state for this group
-                if let Some(members) = self.group_mesh.members.get_mut(&payload.group_id) {
-                    members.retain(|m| m != &payload.user_id);
+
+                // If WE are the removed member, clean up local MLS group state
+                // so we don't retain a stale group that can't encrypt/decrypt.
+                let self_removed = payload.user_id == self.config.user_id;
+                if self_removed {
+                    // SECURITY: Verify the sender is authorized to remove us.
+                    // If the sender is a known group member, they must be an admin.
+                    // If the sender is not a member (e.g. relay server), verify
+                    // that removed_by in the payload is a known admin to prevent
+                    // arbitrary non-member senders from forging removals.
+                    let sender_is_member = self
+                        .group_mesh
+                        .members
+                        .get(&payload.group_id)
+                        .map(|m| m.contains(&sender.to_string()))
+                        .unwrap_or(false);
+                    let admin_to_verify = if sender_is_member {
+                        sender
+                    } else {
+                        &payload.removed_by
+                    };
+                    match self.check_is_admin(&payload.group_id, admin_to_verify) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            error!(
+                                sender = %sender,
+                                verified_id = %admin_to_verify,
+                                group_id = %payload.group_id,
+                                "SECURITY: Group removal notification with unverifiable admin, ignoring"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            warn!(
+                                sender = %sender,
+                                group_id = %payload.group_id,
+                                error = %e,
+                                "Failed to verify admin status for removal notification"
+                            );
+                            return;
+                        }
+                    }
+                    info!(
+                        group_id = %payload.group_id,
+                        "We were removed from the group — cleaning up local state"
+                    );
+                    if let Some(mls) = self.mls_manager.clone() {
+                        if let Ok(mls_guard) = mls.read() {
+                            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                            if let Err(e) = mls_guard.leave_group(&gid) {
+                                debug!(
+                                    group_id = %payload.group_id,
+                                    error = %e,
+                                    "MLS leave_group cleanup after removal (may already be gone)"
+                                );
+                            }
+                        }
+                    }
+                    self.group_mesh.members.remove(&payload.group_id);
+                    self.group_mesh.relay_synced.remove(&payload.group_id);
+                } else {
+                    // Another member was removed — just update the cache
+                    if let Some(members) = self.group_mesh.members.get_mut(&payload.group_id) {
+                        members.retain(|m| m != &payload.user_id);
+                    }
                 }
+
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     state.emit_event(Event::group_member_removed(
                         payload.group_id,

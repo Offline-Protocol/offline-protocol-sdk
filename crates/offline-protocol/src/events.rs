@@ -646,6 +646,18 @@ pub enum Event {
         failed_members: Vec<String>,
     },
 
+    /// A member's role was changed in a group.
+    GroupRoleChanged {
+        /// Group identifier.
+        group_id: String,
+        /// User ID of the member whose role changed.
+        user_id: String,
+        /// New role (e.g. "admin", "member").
+        new_role: String,
+        /// User ID of who changed the role.
+        changed_by: String,
+    },
+
     // --- Service discovery ---
     /// A service was discovered on the mesh in response to a discovery query.
     ServiceDiscovered {
@@ -1254,6 +1266,21 @@ impl Event {
             group_id,
             user_id,
             removed_by,
+        }
+    }
+
+    /// Creates a GroupRoleChanged event.
+    pub fn group_role_changed(
+        group_id: String,
+        user_id: String,
+        new_role: String,
+        changed_by: String,
+    ) -> Self {
+        Self::GroupRoleChanged {
+            group_id,
+            user_id,
+            new_role,
+            changed_by,
         }
     }
 
@@ -2094,6 +2121,18 @@ impl fmt::Debug for Event {
             Self::TofuReset { peer_id: _ } => f
                 .debug_struct("TofuReset")
                 .field("peer_id", &"[REDACTED]")
+                .finish(),
+            Self::GroupRoleChanged {
+                group_id,
+                user_id: _,
+                new_role,
+                changed_by: _,
+            } => f
+                .debug_struct("GroupRoleChanged")
+                .field("group_id", group_id)
+                .field("user_id", &"[REDACTED]")
+                .field("new_role", new_role)
+                .field("changed_by", &"[REDACTED]")
                 .finish(),
         }
     }
