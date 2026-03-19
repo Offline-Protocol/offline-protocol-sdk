@@ -257,11 +257,7 @@ impl GroupManager {
 
         GroupInfo {
             group_id: group_id.clone(),
-            name: if is_session {
-                None
-            } else {
-                Some(group_id.as_str().to_string())
-            },
+            name: None,
             members,
             members_count,
             epoch: group.epoch().as_u64(),

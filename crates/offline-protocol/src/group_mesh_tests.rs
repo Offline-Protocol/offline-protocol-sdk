@@ -2738,7 +2738,7 @@ fn test_handle_relay_group_message_mls_decrypt() {
 }
 
 #[test]
-fn test_handle_relay_group_message_mls_unavailable_emits_raw() {
+fn test_handle_relay_group_message_mls_unavailable_drops_message() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     // Deliberately NOT initializing MLS
     protocol.start().unwrap();
@@ -2760,15 +2760,16 @@ fn test_handle_relay_group_message_mls_unavailable_emits_raw() {
         None,
     );
 
-    // Should emit the raw base64 content since MLS is unavailable
+    // Should NOT emit raw ciphertext when MLS is unavailable — message is dropped
     let events = events.lock().unwrap();
-    let received = events.iter().find(|e| {
-        matches!(e, Event::GroupMessageReceived { group_id, content, .. }
-            if group_id == "group:no-mls" && content == &raw_content)
-    });
-    assert!(
-        received.is_some(),
-        "Should emit raw content when MLS is unavailable"
+    let msg_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::GroupMessageReceived { .. }))
+        .collect();
+    assert_eq!(
+        msg_events.len(),
+        0,
+        "Should drop message when MLS is unavailable, not emit raw ciphertext"
     );
 }
 
@@ -4817,5 +4818,203 @@ fn test_epoch_fork_cancelled_when_epoch_advanced_since_detection() {
             .iter()
             .any(|e| matches!(e, Event::GroupEpochForkResolved { .. })),
         "Cancelled fork should not emit GroupEpochForkResolved"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 1: Relay group message dedup
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_relay_group_message_dedup() {
+    let (alice, mut bob, group_id) = setup_alice_bob_group("Dedup Relay");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Encrypt a message from Alice for the group
+    let ciphertext = {
+        let mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        let enc = mls.encrypt_for_group(&gid, b"hello relay dedup").unwrap();
+        base64_encode(&enc.ciphertext)
+    };
+
+    let msg_id = "relay-dedup-msg-1";
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    // First call — should produce an event
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &ciphertext,
+        &ts,
+        msg_id,
+        None,
+        None,
+    );
+    // Second call — same message_id, should be deduped
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &ciphertext,
+        &ts,
+        msg_id,
+        None,
+        None,
+    );
+
+    let evts = events.lock().unwrap();
+    let msg_events: Vec<_> = evts
+        .iter()
+        .filter(|e| matches!(e, Event::GroupMessageReceived { .. }))
+        .collect();
+    assert_eq!(
+        msg_events.len(),
+        1,
+        "Duplicate relay group message should be deduplicated"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2: Duplicate Welcome guard
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_duplicate_welcome_ignored() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Dup Welcome");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Bob is already a member (setup_alice_bob_group added him).
+    // Build a Welcome payload and deliver it again — should be ignored.
+    let welcome_payload = serde_json::json!({
+        "group_id": group_id,
+        "welcome_data": base64_encode(b"fake-welcome-data"),
+        "group_name": Some("Dup Welcome"),
+    });
+    let data = format!(
+        "{}{}",
+        internal_prefixes::GROUP_MLS_WELCOME,
+        serde_json::to_string(&welcome_payload).unwrap()
+    );
+    // Strip the prefix to get just the JSON, since handle_group_mls_welcome expects raw JSON
+    let json_data = &data[internal_prefixes::GROUP_MLS_WELCOME.len()..];
+    bob.handle_group_mls_welcome("alice", json_data);
+
+    let evts = events.lock().unwrap();
+    let add_events: Vec<_> = evts
+        .iter()
+        .filter(|e| matches!(e, Event::GroupMemberAdded { .. }))
+        .collect();
+    assert_eq!(
+        add_events.len(),
+        0,
+        "Duplicate Welcome should not produce a GroupMemberAdded event"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3: Suppress ciphertext emission on decrypt failure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_relay_group_message_no_raw_on_decrypt_failure() {
+    let (mut _alice, mut bob, group_id) = setup_alice_bob_group("No Raw");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Feed corrupted ciphertext (valid base64 but not valid MLS)
+    let corrupted = base64_encode(b"this-is-not-valid-mls-ciphertext");
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    bob.handle_relay_group_message_with_mls(
+        &group_id,
+        "alice",
+        &corrupted,
+        &ts,
+        "corrupt-msg-1",
+        None,
+        None,
+    );
+
+    let evts = events.lock().unwrap();
+    let msg_events: Vec<_> = evts
+        .iter()
+        .filter(|e| matches!(e, Event::GroupMessageReceived { .. }))
+        .collect();
+    assert_eq!(
+        msg_events.len(),
+        0,
+        "Corrupted ciphertext should not produce a GroupMessageReceived event"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4: Commit retry — verify no panic on send failure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_invite_commit_retry_no_panic() {
+    let storage_c = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut charlie = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    charlie.initialize_mls(storage_c).unwrap();
+    charlie.start().unwrap();
+
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Invite Retry");
+
+    // Generate Charlie's key package and store it on Alice
+    let charlie_kp = {
+        let mls = charlie.mls_manager_for_testing().read().unwrap();
+        mls.generate_key_package().unwrap()
+    };
+    alice.pending_key_packages.insert(
+        "charlie".to_string(),
+        crate::protocol::ReceivedKeyPackage {
+            key_package_data: charlie_kp.key_package_data,
+            local_expires_at_ms: u64::MAX,
+        },
+    );
+
+    // invite_to_group will fan-out commit to bob (+ retry pass for any failures).
+    // Should not panic regardless of send outcomes.
+    let result = alice.invite_to_group(&group_id, "charlie");
+    assert!(
+        result.is_ok(),
+        "invite_to_group should succeed even when sends fail"
+    );
+}
+
+#[test]
+fn test_remove_commit_retry_no_panic() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Remove Retry");
+
+    // Add a third member "charlie" to member cache so commit fan-out has targets
+    alice
+        .group_mesh
+        .members
+        .entry(group_id.clone())
+        .and_modify(|m| {
+            m.push("charlie".to_string());
+        });
+
+    // Stop transports so sends fail — remove_from_group should still succeed
+    let _ = alice.stop();
+
+    let result = alice.remove_from_group(&group_id, "bob");
+    assert!(
+        result.is_ok(),
+        "remove_from_group should succeed even when sends fail"
     );
 }

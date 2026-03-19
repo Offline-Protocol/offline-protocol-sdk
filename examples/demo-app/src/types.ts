@@ -21,6 +21,13 @@ export interface ConnectionRequest {
   timestamp: number;
 }
 
+export interface ForwardInfo {
+  originalSender: string;
+  originalMessageId: string;
+  originalTimestamp: number;
+  forwardCount: number;
+}
+
 export interface ChatMessage {
   id: string;
   senderId: string;
@@ -30,6 +37,9 @@ export interface ChatMessage {
   timestamp: number;
   status: 'sending' | 'sent' | 'delivered' | 'failed';
   isOutgoing: boolean;
+  forwardInfo?: ForwardInfo;
+  /** Raw event JSON — used as input when forwarding this message */
+  rawEventJson?: string;
 }
 
 export interface Chat {

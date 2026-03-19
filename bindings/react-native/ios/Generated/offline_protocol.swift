@@ -802,6 +802,10 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func forceTransport(transportType: TransportType) throws 
     
+    func forwardMessage(originalMessageJson: String, newRecipient: String, priority: MessagePriority?) throws  -> String
+    
+    func forwardMessageToGroup(originalMessageJson: String, groupId: String, priority: MessagePriority?) throws  -> [String]
+    
     func getActiveTransports()  -> [String]
     
     func getAllRoutes(destination: String)  -> [RouteEntry]
@@ -1246,6 +1250,28 @@ open func forceTransport(transportType: TransportType)throws   {try rustCallWith
         FfiConverterTypeTransportType_lower(transportType),$0
     )
 }
+}
+    
+open func forwardMessage(originalMessageJson: String, newRecipient: String, priority: MessagePriority?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(originalMessageJson),
+        FfiConverterString.lower(newRecipient),
+        FfiConverterOptionTypeMessagePriority.lower(priority),$0
+    )
+})
+}
+    
+open func forwardMessageToGroup(originalMessageJson: String, groupId: String, priority: MessagePriority?)throws  -> [String]  {
+    return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(originalMessageJson),
+        FfiConverterString.lower(groupId),
+        FfiConverterOptionTypeMessagePriority.lower(priority),$0
+    )
+})
 }
     
 open func getActiveTransports() -> [String]  {
@@ -6412,6 +6438,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 28940) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() != 46590) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 44359) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327) {
