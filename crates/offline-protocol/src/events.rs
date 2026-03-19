@@ -286,6 +286,9 @@ pub enum Event {
         reason: String,
     },
 
+    // TODO: RelayPromoted, RelayDemoted, and RelayDemotedBattery are not yet
+    // emitted — wire RelayManager::should_promote_to_relay / should_demote_from_relay
+    // into the protocol engine so these fire on actual role transitions.
     /// This device was promoted to relay role.
     RelayPromoted {
         /// Number of connections when promoted.
@@ -382,6 +385,9 @@ pub enum Event {
         next_retry_at: Option<i64>,
     },
 
+    // TODO: AckEvicted and FragmentAssemblyEvicted are not yet emitted — wire
+    // AckManager::evict_lowest_priority and BLE fragment reassembly eviction
+    // to emit these so the app layer has observability into capacity pressure.
     /// A pending ACK was evicted due to capacity constraints.
     AckEvicted {
         /// ID of the message whose ACK was evicted.
