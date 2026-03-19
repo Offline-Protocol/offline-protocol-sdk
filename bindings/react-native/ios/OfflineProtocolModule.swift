@@ -976,6 +976,64 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    // ─── Presence, Typing, Read Receipts ───────────────────────
+
+    @objc func sendPresenceUpdate(_ recipient: String,
+                                  status: Int,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            let presenceStatus: PresenceStatus
+            switch status {
+            case 0: presenceStatus = .online
+            case 1: presenceStatus = .away
+            case 2: presenceStatus = .offline
+            default: presenceStatus = .online
+            }
+            let messageId = try proto.sendPresenceUpdate(recipient: recipient, status: presenceStatus)
+            resolver(messageId)
+        } catch {
+            rejecter("ERROR_PRESENCE_UPDATE", "Failed to send presence update: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func sendTypingIndicator(_ recipient: String,
+                                   conversationId: String,
+                                   isTyping: Bool,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            let messageId = try proto.sendTypingIndicator(recipient: recipient, conversationId: conversationId, isTyping: isTyping)
+            resolver(messageId)
+        } catch {
+            rejecter("ERROR_TYPING_INDICATOR", "Failed to send typing indicator: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func sendReadReceipt(_ recipient: String,
+                               messageIds: [String],
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            let messageId = try proto.sendReadReceipt(recipient: recipient, messageIds: messageIds)
+            resolver(messageId)
+        } catch {
+            rejecter("ERROR_READ_RECEIPT", "Failed to send read receipt: \(error.localizedDescription)", error)
+        }
+    }
+
     @objc func receiveMessage(_ resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
         if let messageJson = protocolInstance?.receiveMessage() {
