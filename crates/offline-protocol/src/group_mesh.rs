@@ -689,6 +689,31 @@ impl OfflineProtocol {
                 .remove(&(payload.group_id.clone(), member.to_string()));
         }
 
+        // Auto-promote if removal left zero admins and other members remain
+        if !actual_removed.is_empty() {
+            if let Ok(mls_guard) = self.read_mls_guard() {
+                let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                    let remaining_members = self
+                        .group_mesh
+                        .members
+                        .get(&payload.group_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !metadata.has_any_admin() && !remaining_members.is_empty() {
+                        let promote_id = &remaining_members[0];
+                        if let Err(e) =
+                            mls_guard.set_member_role(&gid, promote_id, GroupRole::Admin)
+                        {
+                            warn!(user_id = %promote_id, error = %e, "Failed to auto-promote member to admin after last admin removed (incoming commit)");
+                        } else {
+                            info!(user_id = %promote_id, group_id = %payload.group_id, "Auto-promoted member to admin after last admin was removed (incoming commit)");
+                        }
+                    }
+                }
+            }
+        }
+
         // Only clear fork tracking when a KeyUpdate commit succeeds — these
         // are the resolution commits issued by the leader. Regular Add/Remove
         // commits from the same branch succeeding doesn't prove the fork is
@@ -1282,11 +1307,22 @@ impl OfflineProtocol {
 
         // Refresh member list after removal
         let members = self.refresh_group_members(group_id)?;
-        // Clean up removed member's role metadata
+        // Clean up removed member's role metadata and auto-promote if no admin remains
         if let Ok(mls_guard) = self.read_mls_guard() {
             let gid = offline_protocol_mls::GroupId::new(group_id);
             if let Err(e) = mls_guard.remove_member_role(&gid, member_id) {
                 warn!(member = %member_id, error = %e, "Failed to clean up role metadata for removed member");
+            }
+            // If no admin remains and there are still members, promote the first remaining member
+            if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                if !metadata.has_any_admin() && !members.is_empty() {
+                    let promote_id = &members[0];
+                    if let Err(e) = mls_guard.set_member_role(&gid, promote_id, GroupRole::Admin) {
+                        warn!(user_id = %promote_id, error = %e, "Failed to auto-promote member to admin after last admin removed");
+                    } else {
+                        info!(user_id = %promote_id, group_id = %group_id, "Auto-promoted member to admin after last admin was removed");
+                    }
+                }
             }
         }
 
@@ -1696,18 +1732,20 @@ impl OfflineProtocol {
             return Err(Error::Other("Only admins can change roles".to_string()));
         }
 
-        // Prevent last admin from demoting themselves
-        if role == GroupRole::Member && target_user_id == self_id {
+        // Prevent demoting the last admin (whether self or another admin)
+        if role == GroupRole::Member {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
             if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                let admin_count = metadata
-                    .get_all_roles()
-                    .values()
-                    .filter(|r| **r == GroupRole::Admin)
-                    .count();
-                if admin_count <= 1 {
-                    return Err(Error::Other("Cannot demote the last admin".to_string()));
+                if metadata.get_role(target_user_id) == GroupRole::Admin {
+                    let admin_count = metadata
+                        .get_all_roles()
+                        .values()
+                        .filter(|r| **r == GroupRole::Admin)
+                        .count();
+                    if admin_count <= 1 {
+                        return Err(Error::Other("Cannot demote the last admin".to_string()));
+                    }
                 }
             }
             drop(mls_guard);

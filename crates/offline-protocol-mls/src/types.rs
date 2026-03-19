@@ -52,8 +52,9 @@ impl From<&str> for GroupId {
 pub enum GroupRole {
     /// Group administrator — can invite/remove members and change roles.
     Admin,
-    /// Regular group member.
+    /// Regular group member (also the fallback for unknown future variants).
     #[default]
+    #[serde(other)]
     Member,
 }
 
