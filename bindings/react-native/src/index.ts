@@ -2322,103 +2322,48 @@ export class OfflineProtocol {
   }
 
   /**
-   * ========================================================================
-   * GROUP MANAGEMENT (RELAY SERVER API)
-   * ========================================================================
+   * Sets a member's role in an MLS group (admin only).
+   * Broadcasts role change to all group members.
+   *
+   * @param groupId - Group ID
+   * @param userId - Target member's user ID
+   * @param role - New role ("admin" or "member")
    */
-
-  /**
-   * Create a new group. Creator becomes admin.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupCreate(name: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupCreate(name);
-  }
-
-  /**
-   * Send encrypted message to a group. Content must be pre-encrypted by client.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupSendMessage(
+  async meshSetMemberRole(
     groupId: string,
-    content: string,
-    replyToMsg?: string | null
+    userId: string,
+    role: string
+  ): Promise<void> {
+    await OfflineProtocolNativeModule.meshSetMemberRole(groupId, userId, role);
+  }
+
+  /**
+   * Gets a member's role in an MLS group.
+   *
+   * @param groupId - Group ID
+   * @param userId - Member's user ID
+   * @returns Role string ("admin" or "member")
+   */
+  async meshGetMemberRole(
+    groupId: string,
+    userId: string
   ): Promise<string> {
-    return await OfflineProtocolNativeModule.groupSendMessage(
+    return await OfflineProtocolNativeModule.meshGetMemberRole(
       groupId,
-      content,
-      replyToMsg || null
+      userId
     );
   }
 
   /**
-   * Add member to group. Admin only.
-   * Returns JSON string to send via WebSocket relay.
+   * Gets all member roles in an MLS group.
+   *
+   * @param groupId - Group ID
+   * @returns Map of user_id -> role
    */
-  async groupAddMember(groupId: string, username: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupAddMember(groupId, username);
-  }
-
-  /**
-   * Remove member from group. Admin only, or user can remove themselves.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupRemoveMember(groupId: string, username: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupRemoveMember(
-      groupId,
-      username
-    );
-  }
-
-  /**
-   * Set member as admin. Admin only.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupSetAdmin(groupId: string, username: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupSetAdmin(groupId, username);
-  }
-
-  /**
-   * Remove admin role from member. Admin only.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupRemoveAdmin(groupId: string, username: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupRemoveAdmin(
-      groupId,
-      username
-    );
-  }
-
-  /**
-   * Leave a group.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupLeave(groupId: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupLeave(groupId);
-  }
-
-  /**
-   * Delete a group. Admin only.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupDelete(groupId: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupDelete(groupId);
-  }
-
-  /**
-   * Get group information.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupGetInfo(groupId: string): Promise<string> {
-    return await OfflineProtocolNativeModule.groupGetInfo(groupId);
-  }
-
-  /**
-   * Get all groups the user is a member of.
-   * Returns JSON string to send via WebSocket relay.
-   */
-  async groupGetUserGroups(): Promise<string> {
-    return await OfflineProtocolNativeModule.groupGetUserGroups();
+  async meshGetGroupRoles(
+    groupId: string
+  ): Promise<Record<string, string>> {
+    return await OfflineProtocolNativeModule.meshGetGroupRoles(groupId);
   }
 
   /**

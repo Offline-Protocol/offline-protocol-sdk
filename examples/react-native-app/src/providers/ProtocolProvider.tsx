@@ -278,14 +278,11 @@ interface ProtocolContextType {
     content: string,
     replyToMsg?: string,
   ) => Promise<boolean>;
-  addGroupMember: (groupId: string, username: string) => Promise<boolean>;
-  removeGroupMember: (groupId: string, username: string) => Promise<boolean>;
+  addGroupMember: (groupId: string, userId: string) => Promise<boolean>;
+  removeGroupMember: (groupId: string, userId: string) => Promise<boolean>;
   leaveGroup: (groupId: string) => Promise<boolean>;
   getGroupInfo: (groupId: string) => Promise<boolean>;
   getUserGroups: () => Promise<boolean>;
-  groupSetAdmin: (groupId: string, username: string) => Promise<boolean>;
-  groupRemoveAdmin: (groupId: string, username: string) => Promise<boolean>;
-  groupDelete: (groupId: string) => Promise<boolean>;
   clearRelayMessages: () => void;
   clearGroupMessages: (groupId: string) => void;
 
@@ -2206,151 +2203,145 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
 
   const connectedPeersCount = contacts.filter(c => c.isOnline).length;
 
-  // Group functions via mesh-sdk: call protocol then send JSON over relay
+  // Group functions via mesh/MLS protocol (replaces old relay group API)
   const createGroup = useCallback(
     async (name: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
+      if (!protocol) return false;
       try {
-        const json = await protocol.groupCreate(name);
-        return send(JSON.parse(json));
+        const info = await protocol.meshCreateGroup(name);
+        setGroups(prev => [
+          ...prev,
+          { groupId: info.groupId, name: info.groupName, createdAt: new Date(info.createdAt) },
+        ]);
+        return true;
       } catch (e) {
         console.error('[ProtocolProvider] createGroup failed', e);
         return false;
       }
     },
-    [protocol, relayStatus, send],
+    [protocol],
   );
 
   const sendGroupMessage = useCallback(
-    async (
-      groupId: string,
-      content: string,
-      replyToMsg?: string,
-    ) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
+    async (groupId: string, content: string, replyToMsg?: string) => {
+      if (!protocol) return false;
       try {
-        const json = await protocol.groupSendMessage(
-          groupId,
-          content,
-          replyToMsg ?? null,
-        );
-        return send(JSON.parse(json));
+        await protocol.meshSendGroupMessage(groupId, content, null, replyToMsg ?? null);
+        return true;
       } catch (e) {
         console.error('[ProtocolProvider] sendGroupMessage failed', e);
         return false;
       }
     },
-    [protocol, relayStatus, send],
+    [protocol],
   );
 
   const addGroupMember = useCallback(
-    async (groupId: string, username: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
+    async (groupId: string, userId: string) => {
+      if (!protocol) return false;
       try {
-        const json = await protocol.groupAddMember(groupId, username);
-        return send(JSON.parse(json));
+        await protocol.meshInviteToGroup(groupId, userId);
+        return true;
       } catch (e) {
         console.error('[ProtocolProvider] addGroupMember failed', e);
         return false;
       }
     },
-    [protocol, relayStatus, send],
+    [protocol],
   );
 
   const removeGroupMember = useCallback(
-    async (groupId: string, username: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
+    async (groupId: string, userId: string) => {
+      if (!protocol) return false;
       try {
-        const json = await protocol.groupRemoveMember(groupId, username);
-        return send(JSON.parse(json));
+        await protocol.meshRemoveFromGroup(groupId, userId);
+        return true;
       } catch (e) {
         console.error('[ProtocolProvider] removeGroupMember failed', e);
         return false;
       }
     },
-    [protocol, relayStatus, send],
+    [protocol],
   );
 
   const leaveGroup = useCallback(
     async (groupId: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
+      if (!protocol) return false;
       try {
-        const json = await protocol.groupLeave(groupId);
-        return send(JSON.parse(json));
+        await protocol.meshLeaveGroup(groupId);
+        setGroups(prev => prev.filter(g => g.groupId !== groupId));
+        return true;
       } catch (e) {
         console.error('[ProtocolProvider] leaveGroup failed', e);
         return false;
       }
     },
-    [protocol, relayStatus, send],
+    [protocol],
   );
 
   const getGroupInfo = useCallback(
     async (groupId: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
+      if (!protocol) return false;
       try {
-        const json = await protocol.groupGetInfo(groupId);
-        return send(JSON.parse(json));
+        const info = await protocol.mlsGetGroupInfo(groupId);
+        if (info) {
+          // Fetch real roles from the protocol layer
+          let roles: Record<string, string> = {};
+          try {
+            roles = await protocol.meshGetGroupRoles(groupId);
+          } catch {
+            // Roles not available — default all to 'member'
+          }
+          setGroupDetails(prev => {
+            const next = new Map(prev);
+            next.set(groupId, {
+              groupId: info.groupId,
+              name: info.groupName,
+              createdBy: '',
+              createdAt: new Date(info.createdAt),
+              members: info.memberIds.map(id => ({
+                userId: id,
+                role: (roles[id] === 'admin' ? 'admin' : 'member') as 'admin' | 'member',
+                joinedAt: new Date(info.createdAt),
+              })),
+            });
+            return next;
+          });
+        }
+        return true;
       } catch (e) {
         console.error('[ProtocolProvider] getGroupInfo failed', e);
         return false;
       }
     },
-    [protocol, relayStatus, send],
+    [protocol],
   );
 
   const getUserGroups = useCallback(async () => {
-    if (!protocol || relayStatus !== 'authenticated') return false;
+    if (!protocol) return false;
     try {
-      const json = await protocol.groupGetUserGroups();
-      return send(JSON.parse(json));
+      const groupIds = await protocol.meshListGroups();
+      const groupInfos = await Promise.all(
+        groupIds.map(async id => {
+          try {
+            const info = await protocol.mlsGetGroupInfo(id);
+            if (info) {
+              return { groupId: info.groupId, name: info.groupName, createdAt: new Date(info.createdAt) };
+            }
+            return { groupId: id, name: id, createdAt: new Date() };
+          } catch (e) {
+            console.warn('[ProtocolProvider] Failed to get info for group', id, e);
+            return { groupId: id, name: id, createdAt: new Date() };
+          }
+        }),
+      );
+      setGroups(groupInfos);
+      return true;
     } catch (e) {
       console.error('[ProtocolProvider] getUserGroups failed', e);
       return false;
     }
-  }, [protocol, relayStatus, send]);
-
-  const groupSetAdmin = useCallback(
-    async (groupId: string, username: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
-      try {
-        const json = await protocol.groupSetAdmin(groupId, username);
-        return send(JSON.parse(json));
-      } catch (e) {
-        console.error('[ProtocolProvider] groupSetAdmin failed', e);
-        return false;
-      }
-    },
-    [protocol, relayStatus, send],
-  );
-
-  const groupRemoveAdmin = useCallback(
-    async (groupId: string, username: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
-      try {
-        const json = await protocol.groupRemoveAdmin(groupId, username);
-        return send(JSON.parse(json));
-      } catch (e) {
-        console.error('[ProtocolProvider] groupRemoveAdmin failed', e);
-        return false;
-      }
-    },
-    [protocol, relayStatus, send],
-  );
-
-  const groupDelete = useCallback(
-    async (groupId: string) => {
-      if (!protocol || relayStatus !== 'authenticated') return false;
-      try {
-        const json = await protocol.groupDelete(groupId);
-        return send(JSON.parse(json));
-      } catch (e) {
-        console.error('[ProtocolProvider] groupDelete failed', e);
-        return false;
-      }
-    },
-    [protocol, relayStatus, send],
-  );
+  }, [protocol]);
 
   const contextValue: ProtocolContextType = {
     isInitialized,
@@ -2422,9 +2413,6 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     leaveGroup,
     getGroupInfo,
     getUserGroups,
-    groupSetAdmin,
-    groupRemoveAdmin,
-    groupDelete,
     clearRelayMessages,
     clearGroupMessages,
   };
