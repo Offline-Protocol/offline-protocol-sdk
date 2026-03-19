@@ -7,6 +7,7 @@
 - **Multi-Transport**: Seamlessly switches between BLE, WiFi Direct, and Internet
 - **Mesh Networking**: Automatic peer discovery and message relay
 - **End-to-End Encryption**: Automatic MLS encryption with forward secrecy (RFC 9420)
+- **Group Roles**: Admin/member role management with last-admin safety invariants
 - **DORS**: Dynamic Offline Relay Switch for optimal transport selection
 - **Reliability**: ACKs, retries, and deduplication built-in
 

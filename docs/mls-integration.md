@@ -401,9 +401,35 @@ When offline, key packages can be exchanged via:
 - Generate multiple key packages and upload to server
 - Delete used key packages from server after session creation
 
+### Group Roles and Permissions
+
+Groups use a role-based permission model:
+
+- **Admin** — Can invite/remove members, change roles, and send messages. The group creator is automatically an admin.
+- **Member** — Can send and receive messages but cannot manage the group.
+
+The SDK enforces a **last-admin invariant**: the last remaining admin cannot be demoted, removed, or leave the group. If the last admin leaves unexpectedly (e.g., crash), a deterministic election promotes the lexicographically smallest member ID to admin.
+
+```typescript
+// Set a member's role (admin only)
+await protocol.meshSetMemberRole(groupId, userId, 'admin');
+
+// Query roles
+const role = await protocol.meshGetMemberRole(groupId, userId); // "admin" | "member"
+const allRoles = await protocol.meshGetGroupRoles(groupId);     // { alice: "admin", bob: "member" }
+
+// Listen for role changes
+protocol.on('group_role_changed', (event) => {
+  console.log(`${event.user_id} → ${event.new_role} (by ${event.changed_by})`);
+});
+```
+
 ### Group Security
 
 - Use MLS's built-in member removal to ensure forward secrecy
+- Only admins can invite, remove members, or change roles — enforced at the protocol level
+- The last-admin invariant prevents orphaned groups
+- Removed members receive a notification and should clean up local group state
 - Rotate group keys periodically
 - Consider re-creating groups for maximum security after member removal
 
@@ -470,6 +496,14 @@ MLS control payloads (key package / welcome / ciphertext envelopes) are encoded 
 | `mlsJoinGroup(welcome)` | Join group from Welcome |
 | `mlsListGroups()` | List all groups |
 | `mlsGetGroupInfo(groupId)` | Get group information |
+
+### Group Roles (High-Level Mesh API)
+
+| Method | Description |
+|--------|-------------|
+| `meshSetMemberRole(groupId, userId, role)` | Set a member's role (admin only) |
+| `meshGetMemberRole(groupId, userId)` | Get a member's role |
+| `meshGetGroupRoles(groupId)` | Get all member roles |
 
 ### Generic
 

@@ -977,6 +977,60 @@ Devices organize into **clusters** (groups of nearby connected peers). Connectio
 - Messages are dropped when TTL reaches 0
 - Prevents infinite message circulation
 
+### Group Messaging (MLS-Encrypted)
+
+Create and manage encrypted groups over the mesh:
+
+```typescript
+// Create a group (you become admin automatically)
+const group = await protocol.meshCreateGroup('Project Team');
+
+// Invite a member (admin only)
+await protocol.meshInviteToGroup(group.groupId, 'bob');
+
+// Send an encrypted group message
+await protocol.meshSendGroupMessage(group.groupId, 'Hello team!');
+
+// Remove a member (admin only)
+await protocol.meshRemoveFromGroup(group.groupId, 'bob');
+
+// Leave a group
+await protocol.meshLeaveGroup(group.groupId);
+```
+
+### Group Roles
+
+Groups use role-based access control with two roles: **Admin** and **Member**.
+
+| Method | Description |
+|--------|-------------|
+| `meshSetMemberRole(groupId, userId, role)` | Change a member's role (`"admin"` or `"member"`) — admin only |
+| `meshGetMemberRole(groupId, userId)` | Get a member's current role |
+| `meshGetGroupRoles(groupId)` | Get all roles as `{ userId: role }` |
+
+```typescript
+// Promote a member to admin
+await protocol.meshSetMemberRole(groupId, 'bob', 'admin');
+
+// Check a member's role
+const role = await protocol.meshGetMemberRole(groupId, 'bob'); // "admin"
+
+// Get all roles
+const roles = await protocol.meshGetGroupRoles(groupId);
+// { alice: "admin", bob: "admin", charlie: "member" }
+
+// Listen for role changes
+protocol.on('group_role_changed', (event) => {
+  console.log(`${event.user_id} is now ${event.new_role}`);
+});
+```
+
+**Security invariants:**
+- The group creator is automatically `Admin`
+- Only admins can invite, remove, or change roles
+- The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
+- If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
+
 ---
 
 ## Reliability Layer
