@@ -8752,3 +8752,644 @@ fn test_forward_message_rejects_excessive_forward_count() {
         err_msg
     );
 }
+
+#[test]
+fn test_send_message_returns_ok_and_emits_deferred_when_transport_fails() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000; // long delay so nothing retries during test
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Use a FlakyTransport that always fails
+    let mut flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    flaky.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let observed_clone = observed_events.clone();
+    protocol.on_event(move |event| {
+        observed_clone.lock().unwrap().push(event);
+    });
+
+    protocol.start().unwrap();
+
+    // send_message should return Ok even though the transport fails
+    let result = protocol.send_message("bob", "Hello!", None::<MessagePriority>, None::<String>);
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+    // Should have emitted a MessageDeferred event
+    let events = observed_events.lock().unwrap();
+    let deferred = events
+        .iter()
+        .find(|e| matches!(e, Event::MessageDeferred { .. }));
+    assert!(
+        deferred.is_some(),
+        "Expected MessageDeferred event, got: {:?}",
+        *events
+    );
+
+    // Message should be in the outbox for retry
+    assert!(
+        protocol.retry_queue_size() > 0,
+        "Expected message in retry queue"
+    );
+}
+
+#[test]
+fn test_flush_outbox_for_peer_on_discovery() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000; // long delay
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    // Don't start it — transport is unavailable so sends go to outbox
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Send a message — it will be deferred
+    let _msg_id = protocol
+        .send_message("bob", "queued msg", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.retry_queue_size() > 0);
+
+    // Now replace with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let observed_clone = observed_events.clone();
+    protocol.on_event(move |event| {
+        observed_clone.lock().unwrap().push(event);
+    });
+
+    // Discover the peer — should flush the pending message
+    protocol.on_neighbor_discovered("bob");
+
+    // The message should have been flushed from the retry queue
+    assert_eq!(
+        protocol.retry_queue_size(),
+        0,
+        "Retry queue should be empty after flush"
+    );
+}
+
+#[test]
+fn test_flush_batch_limit_caps_sends() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails to fill the outbox
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Queue more messages than the batch limit
+    let total = crate::constants::FLUSH_BATCH_LIMIT + 5;
+    for i in 0..total {
+        let _ = protocol.send_message(
+            "bob",
+            &format!("msg-{}", i),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+    assert_eq!(protocol.retry_queue_size(), total);
+
+    // Replace with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    // Flush for peer — should send at most FLUSH_BATCH_LIMIT
+    protocol.on_neighbor_discovered("bob");
+
+    // Remaining messages should still be in the outbox (not in retry queue
+    // since they weren't attempted and thus stay in outbox only)
+    assert!(
+        protocol.retry_queue_size() <= 5,
+        "Expected at most 5 remaining in retry queue, got: {}",
+        protocol.retry_queue_size()
+    );
+}
+
+#[test]
+fn test_flush_outbox_all_on_internet_reconnect() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Queue several messages to different peers
+    for peer in &["alice", "bob", "carol"] {
+        let _ = protocol.send_message(*peer, "hello", None::<MessagePriority>, None::<String>);
+    }
+    assert_eq!(protocol.retry_queue_size(), 3);
+
+    // Replace with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let observed_clone = observed_events.clone();
+    protocol.on_event(move |event| {
+        observed_clone.lock().unwrap().push(event);
+    });
+
+    // Simulate internet reconnect — flush all
+    protocol.flush_outbox_all();
+
+    // All messages should have been flushed from the retry queue
+    assert_eq!(
+        protocol.retry_queue_size(),
+        0,
+        "Retry queue should be empty after flush_outbox_all"
+    );
+}
+
+#[test]
+fn test_flush_outbox_all_collects_stranded_outbox_entries() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Queue a message — goes to outbox AND retry queue
+    let msg_id = protocol
+        .send_message("bob", "stranded", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert_eq!(protocol.retry_queue_size(), 1);
+    assert!(protocol.outbox_entry_count() > 0);
+
+    // Manually remove from retry queue to simulate a "stranded" outbox entry
+    // (e.g., from a prior max_retries rejection in the old code path)
+    protocol.retry_queue_mut().remove(&msg_id.as_str());
+    assert_eq!(protocol.retry_queue_size(), 0);
+    // Outbox entry still exists
+    assert!(protocol.outbox_entry_count() > 0);
+
+    // Replace with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    // flush_outbox_all should pick up the stranded outbox entry
+    protocol.flush_outbox_all();
+
+    // The stranded message should have been sent
+    let sent = mock_clone.sent_messages();
+    assert!(
+        !sent.is_empty(),
+        "Expected stranded outbox message to be sent"
+    );
+}
+
+#[test]
+fn test_ack_receipt_cleans_up_retry_queue() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock.clone()));
+
+    let observed_events = Arc::new(Mutex::new(Vec::<Event>::new()));
+    let observed_clone = observed_events.clone();
+    protocol.on_event(move |event| {
+        observed_clone.lock().unwrap().push(event);
+    });
+
+    protocol.start().unwrap();
+
+    // Send a message — succeeds, enters ACK tracking
+    let msg_id = protocol
+        .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Manually enqueue into retry queue to simulate a retry-in-flight scenario
+    let msg = protocol.outbox_messages().next().unwrap().clone();
+    protocol.retry_queue_mut().enqueue(msg, 1);
+    assert!(protocol.retry_queue_size() > 0);
+
+    // Simulate receiving an ACK from bob for this message
+    let ack_message = Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .requires_ack(false)
+    .metadata(ACK_FOR_KEY, msg_id.as_str())
+    .metadata("ack_hop_count", "0")
+    .metadata("ack_transport", "ble")
+    .build();
+
+    // Queue the ACK so it's received on next process
+    mock.queue_message(ack_message);
+    let _ = protocol.receive_message();
+
+    // The retry queue should be empty after ACK receipt
+    assert_eq!(
+        protocol.retry_queue_size(),
+        0,
+        "Retry queue should be cleaned up after ACK"
+    );
+
+    // Outbox should also be cleaned up
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        0,
+        "Outbox should be cleaned up after ACK"
+    );
+
+    // MessageDelivered event should have been emitted
+    let events = observed_events.lock().unwrap();
+    let delivered = events
+        .iter()
+        .find(|e| matches!(e, Event::MessageDelivered { .. }));
+    assert!(
+        delivered.is_some(),
+        "Expected MessageDelivered event, got: {:?}",
+        *events
+    );
+}
+
+#[test]
+fn test_flush_outbox_all_re_enqueues_overflow_beyond_batch_limit() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails to fill the outbox
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Queue more messages than the batch limit across different peers
+    let total = crate::constants::FLUSH_BATCH_LIMIT + 10;
+    for i in 0..total {
+        let _ = protocol.send_message(
+            &format!("peer-{}", i),
+            &format!("msg-{}", i),
+            None::<MessagePriority>,
+            None::<String>,
+        );
+    }
+    assert_eq!(protocol.retry_queue_size(), total);
+
+    // Replace with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    // Flush all — should send FLUSH_BATCH_LIMIT and re-enqueue the rest
+    protocol.flush_outbox_all();
+
+    // The overflow messages must still be in the retry queue, not lost
+    assert_eq!(
+        protocol.retry_queue_size(),
+        10,
+        "Overflow messages beyond batch limit should be re-enqueued"
+    );
+
+    // Outbox entries for overflowed messages should still exist
+    assert!(
+        protocol.outbox_entry_count() >= 10,
+        "Outbox entries for overflow messages should survive"
+    );
+}
+
+#[test]
+fn test_flush_send_failure_re_enqueues_message() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Queue a message — deferred
+    let _ = protocol
+        .send_message(
+            "bob",
+            "will fail again",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert_eq!(protocol.retry_queue_size(), 1);
+
+    // Flush for peer — transport still fails, so message should be re-enqueued
+    protocol.on_neighbor_discovered("bob");
+
+    assert_eq!(
+        protocol.retry_queue_size(),
+        1,
+        "Message should be re-enqueued after flush send failure"
+    );
+
+    // Outbox entry should still exist
+    assert!(
+        protocol.outbox_entry_count() > 0,
+        "Outbox entry should survive flush send failure"
+    );
+}
+
+#[test]
+fn test_flush_outbox_all_skips_messages_awaiting_ack() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    protocol.start().unwrap();
+
+    // Send a message — succeeds, enters ACK tracking
+    let _msg_id = protocol
+        .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Message was sent successfully: it should be in outbox (awaiting ACK)
+    // but NOT in the retry queue
+    assert_eq!(protocol.retry_queue_size(), 0);
+    assert!(protocol.outbox_entry_count() > 0);
+
+    let sent_before = mock_clone.sent_messages().len();
+
+    // flush_outbox_all should NOT re-send this message because it already
+    // has a pending ACK
+    protocol.flush_outbox_all();
+
+    let sent_after = mock_clone.sent_messages().len();
+    assert_eq!(
+        sent_before, sent_after,
+        "flush_outbox_all should not re-send messages awaiting ACK"
+    );
+}
+
+#[test]
+fn test_cleanup_outbox_removes_retry_queue_entry() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    // Very short outbox lifetime so entries expire immediately
+    config.reliability.retry.outbox_max_lifetime_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a transport that always fails
+    let flaky = FlakyTransport::fail_first(TransportType::BLE, u32::MAX);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(flaky));
+
+    protocol.start().unwrap();
+
+    // Send a message — deferred, enters outbox + retry queue
+    let _ = protocol
+        .send_message(
+            "bob",
+            "will expire",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert_eq!(protocol.retry_queue_size(), 1);
+    assert!(protocol.outbox_entry_count() > 0);
+
+    // Wait a tiny bit for the outbox lifetime to expire
+    std::thread::sleep(Duration::from_millis(5));
+
+    // Run cleanup — should remove both outbox entry AND retry queue entry
+    protocol.cleanup_expired_entries();
+
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        0,
+        "Outbox entry should be cleaned up after expiry"
+    );
+    assert_eq!(
+        protocol.retry_queue_size(),
+        0,
+        "Retry queue entry should be cleaned up when outbox entry expires"
+    );
+}
+
+#[test]
+fn test_flush_outbox_for_peer_includes_media_outbox() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    protocol.start().unwrap();
+
+    // Manually insert a FileChunk message into media_outbox to simulate
+    // a media chunk that was deferred while the peer was unreachable
+    let media_msg = Message::builder(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .content_type(ContentType::FileChunk)
+    .requires_ack(true)
+    .build();
+
+    let media_msg_id = media_msg.id.clone();
+
+    // Insert into media_outbox
+    protocol.media_outbox.insert(
+        media_msg.id.clone(),
+        OutboxEntry {
+            message: media_msg.clone(),
+            attempt_count: 0,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: None,
+        },
+    );
+
+    // Also enqueue in retry queue
+    protocol.retry_queue_mut().enqueue(media_msg, 0);
+    assert_eq!(protocol.retry_queue_size(), 1);
+
+    // Discover the peer — should flush the media outbox message too
+    protocol.on_neighbor_discovered("bob");
+
+    // The media message should have been sent
+    let sent = mock_clone.sent_messages();
+    let found = sent.iter().any(|m| m.id == media_msg_id);
+    assert!(
+        found,
+        "Media outbox message should be sent on peer discovery"
+    );
+
+    // Retry queue should be empty
+    assert_eq!(
+        protocol.retry_queue_size(),
+        0,
+        "Retry queue should be empty after flushing media message"
+    );
+}
+
+#[test]
+fn test_flush_outbox_all_includes_media_outbox() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    // Start with a working transport
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    protocol.start().unwrap();
+
+    // Insert a stranded FileChunk in media_outbox (not in retry queue)
+    let media_msg = Message::builder(
+        UserId::new("user123").unwrap(),
+        UserId::new("alice").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .content_type(ContentType::FileChunk)
+    .requires_ack(true)
+    .build();
+
+    let media_msg_id = media_msg.id.clone();
+
+    protocol.media_outbox.insert(
+        media_msg.id.clone(),
+        OutboxEntry {
+            message: media_msg,
+            attempt_count: 1,
+            first_sent_at: chrono::Utc::now(),
+            last_sent_at: chrono::Utc::now(),
+            last_transport: None,
+        },
+    );
+
+    // No retry queue entry — simulates a stranded media outbox entry
+
+    // flush_outbox_all should pick up the stranded media entry
+    protocol.flush_outbox_all();
+
+    let sent = mock_clone.sent_messages();
+    let found = sent.iter().any(|m| m.id == media_msg_id);
+    assert!(
+        found,
+        "Stranded media outbox message should be sent by flush_outbox_all"
+    );
+}
+
+#[test]
+fn test_flush_outbox_for_peer_skips_messages_awaiting_ack() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    protocol.start().unwrap();
+
+    // Send a message — succeeds, enters ACK tracking
+    let _msg_id = protocol
+        .send_message("bob", "Hello!", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    // Message was sent successfully: it should be in outbox (awaiting ACK)
+    // but NOT in the retry queue
+    assert_eq!(protocol.retry_queue_size(), 0);
+    assert!(protocol.outbox_entry_count() > 0);
+
+    let sent_before = mock_clone.sent_messages().len();
+
+    // Discovering the peer again should NOT re-send the message because it
+    // already has a pending ACK
+    protocol.on_neighbor_discovered("bob");
+
+    let sent_after = mock_clone.sent_messages().len();
+    assert_eq!(
+        sent_before, sent_after,
+        "flush_outbox_for_peer should not re-send messages awaiting ACK"
+    );
+}

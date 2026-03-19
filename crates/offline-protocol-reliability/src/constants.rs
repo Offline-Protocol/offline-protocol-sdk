@@ -1,13 +1,13 @@
 //! Reliability layer constants.
 
 /// Default ACK timeout in milliseconds.
-pub const DEFAULT_ACK_TIMEOUT_MS: u64 = 5000;
+pub const DEFAULT_ACK_TIMEOUT_MS: u64 = 10000;
 
 /// Maximum number of pending ACKs to track.
 pub const DEFAULT_MAX_PENDING_ACKS: usize = 1000;
 
 /// Default maximum number of retries per message.
-pub const DEFAULT_MAX_RETRIES: u32 = 3;
+pub const DEFAULT_MAX_RETRIES: u32 = 10;
 
 /// Initial retry delay in milliseconds.
 pub const DEFAULT_INITIAL_DELAY_MS: u64 = 1000;

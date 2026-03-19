@@ -220,21 +220,25 @@ The reliability layer ensures messages are delivered despite the inherent unreli
 
 ### Acknowledgment (ACK) Management
 Messages that require acknowledgment are tracked:
-- **Timeout**: Default 5 seconds to wait for ACK
+- **Timeout**: Default 10 seconds to wait for ACK
 - **Tracking**: Message ID, recipient, timestamp, retry count
-- **Events**: `MessageDelivered` when ACK received, `MessageFailed` after max retries
+- **Events**: `MessageDelivered` when ACK received, `MessageFailed` after max ACK retries
 
 When an ACK is received, the sender:
 1. Marks the message as delivered
 2. Emits a `MessageDelivered` event
-3. Cancels any pending retries
+3. Removes the message from both the retry queue and outbox
 
 ### Retry Queue
 Failed messages are queued for retry with exponential backoff:
 - **Initial Delay**: 1 second
 - **Backoff Factor**: 2x each retry (1s → 2s → 4s → 8s...)
 - **Maximum Delay**: 30 seconds
-- **Maximum Retries**: 5 attempts (configurable)
+- **No attempt limit**: The retry queue is a pure scheduling mechanism. Only ACK timeouts (not transport failures) count toward the retry limit (default: 10).
+
+When a transport becomes available (peer discovered, internet reconnects), pending messages are flushed immediately — bypassing backoff timers.
+
+For the full delivery lifecycle including client-side persistence patterns, see [Message Delivery & Reliability](message-delivery.md).
 
 ### Priority Ordering
 The retry queue processes messages by priority:
@@ -245,29 +249,30 @@ The retry queue processes messages by priority:
 
 Within the same priority, older messages go first.
 
-### Outbox Persistence
-Messages awaiting acknowledgment are stored in an outbox:
-- Survives temporary transport failures
-- Automatically cleaned up after successful delivery or max retries
-- Configurable maximum lifetime
+### Outbox
+Messages awaiting acknowledgment are stored in an in-memory outbox:
+- Survives temporary transport failures within the process lifetime
+- Automatically cleaned up after successful delivery or max ACK retries
+- Configurable maximum lifetime (default: 1 hour)
+- Does not survive process restarts — see [Client-Side Persistence](message-delivery.md#client-side-persistence)
 
 ## Deduplication
 
 Without deduplication, the same message could be processed multiple times. The deduplicator tracks seen message IDs.
 
-### Bloom Filter Mode (Default)
+### HashMap Mode (Default)
+Exact tracking with no false positives:
+- **Capacity**: 1,000 message IDs (configurable)
+- **Retention**: 1 hour (configurable)
+- **Eviction**: LRU when capacity is reached
+
+### Bloom Filter Mode
 For high-volume scenarios, a space-efficient bloom filter tracks message IDs:
 - **Memory**: ~1MB per filter (constant regardless of message count)
 - **False Positive Rate**: ~1% with default settings
 - **Rotation**: Filters rotate every 15 minutes for automatic expiration
 
-Bloom filters trade perfect accuracy for constant memory usage, making them suitable for resource-constrained devices.
-
-### HashMap Mode
-For exact tracking (no false positives):
-- **Capacity**: 10,000 message IDs (configurable)
-- **Retention**: 1 hour (configurable)
-- **Eviction**: FIFO when capacity is reached
+Bloom filters trade perfect accuracy for constant memory usage, making them suitable for resource-constrained devices. Enable with `useBloomFilter: true`.
 
 ### Deduplication Behavior
 When a message arrives:
@@ -695,17 +700,17 @@ const config = {
   
   reliability: {
     ack: {
-      defaultTimeoutMs: 5000,    // Wait 5s for ACK
+      defaultTimeoutMs: 10000,   // Wait 10s for ACK
     },
     retry: {
-      maxRetries: 5,             // Max retry attempts
+      maxRetries: 10,            // Max ACK retry attempts
       initialDelayMs: 1000,      // First retry after 1s
       maxDelayMs: 30000,         // Cap delay at 30s
       backoffFactor: 2.0,        // Double delay each retry
     },
     dedup: {
-      useBloomFilter: true,      // Use bloom filter mode
-      maxTrackedMessages: 10000, // HashMap mode capacity
+      useBloomFilter: false,     // HashMap mode (default); set true for bloom filter
+      maxTrackedMessages: 1000,  // HashMap mode capacity
       retentionTimeSecs: 3600,   // 1 hour retention
     },
   },

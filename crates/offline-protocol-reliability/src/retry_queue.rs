@@ -89,8 +89,9 @@ impl Ord for RetryEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse comparison for min-heap (earliest retry_at first)
         other.retry_at.cmp(&self.retry_at).then_with(|| {
-            // Tie-breaker: higher priority messages first
-            other.message.priority.cmp(&self.message.priority)
+            // Tie-breaker: higher priority messages first (non-reversed,
+            // so High > Low makes High pop first from the max-heap)
+            self.message.priority.cmp(&other.message.priority)
         })
     }
 }
@@ -133,30 +134,32 @@ impl RetryQueue {
 
     /// Adds a message to the retry queue.
     ///
+    /// The retry queue is a pure scheduling mechanism — it does not enforce a
+    /// retry limit.  ACK-level retry limits are enforced by the ACK manager in
+    /// the protocol layer.
+    ///
+    /// Duplicate messages (same ID already in queue) are silently ignored.
+    ///
     /// # Arguments
     ///
     /// * `message` - The message to queue for retry
-    /// * `retry_count` - Current retry count (0 for first retry)
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` if queued, `Err` if max retries exceeded.
-    pub fn enqueue(&mut self, message: Message, retry_count: u32) -> crate::Result<()> {
-        if retry_count >= self.config.max_retries {
-            return Err(crate::Error::MaxRetriesExceeded);
-        }
-
+    /// * `retry_count` - Current retry count (used for backoff calculation)
+    pub fn enqueue(&mut self, message: Message, retry_count: u32) {
         // Prevent duplicate entries for the same message
         if self.index.contains_key(&message.id.as_str()) {
-            return Ok(());
+            return;
         }
 
         // Calculate retry delay with exponential backoff
+        // Cap exponent at 20 to prevent overflow with large retry counts
         let delay_ms = if retry_count == 0 {
             self.config.initial_delay_ms
         } else {
             let base_delay = self.config.initial_delay_ms
-                * (self.config.backoff_multiplier.powi(retry_count as i32) as u64);
+                * (self
+                    .config
+                    .backoff_multiplier
+                    .powi(retry_count.min(20) as i32) as u64);
             base_delay.min(self.config.max_delay_ms)
         };
 
@@ -172,8 +175,6 @@ impl RetryQueue {
 
         self.index.insert(message.id.as_str(), ());
         self.queue.push(entry);
-
-        Ok(())
     }
 
     /// Dequeues the next message that is ready for retry.
@@ -252,6 +253,20 @@ impl RetryQueue {
     /// Checks if a message is in the queue.
     pub fn contains(&self, message_id: &str) -> bool {
         self.index.contains_key(message_id)
+    }
+
+    /// Drains all entries from the queue, ignoring `retry_at` timing.
+    ///
+    /// Returns entries in priority order (earliest `retry_at` first, then
+    /// highest message priority). Used for immediate flush when transport
+    /// becomes available.
+    pub fn drain_all(&mut self) -> Vec<RetryEntry> {
+        self.index.clear();
+        let mut entries = Vec::with_capacity(self.queue.len());
+        while let Some(entry) = self.queue.pop() {
+            entries.push(entry);
+        }
+        entries
     }
 
     /// Gets the time until the next retry is ready.
@@ -350,7 +365,7 @@ mod tests {
         let mut queue = RetryQueue::with_config(config);
 
         let msg = create_test_message(MessagePriority::Medium);
-        queue.enqueue(msg.clone(), 0).unwrap();
+        queue.enqueue(msg.clone(), 0);
 
         assert_eq!(queue.len(), 1);
         assert!(queue.contains(&msg.id.as_str()));
@@ -394,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_retries() {
+    fn test_enqueue_accepts_high_retry_count() {
         let config = RetryConfig {
             max_retries: 2,
             ..Default::default()
@@ -403,15 +418,47 @@ mod tests {
 
         let msg = create_test_message(MessagePriority::Medium);
 
-        // Should succeed for retry 0 and 1
-        assert!(queue.enqueue(msg.clone(), 0).is_ok());
+        // enqueue no longer rejects based on max_retries — it's a pure
+        // scheduling mechanism. ACK timeouts govern permanent failure.
+        queue.enqueue(msg.clone(), 0);
         queue.dequeue_ready(); // Clear queue
 
-        assert!(queue.enqueue(msg.clone(), 1).is_ok());
+        queue.enqueue(msg.clone(), 1);
         queue.dequeue_ready();
 
-        // Should fail for retry 2 (max_retries = 2)
-        assert!(queue.enqueue(msg.clone(), 2).is_err());
+        // Previously this would fail; now it should succeed
+        queue.enqueue(msg.clone(), 2);
+        queue.dequeue_ready();
+
+        queue.enqueue(msg.clone(), 100);
+    }
+
+    #[test]
+    fn test_drain_all() {
+        let config = RetryConfig {
+            initial_delay_ms: 60_000, // Long delay so nothing is "ready"
+            ..Default::default()
+        };
+        let mut queue = RetryQueue::with_config(config);
+
+        let msg1 = create_test_message(MessagePriority::High);
+        let msg2 = create_test_message(MessagePriority::Low);
+        let msg3 = create_test_message(MessagePriority::Medium);
+
+        queue.enqueue(msg1.clone(), 0);
+        queue.enqueue(msg2.clone(), 0);
+        queue.enqueue(msg3.clone(), 0);
+
+        // Nothing should be ready (long delay)
+        assert!(queue.dequeue_ready().is_none());
+        assert_eq!(queue.len(), 3);
+
+        // drain_all returns everything regardless of timing, in heap order
+        // (earliest retry_at first, priority as tiebreaker)
+        let entries = queue.drain_all();
+        assert_eq!(entries.len(), 3);
+        assert!(queue.is_empty());
+        assert!(!queue.contains(&msg1.id.as_str()));
     }
 
     #[test]
@@ -427,9 +474,9 @@ mod tests {
         let high = create_test_message(MessagePriority::High);
         let medium = create_test_message(MessagePriority::Medium);
 
-        queue.enqueue(low.clone(), 0).unwrap();
-        queue.enqueue(high.clone(), 0).unwrap();
-        queue.enqueue(medium.clone(), 0).unwrap();
+        queue.enqueue(low.clone(), 0);
+        queue.enqueue(high.clone(), 0);
+        queue.enqueue(medium.clone(), 0);
 
         thread::sleep(Duration::from_millis(60));
 
@@ -445,11 +492,42 @@ mod tests {
     }
 
     #[test]
+    fn test_priority_tiebreaker_ordering() {
+        // Verify that when retry_at is identical, higher priority pops first.
+        // We construct entries directly to ensure identical timestamps.
+        let now = Utc::now();
+        let make_entry = |priority: MessagePriority| {
+            let mut msg = create_test_message(priority);
+            // Force same priority into message
+            msg.priority = priority;
+            RetryEntry {
+                message: msg,
+                retry_count: 0,
+                added_at: now,
+                retry_at: now,
+                current_delay_ms: 1000,
+            }
+        };
+
+        let mut heap = BinaryHeap::new();
+        heap.push(make_entry(MessagePriority::Low));
+        heap.push(make_entry(MessagePriority::High));
+        heap.push(make_entry(MessagePriority::Medium));
+
+        assert_eq!(heap.pop().unwrap().message.priority, MessagePriority::High);
+        assert_eq!(
+            heap.pop().unwrap().message.priority,
+            MessagePriority::Medium
+        );
+        assert_eq!(heap.pop().unwrap().message.priority, MessagePriority::Low);
+    }
+
+    #[test]
     fn test_remove_message() {
         let mut queue = RetryQueue::new();
         let msg = create_test_message(MessagePriority::Medium);
 
-        queue.enqueue(msg.clone(), 0).unwrap();
+        queue.enqueue(msg.clone(), 0);
         assert!(queue.contains(&msg.id.as_str()));
 
         assert!(queue.remove(&msg.id.as_str()));
@@ -466,7 +544,7 @@ mod tests {
         let mut queue = RetryQueue::with_config(config);
 
         let msg = create_test_message(MessagePriority::Medium);
-        queue.enqueue(msg, 0).unwrap();
+        queue.enqueue(msg, 0);
 
         // Wait for expiration
         thread::sleep(Duration::from_millis(150));
@@ -484,18 +562,10 @@ mod tests {
         };
         let mut queue = RetryQueue::with_config(config);
 
-        queue
-            .enqueue(create_test_message(MessagePriority::High), 0)
-            .unwrap();
-        queue
-            .enqueue(create_test_message(MessagePriority::High), 0)
-            .unwrap();
-        queue
-            .enqueue(create_test_message(MessagePriority::Medium), 0)
-            .unwrap();
-        queue
-            .enqueue(create_test_message(MessagePriority::Low), 0)
-            .unwrap();
+        queue.enqueue(create_test_message(MessagePriority::High), 0);
+        queue.enqueue(create_test_message(MessagePriority::High), 0);
+        queue.enqueue(create_test_message(MessagePriority::Medium), 0);
+        queue.enqueue(create_test_message(MessagePriority::Low), 0);
 
         let stats = queue.stats();
         assert_eq!(stats.total_count, 4);

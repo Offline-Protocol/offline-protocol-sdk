@@ -142,10 +142,13 @@ impl OfflineProtocol {
                     error = %err,
                     "Send failed, message deferred"
                 );
-                Err(Error::Other(format!(
-                    "Send failed (message {} deferred for retry): {}",
-                    message.id, err
-                )))
+                self.emit_event(Event::message_deferred(
+                    message.id.clone(),
+                    format!("Transport send failed: {}", err),
+                    0,
+                    None,
+                ));
+                Ok(message_id)
             }
         }
     }
@@ -261,10 +264,13 @@ impl OfflineProtocol {
                     error = %err,
                     "Send failed, message deferred"
                 );
-                Err(Error::Other(format!(
-                    "Send failed (message {} deferred for retry): {}",
-                    message.id, err
-                )))
+                self.emit_event(Event::message_deferred(
+                    message.id.clone(),
+                    format!("Transport send failed: {}", err),
+                    0,
+                    None,
+                ));
+                Ok(message_id)
             }
         }
     }
@@ -420,10 +426,13 @@ impl OfflineProtocol {
                     error = %err,
                     "Send via forced transport failed, message deferred"
                 );
-                Err(Error::Other(format!(
-                    "Send via {:?} failed (message {} deferred for retry): {}",
-                    transport, message.id, err
-                )))
+                self.emit_event(Event::message_deferred(
+                    message.id.clone(),
+                    format!("Send via {:?} failed: {}", transport, err),
+                    0,
+                    None,
+                ));
+                Ok(message_id)
             }
         }
     }
@@ -1332,6 +1341,7 @@ impl OfflineProtocol {
             if let Some(transport) = last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
+            self.retry_queue.remove(&message_id.as_str());
             self.outbox.remove(&message_id);
             self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
@@ -1351,6 +1361,7 @@ impl OfflineProtocol {
             if let Some(transport) = last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
+            self.retry_queue.remove(&message_id.as_str());
             self.media_outbox.remove(&message_id);
             self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
@@ -1408,25 +1419,8 @@ impl OfflineProtocol {
         // Ensure message is persisted to outbox for recovery
         self.ensure_outbox_entry(message);
 
-        // Schedule retry. If queuing fails, treat this as a terminal failure.
-        if let Err(e) = self.retry_queue.enqueue(message.clone(), 0) {
-            warn!(
-                message_id = %message.id,
-                error = %e,
-                "Failed to enqueue message for retry"
-            );
-            if message.content_type == ContentType::FileChunk {
-                if let Ok(state) = lock_shared_state(&self.shared_state) {
-                    state.emit_event(Event::message_failed(
-                        message.id.clone(),
-                        "Retry queue unavailable".to_string(),
-                        0,
-                    ));
-                }
-                self.handle_outbound_media_chunk_failed(&message.id, "retry queue unavailable");
-                self.remove_outbox_entry(&message.id);
-            }
-        }
+        // Schedule retry (enqueue is infallible — no attempt limit)
+        self.retry_queue.enqueue(message.clone(), 0);
 
         warn!(
             message_id = %message.id,
@@ -1674,6 +1668,7 @@ impl OfflineProtocol {
                         hop_count,
                     );
                     self.handle_outbound_media_chunk_delivered(&message_id);
+                    self.retry_queue.remove(&message_id.as_str());
                     self.remove_outbox_entry(&message_id);
                 }
             }

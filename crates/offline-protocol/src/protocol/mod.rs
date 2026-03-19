@@ -455,6 +455,9 @@ impl OfflineProtocol {
             debug!(peer_id = %peer_id, cap = MAX_KNOWN_PEERS, "Known peers at capacity, not tracking new peer");
         }
 
+        // Flush any pending outbox messages destined for this peer
+        self.flush_outbox_for_peer(peer_id);
+
         // Only send key package if encryption is enabled and auto key exchange is on
         if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
             return;
@@ -472,6 +475,147 @@ impl OfflineProtocol {
 
         if let Err(e) = self.send_key_package_to(peer_id, false) {
             warn!(error = %e, peer_id = %peer_id, "Failed to send key package on discovery");
+        }
+    }
+
+    /// Immediately attempts to send all pending outbox messages destined for a specific peer.
+    ///
+    /// Called when a peer is discovered to flush messages that were queued while
+    /// the peer was unreachable, bypassing backoff timers.
+    fn flush_outbox_for_peer(&mut self, peer_id: &str) {
+        // Collect matching messages from outbox + media_outbox
+        let mut to_send: Vec<(Message, u32)> = Vec::new();
+
+        for entry in self.outbox.values() {
+            if entry.message.recipient.as_str() == peer_id
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
+                to_send.push((entry.message.clone(), entry.attempt_count));
+            }
+        }
+        for entry in self.media_outbox.values() {
+            if entry.message.recipient.as_str() == peer_id
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
+                to_send.push((entry.message.clone(), entry.attempt_count));
+            }
+        }
+
+        if to_send.is_empty() {
+            return;
+        }
+
+        let count = to_send.len().min(crate::constants::FLUSH_BATCH_LIMIT);
+        debug!(peer_id = %peer_id, count = count, "Flushing outbox for discovered peer");
+
+        // Only process up to FLUSH_BATCH_LIMIT messages. Overflow messages
+        // are not removed from the retry queue, so they retain their backoff
+        // timers and will be picked up on the next process() tick or flush.
+        for (message, attempt_count) in to_send
+            .into_iter()
+            .take(crate::constants::FLUSH_BATCH_LIMIT)
+        {
+            // Remove from retry queue since we're sending immediately
+            self.retry_queue.remove(&message.id.as_str());
+            self.try_flush_send(message, attempt_count);
+        }
+    }
+
+    /// Immediately attempts to send all pending outbox messages across all peers.
+    ///
+    /// Called when a transport becomes available (e.g. internet reconnects) to
+    /// flush all queued messages, bypassing backoff timers.
+    pub fn flush_outbox_all(&mut self) {
+        // Drain all entries from the retry queue (ignores timing)
+        let retry_entries = self.retry_queue.drain_all();
+
+        // Also collect outbox entries NOT in the retry queue (stranded after
+        // previous max_retries rejection)
+        let mut all_messages: Vec<(Message, u32)> = retry_entries
+            .into_iter()
+            .map(|e| (e.message, e.retry_count))
+            .collect();
+
+        // Add outbox entries that weren't in the retry queue (stranded) AND
+        // aren't already waiting for an ACK (successfully sent, just awaiting
+        // confirmation). Without the ACK check, a prior flush that succeeded
+        // would cause these messages to be re-sent unnecessarily.
+        let retry_ids: std::collections::HashSet<String> =
+            all_messages.iter().map(|(m, _)| m.id.as_str()).collect();
+
+        for entry in self.outbox.values() {
+            if !retry_ids.contains(&entry.message.id.as_str())
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
+                all_messages.push((entry.message.clone(), entry.attempt_count));
+            }
+        }
+        for entry in self.media_outbox.values() {
+            if !retry_ids.contains(&entry.message.id.as_str())
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
+                all_messages.push((entry.message.clone(), entry.attempt_count));
+            }
+        }
+
+        if all_messages.is_empty() {
+            return;
+        }
+
+        let count = all_messages.len().min(crate::constants::FLUSH_BATCH_LIMIT);
+        debug!(
+            count = count,
+            total = all_messages.len(),
+            "Flushing all outbox messages"
+        );
+
+        let mut iter = all_messages.into_iter();
+
+        for (message, attempt_count) in iter.by_ref().take(crate::constants::FLUSH_BATCH_LIMIT) {
+            self.try_flush_send(message, attempt_count);
+        }
+
+        // Re-enqueue any messages beyond the batch limit so they aren't lost
+        for (message, attempt_count) in iter {
+            self.retry_queue.enqueue(message, attempt_count);
+        }
+    }
+
+    /// Attempts to send a single message as part of a flush operation.
+    ///
+    /// Ensures the outbox entry exists before sending (it may have been evicted
+    /// by capacity limits while the message sat in the retry queue). On success,
+    /// registers ACK tracking and updates the outbox entry. On failure,
+    /// re-enqueues the message to the retry queue with its current attempt count
+    /// so backoff resumes.
+    fn try_flush_send(&mut self, message: Message, attempt_count: u32) {
+        self.ensure_outbox_entry(&message);
+        let forced_transport = self.pinned_media_transport_for_message(&message.id);
+        let send_result = if let Some(transport) = forced_transport {
+            self.transport_manager
+                .send_via_transport(&message, transport)
+        } else {
+            self.transport_manager.send(&message)
+        };
+        let current_transport =
+            forced_transport.or_else(|| self.transport_manager.current_transport());
+
+        match send_result {
+            Ok(()) => {
+                if let Err(e) = self.ensure_ack_registration(&message) {
+                    warn!(message_id = %message.id, error = %e, "ACK registration failed during flush");
+                }
+                self.mark_message_sent(
+                    &message,
+                    current_transport,
+                    Some(attempt_count.saturating_add(1)),
+                );
+                debug!(message_id = %message.id, "Flush send succeeded");
+            }
+            Err(e) => {
+                self.retry_queue.enqueue(message.clone(), attempt_count);
+                debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
+            }
         }
     }
 
@@ -946,7 +1090,7 @@ impl OfflineProtocol {
     /// - Properly tracks retry counts and transport failures
     fn process_retry_queue(&mut self) -> Result<()> {
         // Limit batch size to prevent blocking on large queues
-        let max_batch_size = 20;
+        let max_batch_size = crate::constants::FLUSH_BATCH_LIMIT;
         let mut processed = 0;
 
         while processed < max_batch_size {
@@ -994,19 +1138,9 @@ impl OfflineProtocol {
                     );
                 }
                 Err(e) => {
-                    // Re-enqueue with incremented retry count
-                    // If this fails (max retries), the message remains in outbox
-                    if self
-                        .retry_queue
-                        .enqueue(entry.message.clone(), entry.retry_count + 1)
-                        .is_err()
-                    {
-                        warn!(
-                            message_id = %entry.message.id,
-                            retry_count = entry.retry_count,
-                            "Max retries exceeded, message remains in outbox for recovery"
-                        );
-                    }
+                    // Re-enqueue with incremented retry count for backoff
+                    self.retry_queue
+                        .enqueue(entry.message.clone(), entry.retry_count + 1);
 
                     if let Some(transport) = forced_transport.or(previous_transport) {
                         self.transport_manager.record_retry_failure(transport);
@@ -1067,6 +1201,7 @@ impl OfflineProtocol {
         drop(state);
 
         self.handle_outbound_media_chunk_failed(message_id, "max retries exceeded");
+        self.retry_queue.remove(&message_id.as_str());
         self.ack_manager.remove_ack(message_id);
         if let Some(entry) = self.remove_outbox_entry(message_id) {
             if let Some(transport) = entry.last_transport {
@@ -1086,48 +1221,13 @@ impl OfflineProtocol {
             let message_clone = entry.message.clone();
             let last_transport = entry.last_transport;
 
-            match self.retry_queue.enqueue(message_clone, retry_count) {
-                Ok(()) => {
-                    if let Some(transport) = last_transport {
-                        self.transport_manager.record_retry_failure(transport);
-                    }
-                }
-                Err(_) => {
-                    self.handle_retry_queue_unavailable(message_id, retry_count)?;
-                }
+            // enqueue is infallible (retry queue has no attempt limit)
+            self.retry_queue.enqueue(message_clone, retry_count);
+            if let Some(transport) = last_transport {
+                self.transport_manager.record_retry_failure(transport);
             }
         } else {
             self.handle_missing_outbox_entry(message_id, retry_count)?;
-        }
-        Ok(())
-    }
-
-    /// Handles the case when retry queue is unavailable.
-    fn handle_retry_queue_unavailable(
-        &mut self,
-        message_id: &MessageId,
-        retry_count: u32,
-    ) -> Result<()> {
-        let state = lock_shared_state(&self.shared_state).map_err(|e| {
-            error!(
-                "Failed to lock shared state for retry queue error event: {}",
-                e
-            );
-            e
-        })?;
-        state.emit_event(Event::message_failed(
-            message_id.clone(),
-            "Retry queue unavailable".to_string(),
-            retry_count,
-        ));
-        drop(state);
-
-        self.handle_outbound_media_chunk_failed(message_id, "retry queue unavailable");
-        self.ack_manager.remove_ack(message_id);
-        if let Some(entry) = self.remove_outbox_entry(message_id) {
-            if let Some(transport) = entry.last_transport {
-                self.transport_manager.record_delivery_failure(transport);
-            }
         }
         Ok(())
     }
@@ -1145,6 +1245,12 @@ impl OfflineProtocol {
     #[cfg(test)]
     pub(crate) fn outbox_messages(&self) -> impl Iterator<Item = &Message> {
         self.outbox.values().map(|e| &e.message)
+    }
+
+    /// Returns the total number of entries across outbox and media_outbox (test-only).
+    #[cfg(test)]
+    pub(crate) fn outbox_entry_count(&self) -> usize {
+        self.outbox.len() + self.media_outbox.len()
     }
 
     /// Clears all outbox entries (test-only).

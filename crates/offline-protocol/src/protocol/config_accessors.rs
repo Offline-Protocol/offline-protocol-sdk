@@ -118,6 +118,12 @@ impl OfflineProtocol {
         self.retry_queue.len()
     }
 
+    /// Returns a mutable reference to the retry queue (test-only).
+    #[cfg(test)]
+    pub(crate) fn retry_queue_mut(&mut self) -> &mut offline_protocol_reliability::RetryQueue {
+        &mut self.retry_queue
+    }
+
     /// Cleans up expired entries from deduplicator, retry queue, outbox, and ack manager.
     /// Also checks for Internet availability transitions to sync groups with relay.
     pub(crate) fn cleanup_expired_entries(&mut self) {
