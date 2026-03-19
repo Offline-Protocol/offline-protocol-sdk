@@ -3115,7 +3115,7 @@ fn test_epoch_fork_cleared_on_successful_commit() {
     let data = serde_json::to_string(&commit_payload).unwrap();
 
     // Process through the protocol layer — this calls process_commit_core
-    alice.handle_group_mls_commit("bob", &data);
+    alice.handle_group_mls_commit("commit-fork-clear-1", "bob", &data);
 
     // Fork should be cleared after successful commit processing
     assert!(
@@ -3988,7 +3988,7 @@ fn test_pending_leave_elections_size_cap_eviction() {
     let data = serde_json::to_string(&leave_payload).unwrap();
 
     // test_user is not the lex-first remaining member (alice is), so it records a pending election
-    protocol.handle_group_mls_leave(new_leaver, &data);
+    protocol.handle_group_mls_leave("leave-evict-1", new_leaver, &data);
 
     // Should still be at cap (one old evicted, one new added)
     assert!(
@@ -4083,7 +4083,7 @@ fn test_non_key_update_commit_does_not_clear_fork_state() {
     let data = serde_json::to_string(&add_commit_payload).unwrap();
 
     // Process through alice — the MLS commit succeeds but commit_type is Add
-    alice.handle_group_mls_commit("bob", &data);
+    alice.handle_group_mls_commit("commit-add-no-clear-1", "bob", &data);
 
     // Fork state should still exist because this was an Add commit, not KeyUpdate
     assert!(
@@ -4122,7 +4122,7 @@ fn test_key_update_commit_clears_fork_state() {
     };
     let data = serde_json::to_string(&ku_commit_payload).unwrap();
 
-    alice.handle_group_mls_commit("bob", &data);
+    alice.handle_group_mls_commit("commit-ku-clear-1", "bob", &data);
 
     assert!(
         !alice.group_mesh.epoch_forks.contains_key(&group_id),
@@ -4473,7 +4473,7 @@ fn test_handle_group_mls_leave_records_pending_election_for_non_elected() {
     };
     let data = serde_json::to_string(&leave_payload).unwrap();
 
-    protocol.handle_group_mls_leave("bob", &data);
+    protocol.handle_group_mls_leave("leave-else-1", "bob", &data);
 
     let key = (group_id.clone(), "bob".to_string());
     assert!(
@@ -4502,7 +4502,7 @@ fn test_handle_group_mls_leave_elected_does_not_record_election() {
     let data = serde_json::to_string(&leave_payload).unwrap();
 
     // alice < bob, so alice is elected → should handle immediately
-    alice.handle_group_mls_leave("bob", &data);
+    alice.handle_group_mls_leave("leave-elected-1", "bob", &data);
 
     let key = (group_id.clone(), "bob".to_string());
     assert!(
@@ -4907,7 +4907,7 @@ fn test_duplicate_welcome_ignored() {
     );
     // Strip the prefix to get just the JSON, since handle_group_mls_welcome expects raw JSON
     let json_data = &data[internal_prefixes::GROUP_MLS_WELCOME.len()..];
-    bob.handle_group_mls_welcome("alice", json_data);
+    bob.handle_group_mls_welcome("welcome-dup-1", "alice", json_data);
 
     let evts = events.lock().unwrap();
     let add_events: Vec<_> = evts
