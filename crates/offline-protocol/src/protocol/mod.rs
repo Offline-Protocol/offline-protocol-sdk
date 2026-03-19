@@ -1003,17 +1003,20 @@ impl OfflineProtocol {
         }
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_WELCOME) {
-            self.handle_group_mls_welcome(sender, data);
+            let mid = message.id.as_str();
+            self.handle_group_mls_welcome(&mid, sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_COMMIT) {
-            self.handle_group_mls_commit(sender, data);
+            let mid = message.id.as_str();
+            self.handle_group_mls_commit(&mid, sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_LEAVE) {
-            self.handle_group_mls_leave(sender, data);
+            let mid = message.id.as_str();
+            self.handle_group_mls_leave(&mid, sender, data);
             return Some(InternalMessageResult::Consumed);
         }
 

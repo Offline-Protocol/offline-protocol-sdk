@@ -364,7 +364,7 @@ impl OfflineProtocol {
     }
 
     /// Handles an incoming MLS Welcome message (group invite).
-    pub(crate) fn handle_group_mls_welcome(&mut self, sender: &str, data: &str) {
+    pub(crate) fn handle_group_mls_welcome(&mut self, message_id: &str, sender: &str, data: &str) {
         let payload = match serde_json::from_str::<GroupMlsWelcomePayload>(data) {
             Ok(p) => p,
             Err(_) => {
@@ -374,6 +374,20 @@ impl OfflineProtocol {
         };
 
         info!(group_id = %payload.group_id, "Received mesh group Welcome");
+
+        // Dedup check — prevents double-join when the same Welcome arrives via
+        // multiple transports nearly simultaneously (TOCTOU race on members cache).
+        let dedup_key = message_id.to_string();
+        if self.group_mesh.message_dedup.contains_key(&dedup_key) {
+            debug!(group_id = %payload.group_id, msg_id = %dedup_key, "Duplicate Welcome message, skipping");
+            return;
+        }
+        self.group_mesh
+            .message_dedup
+            .insert(dedup_key, Instant::now());
+        if self.group_mesh.message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+            self.cleanup_group_message_dedup();
+        }
 
         // Skip duplicate Welcome — we're already a member
         if self.group_mesh.members.contains_key(&payload.group_id) {
@@ -433,7 +447,23 @@ impl OfflineProtocol {
     /// If decryption fails (e.g., due to out-of-order delivery in a mesh network),
     /// the commit is buffered for deferred retry. When a subsequent commit for the
     /// same group succeeds, buffered commits are drained and retried.
-    pub(crate) fn handle_group_mls_commit(&mut self, sender: &str, data: &str) {
+    pub(crate) fn handle_group_mls_commit(&mut self, message_id: &str, sender: &str, data: &str) {
+        // Dedup check — prevents processing the same commit twice when it
+        // arrives via multiple transports. Without this, the second copy fails
+        // at MLS (wrong epoch) and gets buffered as a "retriable" pending
+        // commit, wasting space and potentially triggering false fork detection.
+        let dedup_key = message_id.to_string();
+        if self.group_mesh.message_dedup.contains_key(&dedup_key) {
+            debug!(msg_id = %dedup_key, "Duplicate commit message, skipping");
+            return;
+        }
+        self.group_mesh
+            .message_dedup
+            .insert(dedup_key, Instant::now());
+        if self.group_mesh.message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+            self.cleanup_group_message_dedup();
+        }
+
         match self.process_commit_core(sender, data) {
             CommitOutcome::Success(group_id) => {
                 self.drain_pending_commits(&group_id);
@@ -804,7 +834,7 @@ impl OfflineProtocol {
     ///
     /// For fully adversarial environments, consider requiring admin-only removal
     /// or adding an MLS application-message-signed leave proof.
-    pub(crate) fn handle_group_mls_leave(&mut self, sender: &str, data: &str) {
+    pub(crate) fn handle_group_mls_leave(&mut self, message_id: &str, sender: &str, data: &str) {
         let payload = match serde_json::from_str::<GroupMlsLeavePayload>(data) {
             Ok(p) => p,
             Err(_) => {
@@ -812,6 +842,24 @@ impl OfflineProtocol {
                 return;
             }
         };
+
+        // Dedup check — prevents duplicate leave notifications from resetting
+        // the election timer or triggering redundant remove-commit attempts.
+        let dedup_key = message_id.to_string();
+        if self.group_mesh.message_dedup.contains_key(&dedup_key) {
+            debug!(
+                group_id = %payload.group_id,
+                msg_id = %dedup_key,
+                "Duplicate leave notification, skipping"
+            );
+            return;
+        }
+        self.group_mesh
+            .message_dedup
+            .insert(dedup_key, Instant::now());
+        if self.group_mesh.message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+            self.cleanup_group_message_dedup();
+        }
 
         // Verify sender matches the claimed leaving member to prevent spoofing
         if payload.leaving_member != sender {
