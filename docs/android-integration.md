@@ -179,6 +179,18 @@ protocol.setEventListener { event ->
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
 - If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
 
+## TOFU Trust Management
+
+Reset a peer's TOFU-pinned public key when you need to re-establish trust (e.g., the peer reinstalled the app):
+
+```kotlin
+// Reset trust pin for a peer
+val removed = protocol.resetTofuForPeer("bob")
+// removed == true if an entry was cleared, false if none existed
+```
+
+After reset, the next message from that peer will establish a new trust pin.
+
 ## Architecture
 
 ```

@@ -522,6 +522,22 @@ pub fn rename_group(
 
 Renames a group and broadcasts the change to all members. Only admins can rename groups.
 
+### TOFU Trust Management
+
+```rust
+/// Reset the TOFU-pinned public key for a peer.
+/// After reset, the next message from this peer will establish a new trust pin.
+/// Returns true if an entry was removed, false if no entry existed.
+pub fn reset_tofu_for_peer(
+    &mut self,
+    peer_id: &str,
+) -> bool
+```
+
+### Input Validation
+
+- `create_group` and `rename_group` trim whitespace and reject empty group names with an error.
+
 ### Security Invariants
 
 - The group creator is automatically assigned `Admin`.

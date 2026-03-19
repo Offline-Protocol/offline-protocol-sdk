@@ -113,7 +113,7 @@ interface ForwardInfo {
 
 #### Native bridge expansion (iOS & Android)
 
-The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`) have been significantly expanded. If you have custom native module extensions or overrides, you will need to add implementations for the new methods: `blockUser`, `unblockUser`, `getBlockedUsers`, `isUserBlocked`, `forwardMessage`, `meshForwardMessageToGroup`, `sendPresenceUpdate`, `sendTypingIndicator`, `sendReadReceipt`, and the full `MeshServices` API surface (`registerService`, `unregisterService`, `discoverServices`, `sendServiceRequest`, `respondToServiceRequest`).
+The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`) have been significantly expanded. If you have custom native module extensions or overrides, you will need to add implementations for the new methods: `blockUser`, `unblockUser`, `getBlockedUsers`, `isUserBlocked`, `forwardMessage`, `meshForwardMessageToGroup`, `sendPresenceUpdate`, `sendTypingIndicator`, `sendReadReceipt`, `resetTofuForPeer`, `meshRenameGroup`, and the full `MeshServices` API surface (`registerService`, `unregisterService`, `discoverServices`, `sendServiceRequest`, `respondToServiceRequest`).
 
 ---
 
@@ -150,6 +150,12 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 - **Reduce message latency from invitation to delivery** — Overhauled polling and timing across the stack to dramatically reduce the time from MLS invitation to first decryptable message. Replaced the 750ms × 8 fixed-interval MLS establishment polling with a 100ms exponential backoff helper that resolves faster in the common case. Aligned the Android process tick interval with iOS (500ms → 100ms) to eliminate a platform-specific latency gap. Reduced startup delay from 500ms to 100ms, and presence rebroadcast interval from 60s to 15s for faster peer discovery. Tightened reliability config in the example app to match production expectations.
 
 ### Bug Fixes
+
+- **Reject empty group names** — `create_group` and `rename_group` now validate the group name: whitespace is trimmed and empty strings are rejected with a descriptive error. Previously, an empty name could be broadcast to all group members.
+
+- **Wire `resetTofuForPeer` through all platform bindings** — The TOFU reset API (`resetTofuForPeer`) is now available in React Native (TypeScript), iOS (Swift native module), and Android (Kotlin native module). Previously it was only callable from Rust/UniFFI. After calling this, the next message from the peer will establish a new trust pin.
+
+- **Wire `renameGroup` through all platform bindings** — `meshRenameGroup` is now wired through the iOS Swift native module, iOS Objective-C bridge, Android Kotlin native module, and the UniFFI-generated Kotlin/Swift bindings. The React Native TypeScript wrapper and the Rust/UniFFI layer already had this method.
 
 - **Harden mesh group robustness** ([#47](https://github.com/Offline-Protocol/sdk/pull/47))
   Fixed several issues that caused group messaging to degrade under real-world conditions. Stale relay caches now refresh from MLS membership on each fan-out. Added a leave election fallback with staggered re-election timeouts so groups can recover when the elected leader crashes. Implemented epoch fork detection using Lamport clock comparison and automatic resolution via leader-elected key-update commits. Added a circuit breaker on elections to prevent election storms, tuple-keyed leave elections to handle concurrent leaves, and per-attempt cooldown to prevent rapid-fire retries.

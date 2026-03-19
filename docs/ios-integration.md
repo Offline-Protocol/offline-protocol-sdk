@@ -212,6 +212,18 @@ protocol.onEvent { event in
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
 - If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
 
+## TOFU Trust Management
+
+Reset a peer's TOFU-pinned public key when you need to re-establish trust (e.g., the peer reinstalled the app):
+
+```swift
+// Reset trust pin for a peer
+let removed = try protocol.resetTofuForPeer(peerId: "bob")
+// removed == true if an entry was cleared, false if none existed
+```
+
+After reset, the next message from that peer will establish a new trust pin.
+
 ## Platform Limitations
 
 iOS does **not** support Wi-Fi Direct. Available transports:

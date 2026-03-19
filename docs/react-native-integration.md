@@ -439,7 +439,39 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 
 ---
 
-### 11.15 Group Management (Relay Server API)
+### 11.15 Security & Trust
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **blockUser** | `blockUser(userId: string): Promise<void>` | Blocks a user (silently drops their messages). |
+| **unblockUser** | `unblockUser(userId: string): Promise<void>` | Unblocks a user. |
+| **getBlockedUsers** | `getBlockedUsers(): Promise<string[]>` | Returns all blocked user IDs. |
+| **isUserBlocked** | `isUserBlocked(userId: string): Promise<boolean>` | Whether a user is blocked. |
+| **resetTofuForPeer** | `resetTofuForPeer(peerId: string): Promise<boolean>` | Resets the TOFU-pinned public key for a peer. After reset, the next message from this peer establishes a new trust pin. Returns `true` if an entry was removed. |
+
+---
+
+### 11.16 Presence, Typing & Read Receipts
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **sendPresenceUpdate** | `sendPresenceUpdate(recipient, status): Promise<void>` | Sends a presence update (`"online"`, `"away"`, `"offline"`). |
+| **sendTypingIndicator** | `sendTypingIndicator(recipient, conversationId, isTyping): Promise<void>` | Sends a typing indicator. |
+| **sendReadReceipt** | `sendReadReceipt(recipient, messageIds: string[]): Promise<void>` | Sends read receipts for one or more messages. |
+
+---
+
+### 11.17 Message Forwarding
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **forwardMessage** | `forwardMessage(params: ForwardMessageParams): Promise<string>` | Forwards a message to a 1:1 recipient with attribution. |
+
+For group forwarding, see `meshForwardMessageToGroup` in [§11.13](#1113-mesh-group-messaging-mls-encrypted).
+
+---
+
+### 11.18 Group Management (Relay Server API)
 
 Each method returns a **JSON string** that your app (or provider) sends to the relay. The SDK does not open or manage the connection. In the example app, ProtocolProvider owns the relay and exposes group actions that call these methods and send the JSON for you.
 
