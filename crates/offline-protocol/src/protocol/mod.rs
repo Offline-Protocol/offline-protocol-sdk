@@ -532,17 +532,24 @@ impl OfflineProtocol {
             .map(|e| (e.message, e.retry_count))
             .collect();
 
-        // Add outbox entries that weren't in the retry queue
+        // Add outbox entries that weren't in the retry queue (stranded) AND
+        // aren't already waiting for an ACK (successfully sent, just awaiting
+        // confirmation). Without the ACK check, a prior flush that succeeded
+        // would cause these messages to be re-sent unnecessarily.
         let retry_ids: std::collections::HashSet<String> =
             all_messages.iter().map(|(m, _)| m.id.as_str()).collect();
 
         for entry in self.outbox.values() {
-            if !retry_ids.contains(&entry.message.id.as_str()) {
+            if !retry_ids.contains(&entry.message.id.as_str())
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
                 all_messages.push((entry.message.clone(), entry.attempt_count));
             }
         }
         for entry in self.media_outbox.values() {
-            if !retry_ids.contains(&entry.message.id.as_str()) {
+            if !retry_ids.contains(&entry.message.id.as_str())
+                && !self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            {
                 all_messages.push((entry.message.clone(), entry.attempt_count));
             }
         }

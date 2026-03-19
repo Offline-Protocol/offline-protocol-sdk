@@ -1341,6 +1341,7 @@ impl OfflineProtocol {
             if let Some(transport) = last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
+            self.retry_queue.remove(&message_id.as_str());
             self.outbox.remove(&message_id);
             self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
@@ -1360,6 +1361,7 @@ impl OfflineProtocol {
             if let Some(transport) = last_transport {
                 self.transport_manager.record_delivery_failure(transport);
             }
+            self.retry_queue.remove(&message_id.as_str());
             self.media_outbox.remove(&message_id);
             self.handle_outbound_media_chunk_failed(&message_id, "outbox lifetime exceeded");
         }
