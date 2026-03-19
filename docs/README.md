@@ -23,6 +23,7 @@
 |-------|-------------|
 | [DORS Deep Dive](dors.md) | How the transport selection engine works (scoring, switching, escalation) |
 | [DORS Configuration](dors-configuration.md) | Tuning DORS for different use cases with parameter reference |
+| [Message Delivery](message-delivery.md) | Delivery lifecycle, retry/ACK system, flush triggers, and client-side persistence |
 | [Mesh Networking](mesh.md) | Peer discovery, connection management, message delivery, and routing |
 | [MLS Encryption](mls-integration.md) | End-to-end encryption with auto-encryption and manual MLS APIs |
 | [Service Discovery](service-discovery.md) | Decentralized service registration, discovery, and request/response |

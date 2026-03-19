@@ -220,21 +220,25 @@ The reliability layer ensures messages are delivered despite the inherent unreli
 
 ### Acknowledgment (ACK) Management
 Messages that require acknowledgment are tracked:
-- **Timeout**: Default 5 seconds to wait for ACK
+- **Timeout**: Default 10 seconds to wait for ACK
 - **Tracking**: Message ID, recipient, timestamp, retry count
-- **Events**: `MessageDelivered` when ACK received, `MessageFailed` after max retries
+- **Events**: `MessageDelivered` when ACK received, `MessageFailed` after max ACK retries
 
 When an ACK is received, the sender:
 1. Marks the message as delivered
 2. Emits a `MessageDelivered` event
-3. Cancels any pending retries
+3. Removes the message from both the retry queue and outbox
 
 ### Retry Queue
 Failed messages are queued for retry with exponential backoff:
 - **Initial Delay**: 1 second
 - **Backoff Factor**: 2x each retry (1s → 2s → 4s → 8s...)
 - **Maximum Delay**: 30 seconds
-- **Maximum Retries**: 5 attempts (configurable)
+- **No attempt limit**: The retry queue is a pure scheduling mechanism. Only ACK timeouts (not transport failures) count toward the retry limit (default: 10).
+
+When a transport becomes available (peer discovered, internet reconnects), pending messages are flushed immediately — bypassing backoff timers.
+
+For the full delivery lifecycle including client-side persistence patterns, see [Message Delivery & Reliability](message-delivery.md).
 
 ### Priority Ordering
 The retry queue processes messages by priority:
@@ -245,11 +249,12 @@ The retry queue processes messages by priority:
 
 Within the same priority, older messages go first.
 
-### Outbox Persistence
-Messages awaiting acknowledgment are stored in an outbox:
-- Survives temporary transport failures
-- Automatically cleaned up after successful delivery or max retries
-- Configurable maximum lifetime
+### Outbox
+Messages awaiting acknowledgment are stored in an in-memory outbox:
+- Survives temporary transport failures within the process lifetime
+- Automatically cleaned up after successful delivery or max ACK retries
+- Configurable maximum lifetime (default: 1 hour)
+- Does not survive process restarts — see [Client-Side Persistence](message-delivery.md#client-side-persistence)
 
 ## Deduplication
 

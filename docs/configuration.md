@@ -315,13 +315,13 @@ Rust migration note:
 **ACK Config**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `defaultTimeoutMs` | number | 5000 | ACK timeout (milliseconds) |
+| `defaultTimeoutMs` | number | 10000 | ACK timeout (milliseconds) |
 | `maxPendingAcks` | number | 1000 | Max pending ACKs |
 
 **Retry Config**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `maxRetries` | number | 3 | Max retry attempts |
+| `maxRetries` | number | 10 | Max ACK retry attempts (transport retries are unlimited) |
 | `initialDelayMs` | number | 1000 | Initial retry delay |
 | `maxDelayMs` | number | 30000 | Max retry delay |
 | `backoffMultiplier` | number | 2.0 | Backoff multiplier |
