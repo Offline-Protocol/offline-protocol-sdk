@@ -1782,15 +1782,11 @@ impl OfflineProtocol {
             }
         }
 
-        // When reconnecting after disconnection, trigger outbox flush
-        // This ensures pending messages are retried immediately
+        // When reconnecting after disconnection, immediately flush all pending
+        // outbox messages (bypasses backoff timers)
         if is_connected && !was_connected {
-            // Process pending retries to flush outbox
             let mut protocol = self.lock_inner()?;
-            if let Err(e) = protocol.process() {
-                // Log but don't fail - outbox flush is best-effort
-                tracing::warn!(error = %e, "Failed to flush outbox on reconnect");
-            }
+            protocol.flush_outbox_all();
         }
 
         // Emit connection event

@@ -142,10 +142,13 @@ impl OfflineProtocol {
                     error = %err,
                     "Send failed, message deferred"
                 );
-                Err(Error::Other(format!(
-                    "Send failed (message {} deferred for retry): {}",
-                    message.id, err
-                )))
+                self.emit_event(Event::message_deferred(
+                    message.id.clone(),
+                    format!("Transport send failed: {}", err),
+                    0,
+                    None,
+                ));
+                Ok(message_id)
             }
         }
     }
@@ -261,10 +264,13 @@ impl OfflineProtocol {
                     error = %err,
                     "Send failed, message deferred"
                 );
-                Err(Error::Other(format!(
-                    "Send failed (message {} deferred for retry): {}",
-                    message.id, err
-                )))
+                self.emit_event(Event::message_deferred(
+                    message.id.clone(),
+                    format!("Transport send failed: {}", err),
+                    0,
+                    None,
+                ));
+                Ok(message_id)
             }
         }
     }
@@ -420,10 +426,13 @@ impl OfflineProtocol {
                     error = %err,
                     "Send via forced transport failed, message deferred"
                 );
-                Err(Error::Other(format!(
-                    "Send via {:?} failed (message {} deferred for retry): {}",
-                    transport, message.id, err
-                )))
+                self.emit_event(Event::message_deferred(
+                    message.id.clone(),
+                    format!("Send via {:?} failed: {}", transport, err),
+                    0,
+                    None,
+                ));
+                Ok(message_id)
             }
         }
     }
@@ -1674,6 +1683,7 @@ impl OfflineProtocol {
                         hop_count,
                     );
                     self.handle_outbound_media_chunk_delivered(&message_id);
+                    self.retry_queue.remove(&message_id.as_str());
                     self.remove_outbox_entry(&message_id);
                 }
             }

@@ -142,21 +142,21 @@ impl RetryQueue {
     ///
     /// Returns `Ok(())` if queued, `Err` if max retries exceeded.
     pub fn enqueue(&mut self, message: Message, retry_count: u32) -> crate::Result<()> {
-        if retry_count >= self.config.max_retries {
-            return Err(crate::Error::MaxRetriesExceeded);
-        }
-
         // Prevent duplicate entries for the same message
         if self.index.contains_key(&message.id.as_str()) {
             return Ok(());
         }
 
         // Calculate retry delay with exponential backoff
+        // Cap exponent at 20 to prevent overflow with large retry counts
         let delay_ms = if retry_count == 0 {
             self.config.initial_delay_ms
         } else {
             let base_delay = self.config.initial_delay_ms
-                * (self.config.backoff_multiplier.powi(retry_count as i32) as u64);
+                * (self
+                    .config
+                    .backoff_multiplier
+                    .powi(retry_count.min(20) as i32) as u64);
             base_delay.min(self.config.max_delay_ms)
         };
 
@@ -252,6 +252,15 @@ impl RetryQueue {
     /// Checks if a message is in the queue.
     pub fn contains(&self, message_id: &str) -> bool {
         self.index.contains_key(message_id)
+    }
+
+    /// Drains all entries from the queue, ignoring `retry_at` timing.
+    ///
+    /// Returns all entries and clears the queue. Used for immediate flush
+    /// when transport becomes available.
+    pub fn drain_all(&mut self) -> Vec<RetryEntry> {
+        self.index.clear();
+        self.queue.drain().collect()
     }
 
     /// Gets the time until the next retry is ready.
@@ -394,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_retries() {
+    fn test_enqueue_accepts_high_retry_count() {
         let config = RetryConfig {
             max_retries: 2,
             ..Default::default()
@@ -403,15 +412,46 @@ mod tests {
 
         let msg = create_test_message(MessagePriority::Medium);
 
-        // Should succeed for retry 0 and 1
+        // enqueue no longer rejects based on max_retries — it's a pure
+        // scheduling mechanism. ACK timeouts govern permanent failure.
         assert!(queue.enqueue(msg.clone(), 0).is_ok());
         queue.dequeue_ready(); // Clear queue
 
         assert!(queue.enqueue(msg.clone(), 1).is_ok());
         queue.dequeue_ready();
 
-        // Should fail for retry 2 (max_retries = 2)
-        assert!(queue.enqueue(msg.clone(), 2).is_err());
+        // Previously this would fail; now it should succeed
+        assert!(queue.enqueue(msg.clone(), 2).is_ok());
+        queue.dequeue_ready();
+
+        assert!(queue.enqueue(msg.clone(), 100).is_ok());
+    }
+
+    #[test]
+    fn test_drain_all() {
+        let config = RetryConfig {
+            initial_delay_ms: 60_000, // Long delay so nothing is "ready"
+            ..Default::default()
+        };
+        let mut queue = RetryQueue::with_config(config);
+
+        let msg1 = create_test_message(MessagePriority::High);
+        let msg2 = create_test_message(MessagePriority::Low);
+        let msg3 = create_test_message(MessagePriority::Medium);
+
+        queue.enqueue(msg1.clone(), 0).unwrap();
+        queue.enqueue(msg2.clone(), 0).unwrap();
+        queue.enqueue(msg3.clone(), 0).unwrap();
+
+        // Nothing should be ready (long delay)
+        assert!(queue.dequeue_ready().is_none());
+        assert_eq!(queue.len(), 3);
+
+        // drain_all returns everything regardless of timing
+        let entries = queue.drain_all();
+        assert_eq!(entries.len(), 3);
+        assert!(queue.is_empty());
+        assert!(!queue.contains(&msg1.id.as_str()));
     }
 
     #[test]
