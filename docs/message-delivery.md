@@ -117,7 +117,7 @@ The outbox persists messages that require acknowledgment. It serves as the sourc
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| Max entries | 1000 | Regular messages |
+| Max entries | 500 | Regular messages |
 | Max media entries | 100 | File chunk messages |
 | Max lifetime | 1 hour | `outbox_max_lifetime_ms` |
 
@@ -224,6 +224,38 @@ MessageDeferred → (transport becomes available) → MessageDelivered
 **Permanent failure**:
 ```
 MessageSent → (ACK timeout) → (retry) → ... → MessageFailed
+```
+
+## Breaking Changes
+
+This version introduces the following breaking changes to the delivery system:
+
+### `send_message()` now returns `Ok` on transport failure
+
+Previously, `send_message()` returned `Err` when no transport could deliver the message immediately. Now it returns `Ok(message_id)` and emits a `MessageDeferred` event instead. The message is queued for automatic retry.
+
+**Migration**: If your code matches on `Err` from `send_message()` to detect "no transport available," switch to listening for `MessageDeferred` events instead. An `Err` from `send_message()` now only indicates a true failure (e.g., invalid recipient, protocol not started).
+
+### `Error::MaxRetriesExceeded` removed
+
+The `MaxRetriesExceeded` variant was removed from the reliability crate's error type. The retry queue no longer enforces a retry limit — only ACK timeouts count toward permanent failure.
+
+**Migration**: Remove any match arms for `Error::MaxRetriesExceeded`. If you need to detect permanent failure, listen for the `MessageFailed` event.
+
+### Default constants changed
+
+| Parameter | Old Default | New Default |
+|-----------|-------------|-------------|
+| ACK timeout | 5,000 ms | 10,000 ms |
+| Max ACK retries | 3 | 10 |
+
+Messages will take longer to permanently fail (up to ~100 seconds worst-case vs ~15 seconds before). Configure lower values if you need faster failure detection:
+
+```typescript
+reliability: {
+  ack: { defaultTimeoutMs: 5000 },
+  retry: { maxRetries: 3 },
+}
 ```
 
 ## Client-Side Persistence

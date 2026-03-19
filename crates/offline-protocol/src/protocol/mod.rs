@@ -559,17 +559,19 @@ impl OfflineProtocol {
             .into_iter()
             .take(crate::constants::FLUSH_BATCH_LIMIT)
         {
-            self.ensure_outbox_entry(&message);
             self.try_flush_send(message, attempt_count);
         }
     }
 
     /// Attempts to send a single message as part of a flush operation.
     ///
-    /// On success, registers ACK tracking and updates the outbox entry.
-    /// On failure, re-enqueues the message to the retry queue with its
-    /// current attempt count so backoff resumes.
+    /// Ensures the outbox entry exists before sending (it may have been evicted
+    /// by capacity limits while the message sat in the retry queue). On success,
+    /// registers ACK tracking and updates the outbox entry. On failure,
+    /// re-enqueues the message to the retry queue with its current attempt count
+    /// so backoff resumes.
     fn try_flush_send(&mut self, message: Message, attempt_count: u32) {
+        self.ensure_outbox_entry(&message);
         let forced_transport = self.pinned_media_transport_for_message(&message.id);
         let send_result = if let Some(transport) = forced_transport {
             self.transport_manager
@@ -1237,6 +1239,12 @@ impl OfflineProtocol {
     #[cfg(test)]
     pub(crate) fn outbox_messages(&self) -> impl Iterator<Item = &Message> {
         self.outbox.values().map(|e| &e.message)
+    }
+
+    /// Returns the total number of entries across outbox and media_outbox (test-only).
+    #[cfg(test)]
+    pub(crate) fn outbox_entry_count(&self) -> usize {
+        self.outbox.len() + self.media_outbox.len()
     }
 
     /// Clears all outbox entries (test-only).
