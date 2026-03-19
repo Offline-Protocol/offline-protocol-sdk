@@ -1743,26 +1743,7 @@ impl OfflineProtocol {
             return Err(Error::Other("Only admins can change roles".to_string()));
         }
 
-        // Prevent demoting the last admin (whether self or another admin)
-        if role == GroupRole::Member {
-            let mls_guard = self.read_mls_guard()?;
-            let gid = offline_protocol_mls::GroupId::new(group_id);
-            if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                if metadata.get_role(target_user_id) == GroupRole::Admin {
-                    let admin_count = metadata
-                        .get_all_roles()
-                        .values()
-                        .filter(|r| **r == GroupRole::Admin)
-                        .count();
-                    if admin_count <= 1 {
-                        return Err(Error::Other("Cannot demote the last admin".to_string()));
-                    }
-                }
-            }
-            drop(mls_guard);
-        }
-
-        // Verify target is a member
+        // Verify target is a member (before acquiring guard for role operations)
         let members = self
             .group_mesh
             .members
@@ -1777,11 +1758,30 @@ impl OfflineProtocol {
             )));
         }
 
-        // Store locally
-        let mls_guard = self.read_mls_guard()?;
-        let gid = offline_protocol_mls::GroupId::new(group_id);
-        mls_guard.set_member_role(&gid, target_user_id, role)?;
-        drop(mls_guard);
+        // Single guard acquisition for both last-admin validation and role write
+        {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+
+            // Prevent demoting the last admin (whether self or another admin)
+            if role == GroupRole::Member {
+                if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                    if metadata.get_role(target_user_id) == GroupRole::Admin {
+                        let admin_count = metadata
+                            .get_all_roles()
+                            .values()
+                            .filter(|r| **r == GroupRole::Admin)
+                            .count();
+                        if admin_count <= 1 {
+                            return Err(Error::Other("Cannot demote the last admin".to_string()));
+                        }
+                    }
+                }
+            }
+
+            // Store locally
+            mls_guard.set_member_role(&gid, target_user_id, role)?;
+        }
 
         // Broadcast to all members
         let payload = GroupRoleChangePayload {

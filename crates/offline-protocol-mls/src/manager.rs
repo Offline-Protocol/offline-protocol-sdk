@@ -851,7 +851,9 @@ impl MlsManager {
                 {
                     metadata.migrate_legacy_roles();
                     // Persist the migration so it only runs once
-                    let _ = self.save_group_metadata(group_id, &metadata);
+                    if let Err(e) = self.save_group_metadata(group_id, &metadata) {
+                        warn!(group_id = %group_id.as_str(), error = %e, "Failed to persist legacy role migration");
+                    }
                 }
                 Ok(Some(metadata))
             }
