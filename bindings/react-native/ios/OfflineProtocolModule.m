@@ -398,6 +398,10 @@ RCT_EXTERN_METHOD(isUserBlocked:(NSString *)userId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(resetTofuForPeer:(NSString *)peerId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Service Discovery & Request/Response
 RCT_EXTERN_METHOD(registerService:(NSString *)serviceId
                   version:(NSString *)version

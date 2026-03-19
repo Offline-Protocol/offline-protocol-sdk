@@ -763,6 +763,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun resetTofuForPeer(peerId: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val removed = proto.resetTofuForPeer(peerId)
+            promise.resolve(removed)
+        } catch (e: Exception) {
+            promise.reject("ERROR_TOFU", "Failed to reset TOFU for peer: ${e.message}", e)
+        }
+    }
+
     // ─── Presence, Typing, Read Receipts ───────────────────────
 
     @ReactMethod

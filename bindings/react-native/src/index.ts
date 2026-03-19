@@ -2353,6 +2353,17 @@ export class OfflineProtocol {
   async isUserBlocked(userId: string): Promise<boolean> {
     return await OfflineProtocolNativeModule.isUserBlocked(userId);
   }
+
+  /**
+   * Resets the TOFU-pinned public key for a peer.
+   * After reset, the next message from this peer will establish a new trust pin.
+   *
+   * @param peerId - Peer ID whose trust pin should be reset
+   * @returns true if an entry was removed, false if no entry existed
+   */
+  async resetTofuForPeer(peerId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.resetTofuForPeer(peerId);
+  }
 }
 
 /**
