@@ -131,6 +131,13 @@ val messageIds = protocol.meshSendGroupMessage(
 // Remove a member (admin only)
 protocol.meshRemoveFromGroup(group.groupId, "bob")
 
+// Get group info (members, epoch, etc.)
+val info = protocol.getGroupInfo(group.groupId)
+info?.let { println("Members: ${it.members}") }
+
+// Rename a group (admin only)
+protocol.renameGroup(group.groupId, "New Team Name")
+
 // Leave a group
 protocol.meshLeaveGroup(group.groupId)
 ```
@@ -151,7 +158,7 @@ val roles = protocol.getGroupRoles(groupId)
 // mapOf("alice" to "admin", "bob" to "admin", "charlie" to "member")
 ```
 
-Listen for role changes:
+Listen for role changes and renames:
 
 ```kotlin
 protocol.setEventListener { event ->
@@ -159,15 +166,30 @@ protocol.setEventListener { event ->
         is Event.GroupRoleChanged -> {
             Log.d("Protocol", "${event.userId} is now ${event.newRole} (by ${event.changedBy})")
         }
+        is Event.GroupRenamed -> {
+            Log.d("Protocol", "Group ${event.groupId} renamed to ${event.newName} by ${event.renamedBy}")
+        }
         else -> {}
     }
 }
 ```
 
 **Security invariants:**
-- Only admins can invite, remove members, or change roles
+- Only admins can invite, remove members, change roles, or rename groups
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
 - If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
+
+## TOFU Trust Management
+
+Reset a peer's TOFU-pinned public key when you need to re-establish trust (e.g., the peer reinstalled the app):
+
+```kotlin
+// Reset trust pin for a peer
+val removed = protocol.resetTofuForPeer("bob")
+// removed == true if an entry was cleared, false if none existed
+```
+
+After reset, the next message from that peer will establish a new trust pin.
 
 ## Architecture
 

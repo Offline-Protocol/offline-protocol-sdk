@@ -286,6 +286,9 @@ pub enum Event {
         reason: String,
     },
 
+    // TODO: RelayPromoted, RelayDemoted, and RelayDemotedBattery are not yet
+    // emitted — wire RelayManager::should_promote_to_relay / should_demote_from_relay
+    // into the protocol engine so these fire on actual role transitions.
     /// This device was promoted to relay role.
     RelayPromoted {
         /// Number of connections when promoted.
@@ -382,6 +385,9 @@ pub enum Event {
         next_retry_at: Option<i64>,
     },
 
+    // TODO: AckEvicted and FragmentAssemblyEvicted are not yet emitted — wire
+    // AckManager::evict_lowest_priority and BLE fragment reassembly eviction
+    // to emit these so the app layer has observability into capacity pressure.
     /// A pending ACK was evicted due to capacity constraints.
     AckEvicted {
         /// ID of the message whose ACK was evicted.
@@ -656,6 +662,18 @@ pub enum Event {
         new_role: String,
         /// User ID of who changed the role.
         changed_by: String,
+    },
+
+    /// A group was renamed.
+    GroupRenamed {
+        /// Group identifier.
+        group_id: String,
+        /// New group name.
+        new_name: String,
+        /// Previous group name (if known).
+        old_name: Option<String>,
+        /// User ID of who renamed the group.
+        renamed_by: String,
     },
 
     // --- Service discovery ---
@@ -1281,6 +1299,21 @@ impl Event {
             user_id,
             new_role,
             changed_by,
+        }
+    }
+
+    /// Creates a GroupRenamed event.
+    pub fn group_renamed(
+        group_id: String,
+        new_name: String,
+        old_name: Option<String>,
+        renamed_by: String,
+    ) -> Self {
+        Self::GroupRenamed {
+            group_id,
+            new_name,
+            old_name,
+            renamed_by,
         }
     }
 
@@ -2133,6 +2166,17 @@ impl fmt::Debug for Event {
                 .field("user_id", &"[REDACTED]")
                 .field("new_role", new_role)
                 .field("changed_by", &"[REDACTED]")
+                .finish(),
+            Self::GroupRenamed {
+                group_id,
+                new_name,
+                old_name: _,
+                renamed_by: _,
+            } => f
+                .debug_struct("GroupRenamed")
+                .field("group_id", group_id)
+                .field("new_name", new_name)
+                .field("renamed_by", &"[REDACTED]")
                 .finish(),
         }
     }

@@ -220,23 +220,25 @@ protocol.sendMessage(
 #### Group Messaging
 
 ```swift
-// Create a group
-let group = try protocol.mlsCreateGroup(groupName: "Project Team")
+// Create a group (creator becomes admin)
+let group = try protocol.meshCreateGroup(groupName: "Project Team")
 
-// Add members (need their key packages)
-let welcome = try protocol.mlsAddGroupMember(
+// Invite members (admin only — handles key exchange + Welcome automatically)
+try protocol.meshInviteToGroup(groupId: group.groupId, inviteeUserId: "alice")
+
+// Send encrypted group message (MLS encryption + mesh fan-out)
+let messageIds = try protocol.meshSendGroupMessage(
     groupId: group.groupId,
-    memberKeyPackage: aliceKeyPackage
+    content: "Hello team!"
 )
 
-// Send the welcome to the new member
-sendWelcome(welcome, to: "alice")
+// Get group info
+if let info = try protocol.meshGetGroupInfo(groupId: group.groupId) {
+    print("Members: \(info.members), Epoch: \(info.epoch)")
+}
 
-// Send encrypted group message
-let encrypted = try protocol.mlsEncryptForGroup(
-    groupId: group.groupId,
-    plaintext: "Hello team!".data(using: .utf8)!
-)
+// Rename a group (admin only, broadcasts to all members)
+try protocol.meshRenameGroup(groupId: group.groupId, newName: "Engineering Team")
 ```
 
 ### 4. Receive and Decrypt Messages
@@ -483,19 +485,18 @@ MLS control payloads (key package / welcome / ciphertext envelopes) are encoded 
 | `mlsListSessions()` | List all sessions |
 | `mlsDeleteSession(otherUserId)` | Delete a session |
 
-### Groups
+### Groups (High-Level Mesh API)
 
 | Method | Description |
 |--------|-------------|
-| `mlsCreateGroup(name)` | Create a new group |
-| `mlsAddGroupMember(groupId, keyPackage)` | Add member (returns Welcome) |
-| `mlsRemoveGroupMember(groupId, memberId)` | Remove member |
-| `mlsLeaveGroup(groupId)` | Leave a group |
-| `mlsEncryptForGroup(groupId, plaintext)` | Encrypt for group |
-| `mlsDecryptFromGroup(encrypted)` | Decrypt from group |
-| `mlsJoinGroup(welcome)` | Join group from Welcome |
-| `mlsListGroups()` | List all groups |
-| `mlsGetGroupInfo(groupId)` | Get group information |
+| `meshCreateGroup(groupName)` | Create a new group (creator is admin) |
+| `meshInviteToGroup(groupId, inviteeUserId)` | Invite member (admin only, handles Welcome + Commit) |
+| `meshRemoveFromGroup(groupId, memberId)` | Remove member (admin only) |
+| `meshLeaveGroup(groupId)` | Leave a group with notification |
+| `meshSendGroupMessage(groupId, content)` | Send encrypted message to all members |
+| `meshListGroups()` | List all groups (excluding 1:1 sessions) |
+| `meshGetGroupInfo(groupId)` | Get group information |
+| `meshRenameGroup(groupId, newName)` | Rename a group (admin only) |
 
 ### Group Roles (High-Level Mesh API)
 

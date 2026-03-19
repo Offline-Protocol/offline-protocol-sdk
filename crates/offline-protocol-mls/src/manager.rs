@@ -56,7 +56,7 @@ impl MlsManager {
 
         let session_manager =
             SessionManager::new(user_id.clone(), storage.clone(), provider.clone());
-        let group_manager = GroupManager::new(user_id.clone(), storage.clone(), provider.clone());
+        let group_manager = GroupManager::new(storage.clone(), provider.clone());
 
         let manager = Self {
             user_id,

@@ -22,20 +22,15 @@ pub struct SessionManager {
 
     /// Group manager for underlying MLS operations.
     group_manager: GroupManager,
-
-    /// Storage backend.
-    #[allow(dead_code)]
-    storage: Arc<dyn MlsStorage>,
 }
 
 impl SessionManager {
     /// Creates a new session manager.
     pub fn new(user_id: String, storage: Arc<dyn MlsStorage>, provider: MlsProvider) -> Self {
-        let group_manager = GroupManager::new(user_id.clone(), storage.clone(), provider);
+        let group_manager = GroupManager::new(storage, provider);
         Self {
             user_id,
             group_manager,
-            storage,
         }
     }
 

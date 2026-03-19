@@ -378,10 +378,8 @@ pub enum TransportType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolState {
     Stopped,
-    Starting,
     Running,
     Paused,
-    Stopping,
 }
 
 /// Relay priority
@@ -930,9 +928,6 @@ struct InternetState {
     outgoing_messages: VecDeque<(String, Vec<u8>)>,
     /// Whether internet transport is connected
     is_connected: bool,
-    /// Server URL (used when configuring internet transport)
-    #[allow(dead_code)]
-    server_url: Option<String>,
 }
 
 /// Internal state for WiFi Direct transport operations
@@ -960,8 +955,6 @@ pub struct OfflineProtocol {
     relay_priority: RwLock<RelayPriority>,
     forced_transport: RwLock<Option<TransportType>>,
     dors_config: RwLock<Option<DorsConfig>>,
-    #[allow(dead_code)]
-    user_id: String,
 }
 
 impl OfflineProtocol {
@@ -1039,7 +1032,6 @@ impl OfflineProtocol {
             internet_state: Mutex::new(InternetState {
                 outgoing_messages: VecDeque::new(),
                 is_connected: false,
-                server_url: None,
             }),
             wifi_direct_state: Mutex::new(WifiDirectState {
                 outgoing_messages: VecDeque::new(),
@@ -1052,7 +1044,6 @@ impl OfflineProtocol {
             relay_priority: RwLock::new(RelayPriority::Medium),
             forced_transport: RwLock::new(None),
             dors_config: RwLock::new(None),
-            user_id,
         })
     }
 
@@ -2189,31 +2180,6 @@ impl OfflineProtocol {
     // TRANSPORT MANAGEMENT
     // ========================================================================
 
-    /// Adds Internet transport
-    pub fn add_internet_transport(
-        &self,
-        _server_url: String,
-        _port: u16,
-    ) -> Result<(), ProtocolError> {
-        // Internet transport requires server infrastructure
-        // This would need to be implemented by creating an InternetTransport instance
-        // and adding it via transport_manager_mut().add_transport()
-        // For now, this is not implemented as it requires network server setup
-        Err(ProtocolError::Other(
-            "Internet transport requires server infrastructure setup".to_string(),
-        ))
-    }
-
-    /// Adds Wi-Fi Direct transport
-    pub fn add_wifi_direct_transport(&self) -> Result<(), ProtocolError> {
-        // WiFi Direct transport would need to be created and added dynamically
-        // This requires platform-specific WiFi Direct implementation
-        // For now, this is not implemented as it's platform-specific
-        Err(ProtocolError::Other(
-            "WiFi Direct transport must be added by platform code".to_string(),
-        ))
-    }
-
     /// Removes a transport
     pub fn remove_transport(&self, transport_type: TransportType) -> Result<(), ProtocolError> {
         let core_transport_type = match transport_type {
@@ -3042,141 +3008,6 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
-    /// Create a new group
-    pub fn mls_create_group(&self, group_name: String) -> Result<MlsGroupInfo, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .create_group(&group_name)
-            .map(MlsGroupInfo::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Add a member to a group.
-    ///
-    /// Returns both the Welcome (for the invitee) and the Commit (to distribute
-    /// to existing members so they advance their MLS epoch).
-    pub fn mls_add_group_member(
-        &self,
-        group_id: String,
-        member_key_package: Vec<u8>,
-    ) -> Result<MlsAddMemberResult, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .add_group_member(&CoreGroupId::new(group_id), &member_key_package)
-            .map(|(welcome, commit)| MlsAddMemberResult {
-                welcome: MlsWelcomeMessage::from(welcome),
-                commit: MlsEncryptedMessage::from(commit),
-            })
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Remove a member from a group
-    pub fn mls_remove_group_member(
-        &self,
-        group_id: String,
-        member_id: String,
-    ) -> Result<MlsEncryptedMessage, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .remove_group_member(&CoreGroupId::new(group_id), &member_id)
-            .map(MlsEncryptedMessage::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Leave a group
-    pub fn mls_leave_group(&self, group_id: String) -> Result<(), ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .leave_group(&CoreGroupId::new(group_id))
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Encrypt a message for a group
-    pub fn mls_encrypt_for_group(
-        &self,
-        group_id: String,
-        plaintext: Vec<u8>,
-    ) -> Result<MlsEncryptedMessage, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .encrypt_for_group(&CoreGroupId::new(group_id), &plaintext)
-            .map(MlsEncryptedMessage::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Decrypt a message from a group
-    pub fn mls_decrypt_from_group(
-        &self,
-        encrypted: MlsEncryptedMessage,
-    ) -> Result<Option<Vec<u8>>, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .decrypt_from_group(&encrypted.into())
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// Join a group using a Welcome message
-    pub fn mls_join_group(
-        &self,
-        welcome: MlsWelcomeMessage,
-    ) -> Result<MlsGroupInfo, ProtocolError> {
-        let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
-            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
-        guard
-            .join_group(&welcome.into())
-            .map(MlsGroupInfo::from)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))
-    }
-
-    /// List all groups
-    pub fn mls_list_groups(&self) -> Vec<String> {
-        let manager = match self.get_mls_manager() {
-            Ok(m) => m,
-            Err(_) => return Vec::new(),
-        };
-        let guard = match manager.read() {
-            Ok(g) => g,
-            Err(_) => return Vec::new(),
-        };
-        guard
-            .list_groups()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|g| g.as_str().to_string())
-            .collect()
-    }
-
-    /// Get information about a group
-    pub fn mls_get_group_info(&self, group_id: String) -> Option<MlsGroupInfo> {
-        let manager = self.get_mls_manager().ok()?;
-        let guard = manager.read().ok()?;
-        guard
-            .get_group_info(&CoreGroupId::new(group_id))
-            .ok()
-            .flatten()
-            .map(MlsGroupInfo::from)
-    }
-
     /// Decrypt any encrypted message
     pub fn mls_decrypt(
         &self,
@@ -3469,6 +3300,15 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
+    /// Get information about an MLS group.
+    pub fn get_group_info(&self, group_id: String) -> Result<Option<MlsGroupInfo>, ProtocolError> {
+        let guard = self.lock_inner()?;
+        Ok(guard
+            .get_group_info(&group_id)
+            .map_err(|e| ProtocolError::Other(e.to_string()))?
+            .map(MlsGroupInfo::from))
+    }
+
     /// Set a member's role in a group (admin only).
     /// `role` must be `"admin"` or `"member"`.
     pub fn set_member_role(
@@ -3509,6 +3349,14 @@ impl OfflineProtocol {
         guard
             .get_group_roles(&group_id)
             .map(|roles| roles.into_iter().map(|(k, v)| (k, v.to_string())).collect())
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
+    /// Rename a group (admin only, broadcasts to all members).
+    pub fn rename_group(&self, group_id: String, new_name: String) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .rename_group(&group_id, &new_name)
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
@@ -3767,37 +3615,24 @@ mod tests {
     }
 
     #[test]
-    fn test_mls_manual_and_core_paths_share_single_state_under_concurrency() {
+    fn test_high_level_api_sees_groups_created_via_core() {
         let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
         protocol
             .initialize_mls(Box::new(TestMlsStorageProvider::default()))
             .unwrap();
 
-        let core_mls_handle = {
+        // Create groups through the core MlsManager directly.
+        {
             let core_guard = protocol.inner.lock().unwrap();
-            core_guard.mls_manager().cloned().unwrap()
-        };
-
-        let manual_protocol = Arc::clone(&protocol);
-        let manual_thread = thread::spawn(move || {
+            let manager = core_guard.mls_manager().cloned().unwrap();
+            let guard = manager.read().unwrap();
             for i in 0..20 {
-                manual_protocol
-                    .mls_create_group(format!("manual-group-{}", i))
-                    .unwrap();
+                guard.create_group(&format!("core-group-{}", i)).unwrap();
             }
-        });
+        }
 
-        let core_thread = thread::spawn(move || {
-            for i in 0..20 {
-                let manager = core_mls_handle.read().unwrap();
-                manager.create_group(&format!("core-group-{}", i)).unwrap();
-            }
-        });
-
-        manual_thread.join().unwrap();
-        core_thread.join().unwrap();
-
-        let from_manual_api = protocol.mls_list_groups();
+        // The high-level API should see the same groups.
+        let from_high_level = protocol.list_groups().unwrap();
         let from_core_api = {
             let core_guard = protocol.inner.lock().unwrap();
             let manager = core_guard.mls_manager().cloned().unwrap();
@@ -3812,9 +3647,10 @@ mod tests {
             groups
         };
 
-        assert_eq!(from_manual_api.len(), from_core_api.len());
+        assert_eq!(from_high_level.len(), from_core_api.len());
+        assert_eq!(from_high_level.len(), 20);
         for group_id in from_core_api {
-            assert!(from_manual_api.contains(&group_id));
+            assert!(from_high_level.contains(&group_id));
         }
     }
 

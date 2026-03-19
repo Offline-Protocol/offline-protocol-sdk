@@ -109,7 +109,7 @@ export function MlsDiagnosticsScreen({ onBack }: MlsDiagnosticsScreenProps) {
         }
 
         try {
-          const groups = await protocol.mlsListGroups();
+          const groups = await protocol.meshListGroups();
           groupCount = groups.length;
         } catch {
           groupCount = 0;

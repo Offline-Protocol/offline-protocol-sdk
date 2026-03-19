@@ -131,10 +131,8 @@ enum TransportType {
 // Protocol state
 enum ProtocolState {
     "Stopped",
-    "Starting",
     "Running",
     "Paused",
-    "Stopping",
 };
 
 // Relay priority
@@ -501,12 +499,6 @@ interface OfflineProtocol {
     
     // Transport management
     [Throws=ProtocolError]
-    void add_internet_transport(string server_url, u16 port);
-    
-    [Throws=ProtocolError]
-    void add_wifi_direct_transport();
-    
-    [Throws=ProtocolError]
     void remove_transport(TransportType transport_type);
     
     sequence<string> get_active_transports();
@@ -687,40 +679,6 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     void mls_clear_pending_welcome(string other_user_id);
     
-    // Create a new group
-    [Throws=ProtocolError]
-    MlsGroupInfo mls_create_group(string group_name);
-    
-    // Add a member to a group (returns Welcome for invitee + Commit for existing members)
-    [Throws=ProtocolError]
-    MlsAddMemberResult mls_add_group_member(string group_id, sequence<u8> member_key_package);
-    
-    // Remove a member from a group
-    [Throws=ProtocolError]
-    MlsEncryptedMessage mls_remove_group_member(string group_id, string member_id);
-    
-    // Leave a group
-    [Throws=ProtocolError]
-    void mls_leave_group(string group_id);
-    
-    // Encrypt a message for a group
-    [Throws=ProtocolError]
-    MlsEncryptedMessage mls_encrypt_for_group(string group_id, sequence<u8> plaintext);
-    
-    // Decrypt a message from a group
-    [Throws=ProtocolError]
-    sequence<u8>? mls_decrypt_from_group(MlsEncryptedMessage encrypted);
-    
-    // Join a group using a Welcome message
-    [Throws=ProtocolError]
-    MlsGroupInfo mls_join_group(MlsWelcomeMessage welcome);
-    
-    // List all groups (excluding 1:1 sessions)
-    sequence<string> mls_list_groups();
-    
-    // Get information about a group
-    MlsGroupInfo? mls_get_group_info(string group_id);
-    
     // Decrypt any encrypted message (auto-detects session vs group)
     [Throws=ProtocolError]
     sequence<u8>? mls_decrypt(MlsEncryptedMessage encrypted);
@@ -837,6 +795,10 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     sequence<string> list_groups();
 
+    // Get information about an MLS group
+    [Throws=ProtocolError]
+    MlsGroupInfo? get_group_info(string group_id);
+
     // Set a member's role in a group (admin only, broadcasts to all members)
     [Throws=ProtocolError]
     void set_member_role(string group_id, string user_id, string role);
@@ -848,6 +810,10 @@ interface OfflineProtocol {
     // Get all member roles in a group (returns user_id -> role map)
     [Throws=ProtocolError]
     record<DOMString, string> get_group_roles(string group_id);
+
+    // Rename a group (admin only, broadcasts to all members)
+    [Throws=ProtocolError]
+    void rename_group(string group_id, string new_name);
 
     // Reset the TOFU-pinned public key for a peer (allows re-pinning on next contact).
     // Returns true if an entry was removed, false if no entry existed (idempotent).

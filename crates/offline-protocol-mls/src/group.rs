@@ -19,10 +19,6 @@ pub const DEFAULT_CIPHERSUITE: Ciphersuite =
 
 /// Manages MLS groups for encrypted messaging.
 pub struct GroupManager {
-    /// User ID of the local user.
-    #[allow(dead_code)]
-    user_id: String,
-
     /// Storage backend for persisting group state.
     storage: Arc<dyn MlsStorage>,
 
@@ -32,12 +28,8 @@ pub struct GroupManager {
 
 impl GroupManager {
     /// Creates a new group manager.
-    pub fn new(user_id: String, storage: Arc<dyn MlsStorage>, provider: MlsProvider) -> Self {
-        Self {
-            user_id,
-            storage,
-            provider,
-        }
+    pub fn new(storage: Arc<dyn MlsStorage>, provider: MlsProvider) -> Self {
+        Self { storage, provider }
     }
 
     /// Returns a reference to the crypto provider.
@@ -278,7 +270,7 @@ mod tests {
         let storage = Arc::new(InMemoryStorage::new());
         let adapter = MlsStorageAdapter::new(storage.clone());
         let provider = MlsProvider::new(adapter);
-        GroupManager::new("test_user".to_string(), storage, provider)
+        GroupManager::new(storage, provider)
     }
 
     #[test]

@@ -405,23 +405,7 @@ All methods are on the `OfflineProtocol` class. Types and events are exported fr
 
 ---
 
-### 11.13 MLS Groups
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| **mlsCreateGroup** | `mlsCreateGroup(groupName): Promise<MlsGroupInfo>` | Creates MLS group. |
-| **mlsAddGroupMember** | `mlsAddGroupMember(groupId, memberKeyPackage: number[]): Promise<MlsWelcome>` | Adds member; returns Welcome for new member. |
-| **mlsRemoveGroupMember** | `mlsRemoveGroupMember(groupId, memberId): Promise<void>` | Removes member from MLS group. |
-| **mlsLeaveGroup** | `mlsLeaveGroup(groupId): Promise<void>` | Leaves MLS group. |
-| **mlsEncryptForGroup** | `mlsEncryptForGroup(groupId, plaintext: number[]): Promise<MlsEncryptedMessage>` | Encrypts for group. |
-| **mlsDecryptFromGroup** | `mlsDecryptFromGroup(encrypted): Promise<number[] \| null>` | Decrypts message from group. |
-| **mlsJoinGroup** | `mlsJoinGroup(welcome: MlsWelcome): Promise<MlsGroupInfo>` | Joins group from Welcome. |
-| **mlsListGroups** | `mlsListGroups(): Promise<string[]>` | All MLS group IDs. |
-| **mlsGetGroupInfo** | `mlsGetGroupInfo(groupId): Promise<MlsGroupInfo \| null>` | MLS group info. |
-
----
-
-### 11.14 Mesh Group Messaging (MLS-Encrypted)
+### 11.13 Mesh Group Messaging (MLS-Encrypted)
 
 High-level group methods that handle MLS encryption and mesh fan-out automatically.
 
@@ -434,10 +418,12 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 | **meshRemoveFromGroup** | `meshRemoveFromGroup(groupId, memberId): Promise<void>` | Removes member (admin only). |
 | **meshLeaveGroup** | `meshLeaveGroup(groupId): Promise<void>` | Leaves group with notification. |
 | **meshListGroups** | `meshListGroups(): Promise<string[]>` | Lists all group IDs (excluding 1:1 sessions). |
+| **meshGetGroupInfo** | `meshGetGroupInfo(groupId): Promise<MlsGroupInfo \| null>` | Gets group info (members, epoch, etc.). |
+| **meshRenameGroup** | `meshRenameGroup(groupId, newName): Promise<void>` | Renames group (admin only); broadcasts to all members. |
 
 ---
 
-### 11.15 Group Role Management
+### 11.14 Group Role Management
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -447,13 +433,45 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 
 **Security invariants:**
 - The group creator is automatically `Admin`.
-- Only admins can invite, remove, or change roles.
+- Only admins can invite, remove, change roles, or rename groups.
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups).
 - Deterministic election promotes the lexicographically smallest member if the last admin disconnects.
 
 ---
 
-### 11.16 Group Management (Relay Server API)
+### 11.15 Security & Trust
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **blockUser** | `blockUser(userId: string): Promise<void>` | Blocks a user (silently drops their messages). |
+| **unblockUser** | `unblockUser(userId: string): Promise<void>` | Unblocks a user. |
+| **getBlockedUsers** | `getBlockedUsers(): Promise<string[]>` | Returns all blocked user IDs. |
+| **isUserBlocked** | `isUserBlocked(userId: string): Promise<boolean>` | Whether a user is blocked. |
+| **resetTofuForPeer** | `resetTofuForPeer(peerId: string): Promise<boolean>` | Resets the TOFU-pinned public key for a peer. After reset, the next message from this peer establishes a new trust pin. Returns `true` if an entry was removed. |
+
+---
+
+### 11.16 Presence, Typing & Read Receipts
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **sendPresenceUpdate** | `sendPresenceUpdate(recipient, status): Promise<void>` | Sends a presence update (`"online"`, `"away"`, `"offline"`). |
+| **sendTypingIndicator** | `sendTypingIndicator(recipient, conversationId, isTyping): Promise<void>` | Sends a typing indicator. |
+| **sendReadReceipt** | `sendReadReceipt(recipient, messageIds: string[]): Promise<void>` | Sends read receipts for one or more messages. |
+
+---
+
+### 11.17 Message Forwarding
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| **forwardMessage** | `forwardMessage(params: ForwardMessageParams): Promise<string>` | Forwards a message to a 1:1 recipient with attribution. |
+
+For group forwarding, see `meshForwardMessageToGroup` in [§11.13](#1113-mesh-group-messaging-mls-encrypted).
+
+---
+
+### 11.18 Group Management (Relay Server API)
 
 Each method returns a **JSON string** that your app (or provider) sends to the relay. The SDK does not open or manage the connection. In the example app, ProtocolProvider owns the relay and exposes group actions that call these methods and send the JSON for you.
 

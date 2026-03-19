@@ -2283,7 +2283,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
     async (groupId: string) => {
       if (!protocol) return false;
       try {
-        const info = await protocol.mlsGetGroupInfo(groupId);
+        const info = await protocol.meshGetGroupInfo(groupId);
         if (info) {
           // Fetch real roles from the protocol layer
           let roles: Record<string, string> = {};
@@ -2324,7 +2324,7 @@ export function ProtocolProvider({ children }: ProtocolProviderProps) {
       const groupInfos = await Promise.all(
         groupIds.map(async id => {
           try {
-            const info = await protocol.mlsGetGroupInfo(id);
+            const info = await protocol.meshGetGroupInfo(id);
             if (info) {
               return { groupId: info.groupId, name: info.groupName, createdAt: new Date(info.createdAt) };
             }

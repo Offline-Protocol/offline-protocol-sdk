@@ -6290,3 +6290,272 @@ fn test_welcome_handler_clears_key_package_sent_to() {
         "key_package_sent_to should be cleared for inviter after Welcome"
     );
 }
+
+// ========================================================================
+// GROUP RENAME
+// ========================================================================
+
+#[test]
+fn test_rename_group_success() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Original Name");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    alice.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    alice.rename_group(&group_id, "New Name").unwrap();
+
+    // Verify name was updated in metadata
+    let info = alice.get_group_info(&group_id).unwrap().unwrap();
+    assert_eq!(info.name.as_deref(), Some("New Name"));
+
+    // Verify event was emitted
+    let captured = events.lock().unwrap();
+    let rename_event = captured
+        .iter()
+        .find(|e| matches!(e, Event::GroupRenamed { .. }));
+    assert!(rename_event.is_some(), "Should emit GroupRenamed event");
+    if let Some(Event::GroupRenamed {
+        group_id: gid,
+        new_name,
+        old_name,
+        renamed_by,
+    }) = rename_event
+    {
+        assert_eq!(gid, &group_id);
+        assert_eq!(new_name, "New Name");
+        assert_eq!(old_name.as_deref(), Some("Original Name"));
+        assert_eq!(renamed_by, "alice");
+    }
+}
+
+#[test]
+fn test_rename_group_non_admin_rejected() {
+    let (mut _alice, mut bob, group_id) = setup_alice_bob_group("Original Name");
+
+    let result = bob.rename_group(&group_id, "Bob's Name");
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Only admins can rename"),
+        "Non-admin rename should be rejected"
+    );
+}
+
+#[test]
+fn test_handle_group_rename_from_admin() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Original Name");
+
+    // Set up Alice's admin role in Bob's local metadata
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+        bob_mls.set_group_name(&gid, "Original Name").unwrap();
+    }
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let payload = GroupRenamePayload {
+        group_id: group_id.clone(),
+        new_name: "Renamed By Alice".to_string(),
+        renamed_by: "alice".to_string(),
+    };
+    bob.handle_group_rename(
+        "msg-rename-1",
+        "alice",
+        &serde_json::to_string(&payload).unwrap(),
+    );
+
+    // Verify name was updated
+    let info = bob.get_group_info(&group_id).unwrap().unwrap();
+    assert_eq!(info.name.as_deref(), Some("Renamed By Alice"));
+
+    // Verify event emitted with transport-authenticated sender
+    let captured = events.lock().unwrap();
+    let rename_event = captured
+        .iter()
+        .find(|e| matches!(e, Event::GroupRenamed { .. }));
+    assert!(rename_event.is_some(), "Should emit GroupRenamed event");
+    if let Some(Event::GroupRenamed { renamed_by, .. }) = rename_event {
+        assert_eq!(renamed_by, "alice", "Should use transport sender");
+    }
+}
+
+#[test]
+fn test_handle_group_rename_from_non_admin_rejected() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Original Name");
+
+    // Set up Alice as admin, Bob as member in Bob's metadata
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+    }
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Incoming rename from "bob" (non-admin sender)
+    let payload = GroupRenamePayload {
+        group_id: group_id.clone(),
+        new_name: "Hacked Name".to_string(),
+        renamed_by: "bob".to_string(),
+    };
+    bob.handle_group_rename(
+        "msg-rename-2",
+        "bob",
+        &serde_json::to_string(&payload).unwrap(),
+    );
+
+    // Should NOT emit event
+    let captured = events.lock().unwrap();
+    let rename_event = captured
+        .iter()
+        .find(|e| matches!(e, Event::GroupRenamed { .. }));
+    assert!(
+        rename_event.is_none(),
+        "Rename from non-admin should be rejected"
+    );
+}
+
+#[test]
+fn test_handle_group_rename_dedup() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Original Name");
+
+    // Set up Alice's admin role
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+    }
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let payload = GroupRenamePayload {
+        group_id: group_id.clone(),
+        new_name: "New Name".to_string(),
+        renamed_by: "alice".to_string(),
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+
+    // First delivery — accepted
+    bob.handle_group_rename("msg-rename-dup", "alice", &json);
+    // Second delivery — deduplicated
+    bob.handle_group_rename("msg-rename-dup", "alice", &json);
+
+    let captured = events.lock().unwrap();
+    let rename_count = captured
+        .iter()
+        .filter(|e| matches!(e, Event::GroupRenamed { .. }))
+        .count();
+    assert_eq!(rename_count, 1, "Duplicate rename should be deduplicated");
+}
+
+#[test]
+fn test_handle_group_rename_uses_transport_sender() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Original Name");
+
+    // Set up Alice's admin role
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+    }
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Payload claims "mallory" renamed, but transport sender is "alice"
+    let payload = GroupRenamePayload {
+        group_id: group_id.clone(),
+        new_name: "Spoofed Name".to_string(),
+        renamed_by: "mallory".to_string(),
+    };
+    bob.handle_group_rename(
+        "msg-rename-spoof",
+        "alice",
+        &serde_json::to_string(&payload).unwrap(),
+    );
+
+    let captured = events.lock().unwrap();
+    if let Some(Event::GroupRenamed { renamed_by, .. }) = captured
+        .iter()
+        .find(|e| matches!(e, Event::GroupRenamed { .. }))
+    {
+        assert_eq!(
+            renamed_by, "alice",
+            "renamed_by should be transport sender, not payload field"
+        );
+    } else {
+        panic!("Expected GroupRenamed event");
+    }
+}
+
+#[test]
+fn test_rename_group_payload_serialization() {
+    let payload = GroupRenamePayload {
+        group_id: "grp-123".to_string(),
+        new_name: "Test Name".to_string(),
+        renamed_by: "alice".to_string(),
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    let parsed: GroupRenamePayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.group_id, "grp-123");
+    assert_eq!(parsed.new_name, "Test Name");
+    assert_eq!(parsed.renamed_by, "alice");
+}
+
+#[test]
+fn test_rename_group_empty_name_rejected() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Original Name");
+
+    let result = alice.rename_group(&group_id, "");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+
+    let result = alice.rename_group(&group_id, "   ");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+}
+
+#[test]
+fn test_create_group_empty_name_rejected() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let result = protocol.create_group("");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+
+    let result = protocol.create_group("   ");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+}

@@ -976,6 +976,22 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Reset the TOFU-pinned public key for a peer.
+    @objc func resetTofuForPeer(_ peerId: String,
+                                 resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            let removed = try proto.resetTofuForPeer(peerId: peerId)
+            resolver(removed)
+        } catch {
+            rejecter("ERROR_TOFU", "Failed to reset TOFU for peer: \(error.localizedDescription)", error)
+        }
+    }
+
     // ─── Presence, Typing, Read Receipts ───────────────────────
 
     @objc func sendPresenceUpdate(_ recipient: String,
@@ -1548,14 +1564,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         switch state {
         case .stopped:
             stateString = "Stopped"
-        case .starting:
-            stateString = "Starting"
         case .running:
             stateString = "Running"
         case .paused:
             stateString = "Paused"
-        case .stopping:
-            stateString = "Stopping"
         @unknown default:
             stateString = "Unknown"
         }
@@ -2736,235 +2748,6 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(proto.mlsListSessions())
     }
 
-    /// Create a new group (memberIds ignored; kept for bridge signature compatibility)
-    @objc func mlsCreateGroup(_ groupName: String,
-                              memberIds: [NSNumber]?,
-                              resolver: @escaping RCTPromiseResolveBlock,
-                              rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let info = try proto.mlsCreateGroup(groupName: groupName)
-            let result: [String: Any] = [
-                "groupId": info.groupId,
-                "name": info.name ?? NSNull(),
-                "members": info.members,
-                "epoch": NSNumber(value: info.epoch),
-                "isSession": info.isSession,
-                "createdAtMs": NSNumber(value: info.createdAtMs),
-                "lastActivityMs": NSNumber(value: info.lastActivityMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to create group: \(error.localizedDescription)", error)
-        }
-    }
-
-    /// Add a member to a group (bridge names second param memberId; it is key package bytes)
-    @objc func mlsAddGroupMember(_ groupId: String,
-                                 memberId memberKeyPackage: [NSNumber],
-                                 resolver: @escaping RCTPromiseResolveBlock,
-                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let data = memberKeyPackage.map { UInt8($0.intValue) }
-            let addResult = try proto.mlsAddGroupMember(groupId: groupId, memberKeyPackage: data)
-            let result: [String: Any] = [
-                "groupId": addResult.welcome.groupId,
-                "welcomeData": addResult.welcome.welcomeData.map { NSNumber(value: $0) },
-                "inviterId": addResult.welcome.inviterId,
-                "groupName": addResult.welcome.groupName ?? NSNull(),
-                "timestampMs": NSNumber(value: addResult.welcome.timestampMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to add group member: \(error.localizedDescription)", error)
-        }
-    }
-
-    /// Remove a member from a group
-    @objc func mlsRemoveGroupMember(_ groupId: String,
-                                    memberId: String,
-                                    resolver: @escaping RCTPromiseResolveBlock,
-                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let commit = try proto.mlsRemoveGroupMember(groupId: groupId, memberId: memberId)
-            let result: [String: Any] = [
-                "groupId": commit.groupId,
-                "messageType": commit.messageType,
-                "epoch": NSNumber(value: commit.epoch),
-                "ciphertext": commit.ciphertext.map { NSNumber(value: $0) },
-                "senderId": commit.senderId,
-                "timestampMs": NSNumber(value: commit.timestampMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to remove group member: \(error.localizedDescription)", error)
-        }
-    }
-
-    /// Leave a group
-    @objc func mlsLeaveGroup(_ groupId: String,
-                             resolver: @escaping RCTPromiseResolveBlock,
-                             rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            try proto.mlsLeaveGroup(groupId: groupId)
-            resolver(nil)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to leave group: \(error.localizedDescription)", error)
-        }
-    }
-
-    /// Encrypt a message for a group
-    @objc func mlsEncryptForGroup(_ groupId: String,
-                                  plaintext: [NSNumber],
-                                  resolver: @escaping RCTPromiseResolveBlock,
-                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            let data = plaintext.map { UInt8($0.intValue) }
-            let encrypted = try proto.mlsEncryptForGroup(groupId: groupId, plaintext: data)
-            let result: [String: Any] = [
-                "groupId": encrypted.groupId,
-                "messageType": encrypted.messageType,
-                "epoch": NSNumber(value: encrypted.epoch),
-                "ciphertext": encrypted.ciphertext.map { NSNumber(value: $0) },
-                "senderId": encrypted.senderId,
-                "timestampMs": NSNumber(value: encrypted.timestampMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to encrypt message for group: \(error.localizedDescription)", error)
-        }
-    }
-
-    /// Decrypt a message from a group
-    @objc func mlsDecryptFromGroup(_ encryptedJson: String,
-                                   resolver: @escaping RCTPromiseResolveBlock,
-                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = encryptedJson.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-            }
-            
-            let ciphertextNumbers = json["ciphertext"] as? [NSNumber] ?? []
-            let ciphertext = ciphertextNumbers.map { UInt8($0.intValue) }
-            
-            let encrypted = MlsEncryptedMessage(
-                groupId: json["groupId"] as? String ?? "",
-                messageType: json["messageType"] as? String ?? "Application",
-                epoch: (json["epoch"] as? NSNumber)?.uint64Value ?? 0,
-                ciphertext: ciphertext,
-                senderId: json["senderId"] as? String ?? "",
-                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
-            )
-            
-            if let plaintext = try proto.mlsDecryptFromGroup(encrypted: encrypted) {
-                resolver(plaintext.map { NSNumber(value: $0) })
-            } else {
-                resolver(NSNull())
-            }
-        } catch {
-            rejecter("ERROR_MLS", "Failed to decrypt message from group: \(error.localizedDescription)", error)
-        }
-    }
-
-    /// Join a group using a Welcome message
-    @objc func mlsJoinGroup(_ welcomeJson: String,
-                            resolver: @escaping RCTPromiseResolveBlock,
-                            rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        do {
-            guard let jsonData = welcomeJson.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-                throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-            }
-            
-            let welcomeDataNumbers = json["welcomeData"] as? [NSNumber] ?? []
-            let welcomeData = welcomeDataNumbers.map { UInt8($0.intValue) }
-            
-            let welcome = MlsWelcomeMessage(
-                groupId: json["groupId"] as? String ?? "",
-                welcomeData: welcomeData,
-                inviterId: json["inviterId"] as? String ?? "",
-                groupName: json["groupName"] as? String,
-                timestampMs: (json["timestampMs"] as? NSNumber)?.uint64Value ?? 0
-            )
-            
-            let info = try proto.mlsJoinGroup(welcome: welcome)
-            let result: [String: Any] = [
-                "groupId": info.groupId,
-                "name": info.name ?? NSNull(),
-                "members": info.members,
-                "epoch": NSNumber(value: info.epoch),
-                "isSession": info.isSession,
-                "createdAtMs": NSNumber(value: info.createdAtMs),
-                "lastActivityMs": NSNumber(value: info.lastActivityMs)
-            ]
-            resolver(result)
-        } catch {
-            rejecter("ERROR_MLS", "Failed to join group: \(error.localizedDescription)", error)
-        }
-    }
-
-    /// List all groups
-    @objc func mlsListGroups(_ resolver: @escaping RCTPromiseResolveBlock,
-                             rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            resolver([])
-            return
-        }
-        resolver(proto.mlsListGroups())
-    }
-
-    /// Get group information
-    @objc func mlsGetGroupInfo(_ groupId: String,
-                               resolver: @escaping RCTPromiseResolveBlock,
-                               rejecter: @escaping RCTPromiseRejectBlock) {
-        guard let proto = protocolInstance else {
-            rejecter("ERROR_MLS", "Protocol not initialized", nil)
-            return
-        }
-        if let info = proto.mlsGetGroupInfo(groupId: groupId) {
-            let result: [String: Any] = [
-                "groupId": info.groupId,
-                "name": info.name ?? NSNull(),
-                "members": info.members,
-                "epoch": NSNumber(value: info.epoch),
-                "isSession": info.isSession,
-                "createdAtMs": NSNumber(value: info.createdAtMs),
-                "lastActivityMs": NSNumber(value: info.lastActivityMs)
-            ]
-            resolver(result)
-        } else {
-            resolver(NSNull())
-        }
-    }
-
     /// Process a Welcome message
     @objc func mlsProcessWelcome(_ welcomeJson: String,
                                  resolver: @escaping RCTPromiseResolveBlock,
@@ -3165,6 +2948,34 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    /// Get information about an MLS group.
+    @objc func meshGetGroupInfo(_ groupId: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            if let info = try proto.getGroupInfo(groupId: groupId) {
+                let result: [String: Any] = [
+                    "groupId": info.groupId,
+                    "name": info.name ?? NSNull(),
+                    "members": info.members,
+                    "epoch": NSNumber(value: info.epoch),
+                    "isSession": info.isSession,
+                    "createdAtMs": NSNumber(value: info.createdAtMs),
+                    "lastActivityMs": NSNumber(value: info.lastActivityMs)
+                ]
+                resolver(result)
+            } else {
+                resolver(NSNull())
+            }
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to get group info: \(error.localizedDescription)", error)
+        }
+    }
+
     /// Set a member's role in a group (admin only).
     @objc func meshSetMemberRole(_ groupId: String,
                                   userId: String,
@@ -3213,6 +3024,23 @@ class OfflineProtocolModule: RCTEventEmitter {
             resolver(roles)
         } catch {
             rejecter("ERROR_MESH_GROUP", "Failed to get group roles: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Rename a group (admin only, broadcasts to all members).
+    @objc func meshRenameGroup(_ groupId: String,
+                                newName: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MESH_GROUP", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            try proto.renameGroup(groupId: groupId, newName: newName)
+            resolver(nil)
+        } catch {
+            rejecter("ERROR_MESH_GROUP", "Failed to rename group: \(error.localizedDescription)", error)
         }
     }
 

@@ -164,6 +164,14 @@ let messageIds = try protocol.meshSendGroupMessage(
 // Remove a member (admin only)
 try protocol.meshRemoveFromGroup(groupId: group.groupId, memberId: "bob")
 
+// Get group info (members, epoch, etc.)
+if let info = try protocol.getGroupInfo(groupId: group.groupId) {
+    print("Members: \(info.members)")
+}
+
+// Rename a group (admin only)
+try protocol.renameGroup(groupId: group.groupId, newName: "New Team Name")
+
 // Leave a group
 try protocol.meshLeaveGroup(groupId: group.groupId)
 ```
@@ -184,13 +192,15 @@ let roles = try protocol.getGroupRoles(groupId: groupId)
 // ["alice": "admin", "bob": "admin", "charlie": "member"]
 ```
 
-Listen for role changes:
+Listen for role changes and renames:
 
 ```swift
 protocol.onEvent { event in
     switch event {
     case .groupRoleChanged(let evt):
         print("\(evt.userId) is now \(evt.newRole) (changed by \(evt.changedBy))")
+    case .groupRenamed(let evt):
+        print("Group \(evt.groupId) renamed to \(evt.newName) by \(evt.renamedBy)")
     default:
         break
     }
@@ -198,9 +208,21 @@ protocol.onEvent { event in
 ```
 
 **Security invariants:**
-- Only admins can invite, remove members, or change roles
+- Only admins can invite, remove members, change roles, or rename groups
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
 - If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
+
+## TOFU Trust Management
+
+Reset a peer's TOFU-pinned public key when you need to re-establish trust (e.g., the peer reinstalled the app):
+
+```swift
+// Reset trust pin for a peer
+let removed = try protocol.resetTofuForPeer(peerId: "bob")
+// removed == true if an entry was cleared, false if none existed
+```
+
+After reset, the next message from that peer will establish a new trust pin.
 
 ## Platform Limitations
 

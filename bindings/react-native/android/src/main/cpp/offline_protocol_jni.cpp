@@ -84,10 +84,6 @@ extern "C" {
                                                        uint32_t failure_count);
     int32_t offline_protocol_should_escalate_to_wifi(ProtocolHandle* handle,
                                                       int32_t* out_should_escalate);
-    int32_t offline_protocol_add_internet_transport(ProtocolHandle* handle,
-                                                     const char* config_json);
-    int32_t offline_protocol_add_wifi_direct_transport(ProtocolHandle* handle,
-                                                        const char* config_json);
     int32_t offline_protocol_remove_transport(ProtocolHandle* handle,
                                               int32_t transport_type);
     int32_t offline_protocol_get_active_transports(ProtocolHandle* handle,
@@ -602,54 +598,6 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeShouldEscalateToWifi(
     }
     
     return static_cast<jint>(shouldEscalate);
-}
-
-JNIEXPORT jint JNICALL
-Java_com_offlineprotocol_OfflineProtocolModule_nativeAddInternetTransport(
-    JNIEnv* env, jobject thiz, jlong handlePtr, jstring configJson) {
-    
-    if (handlePtr == 0) {
-        return ERROR_NULL_POINTER;
-    }
-    
-    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
-    
-    const char* config = nullptr;
-    if (configJson != nullptr) {
-        config = env->GetStringUTFChars(configJson, nullptr);
-    }
-    
-    int32_t result = offline_protocol_add_internet_transport(handle, config);
-    
-    if (config != nullptr) {
-        env->ReleaseStringUTFChars(configJson, config);
-    }
-    
-    return result;
-}
-
-JNIEXPORT jint JNICALL
-Java_com_offlineprotocol_OfflineProtocolModule_nativeAddWifiDirectTransport(
-    JNIEnv* env, jobject thiz, jlong handlePtr, jstring configJson) {
-    
-    if (handlePtr == 0) {
-        return ERROR_NULL_POINTER;
-    }
-    
-    ProtocolHandle* handle = reinterpret_cast<ProtocolHandle*>(handlePtr);
-    
-    const char* config = nullptr;
-    if (configJson != nullptr) {
-        config = env->GetStringUTFChars(configJson, nullptr);
-    }
-    
-    int32_t result = offline_protocol_add_wifi_direct_transport(handle, config);
-    
-    if (config != nullptr) {
-        env->ReleaseStringUTFChars(configJson, config);
-    }
-    
-    return result;
 }
 
 JNIEXPORT jint JNICALL
