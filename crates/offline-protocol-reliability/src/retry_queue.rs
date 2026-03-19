@@ -89,8 +89,9 @@ impl Ord for RetryEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse comparison for min-heap (earliest retry_at first)
         other.retry_at.cmp(&self.retry_at).then_with(|| {
-            // Tie-breaker: higher priority messages first
-            other.message.priority.cmp(&self.message.priority)
+            // Tie-breaker: higher priority messages first (non-reversed,
+            // so High > Low makes High pop first from the max-heap)
+            self.message.priority.cmp(&other.message.priority)
         })
     }
 }
@@ -261,11 +262,16 @@ impl RetryQueue {
 
     /// Drains all entries from the queue, ignoring `retry_at` timing.
     ///
-    /// Returns all entries and clears the queue. Used for immediate flush
-    /// when transport becomes available.
+    /// Returns entries in priority order (earliest `retry_at` first, then
+    /// highest message priority). Used for immediate flush when transport
+    /// becomes available.
     pub fn drain_all(&mut self) -> Vec<RetryEntry> {
         self.index.clear();
-        self.queue.drain().collect()
+        let mut entries = Vec::with_capacity(self.queue.len());
+        while let Some(entry) = self.queue.pop() {
+            entries.push(entry);
+        }
+        entries
     }
 
     /// Gets the time until the next retry is ready.
@@ -452,7 +458,8 @@ mod tests {
         assert!(queue.dequeue_ready().is_none());
         assert_eq!(queue.len(), 3);
 
-        // drain_all returns everything regardless of timing
+        // drain_all returns everything regardless of timing, in heap order
+        // (earliest retry_at first, priority as tiebreaker)
         let entries = queue.drain_all();
         assert_eq!(entries.len(), 3);
         assert!(queue.is_empty());
@@ -487,6 +494,37 @@ mod tests {
             .iter()
             .any(|e| e.message.priority == MessagePriority::High);
         assert!(has_high);
+    }
+
+    #[test]
+    fn test_priority_tiebreaker_ordering() {
+        // Verify that when retry_at is identical, higher priority pops first.
+        // We construct entries directly to ensure identical timestamps.
+        let now = Utc::now();
+        let make_entry = |priority: MessagePriority| {
+            let mut msg = create_test_message(priority);
+            // Force same priority into message
+            msg.priority = priority;
+            RetryEntry {
+                message: msg,
+                retry_count: 0,
+                added_at: now,
+                retry_at: now,
+                current_delay_ms: 1000,
+            }
+        };
+
+        let mut heap = BinaryHeap::new();
+        heap.push(make_entry(MessagePriority::Low));
+        heap.push(make_entry(MessagePriority::High));
+        heap.push(make_entry(MessagePriority::Medium));
+
+        assert_eq!(heap.pop().unwrap().message.priority, MessagePriority::High);
+        assert_eq!(
+            heap.pop().unwrap().message.priority,
+            MessagePriority::Medium
+        );
+        assert_eq!(heap.pop().unwrap().message.priority, MessagePriority::Low);
     }
 
     #[test]

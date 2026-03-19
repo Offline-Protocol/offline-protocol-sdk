@@ -504,6 +504,9 @@ impl OfflineProtocol {
         let count = to_send.len().min(crate::constants::FLUSH_BATCH_LIMIT);
         debug!(peer_id = %peer_id, count = count, "Flushing outbox for discovered peer");
 
+        // Only process up to FLUSH_BATCH_LIMIT messages. Overflow messages
+        // are not removed from the retry queue, so they retain their backoff
+        // timers and will be picked up on the next process() tick or flush.
         for (message, attempt_count) in to_send
             .into_iter()
             .take(crate::constants::FLUSH_BATCH_LIMIT)
