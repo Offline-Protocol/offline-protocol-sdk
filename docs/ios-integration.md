@@ -144,6 +144,64 @@ UniFFI Generated Bindings (Swift)
 Rust Core (100% safe)
 ```
 
+## Group Messaging (MLS-Encrypted Mesh)
+
+Create and manage encrypted groups over the mesh. The group creator is automatically an admin.
+
+```swift
+// Create a group
+let group = try protocol.meshCreateGroup(groupName: "Project Team")
+
+// Invite a member (admin only)
+try protocol.meshInviteToGroup(groupId: group.groupId, inviteeUserId: "bob")
+
+// Send an encrypted group message
+let messageIds = try protocol.meshSendGroupMessage(
+    groupId: group.groupId,
+    content: "Hello team!"
+)
+
+// Remove a member (admin only)
+try protocol.meshRemoveFromGroup(groupId: group.groupId, memberId: "bob")
+
+// Leave a group
+try protocol.meshLeaveGroup(groupId: group.groupId)
+```
+
+### Group Role Management
+
+Groups use role-based access control: **Admin** and **Member**.
+
+```swift
+// Promote a member to admin (admin only)
+try protocol.setMemberRole(groupId: groupId, userId: "bob", role: "admin")
+
+// Check a member's role
+let role = try protocol.getMemberRole(groupId: groupId, userId: "bob") // "admin" or "member"
+
+// Get all roles
+let roles = try protocol.getGroupRoles(groupId: groupId)
+// ["alice": "admin", "bob": "admin", "charlie": "member"]
+```
+
+Listen for role changes:
+
+```swift
+protocol.onEvent { event in
+    switch event {
+    case .groupRoleChanged(let evt):
+        print("\(evt.userId) is now \(evt.newRole) (changed by \(evt.changedBy))")
+    default:
+        break
+    }
+}
+```
+
+**Security invariants:**
+- Only admins can invite, remove members, or change roles
+- The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
+- If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
+
 ## Platform Limitations
 
 iOS does **not** support Wi-Fi Direct. Available transports:

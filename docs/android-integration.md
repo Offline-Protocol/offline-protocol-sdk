@@ -111,6 +111,64 @@ Add to `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.INTERNET" />
 ```
 
+## Group Messaging (MLS-Encrypted Mesh)
+
+Create and manage encrypted groups over the mesh. The group creator is automatically an admin.
+
+```kotlin
+// Create a group
+val group = protocol.meshCreateGroup("Project Team")
+
+// Invite a member (admin only)
+protocol.meshInviteToGroup(group.groupId, "bob")
+
+// Send an encrypted group message
+val messageIds = protocol.meshSendGroupMessage(
+    groupId = group.groupId,
+    content = "Hello team!"
+)
+
+// Remove a member (admin only)
+protocol.meshRemoveFromGroup(group.groupId, "bob")
+
+// Leave a group
+protocol.meshLeaveGroup(group.groupId)
+```
+
+### Group Role Management
+
+Groups use role-based access control: **Admin** and **Member**.
+
+```kotlin
+// Promote a member to admin (admin only)
+protocol.setMemberRole(groupId, "bob", "admin")
+
+// Check a member's role
+val role = protocol.getMemberRole(groupId, "bob") // "admin" or "member"
+
+// Get all roles
+val roles = protocol.getGroupRoles(groupId)
+// mapOf("alice" to "admin", "bob" to "admin", "charlie" to "member")
+```
+
+Listen for role changes:
+
+```kotlin
+protocol.setEventListener { event ->
+    when (event) {
+        is Event.GroupRoleChanged -> {
+            Log.d("Protocol", "${event.userId} is now ${event.newRole} (by ${event.changedBy})")
+        }
+        else -> {}
+    }
+}
+```
+
+**Security invariants:**
+- Only admins can invite, remove members, or change roles
+- The last admin cannot be demoted, removed, or leave (prevents orphaned groups)
+- If the last admin disconnects unexpectedly, a deterministic election promotes the next admin
+
 ## Architecture
 
 ```
