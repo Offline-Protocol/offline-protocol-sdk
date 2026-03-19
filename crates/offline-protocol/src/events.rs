@@ -664,6 +664,18 @@ pub enum Event {
         changed_by: String,
     },
 
+    /// A group was renamed.
+    GroupRenamed {
+        /// Group identifier.
+        group_id: String,
+        /// New group name.
+        new_name: String,
+        /// Previous group name (if known).
+        old_name: Option<String>,
+        /// User ID of who renamed the group.
+        renamed_by: String,
+    },
+
     // --- Service discovery ---
     /// A service was discovered on the mesh in response to a discovery query.
     ServiceDiscovered {
@@ -1287,6 +1299,21 @@ impl Event {
             user_id,
             new_role,
             changed_by,
+        }
+    }
+
+    /// Creates a GroupRenamed event.
+    pub fn group_renamed(
+        group_id: String,
+        new_name: String,
+        old_name: Option<String>,
+        renamed_by: String,
+    ) -> Self {
+        Self::GroupRenamed {
+            group_id,
+            new_name,
+            old_name,
+            renamed_by,
         }
     }
 
@@ -2139,6 +2166,17 @@ impl fmt::Debug for Event {
                 .field("user_id", &"[REDACTED]")
                 .field("new_role", new_role)
                 .field("changed_by", &"[REDACTED]")
+                .finish(),
+            Self::GroupRenamed {
+                group_id,
+                new_name,
+                old_name: _,
+                renamed_by: _,
+            } => f
+                .debug_struct("GroupRenamed")
+                .field("group_id", group_id)
+                .field("new_name", new_name)
+                .field("renamed_by", &"[REDACTED]")
                 .finish(),
         }
     }

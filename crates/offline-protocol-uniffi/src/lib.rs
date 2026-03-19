@@ -3352,6 +3352,14 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::Other(e.to_string()))
     }
 
+    /// Rename a group (admin only, broadcasts to all members).
+    pub fn rename_group(&self, group_id: String, new_name: String) -> Result<(), ProtocolError> {
+        let mut guard = self.lock_inner()?;
+        guard
+            .rename_group(&group_id, &new_name)
+            .map_err(|e| ProtocolError::Other(e.to_string()))
+    }
+
     // ========================================================================
     // TOFU MANAGEMENT
     // ========================================================================

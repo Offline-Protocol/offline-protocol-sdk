@@ -97,6 +97,8 @@ define_internal_prefixes! {
     GROUP_RELAY_BROADCAST = "__GRP_RELAY_BCAST__",
     /// Prefix for group role change notifications.
     GROUP_ROLE_CHANGE = "__GRP_ROLE_CHG__",
+    /// Prefix for group rename notifications.
+    GROUP_RENAME = "__GRP_RENAME__",
     /// Prefix for presence update messages.
     PRESENCE = "__PRESENCE__",
     /// Prefix for typing indicator messages.

@@ -191,6 +191,17 @@ pub(crate) struct GroupRoleChangePayload {
     pub(crate) changed_by: String,
 }
 
+/// Payload for group rename notifications sent via mesh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GroupRenamePayload {
+    /// MLS group identifier.
+    pub(crate) group_id: String,
+    /// New human-readable group name.
+    pub(crate) new_name: String,
+    /// User ID of who renamed the group.
+    pub(crate) renamed_by: String,
+}
+
 // --- Relay optimization payloads ---
 
 /// Payload for registering/updating a group with the relay server.
@@ -1998,6 +2009,153 @@ impl OfflineProtocol {
             payload.group_id,
             payload.target_user_id,
             payload.new_role.to_string(),
+            sender.to_string(),
+        ));
+    }
+
+    // ========================================================================
+    // GROUP RENAME
+    // ========================================================================
+
+    /// Renames a group (admin only).
+    /// Updates the local group name and broadcasts the change to all members.
+    pub fn rename_group(&mut self, group_id: &str, new_name: &str) -> Result<()> {
+        let self_id = self.config.user_id.clone();
+        if !self.check_is_admin(group_id, &self_id)? {
+            return Err(Error::Other("Only admins can rename groups".to_string()));
+        }
+
+        // Load old name before updating
+        let old_name = {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            mls_guard
+                .get_group_metadata(&gid)?
+                .and_then(|m| m.name.clone())
+        };
+
+        // Update locally
+        {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            mls_guard.set_group_name(&gid, new_name)?;
+        }
+
+        // Broadcast to all members
+        let members = self
+            .group_mesh
+            .members
+            .get(group_id)
+            .cloned()
+            .or_else(|| self.refresh_group_members(group_id).ok())
+            .unwrap_or_default();
+
+        let payload = GroupRenamePayload {
+            group_id: group_id.to_string(),
+            new_name: new_name.to_string(),
+            renamed_by: self_id.clone(),
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::GROUP_RENAME,
+            serde_json::to_string(&payload)
+                .map_err(|e| Error::Other(format!("Serialize group rename: {}", e)))?
+        );
+        for member in &members {
+            if member == &self_id {
+                continue;
+            }
+            if let Err(e) =
+                self.send_internal_message(member, content.clone(), MessagePriority::High)
+            {
+                warn!(member = %member, group_id = %group_id, error = %e, "Failed to send group rename broadcast");
+            }
+        }
+
+        self.emit_event(Event::group_renamed(
+            group_id.to_string(),
+            new_name.to_string(),
+            old_name,
+            self_id,
+        ));
+
+        // Update relay registration with new name
+        let _ = self.try_relay_register_group(group_id, Some(new_name), &members);
+
+        info!(group_id = %group_id, new_name = %new_name, "Renamed group");
+        Ok(())
+    }
+
+    /// Handles an incoming group rename notification.
+    pub(crate) fn handle_group_rename(&mut self, message_id: &str, sender: &str, data: &str) {
+        let payload = match serde_json::from_str::<GroupRenamePayload>(data) {
+            Ok(p) => p,
+            Err(_) => {
+                warn!(sender = %sender, "Failed to parse GroupRename payload");
+                return;
+            }
+        };
+
+        // Dedup
+        let dedup_key = message_id.to_string();
+        if self.group_mesh.message_dedup.contains_key(&dedup_key) {
+            return;
+        }
+        self.group_mesh
+            .message_dedup
+            .insert(dedup_key, Instant::now());
+
+        // Verify sender is admin (use transport-authenticated sender)
+        match self.check_is_admin(&payload.group_id, sender) {
+            Ok(true) => {}
+            Ok(false) => {
+                error!(
+                    sender = %sender,
+                    group_id = %payload.group_id,
+                    "SECURITY: Group rename from non-admin, ignoring"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    sender = %sender,
+                    group_id = %payload.group_id,
+                    error = %e,
+                    "Failed to verify admin status for group rename"
+                );
+                return;
+            }
+        }
+
+        // Load old name before updating
+        let old_name = if let Ok(mls_guard) = self.read_mls_guard() {
+            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+            mls_guard
+                .get_group_metadata(&gid)
+                .ok()
+                .flatten()
+                .and_then(|m| m.name.clone())
+        } else {
+            None
+        };
+
+        // Store new name locally
+        if let Ok(mls_guard) = self.read_mls_guard() {
+            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+            if let Err(e) = mls_guard.set_group_name(&gid, &payload.new_name) {
+                warn!(
+                    group_id = %payload.group_id,
+                    error = %e,
+                    "Failed to store new group name from incoming rename"
+                );
+            }
+        }
+
+        // Use transport-authenticated sender as renamed_by
+        self.emit_event(Event::group_renamed(
+            payload.group_id,
+            payload.new_name,
+            old_name,
             sender.to_string(),
         ));
     }
