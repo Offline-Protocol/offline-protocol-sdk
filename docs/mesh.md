@@ -260,19 +260,19 @@ Messages awaiting acknowledgment are stored in an in-memory outbox:
 
 Without deduplication, the same message could be processed multiple times. The deduplicator tracks seen message IDs.
 
-### Bloom Filter Mode (Default)
+### HashMap Mode (Default)
+Exact tracking with no false positives:
+- **Capacity**: 1,000 message IDs (configurable)
+- **Retention**: 1 hour (configurable)
+- **Eviction**: LRU when capacity is reached
+
+### Bloom Filter Mode
 For high-volume scenarios, a space-efficient bloom filter tracks message IDs:
 - **Memory**: ~1MB per filter (constant regardless of message count)
 - **False Positive Rate**: ~1% with default settings
 - **Rotation**: Filters rotate every 15 minutes for automatic expiration
 
-Bloom filters trade perfect accuracy for constant memory usage, making them suitable for resource-constrained devices.
-
-### HashMap Mode
-For exact tracking (no false positives):
-- **Capacity**: 10,000 message IDs (configurable)
-- **Retention**: 1 hour (configurable)
-- **Eviction**: FIFO when capacity is reached
+Bloom filters trade perfect accuracy for constant memory usage, making them suitable for resource-constrained devices. Enable with `useBloomFilter: true`.
 
 ### Deduplication Behavior
 When a message arrives:
@@ -700,17 +700,17 @@ const config = {
   
   reliability: {
     ack: {
-      defaultTimeoutMs: 5000,    // Wait 5s for ACK
+      defaultTimeoutMs: 10000,   // Wait 10s for ACK
     },
     retry: {
-      maxRetries: 5,             // Max retry attempts
+      maxRetries: 10,            // Max ACK retry attempts
       initialDelayMs: 1000,      // First retry after 1s
       maxDelayMs: 30000,         // Cap delay at 30s
       backoffFactor: 2.0,        // Double delay each retry
     },
     dedup: {
-      useBloomFilter: true,      // Use bloom filter mode
-      maxTrackedMessages: 10000, // HashMap mode capacity
+      useBloomFilter: false,     // HashMap mode (default); set true for bloom filter
+      maxTrackedMessages: 1000,  // HashMap mode capacity
       retentionTimeSecs: 3600,   // 1 hour retention
     },
   },

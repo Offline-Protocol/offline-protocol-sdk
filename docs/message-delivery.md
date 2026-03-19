@@ -205,7 +205,7 @@ The delivery system emits events at each stage of the message lifecycle:
 | Event | When | Key Fields |
 |-------|------|------------|
 | `MessageSent` | Message accepted and sent via transport | `message_id`, `recipient`, `priority` |
-| `MessageDeferred` | Message queued for retry (transport unavailable) | `message_id`, `reason`, `retry_count` |
+| `MessageDeferred` | Message queued for retry (transport unavailable) | `message_id`, `reason`, `retry_count`, `next_retry_at` |
 | `MessageDelivered` | ACK received from recipient | `message_id`, `latency_ms`, `hop_count`, `transport` |
 | `MessageFailed` | Permanent failure (max ACK retries exceeded) | `message_id`, `reason`, `retry_count` |
 

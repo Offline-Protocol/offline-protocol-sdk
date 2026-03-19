@@ -330,7 +330,7 @@ Rust migration note:
 **Dedup Config**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `maxTrackedMessages` | number | 10000 | Max message IDs to track |
+| `maxTrackedMessages` | number | 1000 | Max message IDs to track |
 | `retentionTimeSecs` | number | 3600 | Retention time (1 hour) |
 
 ### Network Configuration
