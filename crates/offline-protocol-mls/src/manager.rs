@@ -448,8 +448,7 @@ impl MlsManager {
             .create_group(&group_id, &credential, &signature_keys)?;
 
         // Store group metadata with creator as admin
-        let mut metadata = GroupMetadata::new(Some(group_name.to_string()));
-        metadata.set_role(&self.user_id, GroupRole::Admin);
+        let metadata = GroupMetadata::new_with_creator(Some(group_name.to_string()), &self.user_id);
         self.save_group_metadata(&group_id, &metadata)?;
 
         let mut info = self.group_manager.get_group_info(&group, &group_id);
@@ -841,8 +840,19 @@ impl MlsManager {
         let key_type = StorageKeyType::GroupMetadata.as_str();
         match self.storage.load(key_type, group_id.as_str())? {
             Some(data) => {
-                let metadata: GroupMetadata = serde_json::from_slice(&data)
+                let mut metadata: GroupMetadata = serde_json::from_slice(&data)
                     .map_err(|e| MlsError::Deserialization(e.to_string()))?;
+                // Migrate legacy "role:*" keys from `custom` into `roles`
+                if metadata.roles.is_empty()
+                    && metadata
+                        .custom
+                        .keys()
+                        .any(|k| k.starts_with(GroupMetadata::LEGACY_ROLE_KEY_PREFIX))
+                {
+                    metadata.migrate_legacy_roles();
+                    // Persist the migration so it only runs once
+                    let _ = self.save_group_metadata(group_id, &metadata);
+                }
                 Ok(Some(metadata))
             }
             None => Ok(None),

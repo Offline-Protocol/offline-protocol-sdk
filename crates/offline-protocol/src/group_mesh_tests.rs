@@ -5320,8 +5320,13 @@ fn test_group_role_enum_serialization_roundtrip() {
 fn test_group_role_fromstr() {
     assert_eq!("admin".parse::<GroupRole>().unwrap(), GroupRole::Admin);
     assert_eq!("member".parse::<GroupRole>().unwrap(), GroupRole::Member);
+    // Case-insensitive: "Admin", "ADMIN", "Member" all work
+    assert_eq!("Admin".parse::<GroupRole>().unwrap(), GroupRole::Admin);
+    assert_eq!("ADMIN".parse::<GroupRole>().unwrap(), GroupRole::Admin);
+    assert_eq!("Member".parse::<GroupRole>().unwrap(), GroupRole::Member);
+    assert_eq!("MEMBER".parse::<GroupRole>().unwrap(), GroupRole::Member);
+    // Invalid values still fail
     assert!("moderator".parse::<GroupRole>().is_err());
-    assert!("Admin".parse::<GroupRole>().is_err());
     assert!("".parse::<GroupRole>().is_err());
 }
 
@@ -5452,5 +5457,228 @@ fn test_cannot_remove_last_admin_with_other_members() {
     assert!(
         result.is_ok(),
         "Admin should be able to remove a non-admin member"
+    );
+}
+
+#[test]
+fn test_fallback_admin_uses_created_by() {
+    // When no role entries exist but `created_by` is set, the creator
+    // should be treated as admin via the fallback path.
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("charlie")).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+    protocol.start().unwrap();
+
+    let group_info = protocol.create_group("Fallback Group").unwrap();
+    let group_id = group_info.group_id.as_str();
+
+    // Clear the roles map but leave created_by intact
+    {
+        let mls = protocol.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        mls.remove_member_role(&gid, "charlie").unwrap();
+    }
+
+    protocol.group_mesh.members.insert(
+        group_id.to_string(),
+        vec![
+            "charlie".to_string(),
+            "alice".to_string(),
+            "bob".to_string(),
+        ],
+    );
+
+    // charlie is the creator (created_by), so the fallback grants admin
+    let result = protocol.set_member_role(group_id, "bob", GroupRole::Admin);
+    assert!(
+        result.is_ok(),
+        "Creator should be fallback admin via created_by"
+    );
+}
+
+#[test]
+fn test_fallback_admin_denies_non_creator() {
+    // A non-creator should NOT be treated as admin when roles are empty.
+    let storage_a = Arc::new(crate::mls::InMemoryStorage::default());
+    let storage_b = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut alice = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice.initialize_mls(storage_a).unwrap();
+    bob.initialize_mls(storage_b).unwrap();
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    let group_info = alice.create_group("Deny Test").unwrap();
+    let group_id = group_info.group_id.as_str().to_string();
+
+    // Make Bob join the group
+    let bob_kp = {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.generate_key_package().unwrap()
+    };
+    let (welcome, _commit) = {
+        let alice_mls = alice.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        alice_mls
+            .add_group_member(&gid, &bob_kp.key_package_data)
+            .unwrap()
+    };
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        bob_mls.join_group(&welcome).unwrap();
+    }
+    bob.group_mesh.members.insert(
+        group_id.clone(),
+        vec!["alice".to_string(), "bob".to_string()],
+    );
+
+    // Clear Bob's roles but leave created_by as None (Bob didn't create the group)
+    // Bob's metadata was set by join_group, which doesn't set created_by
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls.remove_member_role(&gid, "bob").unwrap();
+        bob_mls.remove_member_role(&gid, "alice").unwrap();
+    }
+
+    // Bob is not the creator — should be denied admin
+    let result = bob.set_member_role(&group_id, "alice", GroupRole::Member);
+    assert!(result.is_err(), "Non-creator should not be fallback admin");
+    assert!(
+        result.unwrap_err().to_string().contains("Only admins"),
+        "Should get admin-required error"
+    );
+}
+
+#[test]
+fn test_no_metadata_denies_admin() {
+    // When no metadata exists at all, admin check should deny.
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+    protocol.start().unwrap();
+
+    // Simulate having a group in the member list but no metadata
+    protocol.group_mesh.members.insert(
+        "group:phantom".to_string(),
+        vec!["alice".to_string(), "bob".to_string()],
+    );
+
+    let result = protocol.set_member_role("group:phantom", "bob", GroupRole::Admin);
+    assert!(result.is_err(), "No metadata should deny admin access");
+}
+
+#[test]
+fn test_legacy_roles_in_custom_map_are_migrated() {
+    // Simulate a group created before the dedicated `roles` field existed:
+    // roles are stored as "role:user_id" keys in the `custom` map.
+    let storage = Arc::new(crate::mls::InMemoryStorage::default());
+    let mut protocol = OfflineProtocol::new(create_test_config_for_user("alice")).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+    protocol.start().unwrap();
+
+    let group_info = protocol.create_group("Migration Test").unwrap();
+    let group_id = group_info.group_id.as_str();
+
+    // Manually write legacy-style role keys into the custom map and clear the roles map
+    {
+        let mls = protocol.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(group_id);
+        // Set custom metadata with legacy role keys
+        mls.set_group_custom_metadata(&gid, "role:alice", "admin")
+            .unwrap();
+        mls.set_group_custom_metadata(&gid, "role:bob", "member")
+            .unwrap();
+        // Clear the proper roles
+        mls.remove_member_role(&gid, "alice").unwrap();
+    }
+
+    protocol.group_mesh.members.insert(
+        group_id.to_string(),
+        vec!["alice".to_string(), "bob".to_string()],
+    );
+
+    // Reading metadata should trigger migration: legacy keys -> roles map
+    let role = protocol.get_member_role(group_id, "alice").unwrap();
+    assert_eq!(
+        role,
+        GroupRole::Admin,
+        "Legacy role should be migrated to admin"
+    );
+
+    let role = protocol.get_member_role(group_id, "bob").unwrap();
+    assert_eq!(
+        role,
+        GroupRole::Member,
+        "Legacy role should be migrated to member"
+    );
+}
+
+#[test]
+fn test_fallback_admin_not_used_when_roles_exist() {
+    // When role metadata exists with an admin, the fallback should NOT be used
+    // even if the first-sorted member differs from the stored admin.
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Fallback Override");
+
+    // Alice is admin (stored). Even if members list sorts differently,
+    // the stored role takes precedence.
+    let role = alice.get_member_role(&group_id, "alice").unwrap();
+    assert_eq!(
+        role,
+        GroupRole::Admin,
+        "Stored admin role should take precedence over fallback"
+    );
+
+    // Bob is member (stored), not fallback admin
+    let role = alice.get_member_role(&group_id, "bob").unwrap();
+    assert_eq!(
+        role,
+        GroupRole::Member,
+        "Stored member role should take precedence"
+    );
+}
+
+#[test]
+fn test_handle_role_change_dedup() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Dedup Test");
+
+    // Set up Alice as admin on Bob's side
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+    }
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    let payload = super::group_mesh::GroupRoleChangePayload {
+        group_id: group_id.clone(),
+        target_user_id: "bob".to_string(),
+        new_role: GroupRole::Admin,
+        changed_by: "alice".to_string(),
+    };
+    let data = serde_json::to_string(&payload).unwrap();
+
+    // First call — should emit event
+    bob.handle_group_role_change("dedup-msg-1", "alice", &data);
+    // Second call with same message_id — should be deduped
+    bob.handle_group_role_change("dedup-msg-1", "alice", &data);
+
+    let captured = events.lock().unwrap();
+    let role_events: Vec<_> = captured
+        .iter()
+        .filter(|e| matches!(e, Event::GroupRoleChanged { .. }))
+        .collect();
+    assert_eq!(
+        role_events.len(),
+        1,
+        "Duplicate message_id should be deduped — expected 1 event, got {}",
+        role_events.len()
     );
 }

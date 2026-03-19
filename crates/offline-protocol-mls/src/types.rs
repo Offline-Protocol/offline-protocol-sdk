@@ -47,19 +47,14 @@ impl From<&str> for GroupId {
 }
 
 /// Role a user holds within a group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupRole {
     /// Group administrator — can invite/remove members and change roles.
     Admin,
     /// Regular group member.
+    #[default]
     Member,
-}
-
-impl Default for GroupRole {
-    fn default() -> Self {
-        Self::Member
-    }
 }
 
 impl fmt::Display for GroupRole {
@@ -75,13 +70,10 @@ impl FromStr for GroupRole {
     type Err = String;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
+        match s.to_ascii_lowercase().as_str() {
             "admin" => Ok(Self::Admin),
             "member" => Ok(Self::Member),
-            other => Err(format!(
-                "Invalid role '{}', must be 'admin' or 'member'",
-                other
-            )),
+            _ => Err(format!("Invalid role '{}', must be 'admin' or 'member'", s)),
         }
     }
 }
@@ -333,10 +325,22 @@ pub struct GroupMetadata {
     /// Custom application-specific metadata.
     #[serde(default)]
     pub custom: std::collections::HashMap<String, String>,
+
+    /// User ID of the group creator.
+    #[serde(default)]
+    pub created_by: Option<String>,
+
+    /// Per-member role assignments.
+    /// Deserialization falls back to migrating legacy `"role:*"` keys from `custom`.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub roles: std::collections::HashMap<String, GroupRole>,
 }
 
 impl GroupMetadata {
-    /// Creates new group metadata with the given name.
+    /// Prefix previously used for role entries in the `custom` map (legacy).
+    pub const LEGACY_ROLE_KEY_PREFIX: &'static str = "role:";
+
+    /// Creates new group metadata with the given name and creator.
     pub fn new(name: Option<String>) -> Self {
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         Self {
@@ -344,6 +348,41 @@ impl GroupMetadata {
             created_at_ms: now_ms,
             last_activity_ms: now_ms,
             custom: std::collections::HashMap::new(),
+            created_by: None,
+            roles: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Creates new group metadata with a creator.
+    pub fn new_with_creator(name: Option<String>, creator_id: &str) -> Self {
+        let mut meta = Self::new(name);
+        meta.created_by = Some(creator_id.to_string());
+        meta.set_role(creator_id, GroupRole::Admin);
+        meta
+    }
+
+    /// Migrates any legacy `"role:*"` keys from the `custom` map into the
+    /// dedicated `roles` field. Call after deserialization for
+    /// backwards-compatibility with older group metadata.
+    pub fn migrate_legacy_roles(&mut self) {
+        let legacy_keys: Vec<String> = self
+            .custom
+            .keys()
+            .filter(|k| k.starts_with(Self::LEGACY_ROLE_KEY_PREFIX))
+            .cloned()
+            .collect();
+        for key in legacy_keys {
+            if let Some(uid) = key.strip_prefix(Self::LEGACY_ROLE_KEY_PREFIX) {
+                if !self.roles.contains_key(uid) {
+                    let role = self
+                        .custom
+                        .get(&key)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_default();
+                    self.roles.insert(uid.to_string(), role);
+                }
+            }
+            self.custom.remove(&key);
         }
     }
 
@@ -352,48 +391,29 @@ impl GroupMetadata {
         self.last_activity_ms = chrono::Utc::now().timestamp_millis() as u64;
     }
 
-    /// Prefix used for role entries in the custom metadata map.
-    const ROLE_KEY_PREFIX: &'static str = "role:";
-
     /// Gets the role for a user, defaulting to [`GroupRole::Member`] if not set.
     pub fn get_role(&self, user_id: &str) -> GroupRole {
-        self.custom
-            .get(&format!("{}{}", Self::ROLE_KEY_PREFIX, user_id))
-            .and_then(|r| r.parse().ok())
-            .unwrap_or_default()
+        self.roles.get(user_id).copied().unwrap_or_default()
     }
 
     /// Sets the role for a user.
     pub fn set_role(&mut self, user_id: &str, role: GroupRole) {
-        self.custom.insert(
-            format!("{}{}", Self::ROLE_KEY_PREFIX, user_id),
-            role.to_string(),
-        );
+        self.roles.insert(user_id.to_string(), role);
     }
 
     /// Removes role metadata for a user (on removal from group).
     pub fn remove_role(&mut self, user_id: &str) {
-        self.custom
-            .remove(&format!("{}{}", Self::ROLE_KEY_PREFIX, user_id));
+        self.roles.remove(user_id);
     }
 
     /// Returns true if any admin role is stored in this metadata.
     pub fn has_any_admin(&self) -> bool {
-        self.custom.iter().any(|(k, v)| {
-            k.starts_with(Self::ROLE_KEY_PREFIX)
-                && v.parse::<GroupRole>().ok() == Some(GroupRole::Admin)
-        })
+        self.roles.values().any(|r| *r == GroupRole::Admin)
     }
 
     /// Returns all `user_id -> role` mappings.
     pub fn get_all_roles(&self) -> std::collections::HashMap<String, GroupRole> {
-        self.custom
-            .iter()
-            .filter_map(|(k, v)| {
-                k.strip_prefix(Self::ROLE_KEY_PREFIX)
-                    .map(|uid| (uid.to_string(), v.parse().unwrap_or_default()))
-            })
-            .collect()
+        self.roles.clone()
     }
 }
 

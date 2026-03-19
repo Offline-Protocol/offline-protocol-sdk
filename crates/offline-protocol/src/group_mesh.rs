@@ -639,14 +639,26 @@ impl OfflineProtocol {
 
         // Emit events based on actual MLS membership changes, not claimed affected_member
         for member in &actual_added {
-            // Store the role from the commit payload only for the specific affected member
+            // Store the role from the commit payload only for the specific affected member,
+            // and only if the sender is an admin (prevents non-admins from injecting elevated roles).
             if let (Some(role), Some(affected)) = (&payload.role, &payload.affected_member) {
                 if *member == affected {
-                    if let Ok(mls_guard) = self.read_mls_guard() {
-                        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                        if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
-                            warn!(user_id = %member, error = %e, "Failed to store member role from commit");
+                    let sender_is_admin = self
+                        .check_is_admin(&payload.group_id, sender)
+                        .unwrap_or(false);
+                    if sender_is_admin {
+                        if let Ok(mls_guard) = self.read_mls_guard() {
+                            let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                            if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
+                                warn!(user_id = %member, error = %e, "Failed to store member role from commit");
+                            }
                         }
+                    } else {
+                        warn!(
+                            sender = %sender,
+                            group_id = %payload.group_id,
+                            "Ignoring role from commit: sender is not admin"
+                        );
                     }
                 }
             }
@@ -1356,24 +1368,24 @@ impl OfflineProtocol {
         // Block last admin from leaving if other members remain
         let other_members_exist = members.iter().any(|m| m != &self_id);
         if other_members_exist {
-            if let Ok(mls_guard) = self.read_mls_guard() {
-                let gid = offline_protocol_mls::GroupId::new(group_id);
-                if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                    let is_admin = metadata.get_role(&self_id) == GroupRole::Admin;
-                    if is_admin {
-                        let admin_count = metadata
-                            .get_all_roles()
-                            .values()
-                            .filter(|r| **r == GroupRole::Admin)
-                            .count();
-                        if admin_count <= 1 {
-                            return Err(Error::Other(
-                                "Cannot leave group as the last admin while other members remain. Promote another member to admin first.".to_string(),
-                            ));
-                        }
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            if let Some(metadata) = mls_guard.get_group_metadata(&gid)? {
+                let is_admin = metadata.get_role(&self_id) == GroupRole::Admin;
+                if is_admin {
+                    let admin_count = metadata
+                        .get_all_roles()
+                        .values()
+                        .filter(|r| **r == GroupRole::Admin)
+                        .count();
+                    if admin_count <= 1 {
+                        return Err(Error::Other(
+                            "Cannot leave group as the last admin while other members remain. Promote another member to admin first.".to_string(),
+                        ));
                     }
                 }
             }
+            drop(mls_guard);
         }
 
         // Build leave notification payload before touching MLS state
@@ -1649,9 +1661,8 @@ impl OfflineProtocol {
 
     /// Checks if a user is an admin of the given group.
     ///
-    /// Falls back to treating the first member (sorted, i.e. the creator by
-    /// convention) as admin when no admin role has been stored yet. This
-    /// handles groups created before role tracking was introduced.
+    /// Falls back to `created_by` when no admin role has been stored yet
+    /// (handles groups created before role tracking was introduced).
     fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
@@ -1662,21 +1673,14 @@ impl OfflineProtocol {
             if meta.has_any_admin() {
                 return Ok(meta.get_role(user_id) == GroupRole::Admin);
             }
+            // No admin role stored — fall back to created_by if available
+            if let Some(creator) = &meta.created_by {
+                return Ok(creator == user_id);
+            }
         }
 
-        // No admin role stored — fall back to first member (group creator)
-        let members = self
-            .group_mesh
-            .members
-            .get(group_id)
-            .cloned()
-            .unwrap_or_default();
-        let mut sorted = members;
-        sorted.sort();
-        Ok(sorted
-            .first()
-            .map(|first| first == user_id)
-            .unwrap_or(false))
+        // No metadata at all — deny by default
+        Ok(false)
     }
 
     /// Changes a member's role in a group (admin only).
