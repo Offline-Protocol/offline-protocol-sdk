@@ -531,6 +531,82 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         break;
       }
 
+      case 'group_info': {
+        const groupId = event.groupId || event.group_id;
+        const groupName = event.name || event.groupName || event.group_name || 'Group';
+        const members: Array<{user_id: string; role?: string}> = event.members || [];
+        if (!groupId) {break;}
+        setGroups(prev => {
+          const next = new Map(prev);
+          const memberIds = members.map(m => m.user_id);
+          const roles: Record<string, GroupRole> = {};
+          for (const m of members) {
+            roles[m.user_id] = m.role === 'admin' ? 'admin' : 'member';
+          }
+          const existing = next.get(groupId);
+          next.set(groupId, {
+            id: groupId,
+            name: groupName,
+            members: memberIds,
+            roles,
+            messages: existing?.messages || [],
+          });
+          return next;
+        });
+        break;
+      }
+
+      case 'user_groups': {
+        const groupSummaries: Array<{group_id: string; name: string}> = event.groups || [];
+        setGroups(prev => {
+          const next = new Map(prev);
+          for (const g of groupSummaries) {
+            if (!next.has(g.group_id)) {
+              next.set(g.group_id, {
+                id: g.group_id,
+                name: g.name || 'Group',
+                members: [userIdRef.current],
+                roles: {},
+                messages: [],
+              });
+            }
+          }
+          return next;
+        });
+        break;
+      }
+
+      case 'group_error': {
+        const reason = event.reason || 'Unknown group error';
+        console.warn('[GroupError]', reason);
+        break;
+      }
+
+      case 'group_message_partial_failure': {
+        const groupId = event.groupId || event.group_id;
+        const failedMembers: string[] = event.failedMembers || event.failed_members || [];
+        if (!groupId || failedMembers.length === 0) {break;}
+        console.warn(`[GroupPartialFailure] group=${groupId} failed=${failedMembers.join(',')}`);
+        break;
+      }
+
+      case 'group_epoch_fork_detected': {
+        const groupId = event.groupId || event.group_id;
+        if (!groupId) {break;}
+        console.warn(`[EpochFork] Detected in group=${groupId}`);
+        break;
+      }
+
+      case 'group_epoch_fork_resolved': {
+        const groupId = event.groupId || event.group_id;
+        const failedMembers: string[] = event.failedMembers || event.failed_members || [];
+        if (!groupId) {break;}
+        if (failedMembers.length > 0) {
+          console.warn(`[EpochFork] Resolved group=${groupId}, unreachable=${failedMembers.join(',')}`);
+        }
+        break;
+      }
+
       case 'service_discovered': {
         const serviceId = event.serviceId || event.service_id;
         const provider = event.provider_peer_id || event.provider || event.providerId || event.provider_id;

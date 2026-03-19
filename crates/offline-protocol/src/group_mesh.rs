@@ -9,7 +9,9 @@
 //! and a relay server supports it, the protocol can send a single relay
 //! broadcast instead of O(N) per-member fan-out.
 
-use crate::protocol::{base64_decode, base64_encode, internal_prefixes, OfflineProtocol};
+use crate::protocol::{
+    base64_decode, base64_encode, internal_prefixes, GroupMemberRemovedPayload, OfflineProtocol,
+};
 use crate::{Error, Event, Result};
 use chrono::Utc;
 use offline_protocol_core::{ForwardInfo, Message, MessageId, MessagePriority};
@@ -463,6 +465,19 @@ impl OfflineProtocol {
                 }
             }
 
+            // Send a fresh key package to the inviter. The inviter consumed our
+            // previous key package to create this Welcome, so they need a new one
+            // for future group invites. Clear the tracking flag first so the send
+            // isn't suppressed as a duplicate.
+            self.key_package_sent_to.remove(sender);
+            if let Err(e) = self.send_key_package_to(sender, false) {
+                debug!(
+                    inviter = %sender,
+                    error = %e,
+                    "Failed to send fresh key package to inviter after Welcome (will retry on discovery)"
+                );
+            }
+
             self.emit_event(Event::group_member_added(
                 group_id,
                 self.config.user_id.clone(),
@@ -577,6 +592,42 @@ impl OfflineProtocol {
         match mls_result {
             Ok(_) => {}
             Err(ref e) => {
+                // If this is a Remove commit targeting us, we can't decrypt it
+                // because the admin already removed us from the MLS group. But the
+                // commit payload metadata tells us we were removed, so handle it
+                // gracefully: emit the event, clean up local state, and reject the
+                // commit (don't buffer it — it will never succeed).
+                //
+                // SECURITY: Verify the sender is an admin before trusting the
+                // unencrypted commit metadata. Without this check, a non-admin
+                // group member could forge a commit with garbage ciphertext and
+                // affected_member = victim to force group eviction.
+                let self_id = self.config.user_id.clone();
+                if matches!(payload.commit_type, GroupCommitType::Remove)
+                    && payload.affected_member.as_deref() == Some(&self_id)
+                    && self
+                        .check_is_admin(&payload.group_id, sender)
+                        .unwrap_or(false)
+                {
+                    info!(
+                        group_id = %payload.group_id,
+                        "Received remove-commit targeting us — cleaning up local state"
+                    );
+                    // Clean up local MLS state
+                    if let Ok(mls_guard) = self.read_mls_guard() {
+                        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                        let _ = mls_guard.leave_group(&gid);
+                    }
+                    self.group_mesh.members.remove(&payload.group_id);
+                    self.group_mesh.relay_synced.remove(&payload.group_id);
+                    self.emit_event(Event::group_member_removed(
+                        payload.group_id.clone(),
+                        self_id,
+                        sender.to_string(),
+                    ));
+                    return CommitOutcome::Rejected;
+                }
+
                 // Classify MLS errors: permanent failures should not be retried,
                 // only epoch-related decryption failures are worth buffering.
                 let is_permanent = matches!(
@@ -1168,6 +1219,12 @@ impl OfflineProtocol {
         self.pending_key_packages.remove(invitee_user_id);
         self.delete_peer_key_package_from_storage(invitee_user_id);
 
+        // Clear key-package-sent tracking so the invitee can reciprocate.
+        // Without this, the invitee's handler sees us in `key_package_sent_to`
+        // and skips reciprocation, leaving us without a key package for
+        // future group invites.
+        self.key_package_sent_to.remove(invitee_user_id);
+
         // Send our key package to the invitee. Their message dispatch handler
         // will reciprocate with a fresh key package, replenishing our supply
         // for future group invites or 1:1 session creation.
@@ -1372,6 +1429,36 @@ impl OfflineProtocol {
         for member in &failed_commit_members {
             let _ =
                 self.send_internal_message(member, commit_content.clone(), MessagePriority::High);
+        }
+
+        // Send a plaintext removal notification directly to the removed member.
+        // The MLS commit alone is insufficient: the removed member cannot decrypt
+        // it (they're no longer in the group), so they would never learn they were
+        // removed. The plaintext notification uses the existing GROUP_MEMBER_REMOVED
+        // prefix which the message dispatcher handles by emitting a
+        // GroupMemberRemoved event and cleaning up local state.
+        let removed_payload = GroupMemberRemovedPayload {
+            group_id: group_id.to_string(),
+            user_id: member_id.to_string(),
+            removed_by: self_id.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&removed_payload) {
+            let removed_content = format!("{}{}", internal_prefixes::GROUP_MEMBER_REMOVED, json);
+            if let Err(e) = self.send_internal_message(
+                member_id,
+                removed_content.clone(),
+                MessagePriority::High,
+            ) {
+                warn!(
+                    group_id = %group_id,
+                    member = %member_id,
+                    error = %e,
+                    "Failed to send removal notification to removed member"
+                );
+                // Best-effort retry
+                let _ =
+                    self.send_internal_message(member_id, removed_content, MessagePriority::High);
+            }
         }
 
         self.emit_event(Event::group_member_removed(
@@ -1710,7 +1797,7 @@ impl OfflineProtocol {
     ///
     /// Falls back to `created_by` when no admin role has been stored yet
     /// (handles groups created before role tracking was introduced).
-    fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
+    pub(crate) fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         let metadata = mls_guard.get_group_metadata(&gid)?;

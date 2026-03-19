@@ -79,7 +79,7 @@ pub struct OfflineProtocol {
     pub(crate) pending_key_packages: HashMap<String, ReceivedKeyPackage>,
 
     /// Set of peers we've already sent our key package to.
-    key_package_sent_to: std::collections::HashSet<String>,
+    pub(crate) key_package_sent_to: std::collections::HashSet<String>,
 
     /// All discovered/connected peers, tracked independently of encryption.
     /// Used by service discovery to know who to broadcast queries to.
