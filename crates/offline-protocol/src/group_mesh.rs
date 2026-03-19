@@ -1427,11 +1427,9 @@ impl OfflineProtocol {
         };
         if let Ok(json) = serde_json::to_string(&removed_payload) {
             let removed_content = format!("{}{}", internal_prefixes::GROUP_MEMBER_REMOVED, json);
-            if let Err(e) = self.send_internal_message(
-                member_id,
-                removed_content,
-                MessagePriority::High,
-            ) {
+            if let Err(e) =
+                self.send_internal_message(member_id, removed_content, MessagePriority::High)
+            {
                 warn!(
                     group_id = %group_id,
                     member = %member_id,
