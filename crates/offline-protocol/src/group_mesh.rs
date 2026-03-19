@@ -456,7 +456,9 @@ impl OfflineProtocol {
                 if let Ok(mls_guard) = self.read_mls_guard() {
                     let gid = offline_protocol_mls::GroupId::new(&group_id);
                     for (user_id, role) in &payload.member_roles {
-                        let _ = mls_guard.set_member_role(&gid, user_id, *role);
+                        if let Err(e) = mls_guard.set_member_role(&gid, user_id, *role) {
+                            warn!(user_id = %user_id, error = %e, "Failed to store member role from welcome");
+                        }
                     }
                 }
             }
@@ -642,7 +644,9 @@ impl OfflineProtocol {
                 if *member == affected {
                     if let Ok(mls_guard) = self.read_mls_guard() {
                         let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                        let _ = mls_guard.set_member_role(&gid, member, *role);
+                        if let Err(e) = mls_guard.set_member_role(&gid, member, *role) {
+                            warn!(user_id = %member, error = %e, "Failed to store member role from commit");
+                        }
                     }
                 }
             }
@@ -657,7 +661,9 @@ impl OfflineProtocol {
             // Clean up role metadata for removed members
             if let Ok(mls_guard) = self.read_mls_guard() {
                 let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                let _ = mls_guard.remove_member_role(&gid, member);
+                if let Err(e) = mls_guard.remove_member_role(&gid, member) {
+                    warn!(user_id = %member, error = %e, "Failed to clean up role metadata for removed member");
+                }
             }
             self.emit_event(Event::group_member_removed(
                 payload.group_id.clone(),
@@ -1060,8 +1066,8 @@ impl OfflineProtocol {
     /// Sends a Welcome to the invitee and a Commit to all existing members.
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
         // Admin check
-        let self_id_check = self.config.user_id.clone();
-        if !self.check_is_admin(group_id, &self_id_check)? {
+        let self_id = self.config.user_id.clone();
+        if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::Other("Only admins can invite members".to_string()));
         }
 
@@ -1140,7 +1146,9 @@ impl OfflineProtocol {
         let member_roles = {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
-            let _ = mls_guard.set_member_role(&gid, invitee_user_id, GroupRole::Member);
+            if let Err(e) = mls_guard.set_member_role(&gid, invitee_user_id, GroupRole::Member) {
+                warn!(invitee = %invitee_user_id, error = %e, "Failed to store invitee role");
+            }
             mls_guard
                 .get_group_metadata(&gid)
                 .ok()
@@ -1167,7 +1175,6 @@ impl OfflineProtocol {
 
         // Send Commit to all existing members (excluding self and invitee)
         // so they can process it and advance their MLS epoch
-        let self_id = self.config.user_id.clone();
         let commit_payload = GroupMlsCommitPayload {
             group_id: group_id.to_string(),
             commit_type: GroupCommitType::Add,
@@ -1224,9 +1231,36 @@ impl OfflineProtocol {
     /// Sends a Commit to all remaining members.
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
         // Admin check
-        let self_id_check = self.config.user_id.clone();
-        if !self.check_is_admin(group_id, &self_id_check)? {
+        let self_id = self.config.user_id.clone();
+        if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::Other("Only admins can remove members".to_string()));
+        }
+
+        // Block removing the last admin if other members will remain
+        {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id);
+            if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                if metadata.get_role(member_id) == GroupRole::Admin {
+                    let admin_count = metadata
+                        .get_all_roles()
+                        .values()
+                        .filter(|r| **r == GroupRole::Admin)
+                        .count();
+                    let member_count = self
+                        .group_mesh
+                        .members
+                        .get(group_id)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    // member_count > 2: after removal there will still be other members
+                    if admin_count <= 1 && member_count > 2 {
+                        return Err(Error::Other(
+                            "Cannot remove the last admin while other members remain. Promote another member to admin first.".to_string(),
+                        ));
+                    }
+                }
+            }
         }
 
         let mls_guard = self.read_mls_guard()?;
@@ -1236,13 +1270,12 @@ impl OfflineProtocol {
 
         // Refresh member list after removal
         let members = self.refresh_group_members(group_id)?;
-
-        // Fan-out Commit to remaining members
-        let self_id = self.config.user_id.clone();
         // Clean up removed member's role metadata
         if let Ok(mls_guard) = self.read_mls_guard() {
             let gid = offline_protocol_mls::GroupId::new(group_id);
-            let _ = mls_guard.remove_member_role(&gid, member_id);
+            if let Err(e) = mls_guard.remove_member_role(&gid, member_id) {
+                warn!(member = %member_id, error = %e, "Failed to clean up role metadata for removed member");
+            }
         }
 
         let commit_payload = GroupMlsCommitPayload {
@@ -1319,6 +1352,29 @@ impl OfflineProtocol {
             .unwrap_or_default();
 
         let self_id = self.config.user_id.clone();
+
+        // Block last admin from leaving if other members remain
+        let other_members_exist = members.iter().any(|m| m != &self_id);
+        if other_members_exist {
+            if let Ok(mls_guard) = self.read_mls_guard() {
+                let gid = offline_protocol_mls::GroupId::new(group_id);
+                if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
+                    let is_admin = metadata.get_role(&self_id) == GroupRole::Admin;
+                    if is_admin {
+                        let admin_count = metadata
+                            .get_all_roles()
+                            .values()
+                            .filter(|r| **r == GroupRole::Admin)
+                            .count();
+                        if admin_count <= 1 {
+                            return Err(Error::Other(
+                                "Cannot leave group as the last admin while other members remain. Promote another member to admin first.".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
         // Build leave notification payload before touching MLS state
         let leave_payload = GroupMlsLeavePayload {
@@ -1592,14 +1648,35 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Checks if a user is an admin of the given group.
+    ///
+    /// Falls back to treating the first member (sorted, i.e. the creator by
+    /// convention) as admin when no admin role has been stored yet. This
+    /// handles groups created before role tracking was introduced.
     fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
-        let is_admin = mls_guard
-            .get_group_metadata(&gid)?
-            .map(|m| m.get_role(user_id) == GroupRole::Admin)
-            .unwrap_or(false);
-        Ok(is_admin)
+        let metadata = mls_guard.get_group_metadata(&gid)?;
+        drop(mls_guard);
+
+        if let Some(meta) = &metadata {
+            if meta.has_any_admin() {
+                return Ok(meta.get_role(user_id) == GroupRole::Admin);
+            }
+        }
+
+        // No admin role stored — fall back to first member (group creator)
+        let members = self
+            .group_mesh
+            .members
+            .get(group_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut sorted = members;
+        sorted.sort();
+        Ok(sorted
+            .first()
+            .map(|first| first == user_id)
+            .unwrap_or(false))
     }
 
     /// Changes a member's role in a group (admin only).
@@ -1748,7 +1825,15 @@ impl OfflineProtocol {
         // Store role locally
         if let Ok(mls_guard) = self.read_mls_guard() {
             let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-            let _ = mls_guard.set_member_role(&gid, &payload.target_user_id, payload.new_role);
+            if let Err(e) =
+                mls_guard.set_member_role(&gid, &payload.target_user_id, payload.new_role)
+            {
+                warn!(
+                    target = %payload.target_user_id,
+                    error = %e,
+                    "Failed to store role from incoming role change"
+                );
+            }
         }
 
         // Use transport-authenticated sender as changed_by, not the untrusted payload field

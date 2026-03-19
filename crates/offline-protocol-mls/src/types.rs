@@ -352,23 +352,37 @@ impl GroupMetadata {
         self.last_activity_ms = chrono::Utc::now().timestamp_millis() as u64;
     }
 
+    /// Prefix used for role entries in the custom metadata map.
+    const ROLE_KEY_PREFIX: &'static str = "role:";
+
     /// Gets the role for a user, defaulting to [`GroupRole::Member`] if not set.
     pub fn get_role(&self, user_id: &str) -> GroupRole {
         self.custom
-            .get(&format!("role:{}", user_id))
+            .get(&format!("{}{}", Self::ROLE_KEY_PREFIX, user_id))
             .and_then(|r| r.parse().ok())
             .unwrap_or_default()
     }
 
     /// Sets the role for a user.
     pub fn set_role(&mut self, user_id: &str, role: GroupRole) {
-        self.custom
-            .insert(format!("role:{}", user_id), role.to_string());
+        self.custom.insert(
+            format!("{}{}", Self::ROLE_KEY_PREFIX, user_id),
+            role.to_string(),
+        );
     }
 
     /// Removes role metadata for a user (on removal from group).
     pub fn remove_role(&mut self, user_id: &str) {
-        self.custom.remove(&format!("role:{}", user_id));
+        self.custom
+            .remove(&format!("{}{}", Self::ROLE_KEY_PREFIX, user_id));
+    }
+
+    /// Returns true if any admin role is stored in this metadata.
+    pub fn has_any_admin(&self) -> bool {
+        self.custom.iter().any(|(k, v)| {
+            k.starts_with(Self::ROLE_KEY_PREFIX)
+                && v.parse::<GroupRole>().ok() == Some(GroupRole::Admin)
+        })
     }
 
     /// Returns all `user_id -> role` mappings.
@@ -376,7 +390,7 @@ impl GroupMetadata {
         self.custom
             .iter()
             .filter_map(|(k, v)| {
-                k.strip_prefix("role:")
+                k.strip_prefix(Self::ROLE_KEY_PREFIX)
                     .map(|uid| (uid.to_string(), v.parse().unwrap_or_default()))
             })
             .collect()
