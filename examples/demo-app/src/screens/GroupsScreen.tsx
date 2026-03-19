@@ -13,6 +13,7 @@ import {Avatar} from '../components/Avatar';
 import {MessageBubble} from '../components/MessageBubble';
 import {QuickMessages} from '../components/QuickMessages';
 import {formatUserId} from '../utils';
+import type {ChatMessage} from '../types';
 
 type ViewState = 'list' | 'detail' | 'create';
 
@@ -22,7 +23,7 @@ export function GroupsScreen() {
   const [showMembers, setShowMembers] = useState(false);
   const [createName, setCreateName] = useState('');
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set());
-  const {groups, contacts, createGroup, sendGroupMessage, leaveGroup, userId} = useProtocol();
+  const {groups, contacts, createGroup, sendGroupMessage, leaveGroup, userId, forwardMessage, forwardMessageToGroup} = useProtocol();
   const listRef = useRef<FlatList>(null);
 
   // Reset to list if the selected group was deleted (e.g. after leaving)
@@ -140,6 +141,37 @@ export function GroupsScreen() {
       }, 100);
     };
 
+    const handleForward = (msg: ChatMessage) => {
+      const contactList = Array.from(contacts.values()).filter(
+        c => c.hasSession && !c.isBlocked,
+      );
+      const otherGroups = Array.from(groups.values()).filter(g => g.id !== selectedGroupId);
+
+      const buttons: any[] = [];
+
+      contactList.forEach(c => {
+        buttons.push({
+          text: c.name || c.peerId,
+          onPress: () => forwardMessage(msg, c.peerId),
+        });
+      });
+
+      otherGroups.forEach(g => {
+        buttons.push({
+          text: `[Group] ${g.name}`,
+          onPress: () => forwardMessageToGroup(msg, g.id),
+        });
+      });
+
+      if (buttons.length === 0) {
+        Alert.alert('No Recipients', 'No contacts or groups available to forward to.');
+        return;
+      }
+
+      buttons.push({text: 'Cancel', style: 'cancel'});
+      Alert.alert('Forward to...', msg.content.slice(0, 60), buttons);
+    };
+
     const handleLeave = () => {
       Alert.alert('Leave Group', `Leave "${group.name}"?`, [
         {text: 'Cancel', style: 'cancel'},
@@ -210,6 +242,7 @@ export function GroupsScreen() {
               message={item}
               showSender
               senderName={getContactName(item.senderId)}
+              onLongPress={() => handleForward(item)}
             />
           )}
           keyExtractor={item => item.id}

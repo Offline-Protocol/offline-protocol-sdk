@@ -792,6 +792,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_fina
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_all_routes(
@@ -1110,6 +1114,10 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_f
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`newRecipient`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`groupId`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_all_routes(`ptr`: Long,`destination`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1527,6 +1535,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 28940.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() != 46590.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 44359.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327.toShort()) {
@@ -2747,6 +2761,10 @@ public interface OfflineProtocolInterface {
     
     fun `forceTransport`(`transportType`: TransportType)
     
+    fun `forwardMessage`(`originalMessageJson`: kotlin.String, `newRecipient`: kotlin.String, `priority`: MessagePriority?): kotlin.String
+    
+    fun `forwardMessageToGroup`(`originalMessageJson`: kotlin.String, `groupId`: kotlin.String, `priority`: MessagePriority?): List<kotlin.String>
+    
     fun `getActiveTransports`(): List<kotlin.String>
     
     fun `getAllRoutes`(`destination`: kotlin.String): List<RouteEntry>
@@ -3341,6 +3359,34 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
 }
     }
     
+    
+
+    
+    @Throws(ProtocolException::class)override fun `forwardMessage`(`originalMessageJson`: kotlin.String, `newRecipient`: kotlin.String, `priority`: MessagePriority?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(
+        it,
+        FfiConverterString.lower(`originalMessageJson`),FfiConverterString.lower(`newRecipient`),FfiConverterOptionalTypeMessagePriority.lower(`priority`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `forwardMessageToGroup`(`originalMessageJson`: kotlin.String, `groupId`: kotlin.String, `priority`: MessagePriority?): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(
+        it,
+        FfiConverterString.lower(`originalMessageJson`),FfiConverterString.lower(`groupId`),FfiConverterOptionalTypeMessagePriority.lower(`priority`),_status)
+}
+    }
+    )
+    }
     
 
     override fun `getActiveTransports`(): List<kotlin.String> {

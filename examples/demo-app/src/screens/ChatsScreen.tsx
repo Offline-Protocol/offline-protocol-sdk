@@ -5,6 +5,7 @@ import {
   FlatList,
   TouchableOpacity,
   StyleSheet,
+  Alert,
 } from 'react-native';
 import {useProtocol} from '../context/ProtocolContext';
 import {Avatar} from '../components/Avatar';
@@ -12,7 +13,7 @@ import {PresenceIndicator} from '../components/PresenceIndicator';
 import {MessageBubble} from '../components/MessageBubble';
 import {QuickMessages} from '../components/QuickMessages';
 import {formatRelativeTime, formatUserId} from '../utils';
-import type {Chat} from '../types';
+import type {Chat, ChatMessage} from '../types';
 
 interface ChatsScreenProps {
   initialPeerId?: string | null;
@@ -21,7 +22,7 @@ interface ChatsScreenProps {
 
 export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProps) {
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
-  const {chats, contacts, sendMessage, markChatRead, userId, unblockUser} = useProtocol();
+  const {chats, contacts, groups, sendMessage, markChatRead, userId, unblockUser, forwardMessage, forwardMessageToGroup} = useProtocol();
   const listRef = useRef<FlatList>(null);
 
   // Handle navigation from People tab
@@ -48,6 +49,37 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
       setTimeout(() => {
         listRef.current?.scrollToEnd({animated: true});
       }, 100);
+    };
+
+    const handleForward = (msg: ChatMessage) => {
+      const contactList = Array.from(contacts.values()).filter(
+        c => c.hasSession && !c.isBlocked && c.peerId !== selectedPeerId,
+      );
+      const groupList = Array.from(groups.values());
+
+      const buttons: any[] = [];
+
+      contactList.forEach(c => {
+        buttons.push({
+          text: c.name || c.peerId,
+          onPress: () => forwardMessage(msg, c.peerId),
+        });
+      });
+
+      groupList.forEach(g => {
+        buttons.push({
+          text: `[Group] ${g.name}`,
+          onPress: () => forwardMessageToGroup(msg, g.id),
+        });
+      });
+
+      if (buttons.length === 0) {
+        Alert.alert('No Recipients', 'No contacts or groups available to forward to.');
+        return;
+      }
+
+      buttons.push({text: 'Cancel', style: 'cancel'});
+      Alert.alert('Forward to...', msg.content.slice(0, 60), buttons);
     };
 
     return (
@@ -81,7 +113,12 @@ export function ChatsScreen({initialPeerId, onClearInitialPeer}: ChatsScreenProp
           <FlatList
             ref={listRef}
             data={messages}
-            renderItem={({item}) => <MessageBubble message={item} />}
+            renderItem={({item}) => (
+              <MessageBubble
+                message={item}
+                onLongPress={() => handleForward(item)}
+              />
+            )}
             keyExtractor={item => item.id}
             contentContainerStyle={styles.messageList}
             scrollEnabled={!isBlocked}

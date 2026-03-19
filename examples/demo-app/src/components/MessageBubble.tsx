@@ -1,12 +1,13 @@
 import React from 'react';
-import {View, Text, StyleSheet} from 'react-native';
-import {formatMessageTime} from '../utils';
+import {View, Text, TouchableOpacity, StyleSheet} from 'react-native';
+import {formatMessageTime, formatUserId} from '../utils';
 import type {ChatMessage} from '../types';
 
 interface MessageBubbleProps {
   message: ChatMessage;
   showSender?: boolean;
   senderName?: string;
+  onLongPress?: () => void;
 }
 
 const STATUS_ICONS: Record<string, string> = {
@@ -16,15 +17,24 @@ const STATUS_ICONS: Record<string, string> = {
   failed: '✗',
 };
 
-export function MessageBubble({message, showSender, senderName}: MessageBubbleProps) {
+export function MessageBubble({message, showSender, senderName, onLongPress}: MessageBubbleProps) {
   const isOutgoing = message.isOutgoing;
+  const fwd = message.forwardInfo;
+
+  const Wrapper = onLongPress ? TouchableOpacity : View;
+  const wrapperProps = onLongPress ? {onLongPress, activeOpacity: 0.7} : {};
 
   return (
     <View style={[styles.container, isOutgoing ? styles.outgoing : styles.incoming]}>
       {showSender && !isOutgoing && senderName && (
         <Text style={styles.senderName}>{senderName}</Text>
       )}
-      <View style={[styles.bubble, isOutgoing ? styles.bubbleOutgoing : styles.bubbleIncoming]}>
+      <Wrapper {...wrapperProps} style={[styles.bubble, isOutgoing ? styles.bubbleOutgoing : styles.bubbleIncoming]}>
+        {fwd && (
+          <Text style={[styles.forwardLabel, isOutgoing ? styles.forwardLabelOutgoing : styles.forwardLabelIncoming]}>
+            Forwarded from {formatUserId(fwd.originalSender)}
+          </Text>
+        )}
         <Text style={[styles.text, isOutgoing ? styles.textOutgoing : styles.textIncoming]}>
           {message.content}
         </Text>
@@ -41,7 +51,7 @@ export function MessageBubble({message, showSender, senderName}: MessageBubblePr
             </>
           )}
         </View>
-      </View>
+      </Wrapper>
     </View>
   );
 }
@@ -77,6 +87,17 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 2,
     marginLeft: 12,
+  },
+  forwardLabel: {
+    fontSize: 11,
+    fontStyle: 'italic',
+    marginBottom: 4,
+  },
+  forwardLabelOutgoing: {
+    color: 'rgba(255,255,255,0.7)',
+  },
+  forwardLabelIncoming: {
+    color: '#8E8E93',
   },
   text: {
     fontSize: 16,

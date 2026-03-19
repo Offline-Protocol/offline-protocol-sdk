@@ -498,12 +498,16 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         if (!groupId || !memberId) {break;}
         setGroups(prev => {
           const next = new Map(prev);
-          const group = next.get(groupId);
-          if (group) {
-            next.set(groupId, {
-              ...group,
-              members: group.members.filter(m => m !== memberId),
-            });
+          if (memberId === userIdRef.current) {
+            next.delete(groupId);
+          } else {
+            const group = next.get(groupId);
+            if (group) {
+              next.set(groupId, {
+                ...group,
+                members: group.members.filter(m => m !== memberId),
+              });
+            }
           }
           return next;
         });

@@ -375,6 +375,12 @@ impl OfflineProtocol {
 
         info!(group_id = %payload.group_id, "Received mesh group Welcome");
 
+        // Skip duplicate Welcome — we're already a member
+        if self.group_mesh.members.contains_key(&payload.group_id) {
+            debug!(group_id = %payload.group_id, "Ignoring duplicate Welcome — already a member of this group");
+            return;
+        }
+
         let welcome_bytes = match base64_decode(&payload.welcome_data) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -1062,6 +1068,7 @@ impl OfflineProtocol {
             serde_json::to_string(&commit_payload)
                 .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
         );
+        let mut failed_commit_members: Vec<String> = Vec::new();
         for member in &members {
             if member == &self_id || member == invitee_user_id {
                 continue;
@@ -1075,7 +1082,13 @@ impl OfflineProtocol {
                     error = %e,
                     "Failed to send commit to group member during invite"
                 );
+                failed_commit_members.push(member.clone());
             }
+        }
+        // Single best-effort retry pass for transient failures
+        for member in &failed_commit_members {
+            let _ =
+                self.send_internal_message(member, commit_content.clone(), MessagePriority::High);
         }
 
         self.emit_event(Event::group_member_added(
@@ -1119,6 +1132,7 @@ impl OfflineProtocol {
             serde_json::to_string(&commit_payload)
                 .map_err(|e| Error::Other(format!("Serialize commit: {}", e)))?
         );
+        let mut failed_commit_members: Vec<String> = Vec::new();
         for member in &members {
             if member == &self_id {
                 continue;
@@ -1132,7 +1146,13 @@ impl OfflineProtocol {
                     error = %e,
                     "Failed to send commit to group member during remove"
                 );
+                failed_commit_members.push(member.clone());
             }
+        }
+        // Single best-effort retry pass for transient failures
+        for member in &failed_commit_members {
+            let _ =
+                self.send_internal_message(member, commit_content.clone(), MessagePriority::High);
         }
 
         self.emit_event(Event::group_member_removed(
@@ -1982,6 +2002,19 @@ impl OfflineProtocol {
         reply_to_msg: Option<String>,
         forward_info: Option<offline_protocol_core::ForwardInfo>,
     ) {
+        // Dedup check — same pattern as handle_group_mls_msg
+        let dedup_key = message_id.to_string();
+        if self.group_mesh.message_dedup.contains_key(&dedup_key) {
+            debug!(group_id = %group_id, msg_id = %dedup_key, "Duplicate relay group message, skipping");
+            return;
+        }
+        self.group_mesh
+            .message_dedup
+            .insert(dedup_key, Instant::now());
+        if self.group_mesh.message_dedup.len() > MAX_GROUP_MESSAGE_DEDUP_ENTRIES {
+            self.cleanup_group_message_dedup();
+        }
+
         let forward_info_event = forward_info
             .as_ref()
             .map(crate::events::ForwardInfoEvent::from);
@@ -2008,17 +2041,8 @@ impl OfflineProtocol {
         let plaintext = {
             let mls_guard = match self.read_mls_guard() {
                 Ok(guard) => guard,
-                Err(_) => {
-                    // MLS unavailable — emit raw content
-                    self.emit_event(Event::group_message_received(
-                        group_id.to_string(),
-                        sender.to_string(),
-                        content.to_string(),
-                        timestamp.to_string(),
-                        message_id.to_string(),
-                        reply_to_msg,
-                        forward_info_event,
-                    ));
+                Err(e) => {
+                    warn!(group_id = %group_id, error = %e, "MLS unavailable, dropping relay group message");
                     return;
                 }
             };
@@ -2056,17 +2080,8 @@ impl OfflineProtocol {
             None => {
                 warn!(
                     group_id = %group_id,
-                    "Failed to decrypt relay group message via MLS, emitting raw"
+                    "Failed to decrypt relay group message via MLS, dropping"
                 );
-                self.emit_event(Event::group_message_received(
-                    group_id.to_string(),
-                    sender.to_string(),
-                    content.to_string(),
-                    timestamp.to_string(),
-                    message_id.to_string(),
-                    reply_to_msg,
-                    forward_info_event,
-                ));
             }
         }
     }
