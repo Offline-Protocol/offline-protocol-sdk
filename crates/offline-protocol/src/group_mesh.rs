@@ -694,12 +694,15 @@ impl OfflineProtocol {
             if let Ok(mls_guard) = self.read_mls_guard() {
                 let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
                 if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                    let remaining_members = self
+                    let mut remaining_members = self
                         .group_mesh
                         .members
                         .get(&payload.group_id)
                         .cloned()
                         .unwrap_or_default();
+                    // Sort for deterministic election: all nodes must pick the
+                    // same member to promote, regardless of local insertion order.
+                    remaining_members.sort();
                     if !metadata.has_any_admin() && !remaining_members.is_empty() {
                         let promote_id = &remaining_members[0];
                         if let Err(e) =
@@ -1290,7 +1293,11 @@ impl OfflineProtocol {
                         .get(group_id)
                         .map(|m| m.len())
                         .unwrap_or(0);
-                    // member_count > 2: after removal there will still be other members
+                    // member_count > 2: the count is *before* removal, so > 2
+                    // means at least 2 members will remain after the removal.
+                    // When only 2 members exist (the admin being removed + one
+                    // other), the remaining sole member gets auto-promoted, so
+                    // we allow the removal.
                     if admin_count <= 1 && member_count > 2 {
                         return Err(Error::Other(
                             "Cannot remove the last admin while other members remain. Promote another member to admin first.".to_string(),
@@ -1313,10 +1320,14 @@ impl OfflineProtocol {
             if let Err(e) = mls_guard.remove_member_role(&gid, member_id) {
                 warn!(member = %member_id, error = %e, "Failed to clean up role metadata for removed member");
             }
-            // If no admin remains and there are still members, promote the first remaining member
+            // If no admin remains and there are still members, promote the
+            // lexicographically first remaining member for deterministic election
+            // (all nodes must agree on the same candidate).
             if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
-                if !metadata.has_any_admin() && !members.is_empty() {
-                    let promote_id = &members[0];
+                let mut sorted_members = members.clone();
+                sorted_members.sort();
+                if !metadata.has_any_admin() && !sorted_members.is_empty() {
+                    let promote_id = &sorted_members[0];
                     if let Err(e) = mls_guard.set_member_role(&gid, promote_id, GroupRole::Admin) {
                         warn!(user_id = %promote_id, error = %e, "Failed to auto-promote member to admin after last admin removed");
                     } else {
@@ -1789,7 +1800,11 @@ impl OfflineProtocol {
             if member == &self_id {
                 continue;
             }
-            let _ = self.send_internal_message(member, content.clone(), MessagePriority::High);
+            if let Err(e) =
+                self.send_internal_message(member, content.clone(), MessagePriority::High)
+            {
+                warn!(member = %member, group_id = %group_id, error = %e, "Failed to send role change broadcast");
+            }
         }
 
         self.emit_event(Event::group_role_changed(
