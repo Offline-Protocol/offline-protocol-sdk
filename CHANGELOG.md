@@ -2,7 +2,7 @@
 
 All notable changes to the Offline Protocol SDK are documented in this file. This changelog covers everything after the **v0.7.1** release.
 
-## [Unreleased] — since v0.7.1 (2026-03-03)
+## [0.9.0] — 2026-03-20
 
 ### Breaking Changes
 
