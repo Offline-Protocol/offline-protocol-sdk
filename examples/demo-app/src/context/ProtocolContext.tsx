@@ -11,7 +11,7 @@ import {
   MeshServices,
   MessagePriority,
 } from '@offline-protocol/mesh-sdk';
-import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, DiscoveredService, ServiceLogEntry} from '../types';
+import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, DiscoveredService, ServiceLogEntry, ForwardInfo} from '../types';
 import {
   PRESENCE_MESSAGE_PREFIX,
   PRESENCE_REBROADCAST_INTERVAL_MS,
@@ -51,6 +51,8 @@ interface ProtocolContextValue {
   unregisterService: (serviceId: string) => Promise<void>;
   discoverServices: (serviceId?: string) => Promise<void>;
   sendServiceRequest: (provider: string, serviceId: string, method: string, body: string) => Promise<void>;
+  forwardMessage: (message: ChatMessage, recipientId: string) => Promise<void>;
+  forwardMessageToGroup: (message: ChatMessage, groupId: string) => Promise<void>;
   markChatRead: (peerId: string) => void;
   blockUser: (peerId: string) => Promise<void>;
   unblockUser: (peerId: string) => Promise<void>;
@@ -104,6 +106,46 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   useEffect(() => { neighborsRef.current = neighbors; }, [neighbors]);
   useEffect(() => { userNameRef.current = userName; }, [userName]);
   useEffect(() => { userIdRef.current = userId; }, [userId]);
+
+  const parseForwardInfo = (event: any): ForwardInfo | undefined => {
+    const fi = event.forward_info || event.forwardInfo;
+    if (!fi) {return undefined;}
+    return {
+      originalSender: fi.original_sender || fi.originalSender || '',
+      originalMessageId: fi.original_message_id || fi.originalMessageId || '',
+      originalTimestamp: fi.original_timestamp || fi.originalTimestamp || 0,
+      forwardCount: fi.forward_count || fi.forwardCount || 1,
+    };
+  };
+
+  const buildRawEventJson = (event: any): string => {
+    // Build a JSON that matches the Rust `Message` struct for forwarding.
+    // The Rust layer deserializes this into `offline_protocol_core::Message`,
+    // which requires fields: id, sender, recipient, app_id, priority, ttl,
+    // hop_count, timestamp, content (and optionally forwarded_from).
+    const msgId = event.message_id || event.messageId || event.id;
+    const fwd = event.forwarded_from || event.forward_info || event.forwardInfo;
+    const obj: any = {
+      id: msgId,
+      sender: event.sender || event.senderId || event.sender_id,
+      recipient: event.recipient || event.recipientId || event.recipient_id || userIdRef.current,
+      app_id: PROTOCOL_CONFIG.appId,
+      priority: (event.priority || 'medium').toLowerCase(),
+      ttl: event.ttl ?? 8,
+      hop_count: event.hop_count ?? 0,
+      timestamp: event.timestamp || Date.now(),
+      content: event.content || event.message || '',
+    };
+    if (fwd) {
+      obj.forwarded_from = {
+        original_sender: fwd.original_sender || fwd.originalSender,
+        original_message_id: fwd.original_message_id || fwd.originalMessageId,
+        original_timestamp: fwd.original_timestamp || fwd.originalTimestamp,
+        forward_count: fwd.forward_count ?? fwd.forwardCount ?? 1,
+      };
+    }
+    return JSON.stringify(obj);
+  };
 
   // ─── Event Handlers ──────────────────────────────────────
 
@@ -254,6 +296,8 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
           timestamp: event.timestamp || Date.now(),
           status: 'delivered',
           isOutgoing: false,
+          forwardInfo: parseForwardInfo(event),
+          rawEventJson: buildRawEventJson(event),
         };
 
         setChats(prev => {
@@ -372,6 +416,8 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
           timestamp: event.timestamp || Date.now(),
           status: 'delivered',
           isOutgoing: senderId === userIdRef.current,
+          forwardInfo: parseForwardInfo(event),
+          rawEventJson: buildRawEventJson(event),
         };
 
         setGroups(prev => {
@@ -870,6 +916,121 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     });
   }, []);
 
+  const forwardMessageAction = useCallback(async (message: ChatMessage, recipientId: string) => {
+    if (!protocolRef.current) {return;}
+    if (blockedUsersRef.current.has(recipientId)) {return;}
+
+    const originalJson = message.rawEventJson || JSON.stringify({
+      id: message.id,
+      sender: message.senderId,
+      recipient: message.recipientId || userIdRef.current,
+      app_id: PROTOCOL_CONFIG.appId,
+      priority: 'medium',
+      ttl: 8,
+      hop_count: 0,
+      content: message.content,
+      timestamp: message.timestamp,
+    });
+
+    let msgId: string;
+    try {
+      msgId = await protocolRef.current.forwardMessage({
+        originalMessageJson: originalJson,
+        newRecipient: recipientId,
+      });
+    } catch (err) {
+      console.warn('Failed to forward message:', err);
+      return;
+    }
+
+    const fwdInfo: ForwardInfo = message.forwardInfo
+      ? {...message.forwardInfo, forwardCount: message.forwardInfo.forwardCount + 1}
+      : {
+          originalSender: message.senderId,
+          originalMessageId: message.id,
+          originalTimestamp: message.timestamp,
+          forwardCount: 1,
+        };
+
+    const chatMsg: ChatMessage = {
+      id: msgId,
+      senderId: userIdRef.current,
+      recipientId,
+      content: message.content,
+      timestamp: Date.now(),
+      status: 'sending',
+      isOutgoing: true,
+      forwardInfo: fwdInfo,
+    };
+
+    setChats(prev => {
+      const next = new Map(prev);
+      const chat = next.get(recipientId) || {peerId: recipientId, messages: [], unreadCount: 0};
+      next.set(recipientId, {
+        ...chat,
+        messages: [...chat.messages, chatMsg],
+      });
+      return next;
+    });
+  }, []);
+
+  const forwardMessageToGroupAction = useCallback(async (message: ChatMessage, groupId: string) => {
+    if (!protocolRef.current) {return;}
+
+    const originalJson = message.rawEventJson || JSON.stringify({
+      id: message.id,
+      sender: message.senderId,
+      recipient: message.recipientId || userIdRef.current,
+      app_id: PROTOCOL_CONFIG.appId,
+      priority: 'medium',
+      ttl: 8,
+      hop_count: 0,
+      content: message.content,
+      timestamp: message.timestamp,
+    });
+
+    let msgIds: string[];
+    try {
+      msgIds = await protocolRef.current.meshForwardMessageToGroup({
+        originalMessageJson: originalJson,
+        groupId,
+      });
+    } catch (err) {
+      console.warn('Failed to forward message to group:', err);
+      return;
+    }
+
+    const fwdInfo: ForwardInfo = message.forwardInfo
+      ? {...message.forwardInfo, forwardCount: message.forwardInfo.forwardCount + 1}
+      : {
+          originalSender: message.senderId,
+          originalMessageId: message.id,
+          originalTimestamp: message.timestamp,
+          forwardCount: 1,
+        };
+
+    const msgId = msgIds[0] || `fwd-grp-${Date.now()}`;
+    const chatMsg: ChatMessage = {
+      id: msgId,
+      senderId: userIdRef.current,
+      groupId,
+      content: message.content,
+      timestamp: Date.now(),
+      status: 'sending',
+      isOutgoing: true,
+      forwardInfo: fwdInfo,
+    };
+
+    setGroups(prev => {
+      const next = new Map(prev);
+      const group = next.get(groupId);
+      if (group) {
+        next.set(groupId, {...group, messages: [...group.messages, chatMsg]});
+      }
+      return next;
+    });
+  }, []);
+
   // ─── Context Value ───────────────────────────────────────
 
   const value: ProtocolContextValue = {
@@ -898,6 +1059,8 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     unregisterService: unregisterServiceAction,
     discoverServices: discoverServicesAction,
     sendServiceRequest: sendServiceRequestAction,
+    forwardMessage: forwardMessageAction,
+    forwardMessageToGroup: forwardMessageToGroupAction,
     markChatRead,
     blockUser: blockUserAction,
     unblockUser: unblockUserAction,
