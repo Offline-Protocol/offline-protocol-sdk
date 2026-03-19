@@ -231,6 +231,14 @@ let messageIds = try protocol.meshSendGroupMessage(
     groupId: group.groupId,
     content: "Hello team!"
 )
+
+// Get group info
+if let info = try protocol.meshGetGroupInfo(groupId: group.groupId) {
+    print("Members: \(info.members), Epoch: \(info.epoch)")
+}
+
+// Rename a group (admin only, broadcasts to all members)
+try protocol.meshRenameGroup(groupId: group.groupId, newName: "Engineering Team")
 ```
 
 ### 4. Receive and Decrypt Messages
@@ -488,6 +496,7 @@ MLS control payloads (key package / welcome / ciphertext envelopes) are encoded 
 | `meshSendGroupMessage(groupId, content)` | Send encrypted message to all members |
 | `meshListGroups()` | List all groups (excluding 1:1 sessions) |
 | `meshGetGroupInfo(groupId)` | Get group information |
+| `meshRenameGroup(groupId, newName)` | Rename a group (admin only) |
 
 ### Group Roles (High-Level Mesh API)
 

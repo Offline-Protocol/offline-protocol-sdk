@@ -419,6 +419,7 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 | **meshLeaveGroup** | `meshLeaveGroup(groupId): Promise<void>` | Leaves group with notification. |
 | **meshListGroups** | `meshListGroups(): Promise<string[]>` | Lists all group IDs (excluding 1:1 sessions). |
 | **meshGetGroupInfo** | `meshGetGroupInfo(groupId): Promise<MlsGroupInfo \| null>` | Gets group info (members, epoch, etc.). |
+| **meshRenameGroup** | `meshRenameGroup(groupId, newName): Promise<void>` | Renames group (admin only); broadcasts to all members. |
 
 ---
 
@@ -432,7 +433,7 @@ High-level group methods that handle MLS encryption and mesh fan-out automatical
 
 **Security invariants:**
 - The group creator is automatically `Admin`.
-- Only admins can invite, remove, or change roles.
+- Only admins can invite, remove, change roles, or rename groups.
 - The last admin cannot be demoted, removed, or leave (prevents orphaned groups).
 - Deterministic election promotes the lexicographically smallest member if the last admin disconnects.
 

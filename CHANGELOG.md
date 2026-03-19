@@ -4,6 +4,32 @@ All notable changes to the Offline Protocol SDK are documented in this file. Thi
 
 ## [Unreleased] — since v0.7.1 (2026-03-03)
 
+### Breaking Changes
+
+#### Low-level MLS group API removed from UniFFI bindings
+
+The following methods exposed raw MLS group operations that bypassed role checks, fan-out, and mesh routing. They have been removed from the UniFFI surface (Swift, Kotlin, React Native). Use the high-level mesh group API instead.
+
+| Removed method | Replacement |
+|---|---|
+| `mlsCreateGroup(groupName)` | `meshCreateGroup(groupName)` |
+| `mlsAddGroupMember(groupId, keyPackage)` | `meshInviteToGroup(groupId, inviteeUserId)` |
+| `mlsRemoveGroupMember(groupId, memberId)` | `meshRemoveFromGroup(groupId, memberId)` |
+| `mlsLeaveGroup(groupId)` | `meshLeaveGroup(groupId)` |
+| `mlsEncryptForGroup(groupId, plaintext)` | `meshSendGroupMessage(groupId, content)` |
+| `mlsDecryptFromGroup(encrypted)` | Handled automatically by the protocol engine |
+| `mlsJoinGroup(welcome)` | Handled automatically via Welcome processing |
+| `mlsListGroups()` | `meshListGroups()` |
+| `mlsGetGroupInfo(groupId)` | `meshGetGroupInfo(groupId)` |
+
+#### Transport stub methods removed
+
+`addInternetTransport(serverUrl, port)` and `addWifiDirectTransport()` were no-op stubs that always returned errors. They have been removed from UniFFI, UDL, and all platform bindings (JNI, Kotlin, Swift, TypeScript).
+
+#### `ProtocolState` enum variants removed
+
+`Starting` and `Stopping` were never set by the engine and have been removed. The enum is now `Stopped | Running | Paused`. If you have exhaustive `switch`/`when` statements over `ProtocolState`, remove the `Starting` and `Stopping` cases.
+
 ### Breaking Changes (React Native Bindings)
 
 If you are building an app with the React Native bindings, the following changes require updates to your code:
@@ -28,24 +54,7 @@ If you use exhaustive `switch` statements on `ProtocolEvent['type']`, add a case
 
 #### Admin-only group operations (behavioral change)
 
-`meshInviteToGroup()`, `meshRemoveFromGroup()`, and `meshSetMemberRole()` now enforce admin-only access. If a non-admin calls these methods, they will throw with `Error::NotGroupAdmin`. The group creator is automatically assigned the `Admin` role. If your app previously allowed any member to invite/remove, you must either promote them to admin first or adjust your UI to reflect the new permission model.
-
-#### `mls_add_group_member()` return type changed
-
-The return type of `mlsAddGroupMember()` has changed from a single `MlsWelcomeMessage` to a new `MlsAddMemberResult` containing both a Welcome and a Commit message.
-
-**Before:**
-```typescript
-const welcome = await protocol.mlsAddGroupMember(groupId, keyPackage);
-// Send welcome to the invitee
-```
-
-**After:**
-```typescript
-const result = await protocol.mlsAddGroupMember(groupId, keyPackage);
-// result.welcome → send to the invitee
-// result.commit  → sent to existing group members automatically
-```
+`meshInviteToGroup()`, `meshRemoveFromGroup()`, `meshSetMemberRole()`, and `meshRenameGroup()` now enforce admin-only access. If a non-admin calls these methods, they will throw with `Error::NotGroupAdmin`. The group creator is automatically assigned the `Admin` role. If your app previously allowed any member to invite/remove, you must either promote them to admin first or adjust your UI to reflect the new permission model.
 
 #### New error variants: `UserBlocked` and `LockPoisoned`
 
@@ -87,6 +96,7 @@ The following events are emitted at the Rust/UniFFI layer but are not yet expose
 - **`SecurityWarning`** — A control message failed authentication or replay checks.
 - **`TofuReset`** — TOFU trust state was reset for a peer.
 - **`GroupRoleChanged`** — A member's role was changed in a group (also bridged to React Native as `group_role_changed`).
+- **`GroupRenamed`** — A group was renamed, includes `group_id`, `new_name`, `old_name`, and `renamed_by`.
 
 #### `ForwardInfo` added to message events
 
@@ -108,6 +118,12 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 ---
 
 ### Features
+
+- **Group rename API** — `renameGroup(groupId, newName)` lets admins rename a group and broadcasts the change to all members via a `__GRP_RENAME__` internal message. A `GroupRenamed` event is emitted on all peers with `group_id`, `new_name`, `old_name`, and `renamed_by`. Available via UniFFI (Swift/Kotlin) and React Native (`meshRenameGroup`).
+
+- **`getGroupInfo` on the high-level API** — Replaces the removed low-level `mlsGetGroupInfo`. Returns group metadata including members, epoch, and timestamps. Available via UniFFI as `getGroupInfo(groupId)` and React Native as `meshGetGroupInfo(groupId)`.
+
+- **Dead code and security bypass cleanup** — Removed unused struct fields (`GroupManager::user_id`, `SessionManager::storage`, `InternetState::server_url`, UniFFI `OfflineProtocol::user_id`), all annotated with `#[allow(dead_code)]`. Simplified `GroupManager::new` signature (no longer takes a `user_id` parameter). Regenerated all UniFFI bindings (Kotlin, Swift, C header, JNI, TypeScript) to reflect the consolidated API surface.
 
 - **Group role management and security hardening**
   Added app-layer role tracking for MLS groups with a typed `GroupRole` enum (`Admin` / `Member`). The group creator is automatically assigned the `Admin` role. Admins can invite/remove members and change roles; non-admins are rejected with a typed error. Key security improvements: last-admin invariant prevents orphaned groups (demoting or removing the last admin is blocked), deterministic admin election on leader departure using lexicographic fallback, phantom member cleanup on group join, and removed member notification via a plaintext `__GRP_REMOVED__` control message so kicked members can clean up local state immediately. Key packages are automatically replenished after member removal so subsequent invites don't fail. Includes new `meshSetMemberRole()`, `meshGetMemberRole()`, and `meshGetGroupRoles()` APIs with full UniFFI and React Native bindings, a `GroupRoleChanged` event, and 1200+ lines of new tests.

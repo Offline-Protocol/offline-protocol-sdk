@@ -442,6 +442,19 @@ GroupRoleChanged {
 
 Emitted when a member's role is changed in a group.
 
+#### GroupRenamed
+
+```rust
+GroupRenamed {
+    group_id: String,
+    new_name: String,
+    old_name: Option<String>,
+    renamed_by: String,
+}
+```
+
+Emitted when a group is renamed.
+
 ## Group Role Management
 
 The high-level mesh group API includes role-based access control.
@@ -484,10 +497,35 @@ pub fn mesh_get_group_roles(
 ) -> Result<HashMap<String, String>>
 ```
 
+### Group Info
+
+```rust
+/// Get information about a group.
+pub fn get_group_info(
+    &self,
+    group_id: &str,
+) -> Result<Option<MlsGroupInfo>>
+```
+
+Returns group metadata including members, epoch, and timestamps. Returns `None` if the group does not exist.
+
+### Group Rename
+
+```rust
+/// Rename a group (admin only, broadcasts to all members).
+pub fn rename_group(
+    &mut self,
+    group_id: &str,
+    new_name: &str,
+) -> Result<()>
+```
+
+Renames a group and broadcasts the change to all members. Only admins can rename groups.
+
 ### Security Invariants
 
 - The group creator is automatically assigned `Admin`.
-- Only admins can call `mesh_invite_to_group`, `mesh_remove_from_group`, and `mesh_set_member_role`.
+- Only admins can call `mesh_invite_to_group`, `mesh_remove_from_group`, `mesh_set_member_role`, and `rename_group`.
 - The last admin cannot be demoted, removed, or leave — returns `Error::LastAdmin`.
 - If the last admin leaves unexpectedly, deterministic election promotes the lexicographically smallest member.
 
