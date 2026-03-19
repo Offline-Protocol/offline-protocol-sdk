@@ -13,6 +13,7 @@ use crate::protocol::{base64_decode, base64_encode, internal_prefixes, OfflinePr
 use crate::{Error, Event, Result};
 use chrono::Utc;
 use offline_protocol_core::{ForwardInfo, Message, MessageId, MessagePriority};
+use offline_protocol_mls::GroupRole;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -129,9 +130,9 @@ pub(crate) struct GroupMlsWelcomePayload {
     pub(crate) welcome_data: String,
     /// Current member list (user IDs) at the time of invite.
     pub(crate) member_list: Vec<String>,
-    /// Role assignments: user_id -> role string.
+    /// Role assignments: user_id -> role.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub(crate) member_roles: HashMap<String, String>,
+    pub(crate) member_roles: HashMap<String, GroupRole>,
 }
 
 /// Type of group membership commit operation.
@@ -163,7 +164,7 @@ pub(crate) struct GroupMlsCommitPayload {
     pub(crate) affected_member: Option<String>,
     /// Role assigned to the affected member (for Add commits).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) role: Option<String>,
+    pub(crate) role: Option<GroupRole>,
 }
 
 /// Payload for group leave notifications sent via mesh.
@@ -182,8 +183,8 @@ pub(crate) struct GroupRoleChangePayload {
     pub(crate) group_id: String,
     /// User ID of the member whose role changed.
     pub(crate) target_user_id: String,
-    /// New role (e.g. "admin" or "member").
-    pub(crate) new_role: String,
+    /// New role.
+    pub(crate) new_role: GroupRole,
     /// User ID of who changed the role.
     pub(crate) changed_by: String,
 }
@@ -455,11 +456,7 @@ impl OfflineProtocol {
                 if let Ok(mls_guard) = self.read_mls_guard() {
                     let gid = offline_protocol_mls::GroupId::new(&group_id);
                     for (user_id, role) in &payload.member_roles {
-                        let _ = mls_guard.set_group_custom_metadata(
-                            &gid,
-                            &format!("role:{}", user_id),
-                            role,
-                        );
+                        let _ = mls_guard.set_member_role(&gid, user_id, *role);
                     }
                 }
             }
@@ -640,15 +637,13 @@ impl OfflineProtocol {
 
         // Emit events based on actual MLS membership changes, not claimed affected_member
         for member in &actual_added {
-            // Store the role from the commit payload for newly added members
-            if let Some(role) = &payload.role {
-                if let Ok(mls_guard) = self.read_mls_guard() {
-                    let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                    let _ = mls_guard.set_group_custom_metadata(
-                        &gid,
-                        &format!("role:{}", member),
-                        role,
-                    );
+            // Store the role from the commit payload only for the specific affected member
+            if let (Some(role), Some(affected)) = (&payload.role, &payload.affected_member) {
+                if *member == affected {
+                    if let Ok(mls_guard) = self.read_mls_guard() {
+                        let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
+                        let _ = mls_guard.set_member_role(&gid, member, *role);
+                    }
                 }
             }
             self.emit_event(Event::group_member_added(
@@ -662,7 +657,7 @@ impl OfflineProtocol {
             // Clean up role metadata for removed members
             if let Ok(mls_guard) = self.read_mls_guard() {
                 let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-                let _ = mls_guard.remove_group_custom_metadata(&gid, &format!("role:{}", member));
+                let _ = mls_guard.remove_member_role(&gid, member);
             }
             self.emit_event(Event::group_member_removed(
                 payload.group_id.clone(),
@@ -1066,7 +1061,7 @@ impl OfflineProtocol {
     pub fn invite_to_group(&mut self, group_id: &str, invitee_user_id: &str) -> Result<()> {
         // Admin check
         let self_id_check = self.config.user_id.clone();
-        if !self.check_is_admin(group_id, &self_id_check) {
+        if !self.check_is_admin(group_id, &self_id_check)? {
             return Err(Error::Other("Only admins can invite members".to_string()));
         }
 
@@ -1141,15 +1136,11 @@ impl OfflineProtocol {
         // Refresh member list after add
         let members = self.refresh_group_members(group_id)?;
 
-        // Store invitee as "member" role and load all roles for the welcome payload
+        // Store invitee as member role and load all roles for the welcome payload
         let member_roles = {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
-            let _ = mls_guard.set_group_custom_metadata(
-                &gid,
-                &format!("role:{}", invitee_user_id),
-                "member",
-            );
+            let _ = mls_guard.set_member_role(&gid, invitee_user_id, GroupRole::Member);
             mls_guard
                 .get_group_metadata(&gid)
                 .ok()
@@ -1183,7 +1174,7 @@ impl OfflineProtocol {
             ciphertext: base64_encode(&commit.ciphertext),
             epoch: commit.epoch,
             affected_member: Some(invitee_user_id.to_string()),
-            role: Some("member".to_string()),
+            role: Some(GroupRole::Member),
         };
         let commit_content = format!(
             "{}{}",
@@ -1234,7 +1225,7 @@ impl OfflineProtocol {
     pub fn remove_from_group(&mut self, group_id: &str, member_id: &str) -> Result<()> {
         // Admin check
         let self_id_check = self.config.user_id.clone();
-        if !self.check_is_admin(group_id, &self_id_check) {
+        if !self.check_is_admin(group_id, &self_id_check)? {
             return Err(Error::Other("Only admins can remove members".to_string()));
         }
 
@@ -1251,7 +1242,7 @@ impl OfflineProtocol {
         // Clean up removed member's role metadata
         if let Ok(mls_guard) = self.read_mls_guard() {
             let gid = offline_protocol_mls::GroupId::new(group_id);
-            let _ = mls_guard.remove_group_custom_metadata(&gid, &format!("role:{}", member_id));
+            let _ = mls_guard.remove_member_role(&gid, member_id);
         }
 
         let commit_payload = GroupMlsCommitPayload {
@@ -1601,18 +1592,14 @@ impl OfflineProtocol {
     // ========================================================================
 
     /// Checks if a user is an admin of the given group.
-    fn check_is_admin(&self, group_id: &str, user_id: &str) -> bool {
-        let mls_guard = match self.read_mls_guard() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
+    fn check_is_admin(&self, group_id: &str, user_id: &str) -> Result<bool> {
+        let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
-        mls_guard
-            .get_group_metadata(&gid)
-            .ok()
-            .flatten()
-            .map(|m| m.get_role(user_id) == "admin")
-            .unwrap_or(false)
+        let is_admin = mls_guard
+            .get_group_metadata(&gid)?
+            .map(|m| m.get_role(user_id) == GroupRole::Admin)
+            .unwrap_or(false);
+        Ok(is_admin)
     }
 
     /// Changes a member's role in a group (admin only).
@@ -1621,29 +1608,22 @@ impl OfflineProtocol {
         &mut self,
         group_id: &str,
         target_user_id: &str,
-        role: &str,
+        role: GroupRole,
     ) -> Result<()> {
-        if role != "admin" && role != "member" {
-            return Err(Error::Other(format!(
-                "Invalid role '{}', must be 'admin' or 'member'",
-                role
-            )));
-        }
-
         let self_id = self.config.user_id.clone();
-        if !self.check_is_admin(group_id, &self_id) {
+        if !self.check_is_admin(group_id, &self_id)? {
             return Err(Error::Other("Only admins can change roles".to_string()));
         }
 
         // Prevent last admin from demoting themselves
-        if role == "member" && target_user_id == self_id {
+        if role == GroupRole::Member && target_user_id == self_id {
             let mls_guard = self.read_mls_guard()?;
             let gid = offline_protocol_mls::GroupId::new(group_id);
             if let Some(metadata) = mls_guard.get_group_metadata(&gid).ok().flatten() {
                 let admin_count = metadata
                     .get_all_roles()
                     .values()
-                    .filter(|r| r.as_str() == "admin")
+                    .filter(|r| **r == GroupRole::Admin)
                     .count();
                 if admin_count <= 1 {
                     return Err(Error::Other("Cannot demote the last admin".to_string()));
@@ -1670,14 +1650,14 @@ impl OfflineProtocol {
         // Store locally
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
-        mls_guard.set_group_custom_metadata(&gid, &format!("role:{}", target_user_id), role)?;
+        mls_guard.set_member_role(&gid, target_user_id, role)?;
         drop(mls_guard);
 
         // Broadcast to all members
         let payload = GroupRoleChangePayload {
             group_id: group_id.to_string(),
             target_user_id: target_user_id.to_string(),
-            new_role: role.to_string(),
+            new_role: role,
             changed_by: self_id.clone(),
         };
         let content = format!(
@@ -1705,7 +1685,7 @@ impl OfflineProtocol {
     }
 
     /// Gets a member's role in a group.
-    pub fn get_member_role(&self, group_id: &str, user_id: &str) -> Result<String> {
+    pub fn get_member_role(&self, group_id: &str, user_id: &str) -> Result<GroupRole> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         let metadata = mls_guard
@@ -1715,7 +1695,7 @@ impl OfflineProtocol {
     }
 
     /// Gets all member roles in a group.
-    pub fn get_group_roles(&self, group_id: &str) -> Result<HashMap<String, String>> {
+    pub fn get_group_roles(&self, group_id: &str) -> Result<HashMap<String, GroupRole>> {
         let mls_guard = self.read_mls_guard()?;
         let gid = offline_protocol_mls::GroupId::new(group_id);
         let metadata = mls_guard
@@ -1743,31 +1723,40 @@ impl OfflineProtocol {
             .message_dedup
             .insert(dedup_key, Instant::now());
 
-        // Verify sender is admin
-        if !self.check_is_admin(&payload.group_id, sender) {
-            error!(
-                sender = %sender,
-                group_id = %payload.group_id,
-                "SECURITY: Role change from non-admin, ignoring"
-            );
-            return;
+        // Verify sender is admin (use transport-authenticated sender, not payload.changed_by)
+        match self.check_is_admin(&payload.group_id, sender) {
+            Ok(true) => {}
+            Ok(false) => {
+                error!(
+                    sender = %sender,
+                    group_id = %payload.group_id,
+                    "SECURITY: Role change from non-admin, ignoring"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    sender = %sender,
+                    group_id = %payload.group_id,
+                    error = %e,
+                    "Failed to verify admin status for role change"
+                );
+                return;
+            }
         }
 
         // Store role locally
         if let Ok(mls_guard) = self.read_mls_guard() {
             let gid = offline_protocol_mls::GroupId::new(&payload.group_id);
-            let _ = mls_guard.set_group_custom_metadata(
-                &gid,
-                &format!("role:{}", payload.target_user_id),
-                &payload.new_role,
-            );
+            let _ = mls_guard.set_member_role(&gid, &payload.target_user_id, payload.new_role);
         }
 
+        // Use transport-authenticated sender as changed_by, not the untrusted payload field
         self.emit_event(Event::group_role_changed(
             payload.group_id,
             payload.target_user_id,
-            payload.new_role,
-            payload.changed_by,
+            payload.new_role.to_string(),
+            sender.to_string(),
         ));
     }
 

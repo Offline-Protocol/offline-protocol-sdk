@@ -3,6 +3,7 @@ use crate::protocol::tests::{create_test_config, create_test_config_for_user};
 use crate::protocol::{base64_decode, base64_encode, internal_prefixes, InternalMessageResult};
 use crate::{Event, OfflineProtocol};
 use offline_protocol_core::{AppId, UserId};
+use offline_protocol_mls::GroupRole;
 use offline_protocol_transport::{Transport, TransportType};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -5039,4 +5040,346 @@ fn test_remove_commit_retry_no_panic() {
         result.is_ok(),
         "remove_from_group should succeed even when sends fail"
     );
+}
+
+// ========================================================================
+// GROUP ROLE TESTS
+// ========================================================================
+
+#[test]
+fn test_group_creator_is_admin() {
+    let (mut alice, _events) = setup_started_with_events();
+    let group_info = alice.create_group("Test Group").unwrap();
+    let group_id = group_info.group_id.as_str();
+
+    // create_test_config uses "user123" as the user ID
+    let role = alice.get_member_role(group_id, "user123").unwrap();
+    assert_eq!(role, GroupRole::Admin, "Group creator should be admin");
+}
+
+#[test]
+fn test_set_member_role_happy_path() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Role Test");
+
+    // Alice (creator/admin) promotes Bob to admin
+    alice
+        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .unwrap();
+
+    let role = alice.get_member_role(&group_id, "bob").unwrap();
+    assert_eq!(role, GroupRole::Admin);
+}
+
+#[test]
+fn test_set_member_role_non_admin_rejected() {
+    let (mut _alice, mut bob, group_id) = setup_alice_bob_group("Role Test");
+
+    // Bob is not admin — should be rejected
+    let result = bob.set_member_role(&group_id, "alice", GroupRole::Member);
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("Only admins"),
+        "Non-admin should be rejected"
+    );
+}
+
+#[test]
+fn test_last_admin_cannot_demote_self() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Role Test");
+
+    // Alice is the only admin — cannot demote herself
+    let result = alice.set_member_role(&group_id, "alice", GroupRole::Member);
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot demote the last admin"),
+        "Last admin should not be able to demote self"
+    );
+}
+
+#[test]
+fn test_admin_can_demote_self_when_other_admin_exists() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Role Test");
+
+    // Promote Bob to admin first
+    alice
+        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .unwrap();
+
+    // Now Alice can demote herself
+    alice
+        .set_member_role(&group_id, "alice", GroupRole::Member)
+        .unwrap();
+
+    let role = alice.get_member_role(&group_id, "alice").unwrap();
+    assert_eq!(role, GroupRole::Member);
+}
+
+#[test]
+fn test_get_group_roles_returns_all() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Role Test");
+
+    // Promote Bob
+    alice
+        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .unwrap();
+
+    let roles = alice.get_group_roles(&group_id).unwrap();
+    assert_eq!(roles.get("alice"), Some(&GroupRole::Admin));
+    assert_eq!(roles.get("bob"), Some(&GroupRole::Admin));
+}
+
+#[test]
+fn test_set_member_role_non_member_rejected() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Role Test");
+
+    let result = alice.set_member_role(&group_id, "carol", GroupRole::Admin);
+    assert!(result.is_err());
+    assert!(
+        result.unwrap_err().to_string().contains("not a member"),
+        "Non-member should be rejected"
+    );
+}
+
+#[test]
+fn test_invite_requires_admin() {
+    let (mut _alice, mut bob, group_id) = setup_alice_bob_group("Invite Test");
+
+    // Bob (member) tries to invite — should fail
+    let result = bob.invite_to_group(&group_id, "carol");
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Only admins can invite"),
+        "Non-admin invite should be rejected"
+    );
+}
+
+#[test]
+fn test_remove_requires_admin() {
+    let (mut _alice, mut bob, group_id) = setup_alice_bob_group("Remove Test");
+
+    // Bob (member) tries to remove Alice — should fail
+    let result = bob.remove_from_group(&group_id, "alice");
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Only admins can remove"),
+        "Non-admin remove should be rejected"
+    );
+}
+
+#[test]
+fn test_set_member_role_emits_event() {
+    let (mut alice, _bob, group_id) = setup_alice_bob_group("Event Test");
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    alice.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    alice
+        .set_member_role(&group_id, "bob", GroupRole::Admin)
+        .unwrap();
+
+    let captured = events.lock().unwrap();
+    let role_event = captured
+        .iter()
+        .find(|e| matches!(e, Event::GroupRoleChanged { .. }));
+    assert!(role_event.is_some(), "Should emit GroupRoleChanged event");
+    if let Some(Event::GroupRoleChanged {
+        group_id: gid,
+        user_id,
+        new_role,
+        changed_by,
+    }) = role_event
+    {
+        assert_eq!(gid, &group_id);
+        assert_eq!(user_id, "bob");
+        assert_eq!(new_role, "admin");
+        assert_eq!(changed_by, "alice");
+    }
+}
+
+#[test]
+fn test_handle_group_role_change_non_admin_rejected() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Security Test");
+
+    // Set up role state on Bob's side: Alice is admin, Bob is member
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+    }
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Simulate an incoming role change from a non-admin sender (bob)
+    let payload = GroupRoleChangePayload {
+        group_id: group_id.clone(),
+        target_user_id: "bob".to_string(),
+        new_role: GroupRole::Admin,
+        changed_by: "bob".to_string(),
+    };
+    bob.handle_group_role_change("msg-456", "bob", &serde_json::to_string(&payload).unwrap());
+
+    // Should NOT emit event — sender "bob" is not admin
+    let captured = events.lock().unwrap();
+    let role_event = captured
+        .iter()
+        .find(|e| matches!(e, Event::GroupRoleChanged { .. }));
+    assert!(
+        role_event.is_none(),
+        "Role change from non-admin should be rejected"
+    );
+}
+
+#[test]
+fn test_handle_group_role_change_uses_transport_sender_not_payload() {
+    let (_alice, mut bob, group_id) = setup_alice_bob_group("Spoof Test");
+
+    // Set up Alice's admin role in Bob's local metadata so check_is_admin works
+    {
+        let bob_mls = bob.mls_manager_for_testing().read().unwrap();
+        let gid = offline_protocol_mls::GroupId::new(&group_id);
+        bob_mls
+            .set_member_role(&gid, "alice", GroupRole::Admin)
+            .unwrap();
+    }
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_clone = events.clone();
+    bob.on_event(move |event| {
+        events_clone.lock().unwrap().push(event);
+    });
+
+    // Simulate role change from alice (admin) but with a spoofed changed_by field
+    let payload = GroupRoleChangePayload {
+        group_id: group_id.clone(),
+        target_user_id: "bob".to_string(),
+        new_role: GroupRole::Admin,
+        changed_by: "evil_spoofed_user".to_string(),
+    };
+    bob.handle_group_role_change(
+        "msg-123",
+        "alice",
+        &serde_json::to_string(&payload).unwrap(),
+    );
+
+    // Event should use transport sender ("alice"), not the spoofed changed_by
+    let captured = events.lock().unwrap();
+    let role_event = captured
+        .iter()
+        .find(|e| matches!(e, Event::GroupRoleChanged { .. }));
+    assert!(role_event.is_some(), "Valid admin should be accepted");
+    if let Some(Event::GroupRoleChanged { changed_by, .. }) = role_event {
+        assert_eq!(
+            changed_by, "alice",
+            "changed_by must be transport-authenticated sender, not payload"
+        );
+    }
+}
+
+#[test]
+fn test_group_role_enum_serialization_roundtrip() {
+    // Verify GroupRole serializes to lowercase strings for wire compatibility
+    let admin_json = serde_json::to_string(&GroupRole::Admin).unwrap();
+    assert_eq!(admin_json, "\"admin\"");
+
+    let member_json = serde_json::to_string(&GroupRole::Member).unwrap();
+    assert_eq!(member_json, "\"member\"");
+
+    let parsed: GroupRole = serde_json::from_str("\"admin\"").unwrap();
+    assert_eq!(parsed, GroupRole::Admin);
+
+    let parsed: GroupRole = serde_json::from_str("\"member\"").unwrap();
+    assert_eq!(parsed, GroupRole::Member);
+}
+
+#[test]
+fn test_group_role_fromstr() {
+    assert_eq!("admin".parse::<GroupRole>().unwrap(), GroupRole::Admin);
+    assert_eq!("member".parse::<GroupRole>().unwrap(), GroupRole::Member);
+    assert!("moderator".parse::<GroupRole>().is_err());
+    assert!("Admin".parse::<GroupRole>().is_err());
+    assert!("".parse::<GroupRole>().is_err());
+}
+
+#[test]
+fn test_group_role_display() {
+    assert_eq!(GroupRole::Admin.to_string(), "admin");
+    assert_eq!(GroupRole::Member.to_string(), "member");
+}
+
+#[test]
+fn test_welcome_payload_carries_roles() {
+    let mut roles = HashMap::new();
+    roles.insert("alice".to_string(), GroupRole::Admin);
+    roles.insert("bob".to_string(), GroupRole::Member);
+
+    let payload = GroupMlsWelcomePayload {
+        group_id: "group:test".to_string(),
+        group_name: Some("Test".to_string()),
+        welcome_data: "d2VsY29tZQ==".to_string(),
+        member_list: vec!["alice".to_string(), "bob".to_string()],
+        member_roles: roles,
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    let parsed: GroupMlsWelcomePayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.member_roles.get("alice"), Some(&GroupRole::Admin));
+    assert_eq!(parsed.member_roles.get("bob"), Some(&GroupRole::Member));
+}
+
+#[test]
+fn test_commit_payload_carries_role() {
+    let payload = GroupMlsCommitPayload {
+        group_id: "group:test".to_string(),
+        commit_type: GroupCommitType::Add,
+        ciphertext: "abc".to_string(),
+        epoch: 1,
+        affected_member: Some("bob".to_string()),
+        role: Some(GroupRole::Member),
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    let parsed: GroupMlsCommitPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.role, Some(GroupRole::Member));
+
+    // None role should be omitted from JSON
+    let payload_no_role = GroupMlsCommitPayload {
+        group_id: "group:test".to_string(),
+        commit_type: GroupCommitType::Remove,
+        ciphertext: "abc".to_string(),
+        epoch: 2,
+        affected_member: None,
+        role: None,
+    };
+    let json = serde_json::to_string(&payload_no_role).unwrap();
+    assert!(!json.contains("role"));
+}
+
+#[test]
+fn test_role_change_payload_serialization() {
+    let payload = GroupRoleChangePayload {
+        group_id: "group:test".to_string(),
+        target_user_id: "bob".to_string(),
+        new_role: GroupRole::Admin,
+        changed_by: "alice".to_string(),
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    assert!(json.contains("\"new_role\":\"admin\""));
+    let parsed: GroupRoleChangePayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.new_role, GroupRole::Admin);
 }

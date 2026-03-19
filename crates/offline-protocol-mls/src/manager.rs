@@ -7,8 +7,8 @@ use crate::session::SessionManager;
 use crate::storage::MlsStorage;
 use crate::storage_adapter::MlsStorageAdapter;
 use crate::types::{
-    EncryptedMessage, GroupId, GroupInfo, GroupMetadata, KeyPackageBundle, MlsMessageType,
-    StorageKeyType, WelcomeMessage,
+    EncryptedMessage, GroupId, GroupInfo, GroupMetadata, GroupRole, KeyPackageBundle,
+    MlsMessageType, StorageKeyType, WelcomeMessage,
 };
 
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
@@ -449,7 +449,7 @@ impl MlsManager {
 
         // Store group metadata with creator as admin
         let mut metadata = GroupMetadata::new(Some(group_name.to_string()));
-        metadata.set_role(&self.user_id, "admin");
+        metadata.set_role(&self.user_id, GroupRole::Admin);
         self.save_group_metadata(&group_id, &metadata)?;
 
         let mut info = self.group_manager.get_group_info(&group, &group_id);
@@ -712,6 +712,31 @@ impl MlsManager {
             .load_group_metadata(group_id)?
             .unwrap_or_else(|| GroupMetadata::new(None));
         metadata.custom.remove(key);
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
+    /// Sets a member's role in a group.
+    pub fn set_member_role(
+        &self,
+        group_id: &GroupId,
+        user_id: &str,
+        role: GroupRole,
+    ) -> Result<()> {
+        let mut metadata = self
+            .load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.set_role(user_id, role);
+        metadata.touch();
+        self.save_group_metadata(group_id, &metadata)
+    }
+
+    /// Removes a member's role metadata from a group.
+    pub fn remove_member_role(&self, group_id: &GroupId, user_id: &str) -> Result<()> {
+        let mut metadata = self
+            .load_group_metadata(group_id)?
+            .unwrap_or_else(|| GroupMetadata::new(None));
+        metadata.remove_role(user_id);
         metadata.touch();
         self.save_group_metadata(group_id, &metadata)
     }

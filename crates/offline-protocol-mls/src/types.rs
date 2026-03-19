@@ -1,6 +1,8 @@
 //! Types for MLS operations.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Unique identifier for an MLS group.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -41,6 +43,46 @@ impl From<String> for GroupId {
 impl From<&str> for GroupId {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+/// Role a user holds within a group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupRole {
+    /// Group administrator — can invite/remove members and change roles.
+    Admin,
+    /// Regular group member.
+    Member,
+}
+
+impl Default for GroupRole {
+    fn default() -> Self {
+        Self::Member
+    }
+}
+
+impl fmt::Display for GroupRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Admin => write!(f, "admin"),
+            Self::Member => write!(f, "member"),
+        }
+    }
+}
+
+impl FromStr for GroupRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "admin" => Ok(Self::Admin),
+            "member" => Ok(Self::Member),
+            other => Err(format!(
+                "Invalid role '{}', must be 'admin' or 'member'",
+                other
+            )),
+        }
     }
 }
 
@@ -310,16 +352,16 @@ impl GroupMetadata {
         self.last_activity_ms = chrono::Utc::now().timestamp_millis() as u64;
     }
 
-    /// Gets the role for a user, defaulting to `"member"` if not set.
-    pub fn get_role(&self, user_id: &str) -> String {
+    /// Gets the role for a user, defaulting to [`GroupRole::Member`] if not set.
+    pub fn get_role(&self, user_id: &str) -> GroupRole {
         self.custom
             .get(&format!("role:{}", user_id))
-            .cloned()
-            .unwrap_or_else(|| "member".to_string())
+            .and_then(|r| r.parse().ok())
+            .unwrap_or_default()
     }
 
     /// Sets the role for a user.
-    pub fn set_role(&mut self, user_id: &str, role: &str) {
+    pub fn set_role(&mut self, user_id: &str, role: GroupRole) {
         self.custom
             .insert(format!("role:{}", user_id), role.to_string());
     }
@@ -330,12 +372,12 @@ impl GroupMetadata {
     }
 
     /// Returns all `user_id -> role` mappings.
-    pub fn get_all_roles(&self) -> std::collections::HashMap<String, String> {
+    pub fn get_all_roles(&self) -> std::collections::HashMap<String, GroupRole> {
         self.custom
             .iter()
             .filter_map(|(k, v)| {
                 k.strip_prefix("role:")
-                    .map(|uid| (uid.to_string(), v.clone()))
+                    .map(|uid| (uid.to_string(), v.parse().unwrap_or_default()))
             })
             .collect()
     }
