@@ -5,39 +5,43 @@ on:
     tags:
       - 'v*'
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  UNIFFI_VERSION: "0.30.0"
 
 jobs:
   build-ios:
     name: Build iOS Libraries
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
 
-      - name: Cache Cargo
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-ios
+
+      - name: Cache uniffi-bindgen
+        id: cache-uniffi
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-ios-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-ios-
+          path: ~/.cargo/bin/uniffi-bindgen
+          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
 
       - name: Install uniffi-bindgen
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
+        if: steps.cache-uniffi.outputs.cache-hit != 'true'
+        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
 
       - name: Build iOS Libraries
         working-directory: bindings/react-native
@@ -52,17 +56,40 @@ jobs:
             bindings/react-native/ios/Generated/
           retention-days: 1
 
+  # Build each Android ABI in parallel instead of sequentially
   build-android:
-    name: Build Android Libraries
+    name: Build Android (${{ matrix.abi }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            target: aarch64-linux-android
+            linker_env: CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
+            linker_bin: aarch64-linux-android21-clang
+          - abi: armeabi-v7a
+            target: armv7-linux-androideabi
+            linker_env: CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER
+            linker_bin: armv7a-linux-androideabi21-clang
+          - abi: x86_64
+            target: x86_64-linux-android
+            linker_env: CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
+            linker_bin: x86_64-linux-android21-clang
+          - abi: x86
+            target: i686-linux-android
+            linker_env: CARGO_TARGET_I686_LINUX_ANDROID_LINKER
+            linker_bin: i686-linux-android21-clang
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-android-${{ matrix.abi }}
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
@@ -71,55 +98,76 @@ jobs:
           ndk-version: r26b
           add-to-path: true
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-android-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-android-
-
-      - name: Install uniffi-bindgen
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
-
-      - name: Build Android Libraries
-        working-directory: bindings/react-native
+      - name: Build ${{ matrix.abi }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: bash scripts/build-uniffi-android.sh
+        run: |
+          NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export ${{ matrix.linker_env }}="$NDK_TOOLCHAIN/${{ matrix.linker_bin }}"
+          export AR="$NDK_TOOLCHAIN/llvm-ar"
 
-      - name: Upload Android Native Libs
+          cargo build --release --target ${{ matrix.target }} --package offline-protocol-uniffi
+
+          mkdir -p jniLibs/${{ matrix.abi }}
+          SO_ROOT="target/${{ matrix.target }}/release"
+          if [ -f "$SO_ROOT/liboffline_protocol_uniffi.so" ]; then
+            cp "$SO_ROOT/liboffline_protocol_uniffi.so" "jniLibs/${{ matrix.abi }}/libuniffi_offline_protocol.so"
+          else
+            cp "$SO_ROOT/deps/liboffline_protocol_uniffi.so" "jniLibs/${{ matrix.abi }}/libuniffi_offline_protocol.so"
+          fi
+
+      - name: Upload ${{ matrix.abi }} library
         uses: actions/upload-artifact@v4
         with:
-          name: android-jniLibs
-          path: bindings/react-native/android/src/main/jniLibs/
+          name: android-jniLibs-${{ matrix.abi }}
+          path: jniLibs/
           retention-days: 1
 
-      - name: Upload Android Generated Bindings
+  # Generate Kotlin bindings in parallel with builds (only needs UDL file, not compiled code)
+  android-bindings:
+    name: Generate Android Bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache uniffi-bindgen
+        id: cache-uniffi
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/uniffi-bindgen
+          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
+
+      - name: Install uniffi-bindgen
+        if: steps.cache-uniffi.outputs.cache-hit != 'true'
+        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
+
+      - name: Generate Kotlin bindings
+        run: |
+          cd crates/offline-protocol-uniffi
+          uniffi-bindgen generate src/offline_protocol.udl --language kotlin --out-dir ../../android-bindings
+
+      - name: Upload Android Bindings
         uses: actions/upload-artifact@v4
         with:
           name: android-uniffi-bindings
-          path: bindings/react-native/android/src/main/java/uniffi/
+          path: android-bindings/
           retention-days: 1
 
   release:
     name: Create Release & Publish to npm
-    needs: [build-ios, build-android]
-    runs-on: macos-14
+    needs: [build-ios, build-android, android-bindings]
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install git-cliff
-        run: cargo install git-cliff --locked
+      # Pre-built binary — no Rust toolchain needed
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
 
       - name: Generate release notes
         run: git-cliff --latest --strip header -o RELEASE_NOTES.md
@@ -130,17 +178,35 @@ jobs:
           name: ios-libs
           path: bindings/react-native/ios
 
-      - name: Download Android Native Libs
+      - name: Download Android Libraries
         uses: actions/download-artifact@v4
         with:
-          name: android-jniLibs
+          pattern: android-jniLibs-*
           path: bindings/react-native/android/src/main/jniLibs
+          merge-multiple: true
 
-      - name: Download Android Generated Bindings
+      - name: Download Android Bindings
         uses: actions/download-artifact@v4
         with:
           name: android-uniffi-bindings
-          path: bindings/react-native/android/src/main/java/uniffi
+          path: bindings/react-native/android/src/main/java
+
+      - name: Verify artifacts
+        run: |
+          echo "Checking iOS artifacts..."
+          test -f bindings/react-native/ios/libs/liboffline_protocol_uniffi_device.a
+          test -f bindings/react-native/ios/libs/liboffline_protocol_uniffi_sim.a
+          test -d bindings/react-native/ios/Generated
+
+          echo "Checking Android native libraries..."
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            test -f "bindings/react-native/android/src/main/jniLibs/$abi/libuniffi_offline_protocol.so"
+          done
+
+          echo "Checking Android Kotlin bindings..."
+          test -d bindings/react-native/android/src/main/java/uniffi
+
+          echo "All artifacts verified."
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -182,4 +248,3 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
