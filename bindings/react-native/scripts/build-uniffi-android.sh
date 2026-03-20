@@ -3,6 +3,10 @@
 # Build UniFFI Android libraries and generate Kotlin bindings
 # This script builds the Rust UniFFI library for Android and generates Kotlin bindings
 # Compatible with bash 3.2+ (macOS default)
+#
+# NOTE: CI release workflow (.github/workflows/release.yml) uses inline build
+# logic with a matrix strategy instead of this script. If you change build
+# targets, linker settings, or output paths here, update release.yml too.
 
 set -e
 

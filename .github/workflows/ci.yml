@@ -6,30 +6,57 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel outdated runs on the same PR — only latest commit matters
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: Check, Test & Lint
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-check
+          components: rustfmt
 
       - name: Format check
         run: cargo fmt --all -- --check
 
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-clippy
+
       - name: Clippy
         run: cargo clippy --workspace --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
 
       - name: Test
         run: cargo test --workspace --locked
@@ -43,6 +70,7 @@ jobs:
 
   coverage:
     name: Code Coverage
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
