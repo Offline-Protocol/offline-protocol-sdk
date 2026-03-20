@@ -491,5 +491,40 @@ RCT_EXTERN_METHOD(meshRenameGroup:(NSString *)groupId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Presence, Typing, Read Receipts
+RCT_EXTERN_METHOD(sendPresenceUpdate:(NSString *)recipient
+                  status:(nonnull NSNumber *)status
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendTypingIndicator:(NSString *)recipient
+                  conversationId:(NSString *)conversationId
+                  isTyping:(BOOL)isTyping
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(sendReadReceipt:(NSString *)recipient
+                  messageIds:(NSArray *)messageIds
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+// Identity & Cryptography
+RCT_EXTERN_METHOD(getIdentityPublicKey:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(deriveUserIdFromPublicKey:(NSArray *)publicKey
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(signData:(NSArray *)data
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(verifySignature:(NSArray *)publicKey
+                  data:(NSArray *)data
+                  signature:(NSArray *)signature
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 @end
 
