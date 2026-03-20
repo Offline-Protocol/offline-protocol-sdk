@@ -2,6 +2,24 @@
 
 All notable changes to the Offline Protocol SDK are documented in this file. This changelog covers everything after the **v0.7.1** release.
 
+## [0.9.1] — 2026-03-20
+
+### Bug Fixes
+
+- **Add missing `RCT_EXTERN_METHOD` declarations for iOS bridge** ([#69](https://github.com/Offline-Protocol/sdk/pull/69))
+  Seven `@objc func` implementations in `OfflineProtocolModule.swift` had no corresponding `RCT_EXTERN_METHOD` macros in the `.m` bridge file, which meant React Native on iOS could not call them at all (Android worked fine via `@ReactMethod`). The missing methods: `sendPresenceUpdate`, `sendTypingIndicator`, `sendReadReceipt`, `getIdentityPublicKey`, `deriveUserIdFromPublicKey`, `signData`, and `verifySignature` — the entire presence/typing block and all identity crypto methods. A full audit of all 120 methods confirmed these were the only ones missing.
+
+### CI/CD
+
+- **Parallelize release and CI workflows** ([#68](https://github.com/Offline-Protocol/sdk/pull/68))
+  Split the Android release build into a matrix of 4 parallel jobs (one per ABI), cutting release time significantly. Cached the `uniffi-bindgen` binary and switched to a pre-built `git-cliff` binary. Moved the release job to `ubuntu-latest` (it only needs Node and git-cliff, not a macOS runner). Split CI check into parallel fmt/clippy/test jobs so PRs get feedback in ~3 min instead of ~6 min. Added concurrency groups to cancel stale PR runs, restricted coverage to main-only pushes, added `workflow_dispatch` with a `dry_run` input for manual pipeline testing, and added artifact verification before publishing. Fixed a script injection vulnerability in version extraction by moving input interpolation into an env binding.
+
+### Documentation
+
+- **Wiring guide for Rust-to-React-Native method flow** — Added a step-by-step guide (`bindings/react-native/WIRING_GUIDE.md`) covering the six layers from Rust to TypeScript, common mistakes, parameter type mappings, and a smoke test snippet to prevent missing iOS bridge declarations.
+
+---
+
 ## [0.9.0] — 2026-03-20
 
 ### Breaking Changes
@@ -30,9 +48,9 @@ The following methods exposed raw MLS group operations that bypassed role checks
 
 `Starting` and `Stopping` were never set by the engine and have been removed. The enum is now `Stopped | Running | Paused`. If you have exhaustive `switch`/`when` statements over `ProtocolState`, remove the `Starting` and `Stopping` cases.
 
-### Breaking Changes (React Native Bindings)
+#### Admin-only group operations (behavioral change)
 
-If you are building an app with the React Native bindings, the following changes require updates to your code:
+`meshInviteToGroup()`, `meshRemoveFromGroup()`, `meshSetMemberRole()`, and `meshRenameGroup()` now enforce admin-only access. If a non-admin calls these methods, they will throw with `Error::NotGroupAdmin`. The group creator is automatically assigned the `Admin` role. If your app previously allowed any member to invite/remove, you must either promote them to admin first or adjust your UI to reflect the new permission model.
 
 #### New group role management APIs
 
@@ -52,9 +70,48 @@ protocol.on('group_role_changed', (event) => {
 
 If you use exhaustive `switch` statements on `ProtocolEvent['type']`, add a case for `'group_role_changed'`.
 
-#### Admin-only group operations (behavioral change)
+#### Rust-level events added
 
-`meshInviteToGroup()`, `meshRemoveFromGroup()`, `meshSetMemberRole()`, and `meshRenameGroup()` now enforce admin-only access. If a non-admin calls these methods, they will throw with `Error::NotGroupAdmin`. The group creator is automatically assigned the `Admin` role. If your app previously allowed any member to invite/remove, you must either promote them to admin first or adjust your UI to reflect the new permission model.
+The following events are emitted at the Rust/UniFFI layer. If you are consuming the SDK directly through UniFFI (Swift/Kotlin), you should handle these:
+
+- **`GroupRoleChanged`** — A member's role was changed in a group (also bridged to React Native as `group_role_changed`).
+- **`GroupRenamed`** — A group was renamed, includes `group_id`, `new_name`, `old_name`, and `renamed_by`.
+
+### Features
+
+- **Group rename API** — `renameGroup(groupId, newName)` lets admins rename a group and broadcasts the change to all members via a `__GRP_RENAME__` internal message. A `GroupRenamed` event is emitted on all peers with `group_id`, `new_name`, `old_name`, and `renamed_by`. Available via UniFFI (Swift/Kotlin) and React Native (`meshRenameGroup`).
+
+- **`getGroupInfo` on the high-level API** — Replaces the removed low-level `mlsGetGroupInfo`. Returns group metadata including members, epoch, and timestamps. Available via UniFFI as `getGroupInfo(groupId)` and React Native as `meshGetGroupInfo(groupId)`.
+
+- **Dead code and security bypass cleanup** ([#67](https://github.com/Offline-Protocol/sdk/pull/67))
+  Removed unused struct fields (`GroupManager::user_id`, `SessionManager::storage`, `InternetState::server_url`, UniFFI `OfflineProtocol::user_id`), all annotated with `#[allow(dead_code)]`. Simplified `GroupManager::new` signature (no longer takes a `user_id` parameter). Regenerated all UniFFI bindings (Kotlin, Swift, C header, JNI, TypeScript) to reflect the consolidated API surface.
+
+- **Group role management and security hardening** ([#66](https://github.com/Offline-Protocol/sdk/pull/66))
+  Added app-layer role tracking for MLS groups with a typed `GroupRole` enum (`Admin` / `Member`). The group creator is automatically assigned the `Admin` role. Admins can invite/remove members and change roles; non-admins are rejected with a typed error. Key security improvements: last-admin invariant prevents orphaned groups (demoting or removing the last admin is blocked), deterministic admin election on leader departure using lexicographic fallback, phantom member cleanup on group join, and removed member notification via a plaintext `__GRP_REMOVED__` control message so kicked members can clean up local state immediately. Key packages are automatically replenished after member removal so subsequent invites don't fail. Includes new `meshSetMemberRole()`, `meshGetMemberRole()`, and `meshGetGroupRoles()` APIs with full UniFFI and React Native bindings, a `GroupRoleChanged` event, and 1200+ lines of new tests.
+
+### Bug Fixes
+
+- **Reject empty group names** — `create_group` and `rename_group` now validate the group name: whitespace is trimmed and empty strings are rejected with a descriptive error. Previously, an empty name could be broadcast to all group members.
+
+- **Wire `resetTofuForPeer` through all platform bindings** — The TOFU reset API (`resetTofuForPeer`) is now available in React Native (TypeScript), iOS (Swift native module), and Android (Kotlin native module). Previously it was only callable from Rust/UniFFI. After calling this, the next message from the peer will establish a new trust pin.
+
+- **Wire `renameGroup` through all platform bindings** — `meshRenameGroup` is now wired through the iOS Swift native module, iOS Objective-C bridge, Android Kotlin native module, and the UniFFI-generated Kotlin/Swift bindings. The React Native TypeScript wrapper and the Rust/UniFFI layer already had this method.
+
+- **Notify removed members and replenish key packages** — Removed members now receive a plaintext `__GRP_REMOVED__` notification so they can clean up local state immediately instead of silently losing access. After member removal, key packages are automatically replenished so subsequent invites don't fail with a stale key package error.
+
+- **Fix phantom members on group join** — Fixed an issue where the local member list could include stale members after joining a group via Welcome. Member lists are now reconciled from the MLS group state on join.
+
+- **Fix deterministic admin election** — Admin election on leader departure now uses a deterministic lexicographic sort, preventing split-brain scenarios where different nodes elect different admins. Election failures are logged rather than silently swallowed.
+
+- **Close last-admin loopholes** — Prevented several edge cases where a group could become orphaned (no admin): demoting the last admin, removing the last admin, and the last admin leaving are all now blocked with explicit errors.
+
+---
+
+## [0.8.0] — 2026-03-19
+
+### Breaking Changes (React Native Bindings)
+
+If you are building an app with the React Native bindings, the following changes require updates to your code:
 
 #### New error variants: `UserBlocked` and `LockPoisoned`
 
@@ -75,7 +132,7 @@ Three new fields have been added to `ProtocolConfig`. They have defaults so exis
 
 #### New event types in React Native bindings
 
-The following event types have been added to the React Native TypeScript types since v0.7.1:
+The following event types have been added to the React Native TypeScript types:
 
 - **`service_discovered`** — A peer advertised a mesh service in response to a discovery query.
 - **`service_request_received`** — An incoming service request from another peer.
@@ -95,8 +152,6 @@ The following events are emitted at the Rust/UniFFI layer but are not yet expose
 - **`GroupEpochForkDetected`** / **`GroupEpochForkResolved`** — MLS epoch fork lifecycle events.
 - **`SecurityWarning`** — A control message failed authentication or replay checks.
 - **`TofuReset`** — TOFU trust state was reset for a peer.
-- **`GroupRoleChanged`** — A member's role was changed in a group (also bridged to React Native as `group_role_changed`).
-- **`GroupRenamed`** — A group was renamed, includes `group_id`, `new_name`, `old_name`, and `renamed_by`.
 
 #### `ForwardInfo` added to message events
 
@@ -113,20 +168,11 @@ interface ForwardInfo {
 
 #### Native bridge expansion (iOS & Android)
 
-The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`) have been significantly expanded. If you have custom native module extensions or overrides, you will need to add implementations for the new methods: `blockUser`, `unblockUser`, `getBlockedUsers`, `isUserBlocked`, `forwardMessage`, `meshForwardMessageToGroup`, `sendPresenceUpdate`, `sendTypingIndicator`, `sendReadReceipt`, `resetTofuForPeer`, `meshRenameGroup`, and the full `MeshServices` API surface (`registerService`, `unregisterService`, `discoverServices`, `sendServiceRequest`, `respondToServiceRequest`).
+The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`) have been significantly expanded. If you have custom native module extensions or overrides, you will need to add implementations for the new methods: `blockUser`, `unblockUser`, `getBlockedUsers`, `isUserBlocked`, `forwardMessage`, `meshForwardMessageToGroup`, `sendPresenceUpdate`, `sendTypingIndicator`, `sendReadReceipt`, `resetTofuForPeer`, and the full `MeshServices` API surface (`registerService`, `unregisterService`, `discoverServices`, `sendServiceRequest`, `respondToServiceRequest`).
 
 ---
 
 ### Features
-
-- **Group rename API** — `renameGroup(groupId, newName)` lets admins rename a group and broadcasts the change to all members via a `__GRP_RENAME__` internal message. A `GroupRenamed` event is emitted on all peers with `group_id`, `new_name`, `old_name`, and `renamed_by`. Available via UniFFI (Swift/Kotlin) and React Native (`meshRenameGroup`).
-
-- **`getGroupInfo` on the high-level API** — Replaces the removed low-level `mlsGetGroupInfo`. Returns group metadata including members, epoch, and timestamps. Available via UniFFI as `getGroupInfo(groupId)` and React Native as `meshGetGroupInfo(groupId)`.
-
-- **Dead code and security bypass cleanup** — Removed unused struct fields (`GroupManager::user_id`, `SessionManager::storage`, `InternetState::server_url`, UniFFI `OfflineProtocol::user_id`), all annotated with `#[allow(dead_code)]`. Simplified `GroupManager::new` signature (no longer takes a `user_id` parameter). Regenerated all UniFFI bindings (Kotlin, Swift, C header, JNI, TypeScript) to reflect the consolidated API surface.
-
-- **Group role management and security hardening**
-  Added app-layer role tracking for MLS groups with a typed `GroupRole` enum (`Admin` / `Member`). The group creator is automatically assigned the `Admin` role. Admins can invite/remove members and change roles; non-admins are rejected with a typed error. Key security improvements: last-admin invariant prevents orphaned groups (demoting or removing the last admin is blocked), deterministic admin election on leader departure using lexicographic fallback, phantom member cleanup on group join, and removed member notification via a plaintext `__GRP_REMOVED__` control message so kicked members can clean up local state immediately. Key packages are automatically replenished after member removal so subsequent invites don't fail. Includes new `meshSetMemberRole()`, `meshGetMemberRole()`, and `meshGetGroupRoles()` APIs with full UniFFI and React Native bindings, a `GroupRoleChanged` event, and 1200+ lines of new tests.
 
 - **Service discovery and request/response** ([#45](https://github.com/Offline-Protocol/sdk/pull/45))
   Added a new `MeshServices` subsystem that enables peer-to-peer service discovery and typed request/response over the mesh network. Services are advertised via gossip broadcast and discovered without a central registry. Includes auto `not_found` responses for unknown services, known_peers tracking independent of MLS encryption state, configurable max-hops gossip limit to control broadcast radius, payload size limits and capacity bounds to prevent resource exhaustion, sender-based response routing for multi-hop meshes, and the new `OutboundMessage` struct replacing raw tuples throughout the send path. Full UniFFI bindings are included for iOS and Android.
@@ -143,6 +189,9 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 - **User-level message forwarding with attribution** ([#61](https://github.com/Offline-Protocol/sdk/pull/61))
   Introduced first-class message forwarding as a protocol feature. Forwarded messages carry a `ForwardInfo` struct containing the original sender, original message ID, original timestamp, and a forward count. Both 1:1 (`forward_message()`) and group (`forward_message_to_group()`) forwarding are supported. The pending queue preserves forwarding attribution through retries, relay broadcast handles forwarded group messages, and a `MAX_FORWARD_COUNT=100` cap prevents infinite forwarding chains. Content type and media metadata are preserved through the forwarding path. Full React Native bindings included.
 
+- **Presence, typing, and read receipts wired to React Native** ([#65](https://github.com/Offline-Protocol/sdk/pull/65))
+  Wired `sendPresenceUpdate`, `sendTypingIndicator`, and `sendReadReceipt` through the React Native TypeScript wrapper, iOS Swift native module, iOS Objective-C bridge, and Android Kotlin native module. Also wired into the demo app with UI controls for all three signals.
+
 - **Demo app** — Added a simple demo app (`examples/demo-app/`) showcasing all SDK features including messaging, groups, presence (via `sendPresenceUpdate`), typing indicators, read receipts, service discovery, blocking, forwarding, and message relay/deferral tracking. Uses the production-recommended reliability config (10 retries, 10s ACK timeout).
 
 ### Performance
@@ -150,12 +199,6 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 - **Reduce message latency from invitation to delivery** — Overhauled polling and timing across the stack to dramatically reduce the time from MLS invitation to first decryptable message. Replaced the 750ms × 8 fixed-interval MLS establishment polling with a 100ms exponential backoff helper that resolves faster in the common case. Aligned the Android process tick interval with iOS (500ms → 100ms) to eliminate a platform-specific latency gap. Reduced startup delay from 500ms to 100ms, and presence rebroadcast interval from 60s to 15s for faster peer discovery. Tightened reliability config in the example app to match production expectations.
 
 ### Bug Fixes
-
-- **Reject empty group names** — `create_group` and `rename_group` now validate the group name: whitespace is trimmed and empty strings are rejected with a descriptive error. Previously, an empty name could be broadcast to all group members.
-
-- **Wire `resetTofuForPeer` through all platform bindings** — The TOFU reset API (`resetTofuForPeer`) is now available in React Native (TypeScript), iOS (Swift native module), and Android (Kotlin native module). Previously it was only callable from Rust/UniFFI. After calling this, the next message from the peer will establish a new trust pin.
-
-- **Wire `renameGroup` through all platform bindings** — `meshRenameGroup` is now wired through the iOS Swift native module, iOS Objective-C bridge, Android Kotlin native module, and the UniFFI-generated Kotlin/Swift bindings. The React Native TypeScript wrapper and the Rust/UniFFI layer already had this method.
 
 - **Harden mesh group robustness** ([#47](https://github.com/Offline-Protocol/sdk/pull/47))
   Fixed several issues that caused group messaging to degrade under real-world conditions. Stale relay caches now refresh from MLS membership on each fan-out. Added a leave election fallback with staggered re-election timeouts so groups can recover when the elected leader crashes. Implemented epoch fork detection using Lamport clock comparison and automatic resolution via leader-elected key-update commits. Added a circuit breaker on elections to prevent election storms, tuple-keyed leave elections to handle concurrent leaves, and per-attempt cooldown to prevent rapid-fire retries.
@@ -189,14 +232,6 @@ The native modules (`OfflineProtocolModule.swift` and `OfflineProtocolModule.kt`
 
 - **Decouple transport retries from ACK retries** ([#62](https://github.com/Offline-Protocol/sdk/pull/62))
   Fixed a fundamental reliability issue where messages permanently died after just 3 transport send failures, even though the transport was only temporarily unavailable. The root cause was that the `max_retries` limit was applied at enqueue time rather than being purely a scheduling concern. Now, enqueue is always accepted and the retry queue handles scheduling with exponential backoff. Added `drain_all()` and `flush()` methods so messages are sent immediately when a transport becomes available. Fixed ghost re-sends from un-cleaned retry queue entries, double-sends from concurrent flush paths, and zombie entries that never expired. Returns `Ok` with a `MessageDeferred` event when no transport is available (instead of `Err`). Bumped defaults to 10 retries with 10s ACK timeout for better real-world reliability.
-
-- **Notify removed members and replenish key packages** — Removed members now receive a plaintext `__GRP_REMOVED__` notification so they can clean up local state immediately instead of silently losing access. After member removal, key packages are automatically replenished so subsequent invites don't fail with a stale key package error.
-
-- **Fix phantom members on group join** — Fixed an issue where the local member list could include stale members after joining a group via Welcome. Member lists are now reconciled from the MLS group state on join.
-
-- **Fix deterministic admin election** — Admin election on leader departure now uses a deterministic lexicographic sort, preventing split-brain scenarios where different nodes elect different admins. Election failures are logged rather than silently swallowed.
-
-- **Close last-admin loopholes** — Prevented several edge cases where a group could become orphaned (no admin): demoting the last admin, removing the last admin, and the last admin leaving are all now blocked with explicit errors.
 
 - **Fix message forwarding** — Fixed a bug where forwarded message JSON was never parseable because the serialization format didn't match the deserialization expectation.
 
