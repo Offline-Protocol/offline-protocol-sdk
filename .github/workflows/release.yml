@@ -231,13 +231,15 @@ jobs:
 
       - name: Get version from tag
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-          elif [[ -n "${{ inputs.version }}" ]]; then
-            echo "VERSION=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            echo "VERSION=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
           else
-            echo "VERSION=0.0.0-dev" >> $GITHUB_OUTPUT
+            echo "VERSION=0.0.0-dev" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update package.json version
@@ -257,7 +259,7 @@ jobs:
         run: bash scripts/prepare-npm.sh
 
       - name: Create GitHub Release
-        if: ${{ !inputs.dry_run }}
+        if: inputs.dry_run != true
         uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
@@ -267,7 +269,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to npm
-        if: ${{ !inputs.dry_run }}
+        if: inputs.dry_run != true
         working-directory: bindings/react-native
         run: npm publish --access public
         env:
