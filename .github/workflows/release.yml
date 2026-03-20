@@ -10,6 +10,10 @@ on:
         description: 'Dry run (skip publish steps)'
         type: boolean
         default: true
+      version:
+        description: 'Version override (e.g., 0.9.1) — required for branch-based dry runs'
+        type: string
+        required: false
 
 concurrency:
   group: release-${{ github.ref }}
@@ -104,6 +108,7 @@ jobs:
           ndk-version: r26b
           add-to-path: true
 
+      # Safe: matrix values are author-controlled literals, not external input
       - name: Build ${{ matrix.abi }}
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -226,7 +231,14 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            echo "VERSION=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=0.0.0-dev" >> $GITHUB_OUTPUT
+          fi
 
       - name: Update package.json version
         working-directory: bindings/react-native
