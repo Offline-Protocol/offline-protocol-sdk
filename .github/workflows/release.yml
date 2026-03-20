@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (skip publish steps)'
+        type: boolean
+        default: true
 
 concurrency:
   group: release-${{ github.ref }}
@@ -61,6 +67,7 @@ jobs:
     name: Build Android (${{ matrix.abi }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - abi: arm64-v8a
@@ -238,6 +245,7 @@ jobs:
         run: bash scripts/prepare-npm.sh
 
       - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
@@ -247,6 +255,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
         working-directory: bindings/react-native
         run: npm publish --access public
         env:
