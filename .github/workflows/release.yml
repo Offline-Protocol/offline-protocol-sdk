@@ -61,7 +61,6 @@ jobs:
     name: Build Android (${{ matrix.abi }})
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
         include:
           - abi: arm64-v8a
@@ -106,14 +105,18 @@ jobs:
           export ${{ matrix.linker_env }}="$NDK_TOOLCHAIN/${{ matrix.linker_bin }}"
           export AR="$NDK_TOOLCHAIN/llvm-ar"
 
-          cargo build --release --target ${{ matrix.target }} --package offline-protocol-uniffi
+          cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi
 
           mkdir -p jniLibs/${{ matrix.abi }}
           SO_ROOT="target/${{ matrix.target }}/release"
           if [ -f "$SO_ROOT/liboffline_protocol_uniffi.so" ]; then
             cp "$SO_ROOT/liboffline_protocol_uniffi.so" "jniLibs/${{ matrix.abi }}/libuniffi_offline_protocol.so"
-          else
+          elif [ -f "$SO_ROOT/deps/liboffline_protocol_uniffi.so" ]; then
             cp "$SO_ROOT/deps/liboffline_protocol_uniffi.so" "jniLibs/${{ matrix.abi }}/libuniffi_offline_protocol.so"
+          else
+            echo "ERROR: liboffline_protocol_uniffi.so not found in $SO_ROOT or $SO_ROOT/deps"
+            ls -la "$SO_ROOT"/ "$SO_ROOT/deps"/ 2>/dev/null || true
+            exit 1
           fi
 
       - name: Upload ${{ matrix.abi }} library
