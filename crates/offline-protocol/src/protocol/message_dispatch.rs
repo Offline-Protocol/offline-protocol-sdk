@@ -552,6 +552,14 @@ impl OfflineProtocol {
         }
     }
 
+    /// Handles a connection cancelled message.
+    pub(crate) fn handle_connection_cancelled(&mut self, sender: &str) {
+        info!(sender = %sender, "Connection request cancelled");
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::connection_request_cancelled(sender.to_string()));
+        }
+    }
+
     /// Handles a presence update message.
     pub(crate) fn handle_presence_message(&mut self, sender: &str, data: &str) {
         if let Ok(payload) = serde_json::from_str::<PresencePayload>(data) {

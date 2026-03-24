@@ -13,6 +13,7 @@ import type {
   SendConnectionRequestParams,
   AcceptConnectionRequestParams,
   RejectConnectionRequestParams,
+  CancelConnectionRequestParams,
   SendFileParams,
   SendMediaParams,
   MediaMetadata,
@@ -779,6 +780,22 @@ export class OfflineProtocol {
     params: RejectConnectionRequestParams
   ): Promise<string> {
     const messageId = await OfflineProtocolNativeModule.rejectConnectionRequest(
+      params.recipient
+    );
+    return messageId;
+  }
+
+  /**
+   * Cancels a previously sent connection request
+   *
+   * @param params - Connection cancellation parameters
+   * @returns Message ID
+   * @throws Error if cancellation fails to send
+   */
+  async cancelConnectionRequest(
+    params: CancelConnectionRequestParams
+  ): Promise<string> {
+    const messageId = await OfflineProtocolNativeModule.cancelConnectionRequest(
       params.recipient
     );
     return messageId;

@@ -407,6 +407,14 @@ export interface RejectConnectionRequestParams {
 }
 
 /**
+ * Parameters for cancelling a connection request
+ */
+export interface CancelConnectionRequestParams {
+  /** Recipient's user ID */
+  recipient: string;
+}
+
+/**
  * Parameters for sending a media attachment
  */
 export interface SendMediaParams {
@@ -744,6 +752,14 @@ export interface ConnectionAcceptedEvent extends BaseEvent {
 export interface ConnectionRejectedEvent extends BaseEvent {
   type: 'connection_rejected';
   rejected_by: string;
+}
+
+/**
+ * Connection request cancelled event
+ */
+export interface ConnectionRequestCancelledEvent extends BaseEvent {
+  type: 'connection_request_cancelled';
+  cancelled_by: string;
 }
 
 /**
@@ -1094,6 +1110,7 @@ export type ProtocolEvent =
   | ConnectionRequestReceivedEvent
   | ConnectionAcceptedEvent
   | ConnectionRejectedEvent
+  | ConnectionRequestCancelledEvent
   | GroupCreatedEvent
   | GroupMessageReceivedEvent
   | GroupMemberAddedEvent

@@ -715,6 +715,22 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun cancelConnectionRequest(recipient: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val messageId = proto.cancelConnectionRequest(recipient)
+            promise.resolve(messageId)
+        } catch (e: Exception) {
+            val mapped = mapProtocolBridgeError(e)
+            if (mapped != null) {
+                promise.reject(mapped.code, mapped.message, e)
+            } else {
+                promise.reject("ERROR_CONNECTION_REQUEST", "Failed to cancel connection request: ${e.message}", e)
+            }
+        }
+    }
+
     // User Blocking
 
     @ReactMethod

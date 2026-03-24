@@ -526,6 +526,12 @@ pub enum Event {
         rejected_by: String,
     },
 
+    /// A previously sent connection request was cancelled by the sender.
+    ConnectionRequestCancelled {
+        /// User ID of the party who cancelled their request.
+        cancelled_by: String,
+    },
+
     // --- Group (relay) events ---
     /// A group was created (from relay).
     GroupCreated {
@@ -1202,6 +1208,11 @@ impl Event {
     /// Creates a ConnectionRejected event.
     pub fn connection_rejected(rejected_by: String) -> Self {
         Self::ConnectionRejected { rejected_by }
+    }
+
+    /// Creates a ConnectionRequestCancelled event.
+    pub fn connection_request_cancelled(cancelled_by: String) -> Self {
+        Self::ConnectionRequestCancelled { cancelled_by }
     }
 
     /// Creates a PresenceUpdated event.
@@ -1905,6 +1916,10 @@ impl fmt::Debug for Event {
             Self::ConnectionRejected { rejected_by: _ } => f
                 .debug_struct("ConnectionRejected")
                 .field("rejected_by", &"[REDACTED]")
+                .finish(),
+            Self::ConnectionRequestCancelled { cancelled_by: _ } => f
+                .debug_struct("ConnectionRequestCancelled")
+                .field("cancelled_by", &"[REDACTED]")
                 .finish(),
             Self::ServiceDiscovered {
                 query_id,

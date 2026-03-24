@@ -69,6 +69,8 @@ define_internal_prefixes! {
     CONN_ACCEPT = "__CONN_ACC__",
     /// Prefix for connection rejected messages.
     CONN_REJECT = "__CONN_REJ__",
+    /// Prefix for connection cancelled messages.
+    CONN_CANCEL = "__CONN_CAN__",
     /// Prefix for group created (relay).
     GROUP_CREATED = "__GROUP_CREATED__",
     /// Prefix for group message received (relay).

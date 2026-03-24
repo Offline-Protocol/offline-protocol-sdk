@@ -762,6 +762,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func blockUser(userId: String) throws 
     
+    func cancelConnectionRequest(recipient: String) throws  -> String
+    
     func cancelFileTransfer(fileId: String) throws 
     
     func checkPresence(username: String) throws  -> String
@@ -1123,6 +1125,15 @@ open func blockUser(userId: String)throws   {try rustCallWithError(FfiConverterT
         FfiConverterString.lower(userId),$0
     )
 }
+}
+    
+open func cancelConnectionRequest(recipient: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_connection_request(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),$0
+    )
+})
 }
     
 open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
@@ -6309,6 +6320,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 26742) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request() != 4233) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
