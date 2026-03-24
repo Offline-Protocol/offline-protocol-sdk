@@ -1852,6 +1852,30 @@ impl OfflineProtocol {
         Ok(message_id)
     }
 
+    /// Cancels a previously sent connection request via any available transport.
+    ///
+    /// The cancellation is routed through DORS, so it works over Internet, BLE, or WiFi Direct.
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient` - The user ID of the original request recipient
+    ///
+    /// # Encryption
+    ///
+    /// Connection cancellations are internal control messages sent in plaintext,
+    /// exempt from `require_encryption` (same as key packages and welcome messages).
+    pub fn cancel_connection_request(&mut self, recipient: &str) -> Result<MessageId> {
+        if self.is_user_blocked(recipient) {
+            return Err(Error::UserBlocked(recipient.to_string()));
+        }
+
+        let content = internal_prefixes::CONN_CANCEL.to_string();
+
+        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
+        info!(recipient = %recipient, "Cancelled connection request");
+        Ok(message_id)
+    }
+
     /// Sends a presence update to a single peer (unicast).
     ///
     /// This sends to one recipient at a time. To broadcast presence to multiple

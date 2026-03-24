@@ -45,6 +45,7 @@ interface ProtocolContextValue {
   sendConnectionRequest: (peerId: string) => Promise<void>;
   acceptConnectionRequest: (peerId: string) => Promise<void>;
   rejectConnectionRequest: (peerId: string) => Promise<void>;
+  cancelConnectionRequest: (peerId: string) => Promise<void>;
   createGroup: (name: string, memberIds: string[]) => Promise<void>;
   sendGroupMessage: (groupId: string, content: string, priority?: 'medium' | 'critical') => Promise<void>;
   leaveGroup: (groupId: string) => Promise<void>;
@@ -158,7 +159,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   // ─── Event Handlers ──────────────────────────────────────
 
   const handleEvent = useCallback((event: any) => {
-    const eventType = event.eventType || event.type;
+    const eventType = event.type;
 
     switch (eventType) {
       case 'neighbor_discovered': {
@@ -206,11 +207,36 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       case 'connection_request_received': {
         const peerId = event.sender || event.peerId || event.peer_id || event.fromUserId || event.from_user_id;
         if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
+        const peerName = event.sender_name || event.userName || event.user_name || peerId;
         setConnectionRequests(prev => {
           if (prev.some(r => r.peerId === peerId && r.direction === 'in')) {return prev;}
+          const hasOutgoing = prev.some(r => r.peerId === peerId && r.direction === 'out');
+          if (hasOutgoing) {
+            // Mutual request: we already sent them a request and they sent one back.
+            // Auto-accept to complete the connection.
+            protocolRef.current?.acceptConnectionRequest({
+              recipient: peerId,
+              accepterName: userNameRef.current,
+            }).catch(() => {});
+            setContacts(prevContacts => {
+              const next = new Map(prevContacts);
+              const existing = next.get(peerId);
+              next.set(peerId, {
+                peerId,
+                name: existing?.name || peerName,
+                lastSeen: Date.now(),
+                isNearby: neighborsRef.current.has(peerId),
+                hasSession: existing?.hasSession || false,
+                isBlocked: false,
+                presenceStatus: existing?.presenceStatus || 'offline',
+              });
+              return next;
+            });
+            return prev.filter(r => r.peerId !== peerId);
+          }
           return [...prev, {
             peerId,
-            name: event.sender_name || event.userName || event.user_name || peerId,
+            name: peerName,
             direction: 'in',
             timestamp: Date.now(),
           }];
@@ -241,6 +267,13 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'connection_rejected': {
         const peerId = event.rejected_by || event.peerId || event.peer_id || event.byUserId || event.by_user_id;
+        if (!peerId) {break;}
+        setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
+        break;
+      }
+
+      case 'connection_request_cancelled': {
+        const peerId = event.cancelled_by || event.peerId || event.peer_id;
         if (!peerId) {break;}
         setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
         break;
@@ -941,26 +974,36 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       recipient: peerId,
       accepterName: userNameRef.current,
     });
-    setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
-    setContacts(prev => {
-      const next = new Map(prev);
-      const existing = next.get(peerId);
-      next.set(peerId, {
-        peerId,
-        name: existing?.name || peerId,
-        lastSeen: Date.now(),
-        isNearby: neighborsRef.current.has(peerId),
-        hasSession: existing?.hasSession || false,
-        isBlocked: false,
-        presenceStatus: existing?.presenceStatus || 'offline',
+    setConnectionRequests(prev => {
+      const request = prev.find(r => r.peerId === peerId);
+      const peerName = request?.name || peerId;
+      setContacts(prevContacts => {
+        const next = new Map(prevContacts);
+        const existing = next.get(peerId);
+        next.set(peerId, {
+          peerId,
+          name: existing?.name || peerName,
+          lastSeen: Date.now(),
+          isNearby: neighborsRef.current.has(peerId),
+          hasSession: existing?.hasSession || false,
+          isBlocked: false,
+          presenceStatus: existing?.presenceStatus || 'offline',
+        });
+        return next;
       });
-      return next;
+      return prev.filter(r => r.peerId !== peerId);
     });
   }, []);
 
   const rejectConnectionRequestAction = useCallback(async (peerId: string) => {
     if (!protocolRef.current) {return;}
     await protocolRef.current.rejectConnectionRequest({recipient: peerId});
+    setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
+  }, []);
+
+  const cancelConnectionRequestAction = useCallback(async (peerId: string) => {
+    if (!protocolRef.current) {return;}
+    await protocolRef.current.cancelConnectionRequest({recipient: peerId});
     setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
   }, []);
 
@@ -1380,6 +1423,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     sendConnectionRequest: sendConnectionRequestAction,
     acceptConnectionRequest: acceptConnectionRequestAction,
     rejectConnectionRequest: rejectConnectionRequestAction,
+    cancelConnectionRequest: cancelConnectionRequestAction,
     createGroup: createGroupAction,
     sendGroupMessage: sendGroupMessageAction,
     leaveGroup: leaveGroupAction,

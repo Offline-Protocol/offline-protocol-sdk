@@ -1022,6 +1022,61 @@ fn test_reject_connection_request_not_started() {
 }
 
 #[test]
+fn test_cancel_connection_request_success() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let mut mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+
+    protocol.start().unwrap();
+
+    let result = protocol.cancel_connection_request("bob");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_cancel_connection_request_not_started() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let result = protocol.cancel_connection_request("bob");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_process_internal_message_connection_cancelled_event() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let content = internal_prefixes::CONN_CANCEL.to_string();
+    let message = Message::new(
+        UserId::new("carol").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        &content,
+    );
+
+    let result = protocol.process_internal_message(&message);
+    assert!(matches!(result, Some(InternalMessageResult::Consumed)));
+
+    let captured = events.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    match &captured[0] {
+        Event::ConnectionRequestCancelled { cancelled_by } => {
+            assert_eq!(cancelled_by, "carol");
+        }
+        _ => panic!("Wrong event type"),
+    }
+}
+
+#[test]
 fn test_send_connection_request_returns_unique_ids() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
 
@@ -2085,7 +2140,10 @@ fn test_require_encryption_allows_connection_control_messages() {
     let reject_result = protocol.reject_connection_request("bob");
     assert!(reject_result.is_ok());
 
-    assert_eq!(transport_handle.sent_messages().len(), 3);
+    let cancel_result = protocol.cancel_connection_request("bob");
+    assert!(cancel_result.is_ok());
+
+    assert_eq!(transport_handle.sent_messages().len(), 4);
 }
 
 #[test]

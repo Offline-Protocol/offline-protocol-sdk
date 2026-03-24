@@ -823,6 +823,26 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
         }
     }
+
+    @objc func cancelConnectionRequest(_ recipient: String,
+                                       resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+
+            let messageId = try proto.cancelConnectionRequest(recipient: recipient)
+            resolver(messageId)
+        } catch {
+            if let mapped = mapProtocolBridgeError(error) {
+                rejecter(mapped.code, mapped.message, error)
+            } else {
+                rejecter("ERROR_CONNECTION_REQUEST", "Failed to cancel connection request: \(error.localizedDescription)", error)
+            }
+        }
+    }
     
     // MARK: - Service Discovery & Request/Response (via MeshServices)
 

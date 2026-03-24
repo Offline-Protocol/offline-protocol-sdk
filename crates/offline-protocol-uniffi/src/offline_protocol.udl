@@ -442,6 +442,9 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     string reject_connection_request(string recipient);
 
+    [Throws=ProtocolError]
+    string cancel_connection_request(string recipient);
+
     // BLE transport callback (event-driven sending, replaces timer-based polling)
     void set_ble_transport_callback(BleTransportCallback callback);
     

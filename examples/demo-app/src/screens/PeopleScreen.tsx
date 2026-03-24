@@ -24,6 +24,7 @@ export function PeopleScreen({onOpenChat}: PeopleScreenProps) {
     sendConnectionRequest,
     acceptConnectionRequest,
     rejectConnectionRequest,
+    cancelConnectionRequest,
     blockUser,
     unblockUser,
   } = useProtocol();
@@ -103,18 +104,28 @@ export function PeopleScreen({onOpenChat}: PeopleScreenProps) {
             <View style={styles.requestActions}>
               <TouchableOpacity
                 style={[styles.actionButton, styles.acceptButton]}
-                onPress={() => acceptConnectionRequest(item.peerId)}>
+                onPress={() => acceptConnectionRequest(item.peerId).catch(
+                  (e: Error) => Alert.alert('Error', `Failed to accept: ${e.message}`),
+                )}>
                 <Text style={styles.acceptText}>Accept</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.actionButton, styles.rejectButton]}
-                onPress={() => rejectConnectionRequest(item.peerId)}>
+                onPress={() => rejectConnectionRequest(item.peerId).catch(
+                  (e: Error) => Alert.alert('Error', `Failed to reject: ${e.message}`),
+                )}>
                 <Text style={styles.rejectText}>Reject</Text>
               </TouchableOpacity>
             </View>
           )}
           {!isIncoming && (
-            <Text style={styles.pendingLabel}>Pending</Text>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.cancelButton]}
+              onPress={() => cancelConnectionRequest(item.peerId).catch(
+                (e: Error) => Alert.alert('Error', `Failed to cancel: ${e.message}`),
+              )}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </TouchableOpacity>
           )}
         </View>
       );
@@ -132,7 +143,9 @@ export function PeopleScreen({onOpenChat}: PeopleScreenProps) {
           </View>
           <TouchableOpacity
             style={[styles.actionButton, styles.connectButton]}
-            onPress={() => sendConnectionRequest(item.peerId)}>
+            onPress={() => sendConnectionRequest(item.peerId).catch(
+              (e: Error) => Alert.alert('Error', `Failed to send request: ${e.message}`),
+            )}>
             <Text style={styles.connectText}>Connect</Text>
           </TouchableOpacity>
         </View>
@@ -277,10 +290,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
-  pendingLabel: {
+  cancelButton: {
+    backgroundColor: '#F2F2F7',
+  },
+  cancelText: {
+    color: '#FF9500',
     fontSize: 13,
-    color: '#8E8E93',
-    fontStyle: 'italic',
+    fontWeight: '600',
   },
   lock: {
     fontSize: 14,

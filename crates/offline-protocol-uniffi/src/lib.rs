@@ -1439,6 +1439,15 @@ impl OfflineProtocol {
         Ok(message_id.as_str())
     }
 
+    /// Cancels a previously sent connection request via any available transport (DORS-routed).
+    pub fn cancel_connection_request(&self, recipient: String) -> Result<String, ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        let message_id = protocol
+            .cancel_connection_request(&recipient)
+            .map_err(ProtocolError::from)?;
+        Ok(message_id.as_str())
+    }
+
     // ========================================================================
     // SERVICE DISCOVERY (delegated via MeshServices wrapper)
     // ========================================================================

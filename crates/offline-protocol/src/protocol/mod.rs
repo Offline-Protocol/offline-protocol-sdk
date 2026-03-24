@@ -978,6 +978,15 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // Handle connection cancelled messages
+        if content
+            .strip_prefix(internal_prefixes::CONN_CANCEL)
+            .is_some()
+        {
+            self.handle_connection_cancelled(sender);
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Presence, typing, and read receipt messages ---
 
         if let Some(data) = content.strip_prefix(internal_prefixes::PRESENCE) {
