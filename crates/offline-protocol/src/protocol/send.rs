@@ -1466,12 +1466,20 @@ impl OfflineProtocol {
             .ok_or_else(|| Error::Other(format!("Missing welcome lifecycle for {}", peer_id)))?;
         if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::welcome_send_succeeded(
-                peer_id,
+                peer_id.clone(),
                 sent_snapshot.welcome_message.id.as_str().to_string(),
                 sent_snapshot.group_id,
                 sent_snapshot.attempt,
             ));
         }
+
+        // Now that the welcome is confirmed as sent, the can_confirm_from_source
+        // gate is open. Send a confirmation probe immediately so the session can
+        // be confirmed without waiting for the next process() tick. Any earlier
+        // probe/ack exchanges were blocked because the welcome was still
+        // SendAttempted — we need a fresh round-trip.
+        self.send_session_confirmation_probe(&peer_id, "transport_confirmed");
+
         Ok(())
     }
 

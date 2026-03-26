@@ -467,7 +467,10 @@ impl OfflineProtocol {
         }
 
         match self.welcome_lifecycles.get(peer_id) {
-            Some(record) => matches!(record.state, WelcomeDeliveryState::Sent),
+            Some(record) => matches!(
+                record.state,
+                WelcomeDeliveryState::Sent | WelcomeDeliveryState::SendAttempted
+            ),
             None => matches!(
                 source_event,
                 // Compatibility path for sessions created before welcome lifecycle

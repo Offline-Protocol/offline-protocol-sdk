@@ -3110,6 +3110,76 @@ fn test_welcome_internet_requires_async_confirmation_before_sent() {
 }
 
 #[test]
+fn test_on_transport_send_confirmed_sends_immediate_probe() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let mut internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    let transport_handle = internet.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet));
+    protocol.start().unwrap();
+
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    protocol.pending_key_packages.insert(
+        "bob".to_string(),
+        ReceivedKeyPackage {
+            key_package_data: bob_key_package.key_package_data,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+
+    let _ = protocol
+        .send_message(
+            "bob",
+            "probe-after-confirm",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+
+    let welcome_message_id = protocol
+        .welcome_lifecycles
+        .get("bob")
+        .unwrap()
+        .welcome_message
+        .id
+        .as_str()
+        .to_string();
+
+    // Count messages before transport confirmation
+    let messages_before = transport_handle.sent_messages().len();
+
+    protocol
+        .on_transport_send_confirmed(&welcome_message_id)
+        .unwrap();
+
+    // After transport confirmation, a confirmation probe should be sent immediately
+    let messages_after = transport_handle.sent_messages();
+    assert!(
+        messages_after.len() > messages_before,
+        "Expected a confirmation probe to be sent after on_transport_send_confirmed"
+    );
+    let probe_msg = messages_after.last().unwrap();
+    assert!(
+        probe_msg
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE),
+        "Expected last message to be a session confirmation probe, got: {}",
+        &probe_msg.content[..probe_msg.content.len().min(40)]
+    );
+}
+
+#[test]
 fn test_welcome_terminal_lifecycle_can_be_overwritten() {
     let mut config = create_test_config();
     config.encryption.enabled = true;
@@ -3505,6 +3575,84 @@ fn test_welcome_dropped_confirmation_expires_with_explicit_failure_events() {
     assert!(!captured
         .iter()
         .any(|event| matches!(event, Event::SecureSessionEstablished { .. })));
+}
+
+#[test]
+fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
+    // Reproduces the BLE issue: welcome lifecycle stays SendAttempted
+    // (e.g., DORS fell back to Internet), but the peer received the welcome
+    // and sent a confirmation ack. Session should confirm despite the
+    // welcome not being in Sent state.
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.store_pending = true;
+
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.initialize_mls(storage).unwrap();
+
+    let mut transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    let transport_handle = transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    // Set up Bob's MLS session
+    let bob_storage = Arc::new(InMemoryStorage::new());
+    let bob_manager = MlsManager::new("bob", bob_storage).unwrap();
+    let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+    {
+        let manager = protocol.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package("bob", &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session("bob").unwrap();
+    }
+    protocol
+        .ensure_session_state_entry("bob", "test_setup")
+        .unwrap();
+
+    // Simulate: welcome lifecycle is stuck at SendAttempted (DORS fell back to
+    // Internet, or BLE delivery not confirmed yet).
+    let welcome_msg =
+        protocol.create_message("bob", "placeholder", Some(MessagePriority::High), None).unwrap();
+    protocol
+        .upsert_welcome_lifecycle("bob", "session:bob:user123", welcome_msg, "test_setup")
+        .unwrap();
+    protocol
+        .transition_welcome_state("bob", WelcomeDeliveryState::SendAttempted, "test_setup")
+        .unwrap();
+
+    // Queue a message — it should be pending because session is not confirmed
+    let msg_id = protocol
+        .send_message("bob", "hello-over-ble", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(
+        protocol.pending_encrypted_messages.contains_key("bob"),
+        "Message should be queued pending session establishment"
+    );
+
+    // Simulate: Bob received our welcome and sends a confirmation ack
+    let ack_msg = Message::new(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+        internal_prefixes::SESSION_CONFIRM_ACK,
+    );
+    transport_handle.queue_message(ack_msg);
+    let _ = protocol.receive_message();
+
+    // Session should now be confirmed and pending messages flushed
+    assert!(
+        protocol.confirmed_sessions.contains("bob"),
+        "Session should be confirmed after receiving ack with SendAttempted welcome"
+    );
+    assert!(
+        !protocol.pending_encrypted_messages.contains_key("bob"),
+        "Pending messages should be flushed after session confirmation"
+    );
 }
 
 #[test]
