@@ -98,7 +98,7 @@ impl OfflineProtocol {
                 if !self.can_confirm_from_source(&sender_owned, "confirmation_probe_received") {
                     debug!(
                         sender = %sender_owned,
-                        "Skipping probe confirmation until welcome delivery is sent"
+                        "Skipping probe confirmation until welcome send is at least attempted"
                     );
                 } else {
                     match self.confirm_session_state(&sender_owned, "confirmation_probe_received") {
@@ -152,7 +152,7 @@ impl OfflineProtocol {
                 if !self.can_confirm_from_source(&sender_owned, "confirmation_ack_received") {
                     debug!(
                         sender = %sender_owned,
-                        "Skipping ack confirmation until welcome delivery is sent"
+                        "Skipping ack confirmation until welcome send is at least attempted"
                     );
                 } else {
                     match self.confirm_session_state(&sender_owned, "confirmation_ack_received") {
@@ -408,7 +408,7 @@ impl OfflineProtocol {
                     if !self.can_confirm_from_source(&sender_owned, "decrypt_success") {
                         debug!(
                             sender = %sender_owned,
-                            "Skipping decrypt-based confirmation until welcome delivery is sent"
+                            "Skipping decrypt-based confirmation until welcome send is at least attempted"
                         );
                         Some(InternalMessageResult::Decrypted(text))
                     } else {
