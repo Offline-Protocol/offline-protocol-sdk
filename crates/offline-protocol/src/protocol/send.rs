@@ -1473,11 +1473,10 @@ impl OfflineProtocol {
             ));
         }
 
-        // Now that the welcome is confirmed as sent, the can_confirm_from_source
-        // gate is open. Send a confirmation probe immediately so the session can
-        // be confirmed without waiting for the next process() tick. Any earlier
-        // probe/ack exchanges were blocked because the welcome was still
-        // SendAttempted — we need a fresh round-trip.
+        // The welcome is now confirmed as sent. Send a confirmation probe
+        // immediately so the session can be confirmed without waiting for the
+        // next process() tick — an optimistic fast-path for the common case
+        // where the transport confirms promptly.
         self.send_session_confirmation_probe(&peer_id, "transport_confirmed");
 
         Ok(())

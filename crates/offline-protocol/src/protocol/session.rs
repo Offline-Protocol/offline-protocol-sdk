@@ -429,7 +429,7 @@ impl OfflineProtocol {
             if !self.can_confirm_from_source(&peer_id, "confirmation_retry") {
                 debug!(
                     peer_id = %peer_id,
-                    "Skipping confirmation retry until welcome delivery is sent"
+                    "Skipping confirmation retry until welcome send is at least attempted"
                 );
                 continue;
             }
