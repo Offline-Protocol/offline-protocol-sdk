@@ -130,8 +130,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         val config = ProtocolConfig(
-            appId = json.optString("appId", json.optString("app_id", "")),
-            userId = json.optString("userId", json.optString("user_id", "")),
+            appId = json.safeOptString("appId", json.safeOptString("app_id")),
+            userId = json.safeOptString("userId", json.safeOptString("user_id")),
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
@@ -239,7 +239,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         json.optJSONObject("relay")?.let { relayJson ->
-            val priorityRaw = relayJson.optString("relayPriority", relayJson.optString("relay_priority", ""))
+            val priorityRaw = relayJson.safeOptString("relayPriority", relayJson.safeOptString("relay_priority"))
             val priority = normalizeRelayPriority(priorityRaw)
             if (priority != null) {
                 try {
@@ -824,9 +824,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun sendReadReceipt(recipient: String, messageIds: ReadableArray, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val msgIds = mutableListOf<String>()
-            for (i in 0 until messageIds.size()) {
-                msgIds.add(messageIds.getString(i))
+            val msgIds = (0 until messageIds.size())
+                .mapNotNull { messageIds.getString(it)?.takeIf(String::isNotEmpty) }
+            if (msgIds.isEmpty()) {
+                promise.reject("ERROR_READ_RECEIPT", "No valid message IDs provided", null)
+                return
             }
             val messageId = proto.sendReadReceipt(recipient, msgIds)
             promise.resolve(messageId)
@@ -2243,13 +2245,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val welcome = MlsWelcomeMessage(
-                groupId = json.optString("groupId", ""),
+                groupId = json.safeOptString("groupId"),
                 welcomeData = welcomeData,
-                inviterId = json.optString("inviterId", ""),
-                groupName = json.optString("groupName", null),
+                inviterId = json.safeOptString("inviterId"),
+                groupName = json.optNullableString("groupName"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val info = proto.mlsJoinSession(welcome)
             val result = Arguments.createMap().apply {
                 putString("groupId", info.groupId)
@@ -2284,14 +2286,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val encrypted = MlsEncryptedMessage(
-                groupId = json.optString("groupId", ""),
-                messageType = json.optString("messageType", "Application"),
+                groupId = json.safeOptString("groupId"),
+                messageType = json.safeOptString("messageType", "Application"),
                 epoch = json.optLong("epoch", 0).toULong(),
                 ciphertext = ciphertext,
-                senderId = json.optString("senderId", ""),
+                senderId = json.safeOptString("senderId"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val plaintext = proto.mlsDecryptFromUser(encrypted)
             if (plaintext != null) {
                 val result = Arguments.createArray()
@@ -2455,14 +2457,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val encrypted = MlsEncryptedMessage(
-                groupId = json.optString("groupId", ""),
-                messageType = json.optString("messageType", "Application"),
+                groupId = json.safeOptString("groupId"),
+                messageType = json.safeOptString("messageType", "Application"),
                 epoch = json.optLong("epoch", 0).toULong(),
                 ciphertext = ciphertext,
-                senderId = json.optString("senderId", ""),
+                senderId = json.safeOptString("senderId"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val plaintext = proto.mlsDecrypt(encrypted)
             if (plaintext != null) {
                 val result = Arguments.createArray()
@@ -2506,13 +2508,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val welcome = MlsWelcomeMessage(
-                groupId = json.optString("groupId", ""),
+                groupId = json.safeOptString("groupId"),
                 welcomeData = welcomeData,
-                inviterId = json.optString("inviterId", ""),
-                groupName = json.optString("groupName", null),
+                inviterId = json.safeOptString("inviterId"),
+                groupName = json.optNullableString("groupName"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val info = proto.mlsProcessWelcome(welcome)
             val result = Arguments.createMap().apply {
                 putString("groupId", info.groupId)
@@ -2886,53 +2888,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "exception" to e.javaClass.simpleName
             ))
         }
-    }
-
-    private fun JSONObject.optBooleanCompat(vararg keys: String): Boolean? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getBoolean(key) }.getOrNull()
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optIntCompat(vararg keys: String): Int? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getInt(key) }
-                    .getOrElse { runCatching { getDouble(key).toInt() }.getOrNull() }
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optLongCompat(vararg keys: String): Long? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getLong(key) }
-                    .getOrElse { runCatching { getDouble(key).toLong() }.getOrNull() }
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optDoubleCompat(vararg keys: String): Double? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getDouble(key) }.getOrNull()
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optStringCompat(vararg keys: String): String? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getString(key) }.getOrNull()
-            }
-        }
-        return null
     }
 
     private fun parseInternetConfig(config: ReadableMap?): Pair<String, Int> {

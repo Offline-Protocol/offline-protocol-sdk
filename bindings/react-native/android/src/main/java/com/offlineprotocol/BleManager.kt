@@ -2199,7 +2199,7 @@ class BleManager(
     private fun learnRouteFromMessage(messageJson: String, neighborId: String, neighborAddress: String?) {
         try {
             val json = org.json.JSONObject(messageJson)
-            val sender = json.optString("sender", null) ?: return
+            val sender = json.optNullableString("sender") ?: return
             val hopCount = json.optInt("hop_count", 0)
             
             // Don't learn route to ourselves

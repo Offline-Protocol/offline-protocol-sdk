@@ -487,7 +487,7 @@ class InternetManager(
         
         try {
             json = org.json.JSONObject(String(data, Charsets.UTF_8))
-            messageType = json.optString("type", "")
+            messageType = json.safeOptString("type")
         } catch (e: Exception) {
             emitDiagnostic("warning", "Received non-JSON or invalid message", mapOf(
                 "size" to data.size
@@ -498,14 +498,14 @@ class InternetManager(
         when (messageType) {
             "Authenticated" -> {
                 // Handle authentication success
-                val userId = json.optString("user_id", deviceId)
-                val username = json.optString("username", deviceId)
+                val userId = json.safeOptString("user_id", deviceId)
+                val username = json.safeOptString("username", deviceId)
                 handleAuthenticated(userId, username)
             }
             
             "AuthError" -> {
                 // Handle authentication error
-                val reason = json.optString("reason", "Unknown error")
+                val reason = json.safeOptString("reason", "Unknown error")
                 emitDiagnostic("error", "Authentication failed", mapOf(
                     "reason" to reason
                 ))
@@ -515,10 +515,10 @@ class InternetManager(
             "MessageSent" -> {
                 // Handle MessageSent event from WebSocket server
                 // This contains the server-generated message_id that we should use
-                val messageId = json.optString("message_id", null)
-                val recipient = json.optString("recipient", "")
-                val timestamp = json.optString("timestamp", "")
-                
+                val messageId = json.optNullableString("message_id")
+                val recipient = json.safeOptString("recipient")
+                val timestamp = json.safeOptString("timestamp")
+
                 if (messageId != null && messageId.isNotEmpty()) {
                     // The server has confirmed the message was sent with this message_id
                     // We need to notify the protocol so it can update the message ID
@@ -535,11 +535,11 @@ class InternetManager(
             
             "MessageReceived" -> {
                 // Handle incoming direct message
-                val senderId = json.optString("sender", "")
-                val content = json.optString("content", "")
-                val replyToMsg = json.optString("reply_to_msg", null)
-                val messageId = json.optString("message_id", null)
-                val timestamp = json.optString("timestamp", "")
+                val senderId = json.safeOptString("sender")
+                val content = json.safeOptString("content")
+                val replyToMsg = json.optNullableString("reply_to_msg")
+                val messageId = json.optNullableString("message_id")
+                val timestamp = json.safeOptString("timestamp")
                 
                 if (senderId.isEmpty()) {
                     emitDiagnostic("warning", "Invalid MessageReceived format")
@@ -629,8 +629,8 @@ class InternetManager(
             
             "DeliveryError" -> {
                 // Handle delivery error
-                val recipient = json.optString("recipient", "unknown")
-                val reason = json.optString("reason", "Unknown error")
+                val recipient = json.safeOptString("recipient", "unknown")
+                val reason = json.safeOptString("reason", "Unknown error")
                 emitDiagnostic("warning", "Message delivery failed", mapOf(
                     "recipient" to recipient,
                     "reason" to reason
@@ -639,7 +639,7 @@ class InternetManager(
             
             "PresenceStatus", "PresenceStatusWithLastSeen" -> {
                 // Handle presence updates (optional logging)
-                val userId = json.optString("user_id", "unknown")
+                val userId = json.safeOptString("user_id", "unknown")
                 val online = json.optBoolean("online", false)
                 emitDiagnostic("debug", "Presence update", mapOf(
                     "userId" to userId,
@@ -649,9 +649,9 @@ class InternetManager(
             
             "ConnectionRequestReceived" -> {
                 // Forward connection request to JavaScript with full data so it emits connection_request_received
-                val senderId = json.optString("sender", "")
-                val senderName = json.optString("sender_name", senderId)
-                val timestampStr = json.optString("timestamp", "")
+                val senderId = json.safeOptString("sender")
+                val senderName = json.safeOptString("sender_name", senderId)
+                val timestampStr = json.safeOptString("timestamp")
                 val keyPackage = if (json.has("key_package")) {
                     try {
                         val keyPackageArray = json.getJSONArray("key_package")
@@ -686,9 +686,10 @@ class InternetManager(
             }
             
             "ConnectionAccepted" -> {
-                val acceptedBy = json.optString("accepted_by", json.optString("sender", ""))
-                val acceptedByName = json.optString("accepted_by_name", json.optString("sender_name", acceptedBy))
-                val timestampStr = json.optString("timestamp", "")
+                val sender = json.safeOptString("sender")
+                val acceptedBy = json.safeOptString("accepted_by", sender)
+                val acceptedByName = json.safeOptString("accepted_by_name", json.safeOptString("sender_name", acceptedBy))
+                val timestampStr = json.safeOptString("timestamp")
                 val keyPackage = if (json.has("key_package")) {
                     try {
                         val keyPackageArray = json.getJSONArray("key_package")
@@ -723,7 +724,7 @@ class InternetManager(
             }
             
             "ConnectionRejected" -> {
-                val rejectedBy = json.optString("rejected_by", json.optString("sender", ""))
+                val rejectedBy = json.safeOptString("rejected_by", json.safeOptString("sender"))
                 if (rejectedBy.isEmpty()) {
                     emitDiagnostic("warning", "Invalid ConnectionRejected format: missing rejected_by")
                     return
@@ -743,8 +744,8 @@ class InternetManager(
             }
             
             "ConnectionRequestError" -> {
-                val recipient = json.optString("recipient", "")
-                val reason = json.optString("reason", "Unknown error")
+                val recipient = json.safeOptString("recipient")
+                val reason = json.safeOptString("reason", "Unknown error")
                 emitDiagnostic("debug", "Received relay message", mapOf(
                     "type" to messageType,
                     "recipient" to recipient,
@@ -753,8 +754,8 @@ class InternetManager(
             }
             
             "GroupCreated" -> {
-                val groupId = json.optString("group_id", "")
-                val name = json.optString("name", "")
+                val groupId = json.safeOptString("group_id")
+                val name = json.safeOptString("name")
                 if (groupId.isEmpty()) return
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
@@ -764,12 +765,12 @@ class InternetManager(
             }
             
             "GroupMessageReceived" -> {
-                val groupId = json.optString("group_id", "")
-                val sender = json.optString("sender", "")
-                val content = json.optString("content", "")
-                val timestamp = json.optString("timestamp", "")
-                val messageId = json.optString("message_id", "")
-                val replyToMsg = json.optString("reply_to_msg", null)
+                val groupId = json.safeOptString("group_id")
+                val sender = json.safeOptString("sender")
+                val content = json.safeOptString("content")
+                val timestamp = json.safeOptString("timestamp")
+                val messageId = json.safeOptString("message_id")
+                val replyToMsg = json.optNullableString("reply_to_msg")
                 if (groupId.isEmpty() || messageId.isEmpty()) return
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
@@ -783,9 +784,9 @@ class InternetManager(
             }
             
             "GroupMemberAdded" -> {
-                val groupId = json.optString("group_id", "")
-                val userId = json.optString("user_id", "")
-                val addedBy = json.optString("added_by", "")
+                val groupId = json.safeOptString("group_id")
+                val userId = json.safeOptString("user_id")
+                val addedBy = json.safeOptString("added_by")
                 if (groupId.isEmpty()) return
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
@@ -796,9 +797,9 @@ class InternetManager(
             }
             
             "GroupMemberRemoved" -> {
-                val groupId = json.optString("group_id", "")
-                val userId = json.optString("user_id", "")
-                val removedBy = json.optString("removed_by", "")
+                val groupId = json.safeOptString("group_id")
+                val userId = json.safeOptString("user_id")
+                val removedBy = json.safeOptString("removed_by")
                 if (groupId.isEmpty()) return
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
@@ -809,20 +810,22 @@ class InternetManager(
             }
             
             "GroupInfo" -> {
-                val groupId = json.optString("group_id", "")
-                val name = json.optString("name", "")
-                val createdBy = json.optString("created_by", "")
-                val createdAt = json.optString("created_at", "")
+                val groupId = json.safeOptString("group_id")
+                val name = json.safeOptString("name")
+                val createdBy = json.safeOptString("created_by")
+                val createdAt = json.safeOptString("created_at")
                 val membersArray = json.optJSONArray("members")
                 if (groupId.isEmpty()) return
                 val membersJson = org.json.JSONArray()
                 if (membersArray != null) {
                     for (i in 0 until membersArray.length()) {
                         val m = membersArray.getJSONObject(i)
+                        val memberId = m.safeOptString("user_id")
+                        if (memberId.isEmpty()) continue
                         membersJson.put(org.json.JSONObject().apply {
-                            put("user_id", m.optString("user_id", ""))
-                            put("role", m.optString("role", "member"))
-                            put("joined_at", m.optString("joined_at", ""))
+                            put("user_id", memberId)
+                            put("role", m.safeOptString("role", "member"))
+                            put("joined_at", m.safeOptString("joined_at"))
                         })
                     }
                 }
@@ -842,10 +845,12 @@ class InternetManager(
                 val groupsJson = org.json.JSONArray()
                 for (i in 0 until groupsArray.length()) {
                     val g = groupsArray.getJSONObject(i)
+                    val gId = g.safeOptString("group_id")
+                    if (gId.isEmpty()) continue
                     groupsJson.put(org.json.JSONObject().apply {
-                        put("group_id", g.optString("group_id", ""))
-                        put("name", g.optString("name", ""))
-                        put("created_at", g.optString("created_at", ""))
+                        put("group_id", gId)
+                        put("name", g.safeOptString("name"))
+                        put("created_at", g.safeOptString("created_at"))
                     })
                 }
                 val payloadJson = org.json.JSONObject().apply { put("groups", groupsJson) }
@@ -853,7 +858,7 @@ class InternetManager(
             }
             
             "GroupError" -> {
-                val reason = json.optString("reason", "Unknown error")
+                val reason = json.safeOptString("reason", "Unknown error")
                 val payloadJson = org.json.JSONObject().apply { put("reason", reason) }
                 injectGroupInternalMessage("relay", "__GROUP_ERROR__", payloadJson)
             }
