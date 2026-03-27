@@ -2248,7 +2248,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 groupId = json.safeOptString("groupId"),
                 welcomeData = welcomeData,
                 inviterId = json.safeOptString("inviterId"),
-                groupName = json.optString("groupName", null),
+                groupName = json.optNullableString("groupName"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
 
@@ -2381,7 +2381,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             EstablishmentState.HAVE_KEY_PACKAGE -> "HaveKeyPackage"
             EstablishmentState.SESSION_PENDING -> "SessionPending"
             EstablishmentState.SESSION_CONFIRMED -> "SessionConfirmed"
-            else -> throw IllegalStateException("Unknown EstablishmentState: $state")
         }
         promise.resolve(stateString)
     }
@@ -2512,7 +2511,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 groupId = json.safeOptString("groupId"),
                 welcomeData = welcomeData,
                 inviterId = json.safeOptString("inviterId"),
-                groupName = json.optString("groupName", null),
+                groupName = json.optNullableString("groupName"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
 
@@ -2889,53 +2888,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "exception" to e.javaClass.simpleName
             ))
         }
-    }
-
-    private fun JSONObject.optBooleanCompat(vararg keys: String): Boolean? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getBoolean(key) }.getOrNull()
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optIntCompat(vararg keys: String): Int? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getInt(key) }
-                    .getOrElse { runCatching { getDouble(key).toInt() }.getOrNull() }
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optLongCompat(vararg keys: String): Long? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getLong(key) }
-                    .getOrElse { runCatching { getDouble(key).toLong() }.getOrNull() }
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optDoubleCompat(vararg keys: String): Double? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getDouble(key) }.getOrNull()
-            }
-        }
-        return null
-    }
-
-    private fun JSONObject.optStringCompat(vararg keys: String): String? {
-        keys.forEach { key ->
-            if (has(key) && !isNull(key)) {
-                return runCatching { getString(key) }.getOrNull()
-            }
-        }
-        return null
     }
 
     private fun parseInternetConfig(config: ReadableMap?): Pair<String, Int> {

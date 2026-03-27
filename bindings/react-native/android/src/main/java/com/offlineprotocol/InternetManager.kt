@@ -515,7 +515,7 @@ class InternetManager(
             "MessageSent" -> {
                 // Handle MessageSent event from WebSocket server
                 // This contains the server-generated message_id that we should use
-                val messageId = json.optString("message_id", null)
+                val messageId = json.optNullableString("message_id")
                 val recipient = json.safeOptString("recipient")
                 val timestamp = json.safeOptString("timestamp")
 
@@ -537,8 +537,8 @@ class InternetManager(
                 // Handle incoming direct message
                 val senderId = json.safeOptString("sender")
                 val content = json.safeOptString("content")
-                val replyToMsg = json.optString("reply_to_msg", null)
-                val messageId = json.optString("message_id", null)
+                val replyToMsg = json.optNullableString("reply_to_msg")
+                val messageId = json.optNullableString("message_id")
                 val timestamp = json.safeOptString("timestamp")
                 
                 if (senderId.isEmpty()) {
@@ -770,7 +770,7 @@ class InternetManager(
                 val content = json.safeOptString("content")
                 val timestamp = json.safeOptString("timestamp")
                 val messageId = json.safeOptString("message_id")
-                val replyToMsg = json.optString("reply_to_msg", null)
+                val replyToMsg = json.optNullableString("reply_to_msg")
                 if (groupId.isEmpty() || messageId.isEmpty()) return
                 val payloadJson = org.json.JSONObject().apply {
                     put("group_id", groupId)
@@ -820,8 +820,8 @@ class InternetManager(
                 if (membersArray != null) {
                     for (i in 0 until membersArray.length()) {
                         val m = membersArray.getJSONObject(i)
-                        val memberId = m.optString("user_id", null)
-                        if (memberId.isNullOrEmpty()) continue
+                        val memberId = m.safeOptString("user_id")
+                        if (memberId.isEmpty()) continue
                         membersJson.put(org.json.JSONObject().apply {
                             put("user_id", memberId)
                             put("role", m.safeOptString("role", "member"))
@@ -845,8 +845,8 @@ class InternetManager(
                 val groupsJson = org.json.JSONArray()
                 for (i in 0 until groupsArray.length()) {
                     val g = groupsArray.getJSONObject(i)
-                    val gId = g.optString("group_id", null)
-                    if (gId.isNullOrEmpty()) continue
+                    val gId = g.safeOptString("group_id")
+                    if (gId.isEmpty()) continue
                     groupsJson.put(org.json.JSONObject().apply {
                         put("group_id", gId)
                         put("name", g.safeOptString("name"))
