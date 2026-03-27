@@ -819,8 +819,10 @@ class InternetManager(
                 if (membersArray != null) {
                     for (i in 0 until membersArray.length()) {
                         val m = membersArray.getJSONObject(i)
+                        val memberId = m.optString("user_id", null)
+                        if (memberId.isNullOrEmpty()) continue
                         membersJson.put(org.json.JSONObject().apply {
-                            put("user_id", m.optString("user_id", "") ?: "")
+                            put("user_id", memberId)
                             put("role", m.optString("role", "member") ?: "member")
                             put("joined_at", m.optString("joined_at", "") ?: "")
                         })
@@ -842,8 +844,10 @@ class InternetManager(
                 val groupsJson = org.json.JSONArray()
                 for (i in 0 until groupsArray.length()) {
                     val g = groupsArray.getJSONObject(i)
+                    val gId = g.optString("group_id", null)
+                    if (gId.isNullOrEmpty()) continue
                     groupsJson.put(org.json.JSONObject().apply {
-                        put("group_id", g.optString("group_id", "") ?: "")
+                        put("group_id", gId)
                         put("name", g.optString("name", "") ?: "")
                         put("created_at", g.optString("created_at", "") ?: "")
                     })

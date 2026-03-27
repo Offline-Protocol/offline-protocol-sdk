@@ -824,9 +824,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun sendReadReceipt(recipient: String, messageIds: ReadableArray, promise: Promise) {
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
-            val msgIds = mutableListOf<String>()
-            for (i in 0 until messageIds.size()) {
-                msgIds.add(messageIds.getString(i) ?: "")
+            val msgIds = (0 until messageIds.size())
+                .mapNotNull { messageIds.getString(it) }
+                .filter { it.isNotEmpty() }
+            if (msgIds.isEmpty()) {
+                promise.reject("ERROR_READ_RECEIPT", "No valid message IDs provided", null)
+                return
             }
             val messageId = proto.sendReadReceipt(recipient, msgIds)
             promise.resolve(messageId)
