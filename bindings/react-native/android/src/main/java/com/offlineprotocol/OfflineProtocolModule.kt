@@ -14,10 +14,6 @@ import java.util.concurrent.TimeUnit
 // Import generated UniFFI bindings
 import uniffi.offline_protocol.*
 
-/** Kotlin 2.x treats Java `optString` as nullable — this avoids `?: ""` at every call site. */
-private fun JSONObject.safeOptString(key: String, fallback: String = ""): String =
-    optString(key, fallback) ?: fallback
-
 /**
  * UniFFI-based React Native module
  */
@@ -2385,7 +2381,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             EstablishmentState.HAVE_KEY_PACKAGE -> "HaveKeyPackage"
             EstablishmentState.SESSION_PENDING -> "SessionPending"
             EstablishmentState.SESSION_CONFIRMED -> "SessionConfirmed"
-            else -> "Unknown"
+            else -> throw IllegalStateException("Unknown EstablishmentState: $state")
         }
         promise.resolve(stateString)
     }
