@@ -14,6 +14,10 @@ import java.util.concurrent.TimeUnit
 // Import generated UniFFI bindings
 import uniffi.offline_protocol.*
 
+/** Kotlin 2.x treats Java `optString` as nullable — this avoids `?: ""` at every call site. */
+private fun JSONObject.safeOptString(key: String, fallback: String = ""): String =
+    optString(key, fallback) ?: fallback
+
 /**
  * UniFFI-based React Native module
  */
@@ -130,8 +134,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         val config = ProtocolConfig(
-            appId = json.optString("appId", json.optString("app_id", "") ?: "") ?: "",
-            userId = json.optString("userId", json.optString("user_id", "") ?: "") ?: "",
+            appId = json.safeOptString("appId", json.safeOptString("app_id")),
+            userId = json.safeOptString("userId", json.safeOptString("user_id")),
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
@@ -239,7 +243,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         json.optJSONObject("relay")?.let { relayJson ->
-            val priorityRaw = relayJson.optString("relayPriority", relayJson.optString("relay_priority", "") ?: "") ?: ""
+            val priorityRaw = relayJson.safeOptString("relayPriority", relayJson.safeOptString("relay_priority"))
             val priority = normalizeRelayPriority(priorityRaw)
             if (priority != null) {
                 try {
@@ -825,8 +829,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             val msgIds = (0 until messageIds.size())
-                .mapNotNull { messageIds.getString(it) }
-                .filter { it.isNotEmpty() }
+                .mapNotNull { messageIds.getString(it)?.takeIf(String::isNotEmpty) }
             if (msgIds.isEmpty()) {
                 promise.reject("ERROR_READ_RECEIPT", "No valid message IDs provided", null)
                 return
@@ -2246,13 +2249,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val welcome = MlsWelcomeMessage(
-                groupId = json.optString("groupId", "") ?: "",
+                groupId = json.safeOptString("groupId"),
                 welcomeData = welcomeData,
-                inviterId = json.optString("inviterId", "") ?: "",
+                inviterId = json.safeOptString("inviterId"),
                 groupName = json.optString("groupName", null),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val info = proto.mlsJoinSession(welcome)
             val result = Arguments.createMap().apply {
                 putString("groupId", info.groupId)
@@ -2287,14 +2290,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val encrypted = MlsEncryptedMessage(
-                groupId = json.optString("groupId", "") ?: "",
-                messageType = json.optString("messageType", "Application") ?: "Application",
+                groupId = json.safeOptString("groupId"),
+                messageType = json.safeOptString("messageType", "Application"),
                 epoch = json.optLong("epoch", 0).toULong(),
                 ciphertext = ciphertext,
-                senderId = json.optString("senderId", "") ?: "",
+                senderId = json.safeOptString("senderId"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val plaintext = proto.mlsDecryptFromUser(encrypted)
             if (plaintext != null) {
                 val result = Arguments.createArray()
@@ -2459,14 +2462,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val encrypted = MlsEncryptedMessage(
-                groupId = json.optString("groupId", "") ?: "",
-                messageType = json.optString("messageType", "Application") ?: "Application",
+                groupId = json.safeOptString("groupId"),
+                messageType = json.safeOptString("messageType", "Application"),
                 epoch = json.optLong("epoch", 0).toULong(),
                 ciphertext = ciphertext,
-                senderId = json.optString("senderId", "") ?: "",
+                senderId = json.safeOptString("senderId"),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val plaintext = proto.mlsDecrypt(encrypted)
             if (plaintext != null) {
                 val result = Arguments.createArray()
@@ -2510,13 +2513,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val welcome = MlsWelcomeMessage(
-                groupId = json.optString("groupId", "") ?: "",
+                groupId = json.safeOptString("groupId"),
                 welcomeData = welcomeData,
-                inviterId = json.optString("inviterId", "") ?: "",
+                inviterId = json.safeOptString("inviterId"),
                 groupName = json.optString("groupName", null),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
-            
+
             val info = proto.mlsProcessWelcome(welcome)
             val result = Arguments.createMap().apply {
                 putString("groupId", info.groupId)
