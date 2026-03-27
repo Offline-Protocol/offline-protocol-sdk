@@ -130,8 +130,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         val config = ProtocolConfig(
-            appId = json.optString("appId", json.optString("app_id", "")),
-            userId = json.optString("userId", json.optString("user_id", "")),
+            appId = json.optString("appId", json.optString("app_id", "") ?: "") ?: "",
+            userId = json.optString("userId", json.optString("user_id", "") ?: "") ?: "",
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
@@ -239,7 +239,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         json.optJSONObject("relay")?.let { relayJson ->
-            val priorityRaw = relayJson.optString("relayPriority", relayJson.optString("relay_priority", ""))
+            val priorityRaw = relayJson.optString("relayPriority", relayJson.optString("relay_priority", "") ?: "") ?: ""
             val priority = normalizeRelayPriority(priorityRaw)
             if (priority != null) {
                 try {
@@ -826,7 +826,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
             val msgIds = mutableListOf<String>()
             for (i in 0 until messageIds.size()) {
-                msgIds.add(messageIds.getString(i))
+                msgIds.add(messageIds.getString(i) ?: "")
             }
             val messageId = proto.sendReadReceipt(recipient, msgIds)
             promise.resolve(messageId)
@@ -2243,9 +2243,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val welcome = MlsWelcomeMessage(
-                groupId = json.optString("groupId", ""),
+                groupId = json.optString("groupId", "") ?: "",
                 welcomeData = welcomeData,
-                inviterId = json.optString("inviterId", ""),
+                inviterId = json.optString("inviterId", "") ?: "",
                 groupName = json.optString("groupName", null),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
@@ -2284,11 +2284,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val encrypted = MlsEncryptedMessage(
-                groupId = json.optString("groupId", ""),
-                messageType = json.optString("messageType", "Application"),
+                groupId = json.optString("groupId", "") ?: "",
+                messageType = json.optString("messageType", "Application") ?: "Application",
                 epoch = json.optLong("epoch", 0).toULong(),
                 ciphertext = ciphertext,
-                senderId = json.optString("senderId", ""),
+                senderId = json.optString("senderId", "") ?: "",
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
             
@@ -2379,6 +2379,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             EstablishmentState.HAVE_KEY_PACKAGE -> "HaveKeyPackage"
             EstablishmentState.SESSION_PENDING -> "SessionPending"
             EstablishmentState.SESSION_CONFIRMED -> "SessionConfirmed"
+            else -> "Unknown"
         }
         promise.resolve(stateString)
     }
@@ -2455,11 +2456,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val encrypted = MlsEncryptedMessage(
-                groupId = json.optString("groupId", ""),
-                messageType = json.optString("messageType", "Application"),
+                groupId = json.optString("groupId", "") ?: "",
+                messageType = json.optString("messageType", "Application") ?: "Application",
                 epoch = json.optLong("epoch", 0).toULong(),
                 ciphertext = ciphertext,
-                senderId = json.optString("senderId", ""),
+                senderId = json.optString("senderId", "") ?: "",
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
             
@@ -2506,9 +2507,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
             
             val welcome = MlsWelcomeMessage(
-                groupId = json.optString("groupId", ""),
+                groupId = json.optString("groupId", "") ?: "",
                 welcomeData = welcomeData,
-                inviterId = json.optString("inviterId", ""),
+                inviterId = json.optString("inviterId", "") ?: "",
                 groupName = json.optString("groupName", null),
                 timestampMs = json.optLong("timestampMs", 0).toULong()
             )
