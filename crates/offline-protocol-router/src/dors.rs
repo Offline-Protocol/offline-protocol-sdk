@@ -479,19 +479,21 @@ impl TransportSelector {
                     .unwrap_or(std::cmp::Ordering::Equal)
             }) {
             let best_total = best_s.total;
+            let tie_priority = |t: &TransportType| self.scoring_profile(*t).tie_break_priority;
             scored_transports
                 .iter()
                 .filter(|(_, s)| s.total.is_finite() && best_total - s.total <= TIE_EPSILON)
-                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
+                .min_by_key(|(t, _)| tie_priority(t))
                 .map(|(t, s)| (*t, s.total))
                 // In the unlikely event the filter yields nothing, fall back to the
                 // original best candidate.
                 .unwrap_or((*best_t, best_total))
         } else {
             // No finite scores; pick purely by tie-break priority.
+            let tie_priority = |t: &TransportType| self.scoring_profile(*t).tie_break_priority;
             scored_transports
                 .iter()
-                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
+                .min_by_key(|(t, _)| tie_priority(t))
                 .map(|(t, s)| (*t, s.total))?
         };
 
@@ -589,12 +591,11 @@ impl TransportSelector {
         // Determinism: when scores are exactly equal (rare with floats, but can
         // happen in tests or after rounding), apply the same priority tie-break
         // used by selection: Internet > WiFiDirect > BLE.
+        let tie_priority = |t: TransportType| self.scoring_profile(t).tie_break_priority;
         scored.sort_by(|a, b| {
             let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
             if ord == std::cmp::Ordering::Equal {
-                self.scoring_profile(a.0)
-                    .tie_break_priority
-                    .cmp(&self.scoring_profile(b.0).tie_break_priority)
+                tie_priority(a.0).cmp(&tie_priority(b.0))
             } else {
                 ord
             }
@@ -1351,6 +1352,8 @@ impl TransportSelector {
             return None;
         }
 
+        let tie_priority = |t: &TransportType| self.scoring_profile(*t).tie_break_priority;
+
         // Find best finite score (ignoring NaNs). If none, fall back to tie-break only.
         if let Some(best) = scores
             .iter()
@@ -1363,13 +1366,13 @@ impl TransportSelector {
             scores
                 .iter()
                 .filter(|(_, s)| s.is_finite() && best - *s <= TIE_EPSILON)
-                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
+                .min_by_key(|(t, _)| tie_priority(t))
                 .map(|(t, _)| *t)
         } else {
             // No finite scores; choose purely by tie-break priority.
             scores
                 .iter()
-                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
+                .min_by_key(|(t, _)| tie_priority(t))
                 .map(|(t, _)| *t)
         }
     }

@@ -9,7 +9,7 @@
 #![warn(missing_docs)]
 
 pub mod ble;
-pub mod common;
+pub(crate) mod common;
 pub mod constants;
 pub mod error;
 pub mod internet;
