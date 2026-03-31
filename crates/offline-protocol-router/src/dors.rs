@@ -144,22 +144,7 @@ struct TransportScoringProfile {
     /// Default signal score returned when the transport does not use RSSI.
     default_signal_score: f32,
     /// Tie-break priority (lower = preferred when scores are equal).
-    /// Currently the standalone `transport_tie_break_priority` fn is the
-    /// source of truth for tie-breaking; this field ensures new transports
-    /// define their priority alongside the rest of the profile.
-    #[allow(dead_code)]
     tie_break_priority: u8,
-}
-
-/// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
-/// Lower value = preferred. Order: Internet, WiFiDirect, BLE.
-fn transport_tie_break_priority(transport_type: TransportType) -> u8 {
-    match transport_type {
-        TransportType::Internet => 0,
-        TransportType::WiFiDirect => 1,
-        TransportType::BLE => 2,
-        TransportType::Reticulum => 3,
-    }
 }
 
 /// Reason DORS decided to escalate from BLE to Wi‑Fi (for observability).
@@ -497,7 +482,7 @@ impl TransportSelector {
             scored_transports
                 .iter()
                 .filter(|(_, s)| s.total.is_finite() && best_total - s.total <= TIE_EPSILON)
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
                 .map(|(t, s)| (*t, s.total))
                 // In the unlikely event the filter yields nothing, fall back to the
                 // original best candidate.
@@ -506,7 +491,7 @@ impl TransportSelector {
             // No finite scores; pick purely by tie-break priority.
             scored_transports
                 .iter()
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
                 .map(|(t, s)| (*t, s.total))?
         };
 
@@ -607,7 +592,9 @@ impl TransportSelector {
         scored.sort_by(|a, b| {
             let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
             if ord == std::cmp::Ordering::Equal {
-                transport_tie_break_priority(a.0).cmp(&transport_tie_break_priority(b.0))
+                self.scoring_profile(a.0)
+                    .tie_break_priority
+                    .cmp(&self.scoring_profile(b.0).tie_break_priority)
             } else {
                 ord
             }
@@ -1356,7 +1343,10 @@ impl Default for TransportSelector {
 impl TransportSelector {
     /// Returns the transport that would win with these scores using the same tie-break as `select_transport`.
     /// Use to verify tie-break order (Internet > WiFiDirect > BLE) when scores are forced equal.
-    pub fn select_from_scores_for_test(scores: &[(TransportType, f32)]) -> Option<TransportType> {
+    pub fn select_from_scores_for_test(
+        &self,
+        scores: &[(TransportType, f32)],
+    ) -> Option<TransportType> {
         if scores.is_empty() {
             return None;
         }
@@ -1373,13 +1363,13 @@ impl TransportSelector {
             scores
                 .iter()
                 .filter(|(_, s)| s.is_finite() && best - *s <= TIE_EPSILON)
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
                 .map(|(t, _)| *t)
         } else {
             // No finite scores; choose purely by tie-break priority.
             scores
                 .iter()
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| self.scoring_profile(*t).tie_break_priority)
                 .map(|(t, _)| *t)
         }
     }
@@ -2468,17 +2458,19 @@ mod tests {
         );
     }
 
-    /// With forced equal scores, the winner must follow the tie-break rule: Internet > WiFiDirect > BLE.
+    /// With forced equal scores, the winner must follow the tie-break rule: Internet > WiFiDirect > BLE > Reticulum.
     /// Uses a test-only helper to inject equal scores so we don't rely on runtime metrics to tie.
     #[test]
     fn test_tie_break_order_when_scores_forced_equal() {
+        let selector = TransportSelector::new();
+
         // Two transports with identical score: WiFiDirect and BLE. Tie-break prefers WiFiDirect over BLE.
         let scores_two = [
             (TransportType::WiFiDirect, 50.0),
             (TransportType::BLE, 50.0),
         ];
         assert_eq!(
-            TransportSelector::select_from_scores_for_test(&scores_two),
+            selector.select_from_scores_for_test(&scores_two),
             Some(TransportType::WiFiDirect),
             "Tie-break: WiFiDirect > BLE"
         );
@@ -2490,7 +2482,7 @@ mod tests {
             (TransportType::Internet, 50.0),
         ];
         assert_eq!(
-            TransportSelector::select_from_scores_for_test(&scores_three),
+            selector.select_from_scores_for_test(&scores_three),
             Some(TransportType::Internet),
             "Tie-break: Internet > WiFiDirect > BLE"
         );
@@ -2502,7 +2494,7 @@ mod tests {
             (TransportType::BLE, 50.0),
         ];
         assert_eq!(
-            TransportSelector::select_from_scores_for_test(&scores_reversed),
+            selector.select_from_scores_for_test(&scores_reversed),
             Some(TransportType::Internet)
         );
     }
@@ -2649,6 +2641,116 @@ mod tests {
             second,
             TransportType::WiFiDirect,
             "WiFi Direct must not be returned when it was removed from available_transports"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_scores_as_resilience_fallback() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        // All four transports available with decent metrics.
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::Internet, create_test_metrics(None, 0.1, 2));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 3),
+        );
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.1, 2));
+        transports.insert(
+            TransportType::Reticulum,
+            create_test_metrics(Some(-65), 0.1, 2),
+        );
+
+        let selected = selector.select_transport(&message, &transports).unwrap();
+        assert_ne!(
+            selected,
+            TransportType::Reticulum,
+            "Reticulum should not win when higher-bandwidth transports are available"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_wins_when_only_available() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(
+            TransportType::Reticulum,
+            create_test_metrics(Some(-60), 0.1, 2),
+        );
+
+        let selected = selector.select_transport(&message, &transports).unwrap();
+        assert_eq!(
+            selected,
+            TransportType::Reticulum,
+            "Reticulum must be selected when it is the only available transport"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_tie_break_is_lowest_priority() {
+        let selector = TransportSelector::new();
+
+        let scores = [(TransportType::Reticulum, 50.0), (TransportType::BLE, 50.0)];
+        assert_eq!(
+            selector.select_from_scores_for_test(&scores),
+            Some(TransportType::BLE),
+            "Tie-break: BLE > Reticulum"
+        );
+
+        let all = [
+            (TransportType::Internet, 50.0),
+            (TransportType::WiFiDirect, 50.0),
+            (TransportType::BLE, 50.0),
+            (TransportType::Reticulum, 50.0),
+        ];
+        assert_eq!(
+            selector.select_from_scores_for_test(&all),
+            Some(TransportType::Internet),
+            "Tie-break: Internet > WiFiDirect > BLE > Reticulum"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_scoring_profile_produces_valid_scores() {
+        let selector = TransportSelector::new();
+        let message = create_test_message();
+        let metrics = create_test_metrics(Some(-70), 0.2, 5);
+
+        let score =
+            selector.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+        assert!(
+            score.total.is_finite() && score.total >= 0.0,
+            "Reticulum score must be finite and non-negative"
+        );
+        assert!(score.signal.is_finite() && score.signal >= 0.0);
+        assert!(score.bandwidth.is_finite() && score.bandwidth >= 0.0);
+        assert!(score.energy.is_finite() && score.energy >= 0.0);
+        assert!(score.reliability.is_finite() && score.reliability >= 0.0);
+    }
+
+    #[test]
+    fn test_reticulum_penalised_for_media_preference() {
+        let selector = TransportSelector::new();
+        let mut message = create_test_message();
+        let metrics = create_test_metrics(Some(-65), 0.1, 2);
+
+        let score_normal =
+            selector.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+
+        message
+            .metadata
+            .insert("transport_preference".to_string(), "internet".to_string());
+        let score_media =
+            selector.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+
+        assert!(
+            score_media.total < score_normal.total,
+            "Reticulum should be penalised when message prefers internet (media). normal={:.1}, media={:.1}",
+            score_normal.total,
+            score_media.total
         );
     }
 }

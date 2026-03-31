@@ -347,18 +347,14 @@ impl Transport for ReticulumTransport {
             )));
         }
 
-        {
-            let mut queue = self.send_queue.lock().unwrap();
-            queue.push_back(message.clone());
-        }
+        let mut queue = self.send_queue.lock().unwrap();
+        queue.push_back(message.clone());
 
-        {
-            let mut metrics = self.metrics.lock().unwrap();
-            let heuristic_capacity = 50_f32;
-            let queue_len = self.send_queue.lock().unwrap().len();
-            metrics.queue_depth = queue_len;
-            metrics.congestion = ((queue_len as f32) / heuristic_capacity).clamp(0.0, 1.0);
-        }
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.queue_depth = queue.len();
+        metrics.congestion = ((queue.len() as f32) / 50.0).clamp(0.0, 1.0);
+        drop(metrics);
+        drop(queue);
 
         if let Some(callback) = self.on_messages_available.lock().unwrap().as_ref() {
             callback();
