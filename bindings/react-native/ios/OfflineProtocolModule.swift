@@ -174,6 +174,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             bleEnabled: raw["bleEnabled"] as? Bool ?? raw["ble_enabled"] as? Bool ?? true,
             wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,
             internetEnabled: raw["internetEnabled"] as? Bool ?? raw["internet_enabled"] as? Bool ?? true,
+            reticulumEnabled: raw["reticulumEnabled"] as? Bool ?? raw["reticulum_enabled"] as? Bool ?? false,
             preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
             initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
             encryptionEnabled: encryptionEnabled,
@@ -349,7 +350,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 "userId": config.userId,
                 "bleEnabled": config.bleEnabled,
                 "wifiDirectEnabled": config.wifiDirectEnabled,
-                "internetEnabled": config.internetEnabled
+                "internetEnabled": config.internetEnabled,
+                "reticulumEnabled": config.reticulumEnabled
             ])
             
             // Set up event callback
@@ -3112,6 +3114,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             return .ble
         case "wifidirect", "wifi_direct":
             return .wiFiDirect
+        case "reticulum":
+            return .reticulum
         default:
             throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
         }

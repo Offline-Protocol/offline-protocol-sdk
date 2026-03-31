@@ -92,6 +92,7 @@ interface NativeConfig {
   bleEnabled: boolean;
   wifiDirectEnabled: boolean;
   internetEnabled: boolean;
+  reticulumEnabled: boolean;
   preferOnline: boolean;
   initialTtl: number;
   encryptionEnabled?: boolean;
@@ -282,6 +283,7 @@ export class OfflineProtocol {
       bleEnabled: this.config.transports?.ble?.enabled ?? true,
       wifiDirectEnabled: this.config.transports?.wifiDirect?.enabled ?? false,
       internetEnabled: this.config.transports?.internet?.enabled ?? false,
+      reticulumEnabled: this.config.transports?.reticulum?.enabled ?? false,
       preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
       encryptionEnabled: this.config.encryption?.enabled ?? true,

@@ -126,6 +126,7 @@ enum TransportType {
     "Internet",
     "Ble",
     "WiFiDirect",
+    "Reticulum",
 };
 
 // Protocol state
@@ -317,6 +318,7 @@ dictionary TransportConfig {
     boolean ble_enabled;
     boolean wifi_direct_enabled;
     boolean internet_enabled;
+    boolean reticulum_enabled;
 };
 
 enum OverflowPolicy {
@@ -347,6 +349,7 @@ dictionary ProtocolConfig {
     boolean ble_enabled;
     boolean wifi_direct_enabled;
     boolean internet_enabled;
+    boolean reticulum_enabled;
     boolean prefer_online;
     u8 initial_ttl;
     boolean encryption_enabled;

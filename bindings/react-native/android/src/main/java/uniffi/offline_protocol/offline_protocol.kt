@@ -5783,33 +5783,35 @@ data class ProtocolConfig (
     var `wifiDirectEnabled`: kotlin.Boolean
     , 
     var `internetEnabled`: kotlin.Boolean
-    , 
+    ,
+    var `reticulumEnabled`: kotlin.Boolean
+    ,
     var `preferOnline`: kotlin.Boolean
-    , 
+    ,
     var `initialTtl`: kotlin.UByte
-    , 
+    ,
     var `encryptionEnabled`: kotlin.Boolean
-    , 
+    ,
     var `autoKeyExchange`: kotlin.Boolean
-    , 
+    ,
     var `storePending`: kotlin.Boolean
-    , 
+    ,
     var `requireEncryption`: kotlin.Boolean
-    , 
+    ,
     var `maxPendingPerPeer`: kotlin.ULong
-    , 
+    ,
     var `maxPendingGlobal`: kotlin.ULong
-    , 
+    ,
     var `pendingTtlMs`: kotlin.ULong
-    , 
+    ,
     var `overflowPolicy`: OverflowPolicy
-    , 
-    var `maxGroupMembers`: kotlin.UInt = 256u 
-    , 
-    var `groupRelayEnabled`: kotlin.Boolean = true 
-    , 
-    var `requireTransportIdentity`: kotlin.Boolean = false 
-    
+    ,
+    var `maxGroupMembers`: kotlin.UInt = 256u
+    ,
+    var `groupRelayEnabled`: kotlin.Boolean = true
+    ,
+    var `requireTransportIdentity`: kotlin.Boolean = false
+
 ){
     
 
@@ -5825,6 +5827,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
         return ProtocolConfig(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
@@ -5850,6 +5853,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`bleEnabled`) +
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
             FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`reticulumEnabled`) +
             FfiConverterBoolean.allocationSize(value.`preferOnline`) +
             FfiConverterUByte.allocationSize(value.`initialTtl`) +
             FfiConverterBoolean.allocationSize(value.`encryptionEnabled`) +
@@ -5871,6 +5875,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`bleEnabled`, buf)
             FfiConverterBoolean.write(value.`wifiDirectEnabled`, buf)
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
+            FfiConverterBoolean.write(value.`reticulumEnabled`, buf)
             FfiConverterBoolean.write(value.`preferOnline`, buf)
             FfiConverterUByte.write(value.`initialTtl`, buf)
             FfiConverterBoolean.write(value.`encryptionEnabled`, buf)
@@ -6177,15 +6182,16 @@ public object FfiConverterTypeRoutingStats: FfiConverterRustBuffer<RoutingStats>
 
 data class TransportConfig (
     var `bleEnabled`: kotlin.Boolean
-    , 
+    ,
     var `wifiDirectEnabled`: kotlin.Boolean
-    , 
+    ,
     var `internetEnabled`: kotlin.Boolean
-    
-){
-    
+    ,
+    var `reticulumEnabled`: kotlin.Boolean
 
-    
+){
+
+
     companion object
 }
 
@@ -6198,19 +6204,22 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: TransportConfig) = (
             FfiConverterBoolean.allocationSize(value.`bleEnabled`) +
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`internetEnabled`)
+            FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`reticulumEnabled`)
     )
 
     override fun write(value: TransportConfig, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`bleEnabled`, buf)
             FfiConverterBoolean.write(value.`wifiDirectEnabled`, buf)
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
+            FfiConverterBoolean.write(value.`reticulumEnabled`, buf)
     }
 }
 
@@ -6729,10 +6738,11 @@ public object FfiConverterTypeRelayPriority: FfiConverterRustBuffer<RelayPriorit
 
 
 enum class TransportType {
-    
+
     INTERNET,
     BLE,
-    WI_FI_DIRECT;
+    WI_FI_DIRECT,
+    RETICULUM;
     companion object
 }
 

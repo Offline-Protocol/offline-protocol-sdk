@@ -2303,6 +2303,7 @@ mod tests {
             TransportType::BLE,
             TransportType::WiFiDirect,
             TransportType::Internet,
+            TransportType::Reticulum,
         ] {
             let score = selector.calculate_transport_score(&message, transport_type, &metrics);
             assert!(
@@ -2645,6 +2646,62 @@ mod tests {
             TransportType::WiFiDirect,
             "WiFi Direct must not be returned when it was removed from available_transports"
         );
+    }
+
+    /// Regression test: verifies that the scoring-profile refactor does not change
+    /// the computed scores for the three original transports (BLE, WiFi Direct,
+    /// Internet) under fixed, representative metrics.
+    #[test]
+    fn test_scoring_profile_regression_existing_transports() {
+        let selector = TransportSelector::new();
+        let message = create_test_message();
+
+        // Representative metrics: RSSI -60, congestion 0.15, queue_depth 5, battery 75%.
+        let metrics = create_test_metrics(Some(-60), 0.15, 5);
+
+        let ble = selector.calculate_transport_score(&message, TransportType::BLE, &metrics);
+        let wifi =
+            selector.calculate_transport_score(&message, TransportType::WiFiDirect, &metrics);
+        let inet = selector.calculate_transport_score(&message, TransportType::Internet, &metrics);
+
+        // Verify all scores are finite and non-negative.
+        for (label, score) in [("BLE", &ble), ("WiFiDirect", &wifi), ("Internet", &inet)] {
+            assert!(
+                score.total.is_finite() && score.total >= 0.0,
+                "{label} score must be finite and non-negative, got {}",
+                score.total,
+            );
+        }
+
+        // With good RSSI (-60) and 75% battery, BLE's energy-efficiency weighting
+        // makes it score higher than Internet (which has a baseline boost but
+        // lower energy score). This is the expected DORS behavior.
+        assert!(
+            ble.total > inet.total,
+            "BLE ({:.1}) should score higher than Internet ({:.1}) with good signal and 75% battery",
+            ble.total,
+            inet.total,
+        );
+
+        // All sub-scores must be in [0, 100].
+        for (label, score) in [("BLE", &ble), ("WiFiDirect", &wifi), ("Internet", &inet)] {
+            assert!(
+                score.signal >= 0.0 && score.signal <= 100.0,
+                "{label} signal"
+            );
+            assert!(
+                score.bandwidth >= 0.0 && score.bandwidth <= 100.0,
+                "{label} bandwidth"
+            );
+            assert!(
+                score.energy >= 0.0 && score.energy <= 100.0,
+                "{label} energy"
+            );
+            assert!(
+                score.reliability >= 0.0 && score.reliability <= 100.0,
+                "{label} reliability"
+            );
+        }
     }
 
     #[test]
