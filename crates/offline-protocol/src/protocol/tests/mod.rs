@@ -3616,8 +3616,9 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
 
     // Simulate: welcome lifecycle is stuck at SendAttempted (DORS fell back to
     // Internet, or BLE delivery not confirmed yet).
-    let welcome_msg =
-        protocol.create_message("bob", "placeholder", Some(MessagePriority::High), None).unwrap();
+    let welcome_msg = protocol
+        .create_message("bob", "placeholder", Some(MessagePriority::High), None)
+        .unwrap();
     protocol
         .upsert_welcome_lifecycle("bob", "session:bob:user123", welcome_msg, "test_setup")
         .unwrap();
@@ -3627,7 +3628,12 @@ fn test_session_confirms_via_ack_when_welcome_is_send_attempted() {
 
     // Queue a message — it should be pending because session is not confirmed
     let msg_id = protocol
-        .send_message("bob", "hello-over-ble", None::<MessagePriority>, None::<String>)
+        .send_message(
+            "bob",
+            "hello-over-ble",
+            None::<MessagePriority>,
+            None::<String>,
+        )
         .unwrap();
     assert!(
         protocol.pending_encrypted_messages.contains_key("bob"),

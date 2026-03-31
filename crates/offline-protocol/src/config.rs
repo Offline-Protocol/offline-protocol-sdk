@@ -123,6 +123,11 @@ pub struct TransportConfig {
 
     /// Whether Internet transport is enabled.
     pub internet_enabled: bool,
+
+    /// Whether Reticulum mesh transport is enabled.
+    /// Defaults to `false` because Reticulum requires external infrastructure
+    /// (a running Reticulum daemon or RNode hardware).
+    pub reticulum_enabled: bool,
 }
 
 impl Default for TransportConfig {
@@ -131,6 +136,7 @@ impl Default for TransportConfig {
             ble_enabled: true,
             wifi_direct_enabled: true,
             internet_enabled: true,
+            reticulum_enabled: false,
         }
     }
 }
@@ -267,6 +273,7 @@ impl ProtocolConfig {
         if !self.transport.ble_enabled
             && !self.transport.wifi_direct_enabled
             && !self.transport.internet_enabled
+            && !self.transport.reticulum_enabled
         {
             return Err(crate::Error::InvalidConfiguration(
                 "At least one transport must be enabled".to_string(),

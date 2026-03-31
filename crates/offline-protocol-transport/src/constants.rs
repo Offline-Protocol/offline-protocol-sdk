@@ -76,6 +76,20 @@ pub const INTERNET_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 /// Messages awaiting platform confirmation beyond this duration are treated as failed.
 pub const INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 15;
 
+// Reticulum Transport Constants
+/// Connection timeout for reaching the Reticulum daemon (seconds).
+pub const RETICULUM_CONNECTION_TIMEOUT_SECS: u64 = 60;
+
+/// Timeout for pending Reticulum send confirmations (seconds).
+/// Higher than Internet because Reticulum paths can be high-latency
+/// (especially LoRa multi-hop).
+pub const RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 120;
+
+/// Default maximum payload size for Reticulum (bytes).
+/// Reticulum's MDU is 383 bytes per single packet, but larger payloads
+/// are handled transparently by Reticulum's Resource mechanism.
+pub const RETICULUM_MAX_PAYLOAD_SIZE: usize = 65536;
+
 // Transport-wide Constants
 /// Default maximum message size in bytes (1 MB).
 /// Applied at the transport layer before JSON deserialization to prevent

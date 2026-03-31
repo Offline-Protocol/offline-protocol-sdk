@@ -4,7 +4,7 @@
 //! It supports both direct TCP connections and WebSocket for web compatibility.
 
 use crate::constants::{
-    DEFAULT_MAX_MESSAGE_SIZE, INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
+    INTERNET_CONNECTION_TIMEOUT_SECS, INTERNET_DEFAULT_SERVER_ADDRESS,
     INTERNET_HEARTBEAT_INTERVAL_SECS, INTERNET_PENDING_CONFIRMATION_TIMEOUT_SECS,
 };
 use crate::{Result, Transport, TransportMetrics, TransportStatus, TransportType};
@@ -134,12 +134,12 @@ impl InternetTransport {
 
     /// Sets the platform-specific handle.
     pub fn set_platform_handle(&self, handle: usize) {
-        *self.platform_handle.lock().unwrap() = Some(handle);
+        crate::common::set_platform_handle(&self.platform_handle, handle);
     }
 
     /// Gets the platform-specific handle.
     pub fn platform_handle(&self) -> Option<usize> {
-        *self.platform_handle.lock().unwrap()
+        crate::common::platform_handle(&self.platform_handle)
     }
 
     /// Called when connection status changes.
@@ -191,8 +191,7 @@ impl InternetTransport {
 
     /// Called when a message is received from the server.
     pub fn on_message_received(&self, message: Message) {
-        let mut queue = self.receive_queue.lock().unwrap();
-        queue.push_back(message);
+        crate::common::on_message_received(&self.receive_queue, message);
     }
 
     /// Like [`on_message_received`](Self::on_message_received), but attaches a
@@ -206,54 +205,25 @@ impl InternetTransport {
     ///   transport address (IP, session token, etc.). The protocol layer uses
     ///   this value to verify that `message.sender` matches the authenticated
     ///   peer.
-    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
-        if let Err(e) = message.set_transport_peer_id(peer_id) {
-            tracing::warn!(
-                error = %e,
-                message_id = %message.id,
-                "Dropping message: transport provided invalid peer_id"
-            );
-            return;
-        }
-        let mut queue = self.receive_queue.lock().unwrap();
-        queue.push_back(message);
+    pub fn on_message_received_from(&self, message: Message, peer_id: String) {
+        crate::common::on_message_received_from(&self.receive_queue, message, peer_id);
     }
 
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
-        serde_json::to_vec(message).map_err(|e| {
-            crate::Error::SerializationError(format!("Failed to serialize message: {}", e))
-        })
+        crate::common::serialize_message(message)
     }
 
     /// Deserializes a message from JSON bytes.
     pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        serde_json::from_slice(data).map_err(|e| {
-            crate::Error::SerializationError(format!("Failed to deserialize message: {}", e))
-        })
+        crate::common::deserialize_message(data)
     }
 
     /// Called when raw data is received (platform callback).
     ///
     /// This deserializes the message and queues it.
     pub fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
-        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
-            return Err(crate::Error::MessageTooLarge(
-                data.len(),
-                DEFAULT_MAX_MESSAGE_SIZE,
-            ));
-        }
-        match self.deserialize_message(&data) {
-            Ok(message) => {
-                let mut queue = self.receive_queue.lock().unwrap();
-                queue.push_back(message);
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
-                Ok(()) // Don't fail - just drop bad data
-            }
-        }
+        crate::common::on_data_received(&self.receive_queue, data)
     }
 
     /// Like [`on_data_received`](Self::on_data_received), but attaches a
@@ -267,24 +237,7 @@ impl InternetTransport {
     ///   token, etc.). The protocol layer uses this value to verify that
     ///   `message.sender` matches the authenticated peer.
     pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
-        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
-            return Err(crate::Error::MessageTooLarge(
-                data.len(),
-                DEFAULT_MAX_MESSAGE_SIZE,
-            ));
-        }
-        match self.deserialize_message(&data) {
-            Ok(mut message) => {
-                message.set_transport_peer_id(peer_id)?;
-                let mut queue = self.receive_queue.lock().unwrap();
-                queue.push_back(message);
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
-                Ok(())
-            }
-        }
+        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
     }
 
     /// Gets the next message to send (for platform implementation).
@@ -610,6 +563,7 @@ impl InternetTransportBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
     use offline_protocol_core::{AppId, UserId};
 
     fn create_test_message() -> Message {

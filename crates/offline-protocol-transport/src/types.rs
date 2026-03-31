@@ -18,6 +18,9 @@ pub enum TransportType {
     /// Wi-Fi Direct transport (Android only).
     #[serde(rename = "wifiDirect")]
     WiFiDirect,
+    /// Reticulum mesh transport (LoRa, TCP, UDP, serial, I2P).
+    #[serde(rename = "reticulum")]
+    Reticulum,
 }
 
 impl TransportType {
@@ -27,6 +30,7 @@ impl TransportType {
             TransportType::Internet => "internet",
             TransportType::BLE => "ble",
             TransportType::WiFiDirect => "wifiDirect",
+            TransportType::Reticulum => "reticulum",
         }
     }
 
@@ -36,6 +40,7 @@ impl TransportType {
         match normalized.as_str() {
             "internet" => TransportType::Internet,
             "wifidirect" | "wifi_direct" | "wifi-direct" => TransportType::WiFiDirect,
+            "reticulum" => TransportType::Reticulum,
             _ => TransportType::BLE,
         }
     }
@@ -204,6 +209,7 @@ mod tests {
         assert_eq!(TransportType::Internet.label(), "internet");
         assert_eq!(TransportType::BLE.label(), "ble");
         assert_eq!(TransportType::WiFiDirect.label(), "wifiDirect");
+        assert_eq!(TransportType::Reticulum.label(), "reticulum");
     }
 
     #[test]
@@ -234,6 +240,14 @@ mod tests {
             TransportType::from_label("wifidirect"),
             TransportType::WiFiDirect
         );
+        assert_eq!(
+            TransportType::from_label("reticulum"),
+            TransportType::Reticulum
+        );
+        assert_eq!(
+            TransportType::from_label("RETICULUM"),
+            TransportType::Reticulum
+        );
         assert_eq!(TransportType::from_label("unknown"), TransportType::BLE);
         assert_eq!(TransportType::from_label(""), TransportType::BLE);
     }
@@ -243,6 +257,7 @@ mod tests {
         assert_eq!(TransportType::Internet.to_string(), "internet");
         assert_eq!(TransportType::BLE.to_string(), "ble");
         assert_eq!(TransportType::WiFiDirect.to_string(), "wifiDirect");
+        assert_eq!(TransportType::Reticulum.to_string(), "reticulum");
     }
 
     // --- TransportMetrics ---

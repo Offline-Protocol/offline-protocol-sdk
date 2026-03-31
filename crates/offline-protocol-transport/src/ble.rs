@@ -160,12 +160,12 @@ impl BleTransport {
     ///
     /// This is called by the platform implementation to store its context.
     pub fn set_platform_handle(&self, handle: usize) {
-        *self.platform_handle.lock().unwrap() = Some(handle);
+        crate::common::set_platform_handle(&self.platform_handle, handle);
     }
 
     /// Gets the platform-specific handle.
     pub fn platform_handle(&self) -> Option<usize> {
-        *self.platform_handle.lock().unwrap()
+        crate::common::platform_handle(&self.platform_handle)
     }
 
     /// Gets the local device ID.
@@ -187,8 +187,7 @@ impl BleTransport {
 
     /// Called when a message is received from a peer.
     pub fn on_message_received(&self, message: Message) {
-        let mut queue = self.receive_queue.lock().unwrap();
-        queue.push_back(message);
+        crate::common::on_message_received(&self.receive_queue, message);
     }
 
     /// Like [`on_message_received`](Self::on_message_received), but attaches a
@@ -201,17 +200,8 @@ impl BleTransport {
     ///   connection. This is **not** the raw transport address (MAC, BLE device
     ///   UUID, etc.). The protocol layer uses this value to verify that
     ///   `message.sender` matches the physical peer that delivered it.
-    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
-        if let Err(e) = message.set_transport_peer_id(peer_id) {
-            tracing::warn!(
-                error = %e,
-                message_id = %message.id,
-                "Dropping message: transport provided invalid peer_id"
-            );
-            return;
-        }
-        let mut queue = self.receive_queue.lock().unwrap();
-        queue.push_back(message);
+    pub fn on_message_received_from(&self, message: Message, peer_id: String) {
+        crate::common::on_message_received_from(&self.receive_queue, message, peer_id);
     }
 
     /// Called when connection status changes.
@@ -335,16 +325,12 @@ impl BleTransport {
 
     /// Serializes a message to bytes (JSON).
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
-        serde_json::to_vec(message).map_err(|e| {
-            crate::Error::SerializationError(format!("Failed to serialize message: {}", e))
-        })
+        crate::common::serialize_message(message)
     }
 
     /// Deserializes a message from bytes (JSON).
     pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        serde_json::from_slice(data).map_err(|e| {
-            crate::Error::SerializationError(format!("Failed to deserialize message: {}", e))
-        })
+        crate::common::deserialize_message(data)
     }
 
     /// Fragments a message into chunks suitable for BLE transmission.
