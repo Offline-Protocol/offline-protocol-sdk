@@ -439,7 +439,7 @@ impl TransportSelector {
                 base_score: 0.0,
                 media_bonus: 0.0,
                 media_penalty: 40.0,
-                bandwidth_max_bps: 4_700, // LoRa peak ~4.7 KB/s
+                bandwidth_max_bps: 2_700, // LoRa peak ~2.7 KB/s (SF7/BW500kHz)
                 bandwidth_default: 20.0,  // Conservative default
                 energy_baseline: 75.0,    // Between BLE (90) and Internet (60)
                 is_high_power: false,

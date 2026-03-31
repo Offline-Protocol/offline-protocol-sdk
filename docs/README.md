@@ -28,6 +28,7 @@
 | [MLS Encryption](mls-integration.md) | End-to-end encryption with auto-encryption and manual MLS APIs |
 | [Service Discovery](service-discovery.md) | Decentralized service registration, discovery, and request/response |
 | [Transport Architecture](transport-architecture.md) | Transport abstraction layer and how to add new transports |
+| [Reticulum Transport](reticulum.md) | Reticulum mesh transport setup, architecture, and platform integration |
 
 ## Examples
 

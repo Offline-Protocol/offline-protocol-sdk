@@ -26,6 +26,7 @@ pub enum TransportType {
     Internet,    // Online connectivity (unlimited range)
     BLE,         // Bluetooth Low Energy mesh (50-100m)
     WiFiDirect,  // Wi-Fi Direct (100-200m, Android only)
+    Reticulum,   // Reticulum mesh (LoRa, TCP, UDP, serial, I2P)
 }
 ```
 

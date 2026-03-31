@@ -8,7 +8,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 2. **Write Once**: Core logic shared across all platforms
 3. **Zero-Copy**: Minimize allocations and copying
 4. **Modular**: Each crate has a single responsibility
-5. **Testable**: ~800 tests covering all critical paths
+5. **Testable**: ~900 tests covering all critical paths
 
 ## Crate Organization
 
@@ -31,9 +31,10 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Key Components**:
 - `Transport` trait (send, receive, status, metrics)
-- `TransportType` enum
+- `TransportType` enum (BLE, WiFi Direct, Internet, Reticulum)
 - `TransportMetrics` for monitoring
 - `MockTransport` for testing
+- Shared `common` module for cross-transport helper functions
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
 
@@ -49,7 +50,8 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 - `PathSelector` - Optimal relay selection
 
 **Algorithms**:
-- Transport scoring: Signal + Proximity + Bandwidth + Congestion + Energy
+- Transport scoring: Signal + Proximity + Bandwidth + Congestion + Energy + Reliability + Load
+- Per-transport scoring profiles (BLE, WiFi Direct, Internet, Reticulum)
 - Hysteresis prevents flapping (15-point threshold)
 - Cooldown timer (20 seconds)
 - Stability window (8 seconds)
@@ -139,7 +141,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 See [DORS Deep Dive](dors.md) for the full scoring system and [DORS Configuration Guide](dors-configuration.md) for tuning parameters.
 
-**Summary**: DORS evaluates each transport using seven weighted factors (signal, proximity, bandwidth, congestion, energy, reliability, capacity), applies hysteresis + cooldown + stability checks to prevent flapping, and supports automatic escalation from BLE to WiFi Direct when performance degrades.
+**Summary**: DORS evaluates each transport (BLE, WiFi Direct, Internet, Reticulum) using seven weighted factors (signal, proximity, bandwidth, congestion, energy, reliability, capacity), applies hysteresis + cooldown + stability checks to prevent flapping, and supports automatic escalation from BLE to WiFi Direct when performance degrades. Reticulum is scored as a resilience fallback with lowest tie-break priority.
 
 ## Relay System
 
@@ -253,7 +255,7 @@ The SDK uses [UniFFI](https://mozilla.github.io/uniffi-rs/) to generate type-saf
 
 ## Testing Strategy
 
-### Test Coverage (~800 tests)
+### Test Coverage (~900 tests)
 
 Tests are distributed across all crates and cover:
 - Core types and message construction

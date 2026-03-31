@@ -131,6 +131,7 @@ let messageId = try protocol.sendMessage(
 - [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step project setup
 - [API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)
+- [Reticulum Transport](docs/reticulum.md)
 - [Architecture Overview](docs/architecture.md)
 - [All Documentation](docs/)
 

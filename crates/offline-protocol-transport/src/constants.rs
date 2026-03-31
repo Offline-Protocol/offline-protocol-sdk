@@ -86,8 +86,9 @@ pub const RETICULUM_CONNECTION_TIMEOUT_SECS: u64 = 60;
 pub const RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 120;
 
 /// Default maximum payload size for Reticulum (bytes).
-/// Reticulum's MDU is 383 bytes per single packet, but larger payloads
-/// are handled transparently by Reticulum's Resource mechanism.
+/// Reticulum's encrypted MDU is 383 bytes per single packet (plain MDU is
+/// 464 bytes). Larger payloads are handled transparently by Reticulum's
+/// Resource mechanism over an established Link.
 pub const RETICULUM_MAX_PAYLOAD_SIZE: usize = 65536;
 
 // Transport-wide Constants
