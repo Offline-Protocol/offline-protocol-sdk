@@ -13,15 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Recalculates `delivery_ratio` and `drop_rate` from the current success/failure counts.
-fn recalculate_delivery_ratios(metrics: &mut TransportMetrics) {
-    let total = metrics.success_count + metrics.failure_count;
-    if total > 0 {
-        let ratio = metrics.success_count as f32 / total as f32;
-        metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
-        metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
-    }
-}
+use crate::common::recalculate_delivery_ratios;
 
 /// Internet transport configuration
 #[derive(Debug, Clone)]

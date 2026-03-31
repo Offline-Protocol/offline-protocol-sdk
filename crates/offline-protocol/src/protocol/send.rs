@@ -2066,6 +2066,7 @@ impl OfflineProtocol {
             }
         }
 
+        // Reticulum excluded: LoRa bandwidth (~4.7 KB/s) is unsuitable for media transfer.
         for preferred in [
             TransportType::Internet,
             TransportType::WiFiDirect,

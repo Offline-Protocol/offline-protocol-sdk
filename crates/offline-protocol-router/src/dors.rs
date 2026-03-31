@@ -95,7 +95,7 @@ impl Default for DorsConfig {
 }
 
 /// Scores within this delta of the *best* score are treated as a tie for selection,
-/// and the tie-break order (Internet > WiFiDirect > BLE) is then used.
+/// and the tie-break order (Internet > WiFiDirect > BLE > Reticulum) is then used.
 const TIE_EPSILON: f32 = 0.01;
 
 /// No-RSSI-data default for radio transports (not transport-specific, just means

@@ -6,7 +6,7 @@
 //! boilerplate to one-liner delegation calls.
 
 use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
-use crate::{Error, Result};
+use crate::{Error, Result, TransportMetrics};
 use offline_protocol_core::Message;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -95,4 +95,14 @@ pub fn set_platform_handle(handle_lock: &Mutex<Option<usize>>, handle: usize) {
 /// Retrieves the stored platform handle.
 pub fn platform_handle(handle_lock: &Mutex<Option<usize>>) -> Option<usize> {
     *handle_lock.lock().unwrap()
+}
+
+/// Recalculates `delivery_ratio` and `drop_rate` from the current success/failure counts.
+pub fn recalculate_delivery_ratios(metrics: &mut TransportMetrics) {
+    let total = metrics.success_count + metrics.failure_count;
+    if total > 0 {
+        let ratio = metrics.success_count as f32 / total as f32;
+        metrics.delivery_ratio = Some(ratio.clamp(0.0, 1.0));
+        metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
+    }
 }
