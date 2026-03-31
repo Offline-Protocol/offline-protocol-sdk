@@ -102,6 +102,22 @@ const TIE_EPSILON: f32 = 0.01;
 /// "we don't know the signal yet").
 const SIGNAL_SCORE_NO_DATA: f32 = 50.0;
 
+/// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
+/// Lower value = preferred. Order: Internet, WiFiDirect, BLE, Reticulum.
+///
+/// Kept as a standalone function (rather than going through [`TransportScoringProfile`])
+/// because tie-breaking is called per-element inside `min_by_key` / `sort_by`, and
+/// constructing a full profile struct just to read a `u8` would be wasteful.
+/// The values here **must** match each profile's `tie_break_priority` field.
+fn tie_break_priority(transport_type: TransportType) -> u8 {
+    match transport_type {
+        TransportType::Internet => 0,
+        TransportType::WiFiDirect => 1,
+        TransportType::BLE => 2,
+        TransportType::Reticulum => 3,
+    }
+}
+
 /// Weights for each DORS scoring dimension.
 #[derive(Debug, Clone)]
 struct ScoringWeights {
@@ -112,6 +128,19 @@ struct ScoringWeights {
     energy: f32,
     reliability: f32,
     load: f32,
+}
+
+impl ScoringWeights {
+    /// Sum of all weights. Should be 1.0 for a correctly defined profile.
+    fn sum(&self) -> f32 {
+        self.signal
+            + self.proximity
+            + self.bandwidth
+            + self.congestion
+            + self.energy
+            + self.reliability
+            + self.load
+    }
 }
 
 /// Per-transport scoring configuration for DORS.
@@ -322,7 +351,7 @@ impl TransportSelector {
     /// bandwidth normalisation, energy baseline, tie-break) is handled
     /// generically.
     fn scoring_profile(&self, transport_type: TransportType) -> TransportScoringProfile {
-        match transport_type {
+        let profile = match transport_type {
             TransportType::Internet => TransportScoringProfile {
                 weights: ScoringWeights {
                     signal: 0.0,
@@ -419,7 +448,22 @@ impl TransportSelector {
                 default_signal_score: 60.0,
                 tie_break_priority: 3, // Lowest: resilience fallback
             },
-        }
+        };
+
+        debug_assert!(
+            (profile.weights.sum() - 1.0).abs() < 1e-6,
+            "Scoring weights for {:?} must sum to 1.0, got {}",
+            transport_type,
+            profile.weights.sum(),
+        );
+        debug_assert_eq!(
+            profile.tie_break_priority,
+            tie_break_priority(transport_type),
+            "tie_break_priority in profile for {:?} must match standalone tie_break_priority()",
+            transport_type,
+        );
+
+        profile
     }
 
     /// Selects the best transport for sending a message.
@@ -479,21 +523,19 @@ impl TransportSelector {
                     .unwrap_or(std::cmp::Ordering::Equal)
             }) {
             let best_total = best_s.total;
-            let tie_priority = |t: &TransportType| self.scoring_profile(*t).tie_break_priority;
             scored_transports
                 .iter()
                 .filter(|(_, s)| s.total.is_finite() && best_total - s.total <= TIE_EPSILON)
-                .min_by_key(|(t, _)| tie_priority(t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, s)| (*t, s.total))
                 // In the unlikely event the filter yields nothing, fall back to the
                 // original best candidate.
                 .unwrap_or((*best_t, best_total))
         } else {
             // No finite scores; pick purely by tie-break priority.
-            let tie_priority = |t: &TransportType| self.scoring_profile(*t).tie_break_priority;
             scored_transports
                 .iter()
-                .min_by_key(|(t, _)| tie_priority(t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, s)| (*t, s.total))?
         };
 
@@ -591,11 +633,10 @@ impl TransportSelector {
         // Determinism: when scores are exactly equal (rare with floats, but can
         // happen in tests or after rounding), apply the same priority tie-break
         // used by selection: Internet > WiFiDirect > BLE.
-        let tie_priority = |t: TransportType| self.scoring_profile(t).tie_break_priority;
         scored.sort_by(|a, b| {
             let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
             if ord == std::cmp::Ordering::Equal {
-                tie_priority(a.0).cmp(&tie_priority(b.0))
+                tie_break_priority(a.0).cmp(&tie_break_priority(b.0))
             } else {
                 ord
             }
@@ -1352,8 +1393,6 @@ impl TransportSelector {
             return None;
         }
 
-        let tie_priority = |t: &TransportType| self.scoring_profile(*t).tie_break_priority;
-
         // Find best finite score (ignoring NaNs). If none, fall back to tie-break only.
         if let Some(best) = scores
             .iter()
@@ -1366,13 +1405,13 @@ impl TransportSelector {
             scores
                 .iter()
                 .filter(|(_, s)| s.is_finite() && best - *s <= TIE_EPSILON)
-                .min_by_key(|(t, _)| tie_priority(t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, _)| *t)
         } else {
             // No finite scores; choose purely by tie-break priority.
             scores
                 .iter()
-                .min_by_key(|(t, _)| tie_priority(t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, _)| *t)
         }
     }
@@ -2811,6 +2850,33 @@ mod tests {
             "Reticulum should be penalised when message prefers internet (media). normal={:.1}, media={:.1}",
             score_normal.total,
             score_media.total
+        );
+    }
+
+    /// Verifies that `prefer_online` does not give Reticulum an unintended boost.
+    #[test]
+    fn test_reticulum_not_boosted_by_prefer_online() {
+        let selector_prefer = TransportSelector::with_config(DorsConfig {
+            prefer_online: true,
+            ..Default::default()
+        });
+        let selector_default = TransportSelector::new();
+        let message = create_test_message();
+        let metrics = create_test_metrics(Some(-65), 0.1, 2);
+
+        let score_prefer =
+            selector_prefer.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+        let score_default = selector_default.calculate_transport_score(
+            &message,
+            TransportType::Reticulum,
+            &metrics,
+        );
+
+        assert!(
+            (score_prefer.total - score_default.total).abs() < 0.01,
+            "prefer_online must not change Reticulum score. prefer={:.1}, default={:.1}",
+            score_prefer.total,
+            score_default.total,
         );
     }
 }

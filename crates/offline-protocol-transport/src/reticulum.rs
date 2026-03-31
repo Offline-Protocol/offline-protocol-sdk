@@ -643,6 +643,48 @@ mod tests {
     }
 
     #[test]
+    fn test_drain_expired_pending_expires_old_entries() {
+        let mut transport = ReticulumTransport::new("device1");
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        // Insert a pending entry that is already past the timeout by backdating it.
+        let timeout_secs = RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS;
+        let expired_at = Instant::now() - Duration::from_secs(timeout_secs + 1);
+        transport
+            .pending_confirmation
+            .lock()
+            .unwrap()
+            .insert("expired-msg".to_string(), expired_at);
+
+        // Insert a recent pending entry that should survive.
+        transport
+            .pending_confirmation
+            .lock()
+            .unwrap()
+            .insert("recent-msg".to_string(), Instant::now());
+
+        transport.drain_expired_pending();
+
+        let pending = transport.pending_confirmation.lock().unwrap();
+        assert!(
+            !pending.contains_key("expired-msg"),
+            "Expired entry should have been drained"
+        );
+        assert!(
+            pending.contains_key("recent-msg"),
+            "Recent entry should be retained"
+        );
+        drop(pending);
+
+        let metrics = transport.metrics();
+        assert_eq!(
+            metrics.failure_count, 1,
+            "Expired entry should be counted as a failure"
+        );
+    }
+
+    #[test]
     fn test_has_pending_sends() {
         let mut transport = ReticulumTransport::new("device1");
         transport.start().unwrap();
