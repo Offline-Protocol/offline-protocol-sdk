@@ -316,14 +316,13 @@ class BlePeripheral(TransportManager):
         """
         try:
             resolved = self._resolve_char_uuid(char_uuid)
+            print(f"[ble_peripheral] _on_write called: uuid={resolved}, value_type={type(value).__name__}, value_len={len(value) if value else 0}")
             if resolved != MESSAGE_CHAR_UUID.lower():
+                print(f"[ble_peripheral] _on_write: ignoring write to {resolved}")
                 return
 
             fragment = bytes(value)
-            logger.debug(
-                "[ble_peripheral] _on_write: %d bytes from %s",
-                len(fragment), type(char_uuid).__name__,
-            )
+            print(f"[ble_peripheral] _on_write: {len(fragment)} bytes, sender={self._resolve_sender()}")
             self._bytes_received += len(fragment)
             self._fragments_received += 1
 
@@ -332,11 +331,11 @@ class BlePeripheral(TransportManager):
             self._protocol.ble_fragment_received(
                 sender_id=sender_id, fragment=list(fragment)
             )
-        except Exception as exc:
-            logger.error("[ble_peripheral] Write handler exception: %s", exc, exc_info=True)
-            self._emit_diagnostic(
-                "error", f"Error in write handler: {exc}"
-            )
+            print("[ble_peripheral] _on_write: fragment fed to protocol OK")
+        except BaseException as exc:
+            print(f"[ble_peripheral] _on_write EXCEPTION: {type(exc).__name__}: {exc}")
+            import traceback
+            traceback.print_exc()
 
     def _resolve_sender(self) -> str:
         """Best-effort identification of the writing central.
