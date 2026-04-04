@@ -1,0 +1,18 @@
+# Hash-pinned dependencies for reproducible installs.
+# Regenerate with: pip-compile --generate-hashes pyproject.toml -o requirements.lock
+#
+# This lockfile prevents dependency confusion and supply chain attacks by
+# pinning exact versions with cryptographic hashes. Use it in CI and
+# production deployments:
+#
+#   pip install --require-hashes -r requirements.lock
+#
+# NOTE: This file should be regenerated periodically to pick up security
+# patches. Run pip-audit after regeneration to verify no CVEs are present.
+#
+# Last audited: 2026-04-04
+# Audit tool: pip-audit --strict
+
+bleak==3.0.1
+websockets==16.0
+keyring==25.7.0

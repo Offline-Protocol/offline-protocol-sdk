@@ -170,9 +170,317 @@ jobs:
           path: android-bindings/
           retention-days: 1
 
+  # ---------------------------------------------------------------------------
+  # Desktop builds (macOS / Linux / Windows)
+  # ---------------------------------------------------------------------------
+
+  build-desktop-macos:
+    name: Build Desktop (macOS ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-14
+            lib_name: liboffline_protocol_uniffi.dylib
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            runner: macos-13
+            lib_name: liboffline_protocol_uniffi.dylib
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-desktop-macos-${{ matrix.arch }}
+
+      - name: Build cdylib
+        run: cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi
+
+      - name: Collect artifact
+        run: |
+          mkdir -p desktop-libs/macos-${{ matrix.arch }}
+          SO_ROOT="target/${{ matrix.target }}/release"
+          if [ -f "$SO_ROOT/${{ matrix.lib_name }}" ]; then
+            cp "$SO_ROOT/${{ matrix.lib_name }}" "desktop-libs/macos-${{ matrix.arch }}/"
+          elif [ -f "$SO_ROOT/deps/${{ matrix.lib_name }}" ]; then
+            cp "$SO_ROOT/deps/${{ matrix.lib_name }}" "desktop-libs/macos-${{ matrix.arch }}/"
+          else
+            echo "ERROR: ${{ matrix.lib_name }} not found"
+            ls -la "$SO_ROOT"/ "$SO_ROOT/deps"/ 2>/dev/null || true
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-${{ matrix.arch }}
+          path: desktop-libs/
+          retention-days: 1
+
+  build-desktop-linux:
+    name: Build Desktop (Linux ${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            lib_name: liboffline_protocol_uniffi.so
+            cross: false
+          - arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            lib_name: liboffline_protocol_uniffi.so
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-desktop-linux-${{ matrix.arch }}
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Build cdylib
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi
+
+      - name: Collect artifact
+        run: |
+          mkdir -p desktop-libs/linux-${{ matrix.arch }}
+          SO_ROOT="target/${{ matrix.target }}/release"
+          if [ -f "$SO_ROOT/${{ matrix.lib_name }}" ]; then
+            cp "$SO_ROOT/${{ matrix.lib_name }}" "desktop-libs/linux-${{ matrix.arch }}/"
+          elif [ -f "$SO_ROOT/deps/${{ matrix.lib_name }}" ]; then
+            cp "$SO_ROOT/deps/${{ matrix.lib_name }}" "desktop-libs/linux-${{ matrix.arch }}/"
+          else
+            echo "ERROR: ${{ matrix.lib_name }} not found"
+            ls -la "$SO_ROOT"/ "$SO_ROOT/deps"/ 2>/dev/null || true
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-${{ matrix.arch }}
+          path: desktop-libs/
+          retention-days: 1
+
+  build-desktop-windows:
+    name: Build Desktop (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-desktop-windows
+
+      - name: Build cdylib
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --package offline-protocol-uniffi
+
+      - name: Collect artifact
+        shell: bash
+        run: |
+          mkdir -p desktop-libs/windows-x86_64
+          SO_ROOT="target/x86_64-pc-windows-msvc/release"
+          if [ -f "$SO_ROOT/offline_protocol_uniffi.dll" ]; then
+            cp "$SO_ROOT/offline_protocol_uniffi.dll" "desktop-libs/windows-x86_64/"
+          elif [ -f "$SO_ROOT/deps/offline_protocol_uniffi.dll" ]; then
+            cp "$SO_ROOT/deps/offline_protocol_uniffi.dll" "desktop-libs/windows-x86_64/"
+          else
+            echo "ERROR: offline_protocol_uniffi.dll not found"
+            ls -la "$SO_ROOT"/ "$SO_ROOT/deps"/ 2>/dev/null || true
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x86_64
+          path: desktop-libs/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Python bindings generation & testing
+  # ---------------------------------------------------------------------------
+
+  python-bindings:
+    name: Generate Python Bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache uniffi-bindgen
+        id: cache-uniffi
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/uniffi-bindgen
+          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
+
+      - name: Install uniffi-bindgen
+        if: steps.cache-uniffi.outputs.cache-hit != 'true'
+        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
+
+      - name: Generate Python bindings
+        run: |
+          cd crates/offline-protocol-uniffi
+          uniffi-bindgen generate src/offline_protocol.udl --language python --out-dir ../../bindings/python/offline_protocol_sdk/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-bindings
+          path: bindings/python/offline_protocol_sdk/offline_protocol.py
+          retention-days: 1
+
+  test-python:
+    name: Test Python Bindings
+    needs: [python-bindings, build-desktop-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download Python bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: python-bindings
+          path: bindings/python/offline_protocol_sdk/
+
+      - name: Download Linux x86_64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: desktop-linux-x86_64
+          path: native-libs/
+
+      - name: Install and test
+        run: |
+          cp native-libs/linux-x86_64/liboffline_protocol_uniffi.so bindings/python/offline_protocol_sdk/
+          cd bindings/python/offline_protocol_sdk && ln -sf liboffline_protocol_uniffi.so libuniffi.so && cd ..
+          pip install -e ".[dev]"
+          pytest tests/ -v
+
+  audit-python:
+    name: Audit Python Dependencies
+    needs: [python-bindings]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Audit for known CVEs
+        run: |
+          cd bindings/python
+          pip install pip-audit
+          pip install bleak websockets keyring
+          pip-audit --strict
+
+  python-package:
+    name: Package Python (${{ matrix.platform }})
+    needs: [build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            artifact: desktop-macos-arm64
+            lib_subdir: macos-arm64
+            plat_name: macosx_14_0_arm64
+          - platform: macos-x86_64
+            artifact: desktop-macos-x86_64
+            lib_subdir: macos-x86_64
+            plat_name: macosx_13_0_x86_64
+          - platform: linux-x86_64
+            artifact: desktop-linux-x86_64
+            lib_subdir: linux-x86_64
+            plat_name: manylinux_2_17_x86_64
+          - platform: linux-aarch64
+            artifact: desktop-linux-aarch64
+            lib_subdir: linux-aarch64
+            plat_name: manylinux_2_17_aarch64
+          - platform: windows-x86_64
+            artifact: desktop-windows-x86_64
+            lib_subdir: windows-x86_64
+            plat_name: win_amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download Python bindings
+        uses: actions/download-artifact@v4
+        with:
+          name: python-bindings
+          path: bindings/python/offline_protocol_sdk/
+
+      - name: Download native library
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: native-libs/
+
+      - name: Build wheel
+        run: |
+          cp native-libs/${{ matrix.lib_subdir }}/* bindings/python/offline_protocol_sdk/
+          # Create symlink matching the name generated Python expects (libuniffi.*)
+          cd bindings/python/offline_protocol_sdk
+          for lib in *.dylib; do [ -f "$lib" ] && ln -sf "$lib" libuniffi.dylib; done
+          for lib in *.so; do [ -f "$lib" ] && ln -sf "$lib" libuniffi.so; done
+          for lib in *.dll; do [ -f "$lib" ] && ln -sf "$lib" uniffi.dll; done
+          cd ..
+          pip install build wheel
+          python -m build --wheel
+          # Re-tag the wheel with the correct platform
+          pip install wheel
+          python -c "
+          import glob, pathlib, wheel.wheelfile
+          for whl in glob.glob('dist/*.whl'):
+              print(f'Built: {whl}')
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-wheel-${{ matrix.platform }}
+          path: bindings/python/dist/*.whl
+          retention-days: 5
+
+  # ---------------------------------------------------------------------------
+  # Release
+  # ---------------------------------------------------------------------------
+
   release:
     name: Create Release & Publish to npm
-    needs: [build-ios, build-android, android-bindings]
+    needs: [build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
