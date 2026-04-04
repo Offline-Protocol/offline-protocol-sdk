@@ -42,6 +42,21 @@ class SecureStorage(MlsStorageProvider):
         self._service = service
         self._lock = threading.Lock()
 
+        # Warn if keyring resolved to a plaintext or null backend — MLS key
+        # material would be stored unprotected.
+        try:
+            backend = keyring.get_keyring()
+            backend_name = type(backend).__name__
+            if "Fail" in backend_name or "Null" in backend_name or "PlaintextKeyring" in backend_name:
+                logger.warning(
+                    "keyring backend is '%s' — MLS keys will NOT be stored "
+                    "securely. Install a platform secret service (e.g. "
+                    "gnome-keyring, kwallet) for production use.",
+                    backend_name,
+                )
+        except Exception:
+            logger.debug("Could not inspect keyring backend", exc_info=True)
+
     # -- MlsStorageProvider interface ----------------------------------------
 
     def store(self, key_type: str, key_id: str, data: list[int]) -> None:

@@ -125,7 +125,11 @@ class InternetManager(TransportManager):
             "has_token": token is not None,
         })
         if self._connected and self._ws is not None:
-            asyncio.ensure_future(self._send_authentication())
+            loop = self._loop
+            if loop is not None and not loop.is_closed() and loop.is_running():
+                loop.call_soon_threadsafe(
+                    asyncio.ensure_future, self._send_authentication()
+                )
 
     # -- TransportManager interface -------------------------------------------
 
@@ -178,7 +182,7 @@ class InternetManager(TransportManager):
         try:
             self._protocol.internet_status_changed(is_connected=False)
         except Exception:
-            pass
+            logger.debug("internet_status_changed(False) failed", exc_info=True)
 
         self._update_state(TransportState.STOPPED)
         self._emit_diagnostic("info", "Internet transport stopped")
@@ -287,7 +291,7 @@ class InternetManager(TransportManager):
             try:
                 self._protocol.internet_status_changed(is_connected=False)
             except Exception:
-                pass
+                logger.debug("internet_status_changed(False) failed", exc_info=True)
 
         self._emit_diagnostic("warning", "WebSocket disconnected", {
             "error": str(error) if error else "none",
@@ -421,18 +425,21 @@ class InternetManager(TransportManager):
         self._messages_received += 1
 
         # Try to parse content as full Message JSON, otherwise wrap it
+        is_full_message = False
+        message_dict: dict[str, Any] = {}
         try:
             content_json = json.loads(content)
-            if "sender" in content_json and "recipient" in content_json:
+            if isinstance(content_json, dict) and "sender" in content_json and "recipient" in content_json:
                 message_dict = content_json
                 if message_id and "id" not in message_dict:
                     message_dict["id"] = message_id
                 if reply_to_msg and "reply_to_msg" not in message_dict:
                     message_dict["reply_to_msg"] = reply_to_msg
-            else:
-                raise ValueError("not a full message")
-        except (json.JSONDecodeError, ValueError):
-            message_dict: dict[str, Any] = {
+                is_full_message = True
+        except json.JSONDecodeError:
+            pass
+        if not is_full_message:
+            message_dict = {
                 "sender": sender_id,
                 "recipient": self._device_id,
                 "content": content,
@@ -561,10 +568,15 @@ class InternetManager(TransportManager):
     def _poll_and_send_messages(self) -> None:
         """Drain outgoing messages from the protocol and send them.
 
-        Concurrency is bounded by ``_send_semaphore`` to prevent unbounded
-        task spawning when the protocol core has a large outbox.
+        Only dequeues up to the number of available semaphore slots to
+        prevent unbounded task creation when the protocol core has a large
+        outbox.  Remaining messages will be picked up on the next poll tick.
         """
-        while True:
+        # Limit to available concurrency slots to avoid creating thousands
+        # of tasks that all block on the semaphore.
+        available_slots = self._send_semaphore._value
+        drained = 0
+        while drained < available_slots:
             try:
                 msg = self._protocol.internet_get_next_message()
             except (AttributeError, ReferenceError) as exc:
@@ -585,6 +597,7 @@ class InternetManager(TransportManager):
             )
             self._send_tasks.add(task)
             task.add_done_callback(self._send_tasks.discard)
+            drained += 1
 
     async def _send_message(
         self, message_id: str, recipient: str, data: bytes

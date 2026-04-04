@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
@@ -77,10 +78,18 @@ class BleManager(TransportManager):
         self._scanner: BleakScanner | None = None
         self._scan_task: asyncio.Task[None] | None = None
 
+        # Lock protecting shared state accessed from bleak's scanner thread
+        # (_on_advertisement) AND the asyncio event loop. Guards: _last_seen,
+        # _connection_attempts, _global_attempts, _connecting, _clients,
+        # _peer_device_ids.
+        self._lock = threading.Lock()
+
         # Connected peers: address -> BleakClient
         self._clients: dict[str, BleakClient] = {}
         # address -> device_id mapping
         self._peer_device_ids: dict[str, str] = {}
+        # device_id -> address reverse lookup (avoids linear scan)
+        self._device_id_to_addr: dict[str, str] = {}
         # address -> last-seen timestamp
         self._last_seen: dict[str, float] = {}
         # address -> last connection attempt timestamp (rate limiting)
@@ -133,7 +142,7 @@ class BleManager(TransportManager):
         try:
             self._protocol.ble_status_changed(is_available=True)
         except Exception:
-            pass
+            logger.debug("ble_status_changed(True) failed", exc_info=True)
 
         self._update_state(TransportState.RUNNING)
 
@@ -164,20 +173,24 @@ class BleManager(TransportManager):
         self._peer_cleanup_task = None
 
         # Disconnect all clients
-        for addr, client in list(self._clients.items()):
+        with self._lock:
+            clients_snapshot = list(self._clients.items())
+        for addr, client in clients_snapshot:
             try:
                 await client.disconnect()
             except Exception:
                 pass
-        self._clients.clear()
-        self._peer_device_ids.clear()
-        self._last_seen.clear()
-        self._connecting.clear()
+        with self._lock:
+            self._clients.clear()
+            self._peer_device_ids.clear()
+            self._device_id_to_addr.clear()
+            self._last_seen.clear()
+            self._connecting.clear()
 
         try:
             self._protocol.ble_status_changed(is_available=False)
         except Exception:
-            pass
+            logger.debug("ble_status_changed(False) failed")
 
         self._update_state(TransportState.STOPPED)
         self._emit_diagnostic("info", "BLE transport stopped")
@@ -200,7 +213,7 @@ class BleManager(TransportManager):
         """Called by bleak for each BLE advertisement detected.
 
         NOTE: This is invoked from bleak's scanner thread, not the asyncio
-        event loop.  All shared-state access must be thread-safe.
+        event loop.  All shared-state mutations go through ``_lock``.
         """
         addr = device.address
         rssi = adv_data.rssi if adv_data.rssi is not None else -100
@@ -210,33 +223,38 @@ class BleManager(TransportManager):
             return
 
         now = time.monotonic()
-        self._last_seen[addr] = now
+        should_connect = False
 
-        # Notify protocol of discovery (using address as provisional peer ID
-        # until we read the device ID characteristic)
-        peer_id = self._peer_device_ids.get(addr, addr)
+        with self._lock:
+            self._last_seen[addr] = now
+
+            peer_id = self._peer_device_ids.get(addr, addr)
+
+            # Attempt connection if not already connected / connecting.
+            if addr not in self._clients and addr not in self._connecting:
+                if self._should_connect_locked(addr, now):
+                    self._connecting.add(addr)
+                    should_connect = True
+
+        # Protocol calls outside the lock to avoid holding it during FFI
         try:
             self._protocol.ble_peer_discovered(peer_id=peer_id, rssi=rssi)
         except Exception:
-            pass
+            logger.debug("ble_peer_discovered failed for %s", peer_id)
 
-        # Attempt connection if not already connected / connecting.
-        # Mark as connecting BEFORE scheduling the task to prevent duplicate
-        # connection attempts from near-simultaneous advertisements.
-        if addr not in self._clients and addr not in self._connecting:
-            if self._should_connect(addr, now):
-                self._connecting.add(addr)
-                loop = self._loop
-                if loop is not None and not loop.is_closed() and loop.is_running():
-                    loop.call_soon_threadsafe(
-                        asyncio.ensure_future,
-                        self._connect_to_peer(device),
-                    )
-                else:
+        if should_connect:
+            loop = self._loop
+            if loop is not None and not loop.is_closed() and loop.is_running():
+                loop.call_soon_threadsafe(
+                    asyncio.ensure_future,
+                    self._connect_to_peer(device),
+                )
+            else:
+                with self._lock:
                     self._connecting.discard(addr)
 
-    def _should_connect(self, addr: str, now: float) -> bool:
-        """Adaptive rate-limiting (mirrors iOS adaptive scan logic)."""
+    def _should_connect_locked(self, addr: str, now: float) -> bool:
+        """Adaptive rate-limiting. Caller must hold ``_lock``."""
         # Per-peripheral cooldown
         last_attempt = self._connection_attempts.get(addr, 0)
         if now - last_attempt < ADAPTIVE_COOLDOWN_PER_PERIPHERAL:
@@ -256,8 +274,9 @@ class BleManager(TransportManager):
         addr = device.address
         # addr is already in self._connecting (added in _on_advertisement)
         now = time.monotonic()
-        self._connection_attempts[addr] = now
-        self._global_attempts.append(now)
+        with self._lock:
+            self._connection_attempts[addr] = now
+            self._global_attempts.append(now)
 
         try:
             client = BleakClient(
@@ -282,15 +301,17 @@ class BleManager(TransportManager):
                 await client.disconnect()
                 return
 
-            self._clients[addr] = client
-            self._peer_device_ids[addr] = device_id
+            with self._lock:
+                self._clients[addr] = client
+                self._peer_device_ids[addr] = device_id
+                self._device_id_to_addr[device_id] = addr
 
             # Re-notify protocol with the real device ID
             try:
                 rssi = -70  # approximate; bleak doesn't expose RSSI post-connect
                 self._protocol.ble_peer_discovered(peer_id=device_id, rssi=rssi)
             except Exception:
-                pass
+                logger.debug("ble_peer_discovered failed for %s", device_id)
 
             # Subscribe to message notifications
             await self._subscribe_to_messages(client, addr, device_id)
@@ -303,7 +324,8 @@ class BleManager(TransportManager):
         except Exception as exc:
             self._emit_diagnostic("debug", f"Connection to {addr} failed: {exc}")
         finally:
-            self._connecting.discard(addr)
+            with self._lock:
+                self._connecting.discard(addr)
 
     async def _read_device_id(self, client: BleakClient) -> str | None:
         """Read the device ID characteristic from a connected peripheral."""
@@ -341,13 +363,15 @@ class BleManager(TransportManager):
 
     async def _on_peer_disconnected(self, addr: str) -> None:
         """Called when a peer disconnects."""
-        device_id = self._peer_device_ids.pop(addr, addr)
-        self._clients.pop(addr, None)
+        with self._lock:
+            device_id = self._peer_device_ids.pop(addr, addr)
+            self._clients.pop(addr, None)
+            self._device_id_to_addr.pop(device_id, None)
 
         try:
             self._protocol.ble_peer_lost(peer_id=device_id)
         except Exception:
-            pass
+            logger.debug("ble_peer_lost failed for %s", device_id)
 
         self._emit_diagnostic("info", f"Peer disconnected: {device_id}")
 
@@ -403,14 +427,15 @@ class BleManager(TransportManager):
             try:
                 self._protocol.ble_return_fragment()
             except Exception:
-                pass
+                logger.debug("ble_return_fragment failed", exc_info=True)
 
     def _find_client_for_peer(self, peer_id: str) -> BleakClient | None:
-        """Find the BleakClient for a given device ID."""
-        for addr, did in self._peer_device_ids.items():
-            if did == peer_id:
+        """Find the BleakClient for a given device ID (O(1) via reverse map)."""
+        with self._lock:
+            addr = self._device_id_to_addr.get(peer_id)
+            if addr is not None:
                 return self._clients.get(addr)
-        return None
+            return None
 
     # -- background tasks -----------------------------------------------------
 
@@ -420,18 +445,24 @@ class BleManager(TransportManager):
             while True:
                 await asyncio.sleep(PEER_LOST_TIMEOUT / 2)
                 now = time.monotonic()
-                stale = [
-                    addr
-                    for addr, ts in self._last_seen.items()
-                    if now - ts > PEER_LOST_TIMEOUT
-                    and addr not in self._clients
-                ]
-                for addr in stale:
-                    self._last_seen.pop(addr, None)
-                    device_id = self._peer_device_ids.pop(addr, addr)
+                stale_device_ids: list[str] = []
+                with self._lock:
+                    stale = [
+                        addr
+                        for addr, ts in self._last_seen.items()
+                        if now - ts > PEER_LOST_TIMEOUT
+                        and addr not in self._clients
+                    ]
+                    for addr in stale:
+                        self._last_seen.pop(addr, None)
+                        device_id = self._peer_device_ids.pop(addr, addr)
+                        self._device_id_to_addr.pop(device_id, None)
+                        stale_device_ids.append(device_id)
+                # Notify protocol outside the lock
+                for device_id in stale_device_ids:
                     try:
                         self._protocol.ble_peer_lost(peer_id=device_id)
                     except Exception:
-                        pass
+                        logger.debug("ble_peer_lost failed for %s", device_id)
         except asyncio.CancelledError:
             return

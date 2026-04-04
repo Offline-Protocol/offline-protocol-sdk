@@ -167,7 +167,7 @@ class BlePeripheral(TransportManager):
         try:
             self._protocol.ble_status_changed(is_available=True)
         except Exception:
-            pass
+            logger.debug("ble_status_changed(True) failed", exc_info=True)
 
         self._update_state(TransportState.RUNNING)
 
@@ -208,13 +208,13 @@ class BlePeripheral(TransportManager):
             try:
                 self._protocol.ble_peer_lost(peer_id=central_uuid)
             except Exception:
-                pass
+                logger.debug("ble_peer_lost failed for %s", central_uuid)
         self._connected_centrals.clear()
 
         try:
             self._protocol.ble_status_changed(is_available=False)
         except Exception:
-            pass
+            logger.debug("ble_status_changed(False) failed", exc_info=True)
 
         self._update_state(TransportState.STOPPED)
         self._emit_diagnostic("info", "BLE peripheral stopped")
@@ -408,7 +408,7 @@ class BlePeripheral(TransportManager):
             try:
                 self._protocol.ble_return_fragment()
             except Exception:
-                pass
+                logger.debug("ble_return_fragment failed", exc_info=True)
 
     # -- background tasks -----------------------------------------------------
 
@@ -428,9 +428,17 @@ class BlePeripheral(TransportManager):
 
                 try:
                     delegate = self._server.peripheral_manager_delegate
+                    # NOTE: _central_subscriptions is a bless-internal dict.
+                    # Validated against bless 0.3.x. If this attribute is
+                    # missing after a bless upgrade, the except below logs a
+                    # warning and the monitor degrades gracefully (no peer
+                    # tracking, but data transfer still works).
                     current = set(delegate._central_subscriptions.keys())
                 except (AttributeError, TypeError):
-                    # bless internal API may change across versions
+                    logger.debug(
+                        "Cannot read bless _central_subscriptions — "
+                        "peer monitoring disabled (bless API may have changed)"
+                    )
                     continue
 
                 # New centrals
@@ -449,7 +457,7 @@ class BlePeripheral(TransportManager):
                             peer_id=central_uuid, rssi=-50
                         )
                     except Exception:
-                        pass
+                        logger.debug("ble_peer_discovered failed for %s", central_uuid)
                     self._emit_diagnostic(
                         "info", "Central connected", {"central": central_uuid}
                     )
@@ -460,7 +468,7 @@ class BlePeripheral(TransportManager):
                     try:
                         self._protocol.ble_peer_lost(peer_id=central_uuid)
                     except Exception:
-                        pass
+                        logger.debug("ble_peer_lost failed for %s", central_uuid)
                     self._emit_diagnostic(
                         "info", "Central disconnected", {"central": central_uuid}
                     )
