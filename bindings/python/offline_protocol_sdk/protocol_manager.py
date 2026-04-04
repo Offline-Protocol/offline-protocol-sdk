@@ -118,6 +118,7 @@ class ProtocolManager:
 
         # Transport managers
         device_id = config.user_id  # type: ignore[union-attr]
+        app_id = getattr(config, "app_id", "offline-messenger")
 
         self.ble: BleManager | None = None
         if getattr(config, "ble_enabled", False):
@@ -125,7 +126,7 @@ class ProtocolManager:
 
         self.internet: InternetManager | None = None
         if getattr(config, "internet_enabled", False):
-            self.internet = InternetManager(self._protocol, device_id)
+            self.internet = InternetManager(self._protocol, device_id, app_id=app_id)
 
         self.ble_peripheral: BlePeripheral | None = None
         if getattr(config, "ble_enabled", False):
@@ -284,13 +285,36 @@ class ProtocolManager:
             return
 
     def _drain_incoming_messages(self) -> None:
-        """Drain up to 100 messages per tick (matches iOS cap)."""
+        """Drain up to 100 messages per tick and dispatch to the event handler.
+
+        ``receive_message()`` returns JSON strings.  Each message is parsed
+        and forwarded as a ``message_received`` event so that users only need
+        to subscribe to the event handler (matching the iOS/Android pattern).
+
+        Note: because the processing loop consumes this queue, calling
+        ``protocol.receive_message()`` directly while ProtocolManager is
+        running will always return ``None``.
+        """
+        handler = self._event_handler
         drained = 0
         while drained < _MAX_MESSAGES_PER_TICK:
-            msg = self._protocol.receive_message()
-            if msg is None:
+            raw = self._protocol.receive_message()
+            if raw is None:
                 break
             drained += 1
+            if handler is not None:
+                try:
+                    event = json.loads(raw)
+                    if isinstance(event, dict):
+                        event.setdefault("type", "message_received")
+                    else:
+                        event = {"type": "message_received", "raw": raw}
+                except json.JSONDecodeError:
+                    event = {"type": "message_received", "raw": raw}
+                try:
+                    handler(event)
+                except Exception:
+                    logger.debug("Event handler error for message", exc_info=True)
         if drained == _MAX_MESSAGES_PER_TICK:
             logger.warning(
                 "Capped receiveMessage drain at %d for this tick",

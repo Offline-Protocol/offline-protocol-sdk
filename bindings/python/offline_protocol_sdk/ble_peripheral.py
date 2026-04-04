@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 import time
 from typing import Any
 
@@ -108,6 +109,9 @@ class BlePeripheral(TransportManager):
 
         # Event loop — captured in start() for thread-safe callback scheduling
         self._loop: asyncio.AbstractEventLoop | None = None
+
+        # Lock protecting metrics — _on_write runs on bless's delegate thread
+        self._lock = threading.Lock()
 
         # Metrics
         self._bytes_sent: int = 0
@@ -220,14 +224,15 @@ class BlePeripheral(TransportManager):
         self._emit_diagnostic("info", "BLE peripheral stopped")
 
     def get_metrics(self) -> dict[str, Any]:
-        return {
-            "bytes_sent": self._bytes_sent,
-            "bytes_received": self._bytes_received,
-            "fragments_sent": self._fragments_sent,
-            "fragments_received": self._fragments_received,
-            "connected_centrals": len(self._connected_centrals),
-            "is_advertising": self._is_advertising,
-        }
+        with self._lock:
+            return {
+                "bytes_sent": self._bytes_sent,
+                "bytes_received": self._bytes_received,
+                "fragments_sent": self._fragments_sent,
+                "fragments_received": self._fragments_received,
+                "connected_centrals": len(self._connected_centrals),
+                "is_advertising": self._is_advertising,
+            }
 
     # -- GATT server setup ----------------------------------------------------
 
@@ -329,8 +334,9 @@ class BlePeripheral(TransportManager):
                 "_on_write: %d bytes, sender=%s",
                 len(fragment), self._resolve_sender(),
             )
-            self._bytes_received += len(fragment)
-            self._fragments_received += 1
+            with self._lock:
+                self._bytes_received += len(fragment)
+                self._fragments_received += 1
 
             sender_id = self._resolve_sender()
 
@@ -398,8 +404,9 @@ class BlePeripheral(TransportManager):
             if char is not None:
                 char.value = data
                 self._server.update_value(SERVICE_UUID, MESSAGE_CHAR_UUID)
-                self._bytes_sent += len(data)
-                self._fragments_sent += 1
+                with self._lock:
+                    self._bytes_sent += len(data)
+                    self._fragments_sent += 1
 
                 # Inter-frame delay to avoid overwhelming the BLE stack
                 await asyncio.sleep(_INTER_FRAME_DELAY)

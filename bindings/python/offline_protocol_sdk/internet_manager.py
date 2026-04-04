@@ -66,10 +66,12 @@ class InternetManager(TransportManager):
         auth_token: str | None = None,
         auto_reconnect: bool = True,
         max_reconnect_attempts: int = 0,
+        app_id: str = "offline-messenger",
     ) -> None:
         super().__init__()
         self._protocol = protocol
         self._device_id = device_id
+        self._app_id = app_id
         self._server_url = server_url
         self._auth_token = auth_token
         self._auto_reconnect = auto_reconnect
@@ -300,6 +302,8 @@ class InternetManager(TransportManager):
         })
 
     async def _handle_connection_closed(self, error: Exception | None) -> None:
+        if not self._connected and not self._authenticated:
+            return  # already handled — guard against concurrent callers
         was_connected = self._connected
         self._connected = False
         self._authenticated = False
@@ -377,7 +381,7 @@ class InternetManager(TransportManager):
                 if isinstance(raw, bytes):
                     data = raw
                 else:
-                    data = raw.encode("utf-8") if isinstance(raw, str) else raw
+                    data = raw.encode("utf-8")
                 self._bytes_received += len(data)
                 self._process_received(data)
         except websockets.ConnectionClosed:
@@ -467,7 +471,7 @@ class InternetManager(TransportManager):
                 "sender": sender_id,
                 "recipient": self._device_id,
                 "content": content,
-                "app_id": "offline-messenger",
+                "app_id": self._app_id,
                 "priority": "Medium",
                 "ttl": 8,
                 "hop_count": 0,
@@ -571,7 +575,7 @@ class InternetManager(TransportManager):
             "sender": sender_id,
             "recipient": self._device_id,
             "content": content,
-            "app_id": "offline-messenger",
+            "app_id": self._app_id,
             "priority": "Medium",
             "ttl": 8,
             "hop_count": 0,
@@ -623,22 +627,34 @@ class InternetManager(TransportManager):
             task.add_done_callback(self._send_tasks.discard)
             drained += 1
 
+    def _notify_send_failed(self, message_id: str, reason: str) -> None:
+        """Best-effort notification to the protocol that a send failed."""
+        try:
+            self._protocol.internet_send_failed_with_reason(
+                message_id=message_id, reason=reason
+            )
+        except Exception:
+            try:
+                self._protocol.internet_send_failed(message_id=message_id)
+            except Exception:
+                logger.debug("internet_send_failed also failed", exc_info=True)
+
     async def _send_message(
         self, message_id: str, recipient: str, data: bytes
     ) -> None:
-        if self._ws is None or not self._connected:
-            try:
-                self._protocol.internet_send_failed_with_reason(
-                    message_id=message_id, reason="Not connected"
-                )
-            except Exception:
-                try:
-                    self._protocol.internet_send_failed(message_id=message_id)
-                except Exception:
-                    logger.debug("internet_send_failed also failed", exc_info=True)
+        ws = self._ws
+        if ws is None or not self._connected:
+            self._notify_send_failed(message_id, "Not connected")
             return
 
         async with self._send_semaphore:
+            # Re-check after yielding to the semaphore — connection may have
+            # been torn down while we were waiting for a slot.
+            ws = self._ws
+            if ws is None or not self._connected:
+                self._notify_send_failed(message_id, "Disconnected while waiting")
+                return
+
             try:
                 try:
                     content = data.decode("utf-8")
@@ -649,7 +665,7 @@ class InternetManager(TransportManager):
                     "recipient": recipient,
                     "content": content,
                 })
-                await self._ws.send(payload)
+                await ws.send(payload)
                 self._bytes_sent += len(payload)
                 self._messages_sent += 1
                 self._consecutive_send_failures = 0
@@ -662,15 +678,7 @@ class InternetManager(TransportManager):
                     "message_id": message_id,
                     "consecutive_failures": self._consecutive_send_failures,
                 })
-                try:
-                    self._protocol.internet_send_failed_with_reason(
-                        message_id=message_id, reason=str(exc)
-                    )
-                except Exception:
-                    try:
-                        self._protocol.internet_send_failed(message_id=message_id)
-                    except Exception:
-                        logger.debug("internet_send_failed also failed", exc_info=True)
+                self._notify_send_failed(message_id, str(exc))
 
                 if self._consecutive_send_failures >= _MAX_CONSECUTIVE_FAILURES:
                     self._emit_diagnostic(

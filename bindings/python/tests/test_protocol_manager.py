@@ -166,6 +166,88 @@ class TestProtocolManagerTransports:
         pm = ProtocolManager(config)
         assert pm.internet is None
 
+    def test_internet_inherits_app_id(self):
+        config = _make_config(internet_enabled=True, app_id="custom-app")
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        assert pm.internet is not None
+        assert pm.internet._app_id == "custom-app"
+
+
+class TestProtocolManagerMessageDrain:
+    @pytest.mark.asyncio
+    async def test_drain_dispatches_messages_to_event_handler(self):
+        config = _make_config()
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        events = []
+        pm = ProtocolManager(config, event_handler=events.append)
+        await pm.start()
+
+        # Simulate protocol returning a message then None
+        msg_json = '{"sender": "alice", "content": "hi"}'
+        pm._protocol.receive_message = MagicMock(side_effect=[msg_json, None])
+
+        pm._drain_incoming_messages()
+
+        assert len(events) == 1
+        assert events[0]["sender"] == "alice"
+        assert events[0]["content"] == "hi"
+        assert events[0].get("type") == "message_received"
+        await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_drain_without_handler_does_not_crash(self):
+        config = _make_config()
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config, event_handler=None)
+        await pm.start()
+
+        pm._protocol.receive_message = MagicMock(side_effect=["{}",  None])
+
+        # Should not raise
+        pm._drain_incoming_messages()
+        await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_drain_handles_invalid_json(self):
+        config = _make_config()
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        events = []
+        pm = ProtocolManager(config, event_handler=events.append)
+        await pm.start()
+
+        pm._protocol.receive_message = MagicMock(
+            side_effect=["not-json", None]
+        )
+        pm._drain_incoming_messages()
+
+        assert len(events) == 1
+        assert events[0]["type"] == "message_received"
+        assert events[0]["raw"] == "not-json"
+        await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_drain_caps_at_max_messages(self):
+        config = _make_config()
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+        from offline_protocol_sdk.protocol_manager import _MAX_MESSAGES_PER_TICK
+
+        events = []
+        pm = ProtocolManager(config, event_handler=events.append)
+        await pm.start()
+
+        # Return messages forever (more than the cap)
+        pm._protocol.receive_message = MagicMock(return_value='{"type":"msg"}')
+
+        pm._drain_incoming_messages()
+
+        assert len(events) == _MAX_MESSAGES_PER_TICK
+        await pm.stop()
+
 
 class TestProtocolManagerConvenience:
     @pytest.mark.asyncio

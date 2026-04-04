@@ -196,14 +196,15 @@ class BleManager(TransportManager):
         self._emit_diagnostic("info", "BLE transport stopped")
 
     def get_metrics(self) -> dict[str, Any]:
-        return {
-            "bytes_sent": self._bytes_sent,
-            "bytes_received": self._bytes_received,
-            "fragments_sent": self._fragments_sent,
-            "fragments_received": self._fragments_received,
-            "connected_peers": len(self._clients),
-            "discovered_peers": len(self._last_seen),
-        }
+        with self._lock:
+            return {
+                "bytes_sent": self._bytes_sent,
+                "bytes_received": self._bytes_received,
+                "fragments_sent": self._fragments_sent,
+                "fragments_received": self._fragments_received,
+                "connected_peers": len(self._clients),
+                "discovered_peers": len(self._last_seen),
+            }
 
     # -- scanning / discovery -------------------------------------------------
 
@@ -352,8 +353,9 @@ class BleManager(TransportManager):
 
     def _on_fragment_received(self, sender_id: str, fragment: bytes) -> None:
         """Handle an incoming BLE fragment from a peer."""
-        self._bytes_received += len(fragment)
-        self._fragments_received += 1
+        with self._lock:
+            self._bytes_received += len(fragment)
+            self._fragments_received += 1
         try:
             self._protocol.ble_fragment_received(
                 sender_id=sender_id, fragment=list(fragment)
@@ -416,8 +418,9 @@ class BleManager(TransportManager):
                         data,
                         response=False,
                     )
-                    self._bytes_sent += len(data)
-                    self._fragments_sent += 1
+                    with self._lock:
+                        self._bytes_sent += len(data)
+                        self._fragments_sent += 1
                 except Exception as exc:
                     self._emit_diagnostic(
                         "warning", f"Failed to send fragment to {recipient}: {exc}"
