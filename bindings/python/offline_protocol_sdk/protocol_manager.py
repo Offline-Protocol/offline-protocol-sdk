@@ -21,6 +21,7 @@ from .offline_protocol import (
     WifiDirectTransportCallback,
 )
 from .ble_manager import BleManager
+from .ble_peripheral import BlePeripheral
 from .internet_manager import InternetManager
 from .secure_storage import SecureStorage
 
@@ -49,14 +50,21 @@ class _EventCallbackImpl(EventCallback):
 
 
 class _BleTransportCallbackImpl(BleTransportCallback):
-    """Bridges Rust BLE fragment-ready notifications to the BLE manager."""
+    """Bridges Rust BLE fragment-ready notifications to BLE managers."""
 
-    def __init__(self, ble_manager: BleManager | None) -> None:
+    def __init__(
+        self,
+        ble_manager: BleManager | None,
+        ble_peripheral: BlePeripheral | None,
+    ) -> None:
         self._ble = ble_manager
+        self._peripheral = ble_peripheral
 
     def on_fragments_available(self) -> None:
         if self._ble is not None:
             self._ble.on_fragments_available()
+        if self._peripheral is not None:
+            self._peripheral.on_fragments_available()
 
 
 class _WifiDirectTransportCallbackImpl(WifiDirectTransportCallback):
@@ -119,6 +127,10 @@ class ProtocolManager:
         if getattr(config, "internet_enabled", False):
             self.internet = InternetManager(self._protocol, device_id)
 
+        self.ble_peripheral: BlePeripheral | None = None
+        if getattr(config, "ble_enabled", False):
+            self.ble_peripheral = BlePeripheral(self._protocol, device_id)
+
         # Processing loop task
         self._process_task: asyncio.Task[None] | None = None
         self._running = False
@@ -140,7 +152,7 @@ class ProtocolManager:
         self._protocol.set_event_callback(self._event_cb)
 
         # Set transport callbacks
-        self._ble_cb = _BleTransportCallbackImpl(self.ble)
+        self._ble_cb = _BleTransportCallbackImpl(self.ble, self.ble_peripheral)
         self._protocol.set_ble_transport_callback(self._ble_cb)
 
         self._wifi_cb = _WifiDirectTransportCallbackImpl()
@@ -180,6 +192,8 @@ class ProtocolManager:
         # Stop transports
         if self.ble is not None:
             await self.ble.stop()
+        if self.ble_peripheral is not None:
+            await self.ble_peripheral.stop()
         if self.internet is not None:
             await self.internet.stop()
 

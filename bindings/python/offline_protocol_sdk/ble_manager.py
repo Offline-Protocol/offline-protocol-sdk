@@ -346,7 +346,7 @@ class BleManager(TransportManager):
             if frag is None:
                 break
 
-            recipient = frag.recipient
+            recipient = frag.recipient_id
             data = bytes(frag.data)
 
             # Find the client for this recipient
