@@ -1,6 +1,6 @@
 # @offline-protocol/mesh-sdk
 
-Offline-first mesh networking SDK for React Native. Enables peer-to-peer messaging over BLE, WiFi Direct, and Internet with intelligent transport switching.
+Offline-first mesh networking SDK for React Native. Enables peer-to-peer messaging over BLE, WiFi Direct, Internet, and Reticulum with intelligent transport switching.
 
 ## Table of Contents
 
@@ -433,6 +433,9 @@ interface TransportsConfig {
     autoAccept?: boolean;
     groupOwnerIntent?: number;  // 0-15
   };
+  reticulum?: {
+    enabled: boolean;           // default: false (requires external daemon)
+  };
 }
 ```
 
@@ -562,7 +565,7 @@ enum MessagePriority {
 | `getTransportMetrics(type)` | `Promise<TransportMetrics \| null>` | Get transport statistics |
 
 ```typescript
-type TransportType = 'ble' | 'internet' | 'wifiDirect';
+type TransportType = 'ble' | 'internet' | 'wifiDirect' | 'reticulum';
 
 interface TransportMetrics {
   packetsSent: number;
@@ -922,6 +925,9 @@ DORS automatically selects the optimal transport based on real-time conditions.
 
 **Internet**: Optimized for server connectivity
 - Bandwidth: 35%, Reliability: 30%, Congestion: 15%, Energy: 10%
+
+**Reticulum**: Optimized for resilience and long-range fallback
+- Reliability: 30%, Energy: 25%, Proximity: 20%, Congestion: 15%, Signal: 5%, Bandwidth: 5%
 
 ### Switching Safeguards
 

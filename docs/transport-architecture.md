@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Offline Protocol SDK uses an extensible transport architecture that allows multiple communication channels (BLE, WiFi Direct, Internet) to coexist and be managed independently. This document explains the architecture and how to add new transports.
+The Offline Protocol SDK uses an extensible transport architecture that allows multiple communication channels (BLE, WiFi Direct, Internet, Reticulum) to coexist and be managed independently. This document explains the architecture and how to add new transports.
 
 ## Architecture Layers
 
@@ -50,7 +50,7 @@ The Offline Protocol SDK uses an extensible transport architecture that allows m
 │                                                     │
 │  ┌───────────────────────────────────────────────┐│
 │  │         Transport Abstraction Layer           ││
-│  │  (BleTransport, WiFiTransport, NetTransport)  ││
+│  │  (BLE, WiFi, Internet, Reticulum)             ││
 │  └───────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────┘
 ```
@@ -150,7 +150,7 @@ interface TransportManager {
 
 ### Internet (Relay Server)
 
-**Status**: ✅ Implemented
+**Status**: Implemented
 
 **Use Case**: Communication when devices are far apart via a relay server
 
@@ -163,6 +163,29 @@ Device A ←→ WebSocket ←→ Relay Server ←→ WebSocket ←→ Device B
 `internetGetNextMessage()`, sends bytes over the WebSocket, and **must** report
 the outcome via `internetConfirmSent(messageId)` or `internetSendFailed(messageId)`.
 This feeds real delivery data into DORS so it can make accurate routing decisions.
+
+### Reticulum Mesh Transport
+
+**Status**: Implemented
+
+**Use Case**: Long-range, resilient mesh networking via the Reticulum network stack. Supports LoRa, TCP, UDP, serial, I2P, and other mediums. Ideal for off-grid, disaster recovery, and infrastructure-sparse environments.
+
+**Architecture**:
+```
+Device ←→ Platform Bridge ←→ Reticulum Stack ←→ LoRa/TCP/UDP/I2P ←→ Remote Device
+```
+
+**Platform bridge pattern**: The platform bridges to a Reticulum stack via embedded Python (most proven for mobile, used by Sideband), the emerging `reticulum-rs` Rust crate, HDLC shared instance IPC (desktop), or a TCP gateway. The Rust transport manages queues, metrics, and the confirmation loop.
+
+**Send confirmation loop**: Like Internet transport, the platform drains the outgoing queue via `reticulumGetNextMessage()`, sends through the Reticulum daemon, and **must** report the outcome via `reticulumConfirmSent(messageId)` or `reticulumSendFailed(messageId)`. Pending confirmations time out after 120 seconds (longer than Internet's 15s due to high-latency LoRa paths).
+
+**Key characteristics**:
+- Disabled by default (`reticulumEnabled: false`) — requires external infrastructure
+- Low bandwidth (~0.7 KB/s typical, ~2.7 KB/s peak on LoRa), so excluded from media transfer
+- DORS gives it lowest tie-break priority (resilience fallback)
+- Connection timeout: 60 seconds (vs 30s for Internet)
+
+See the [Reticulum Transport Guide](reticulum.md) for full setup and integration details.
 
 ## Adding a New Transport
 
@@ -396,10 +419,12 @@ Update `AndroidManifest.xml` with required permissions.
 4. Native transport managers poll:
    - BLE: bleGetNextFragment()
    - Internet: internetGetNextMessage() → returns messageId + bytes
+   - Reticulum: reticulumGetNextMessage() → returns messageId + bytes
 5. Transport sends data over platform-specific channel
 6. Platform reports outcome:
    - BLE: implicit (fragment send is synchronous)
    - Internet: internetConfirmSent(messageId) or internetSendFailed(messageId)
+   - Reticulum: reticulumConfirmSent(messageId) or reticulumSendFailed(messageId)
 7. Remote device receives data and passes to Rust core
 8. Rust core delivers message and sends ACK
 ```
@@ -421,7 +446,7 @@ Update `AndroidManifest.xml` with required permissions.
 The Rust core uses the **Dynamic Opportunistic Routing Selection (DORS)** algorithm to choose the best transport for each message based on:
 
 - **Signal strength** (RSSI for BLE)
-- **Bandwidth** (BLE < WiFi Direct < Internet)
+- **Bandwidth** (Reticulum < BLE < WiFi Direct < Internet)
 - **Latency** (BLE ≈ WiFi Direct << Internet)
 - **Reliability** (historical delivery rates)
 - **Congestion** (queue depths)
@@ -501,5 +526,5 @@ The TransportManager pattern provides:
 - ✅ Consistent interface across transports
 - ✅ Independent lifecycle management
 
-This architecture makes it straightforward to add WiFi Direct, Internet, or any other transport without modifying existing code.
+This architecture makes it straightforward to add new transports without modifying existing code. Reticulum was added as the fourth transport following this exact pattern.
 

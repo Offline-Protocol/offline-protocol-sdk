@@ -1029,6 +1029,11 @@ impl OfflineProtocol {
                 use crate::constants::{DEFAULT_CHUNK_SIZE, DEFAULT_MEDIA_WINDOW_SIZE};
                 (DEFAULT_CHUNK_SIZE, DEFAULT_MEDIA_WINDOW_SIZE)
             }
+            TransportType::Reticulum => {
+                // Reticulum is low-bandwidth (LoRa); use BLE-like chunk sizes.
+                use crate::constants::{CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE};
+                (CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE)
+            }
         };
         let chunks = self.file_transfer_manager.chunk_file(
             file_id.clone(),
@@ -2061,6 +2066,7 @@ impl OfflineProtocol {
             }
         }
 
+        // Reticulum excluded: LoRa bandwidth (~0.7 KB/s typical) is unsuitable for media transfer.
         for preferred in [
             TransportType::Internet,
             TransportType::WiFiDirect,

@@ -28,6 +28,9 @@ const config = {
       autoAccept: false,
       groupOwnerIntent: 7, // 0-15, higher = more likely to be group owner
     },
+    reticulum: {
+      enabled: false, // Requires external Reticulum daemon
+    },
   },
   
   // DORS configuration
@@ -198,8 +201,8 @@ protocol.on('transport_switched', (event) => {
 ```typescript
 {
   type: 'transport_switched',
-  from: 'ble' | 'internet' | 'wifiDirect' | null,
-  to: 'ble' | 'internet' | 'wifiDirect',
+  from: 'ble' | 'internet' | 'wifiDirect' | 'reticulum' | null,
+  to: 'ble' | 'internet' | 'wifiDirect' | 'reticulum',
   reason: string,
   timestamp: number
 }
@@ -408,8 +411,9 @@ DORS itself is battery-efficient, but transport choices affect overall consumpti
 | Transport | Power Draw | DORS Recommendation |
 |-----------|------------|---------------------|
 | BLE | Low (10-50mW) | Preferred for energy efficiency |
-| WiFi Direct | High (200-400mW) | Only when needed for bandwidth |
+| Reticulum | Low-Medium (varies by medium) | Resilience fallback for off-grid scenarios |
 | Internet | Medium (50-200mW) | Depends on `preferOnline` setting |
+| WiFi Direct | High (200-400mW) | Only when needed for bandwidth |
 
 DORS automatically factors energy efficiency into scoring (30% weight for BLE).
 
@@ -421,7 +425,7 @@ DORS automatically factors energy efficiency into scoring (30% weight for BLE).
 
 ## Integration Checklist
 
-- [ ] Configure transports based on app needs (BLE, Internet, WiFi Direct)
+- [ ] Configure transports based on app needs (BLE, Internet, WiFi Direct, Reticulum)
 - [ ] Set `preferOnline` based on architecture (hybrid vs pure mesh)
 - [ ] Tune hysteresis/cooldown based on mobility patterns
 - [ ] Set escalation threshold based on latency tolerance
@@ -432,6 +436,7 @@ DORS automatically factors energy efficiency into scoring (30% weight for BLE).
 ## Further Reading
 
 - [DORS Deep Dive](dors.md) - How DORS scoring and switching works
+- [Reticulum Transport](reticulum.md) - Reticulum setup and platform integration
 - [Architecture Overview](architecture.md)
 - [Transport Architecture](transport-architecture.md)
 - [Configuration Reference](configuration.md)

@@ -144,7 +144,41 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 }
 ```
 
-### 4. Battery-Conscious App
+### 4. Off-Grid / Disaster Recovery App
+
+**Requirements**: Maximum resilience, no infrastructure assumed, long-range.
+
+```typescript
+{
+  appId: 'disaster-response',
+  userId: userId,
+
+  transports: {
+    ble: { enabled: true },
+    wifiDirect: { enabled: true },
+    internet: { enabled: false },   // No infrastructure
+    reticulum: { enabled: true },   // LoRa long-range fallback
+  },
+
+  dors: {
+    preferOnline: false,
+    switchHysteresis: 10,
+    bleToWifiRetryThreshold: 1,
+  },
+
+  relay: {
+    allowRelay: true,
+    relayPriority: 'always',
+    minBatteryForRelay: 15,
+  },
+
+  network: {
+    initialTtl: 12,  // Higher TTL for sparse networks
+  }
+}
+```
+
+### 5. Battery-Conscious App
 
 **Requirements**: Minimize power consumption.
 
@@ -152,7 +186,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 {
   appId: 'battery-saver-app',
   userId: userId,
-  
+
   transports: {
     ble: { enabled: true },  // Low power
     wifiDirect: { enabled: false },  // Avoid high power WiFi
@@ -177,7 +211,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 }
 ```
 
-### 5. Crowded Event (Dense Network)
+### 6. Crowded Event (Dense Network)
 
 **Requirements**: High congestion, many devices.
 
@@ -226,6 +260,7 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 | `transports.ble.enabled` | boolean | true | Enable BLE mesh |
 | `transports.wifiDirect.enabled` | boolean | true | Enable Wi-Fi Direct (Android only) |
 | `transports.internet.enabled` | boolean | true | Enable Internet |
+| `transports.reticulum.enabled` | boolean | false | Enable Reticulum mesh (requires external daemon) |
 
 ### Encryption Configuration
 
@@ -354,7 +389,7 @@ The SDK validates configuration on creation:
 
 ### Android
 
-**Available Transports**: Internet, BLE, Wi-Fi Direct
+**Available Transports**: Internet, BLE, Wi-Fi Direct, Reticulum
 
 **Permissions Required**:
 - `BLUETOOTH`, `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`
@@ -363,7 +398,7 @@ The SDK validates configuration on creation:
 
 ### iOS
 
-**Available Transports**: Internet, BLE (no Wi-Fi Direct)
+**Available Transports**: Internet, BLE, Reticulum (no Wi-Fi Direct)
 
 **Permissions Required**:
 - `NSBluetoothAlwaysUsageDescription`
@@ -452,7 +487,8 @@ The SDK validates configuration on creation:
 ### Open Rural Area
 
 - Fewer relays, higher TTL
-- Wi-Fi Direct preferred (longer range)
+- Reticulum with LoRa preferred (multi-km range)
+- Wi-Fi Direct for nearby high-bandwidth transfers
 - Higher battery thresholds
 
 ### Indoor Building

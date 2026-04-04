@@ -366,7 +366,7 @@ These values are compile-time constants. The dedup map is automatically cleaned 
 
 Service discovery is built on top of existing protocol infrastructure:
 
-- **Transport**: All service messages route through the DORS multi-transport selector (BLE, WiFi Direct, Internet). The best available transport is chosen automatically.
+- **Transport**: All service messages route through the DORS multi-transport selector (BLE, WiFi Direct, Internet, Reticulum). The best available transport is chosen automatically.
 - **Reliability**: ACK/retry mechanisms from the reliability layer are automatically applied to request/response messages.
 - **Encryption**: When MLS sessions exist, service messages are encrypted transparently. When they don't, messages are sent in plaintext (as long as `require_encryption` is false).
 - **Routing**: Discovery queries use the existing gossip and message forwarding infrastructure with the same deduplication and hop-counting as other mesh messages.

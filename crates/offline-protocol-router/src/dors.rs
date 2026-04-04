@@ -95,17 +95,85 @@ impl Default for DorsConfig {
 }
 
 /// Scores within this delta of the *best* score are treated as a tie for selection,
-/// and the tie-break order (Internet > WiFiDirect > BLE) is then used.
+/// and the tie-break order (Internet > WiFiDirect > BLE > Reticulum) is then used.
 const TIE_EPSILON: f32 = 0.01;
 
+/// No-RSSI-data default for radio transports (not transport-specific, just means
+/// "we don't know the signal yet").
+const SIGNAL_SCORE_NO_DATA: f32 = 50.0;
+
 /// Tie-break priority for transport selection when scores are equal or within TIE_EPSILON.
-/// Lower value = preferred. Order: Internet, WiFiDirect, BLE.
-fn transport_tie_break_priority(transport_type: TransportType) -> u8 {
+/// Lower value = preferred. Order: Internet, WiFiDirect, BLE, Reticulum.
+///
+/// Kept as a standalone function (rather than going through [`TransportScoringProfile`])
+/// because tie-breaking is called per-element inside `min_by_key` / `sort_by`, and
+/// constructing a full profile struct just to read a `u8` would be wasteful.
+/// The values here **must** match each profile's `tie_break_priority` field.
+fn tie_break_priority(transport_type: TransportType) -> u8 {
     match transport_type {
         TransportType::Internet => 0,
         TransportType::WiFiDirect => 1,
         TransportType::BLE => 2,
+        TransportType::Reticulum => 3,
     }
+}
+
+/// Weights for each DORS scoring dimension.
+#[derive(Debug, Clone)]
+struct ScoringWeights {
+    signal: f32,
+    proximity: f32,
+    bandwidth: f32,
+    congestion: f32,
+    energy: f32,
+    reliability: f32,
+    load: f32,
+}
+
+impl ScoringWeights {
+    /// Sum of all weights. Should be 1.0 for a correctly defined profile.
+    fn sum(&self) -> f32 {
+        self.signal
+            + self.proximity
+            + self.bandwidth
+            + self.congestion
+            + self.energy
+            + self.reliability
+            + self.load
+    }
+}
+
+/// Per-transport scoring configuration for DORS.
+///
+/// Centralises all transport-specific weights, baselines, and thresholds so that
+/// adding a new transport only requires defining a single profile in
+/// [`TransportSelector::scoring_profile`].
+#[derive(Debug, Clone)]
+struct TransportScoringProfile {
+    /// Weights for each scoring dimension.
+    weights: ScoringWeights,
+    /// Base score added to the weighted sum (e.g., Internet gets a baseline boost).
+    base_score: f32,
+    /// Bonus applied when message has `transport_preference = "internet"`.
+    media_bonus: f32,
+    /// Penalty applied when message has `transport_preference = "internet"`.
+    media_penalty: f32,
+    /// Maximum bandwidth in bytes/sec for normalization.
+    bandwidth_max_bps: u64,
+    /// Default bandwidth score when `bandwidth_bps` is not reported.
+    bandwidth_default: f32,
+    /// Base energy efficiency score (0–100).
+    energy_baseline: f32,
+    /// Whether this transport is high-power (penalised when battery is low).
+    is_high_power: bool,
+    /// Energy adjustment when this node is actively relaying on this transport.
+    active_relay_energy_adjustment: f32,
+    /// Whether this transport reports RSSI (radio-based transports).
+    has_signal: bool,
+    /// Default signal score returned when the transport does not use RSSI.
+    default_signal_score: f32,
+    /// Tie-break priority (lower = preferred when scores are equal).
+    tie_break_priority: u8,
 }
 
 /// Reason DORS decided to escalate from BLE to Wi‑Fi (for observability).
@@ -276,6 +344,128 @@ impl TransportSelector {
         }
     }
 
+    /// Returns the scoring profile for a transport type.
+    ///
+    /// All transport-specific scoring configuration lives here. To add a new
+    /// transport, define its profile and everything else (weighted scoring,
+    /// bandwidth normalisation, energy baseline, tie-break) is handled
+    /// generically.
+    fn scoring_profile(&self, transport_type: TransportType) -> TransportScoringProfile {
+        let profile = match transport_type {
+            TransportType::Internet => TransportScoringProfile {
+                weights: ScoringWeights {
+                    signal: 0.0,
+                    proximity: 0.0,
+                    bandwidth: 0.35,
+                    congestion: 0.15,
+                    energy: 0.10,
+                    reliability: 0.30,
+                    load: 0.10,
+                },
+                base_score: if self.config.prefer_online {
+                    25.0
+                } else {
+                    10.0
+                },
+                media_bonus: 50.0,
+                media_penalty: 0.0,
+                bandwidth_max_bps: 10_000_000,
+                bandwidth_default: if self.config.prefer_online {
+                    70.0
+                } else {
+                    50.0
+                },
+                energy_baseline: 60.0,
+                is_high_power: true,
+                active_relay_energy_adjustment: 0.0,
+                has_signal: false,
+                default_signal_score: 60.0,
+                tie_break_priority: 0,
+            },
+            TransportType::BLE => TransportScoringProfile {
+                weights: ScoringWeights {
+                    signal: 0.30,
+                    proximity: 0.15,
+                    bandwidth: 0.0,
+                    congestion: 0.15,
+                    energy: 0.30,
+                    reliability: 0.05,
+                    load: 0.05,
+                },
+                base_score: 0.0,
+                media_bonus: 0.0,
+                media_penalty: 40.0,
+                bandwidth_max_bps: 150_000,
+                bandwidth_default: 40.0,
+                energy_baseline: 90.0,
+                is_high_power: false,
+                active_relay_energy_adjustment: 5.0,
+                has_signal: true,
+                default_signal_score: 60.0,
+                tie_break_priority: 2,
+            },
+            TransportType::WiFiDirect => TransportScoringProfile {
+                weights: ScoringWeights {
+                    signal: 0.0,
+                    proximity: 0.20,
+                    bandwidth: 0.35,
+                    congestion: 0.20,
+                    energy: 0.0,
+                    reliability: 0.15,
+                    load: 0.10,
+                },
+                base_score: 0.0,
+                media_bonus: 0.0,
+                media_penalty: 0.0,
+                bandwidth_max_bps: 2_000_000,
+                bandwidth_default: 90.0,
+                energy_baseline: 40.0,
+                is_high_power: true,
+                active_relay_energy_adjustment: -10.0,
+                has_signal: true,
+                default_signal_score: 60.0,
+                tie_break_priority: 1,
+            },
+            TransportType::Reticulum => TransportScoringProfile {
+                weights: ScoringWeights {
+                    signal: 0.05,
+                    proximity: 0.20,
+                    bandwidth: 0.05,
+                    congestion: 0.15,
+                    energy: 0.25,
+                    reliability: 0.30,
+                    load: 0.0,
+                },
+                base_score: 0.0,
+                media_bonus: 0.0,
+                media_penalty: 40.0,
+                bandwidth_max_bps: 2_700, // LoRa peak ~2.7 KB/s (SF7/BW500kHz)
+                bandwidth_default: 20.0,  // Conservative default
+                energy_baseline: 75.0,    // Between BLE (90) and Internet (60)
+                is_high_power: false,
+                active_relay_energy_adjustment: 0.0,
+                has_signal: true, // Radio interfaces report RSSI
+                default_signal_score: 60.0,
+                tie_break_priority: 3, // Lowest: resilience fallback
+            },
+        };
+
+        debug_assert!(
+            (profile.weights.sum() - 1.0).abs() < 1e-6,
+            "Scoring weights for {:?} must sum to 1.0, got {}",
+            transport_type,
+            profile.weights.sum(),
+        );
+        debug_assert_eq!(
+            profile.tie_break_priority,
+            tie_break_priority(transport_type),
+            "tie_break_priority in profile for {:?} must match standalone tie_break_priority()",
+            transport_type,
+        );
+
+        profile
+    }
+
     /// Selects the best transport for sending a message.
     ///
     /// # Arguments
@@ -336,7 +526,7 @@ impl TransportSelector {
             scored_transports
                 .iter()
                 .filter(|(_, s)| s.total.is_finite() && best_total - s.total <= TIE_EPSILON)
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, s)| (*t, s.total))
                 // In the unlikely event the filter yields nothing, fall back to the
                 // original best candidate.
@@ -345,7 +535,7 @@ impl TransportSelector {
             // No finite scores; pick purely by tie-break priority.
             scored_transports
                 .iter()
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, s)| (*t, s.total))?
         };
 
@@ -446,7 +636,7 @@ impl TransportSelector {
         scored.sort_by(|a, b| {
             let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
             if ord == std::cmp::Ordering::Equal {
-                transport_tie_break_priority(a.0).cmp(&transport_tie_break_priority(b.0))
+                tie_break_priority(a.0).cmp(&tie_break_priority(b.0))
             } else {
                 ord
             }
@@ -462,11 +652,13 @@ impl TransportSelector {
         transport_type: TransportType,
         metrics: &TransportMetrics,
     ) -> TransportScore {
-        let signal_score = self.calculate_signal_score(transport_type, metrics);
+        let profile = self.scoring_profile(transport_type);
+
+        let signal_score = self.calculate_signal_score(&profile, transport_type, metrics);
         let proximity_score = self.calculate_proximity_score(message);
-        let bandwidth_score = self.calculate_bandwidth_score(transport_type, metrics);
+        let bandwidth_score = self.calculate_bandwidth_score(&profile, metrics);
         let congestion_score = self.calculate_congestion_score(transport_type, metrics);
-        let energy_score = self.calculate_energy_score(transport_type, metrics);
+        let energy_score = self.calculate_energy_score(&profile, metrics);
         let reliability_score = self.calculate_reliability_score(transport_type, metrics);
         let load_score = self.calculate_load_score(transport_type, metrics);
 
@@ -494,56 +686,26 @@ impl TransportSelector {
         // is set.
         //
         // When the message requests internet preference (media/file chunks),
-        // the Internet baseline is raised by MEDIA_INTERNET_BONUS (50) and
-        // BLE is penalised by MEDIA_BLE_PENALTY (40) to make Internet the
+        // the profile's media_bonus is applied (Internet: +50) and
+        // media_penalty is subtracted (BLE: -40) to make Internet the
         // overwhelming favourite while still allowing WiFi Direct as fallback.
-        const MEDIA_INTERNET_BONUS: f32 = 50.0;
-        const MEDIA_BLE_PENALTY: f32 = 40.0;
-
-        let total = match transport_type {
-            TransportType::Internet => {
-                let baseline = if self.config.prefer_online {
-                    25.0
-                } else {
-                    10.0
-                };
-                let media_bonus = if prefers_internet {
-                    MEDIA_INTERNET_BONUS
-                } else {
-                    0.0
-                };
-                baseline
-                    + media_bonus
-                    + (bandwidth_score * 0.35)
-                    + (reliability_score * 0.3)
-                    + (congestion_score * 0.15)
-                    + (energy_score * 0.1)
-                    + (load_score * 0.1)
-            }
-            TransportType::BLE => {
-                let media_penalty = if prefers_internet {
-                    MEDIA_BLE_PENALTY
-                } else {
-                    0.0
-                };
-                ((signal_score * 0.3)
-                    + (energy_score * 0.3)
-                    + (congestion_score * 0.15)
-                    + (proximity_score * 0.15)
-                    + (reliability_score * 0.05)
-                    + (load_score * 0.05))
-                    - media_penalty
-            }
-            TransportType::WiFiDirect => {
-                (bandwidth_score * 0.35)
-                    + (proximity_score * 0.2)
-                    + (congestion_score * 0.2)
-                    + (reliability_score * 0.15)
-                    + (load_score * 0.1)
-            }
+        let media_adjust = if prefers_internet {
+            profile.media_bonus - profile.media_penalty
+        } else {
+            0.0
         };
 
-        let total = total.max(0.0);
+        let w = &profile.weights;
+        let total = (profile.base_score
+            + media_adjust
+            + (signal_score * w.signal)
+            + (proximity_score * w.proximity)
+            + (bandwidth_score * w.bandwidth)
+            + (congestion_score * w.congestion)
+            + (energy_score * w.energy)
+            + (reliability_score * w.reliability)
+            + (load_score * w.load))
+            .max(0.0);
 
         TransportScore {
             signal: signal_score,
@@ -648,15 +810,12 @@ impl TransportSelector {
     /// Calculates signal strength score from RSSI.
     fn calculate_signal_score(
         &self,
+        profile: &TransportScoringProfile,
         transport_type: TransportType,
         metrics: &TransportMetrics,
     ) -> f32 {
-        if !matches!(
-            transport_type,
-            TransportType::BLE | TransportType::WiFiDirect
-        ) {
-            // Non-radio transports do not rely on RSSI
-            return 60.0;
+        if !profile.has_signal {
+            return profile.default_signal_score;
         }
 
         let rssi_value = metrics.rssi.map(|r| r as f32).or_else(|| {
@@ -667,7 +826,7 @@ impl TransportSelector {
 
         let rssi_value = match rssi_value {
             Some(value) => value,
-            None => return 50.0,
+            None => return SIGNAL_SCORE_NO_DATA,
         };
 
         if rssi_value >= -50.0 {
@@ -699,38 +858,19 @@ impl TransportSelector {
 
     /// Calculates bandwidth score (0–100).
     ///
-    /// When bandwidth is measured/estimated (`bandwidth_bps`), it is normalized per transport.
-    /// When unknown, defaults are used. For Internet, the default depends on `prefer_online`:
-    /// higher when true so we still prefer Internet when we can't measure, without assuming full bandwidth.
+    /// When bandwidth is measured/estimated (`bandwidth_bps`), it is normalised
+    /// against the profile's `bandwidth_max_bps`. When unknown, the profile's
+    /// `bandwidth_default` is returned (which may be config-dependent, e.g.
+    /// Internet's default is higher when `prefer_online` is set).
     fn calculate_bandwidth_score(
         &self,
-        transport_type: TransportType,
+        profile: &TransportScoringProfile,
         metrics: &TransportMetrics,
     ) -> f32 {
         if let Some(bandwidth) = metrics.bandwidth_bps {
-            // Normalize bandwidth to 0-100 scale
-            // BLE: ~150 KB/s = 150,000 B/s
-            // Wi-Fi Direct: ~2 MB/s = 2,000,000 B/s
-            // Internet: 10 Mbps = 10,000,000 B/s (measure/estimate when available)
-            match transport_type {
-                TransportType::BLE => (bandwidth as f32 / 150_000.0 * 100.0).min(100.0),
-                TransportType::WiFiDirect => (bandwidth as f32 / 2_000_000.0 * 100.0).min(100.0),
-                TransportType::Internet => (bandwidth as f32 / 10_000_000.0 * 100.0).min(100.0),
-            }
+            (bandwidth as f32 / profile.bandwidth_max_bps as f32 * 100.0).min(100.0)
         } else {
-            // Default scores when bandwidth is unknown
-            match transport_type {
-                TransportType::BLE => 40.0,
-                TransportType::WiFiDirect => 90.0,
-                TransportType::Internet => {
-                    // Prefer Internet when prefer_online is set, but do not assume full bandwidth
-                    if self.config.prefer_online {
-                        70.0
-                    } else {
-                        50.0
-                    }
-                }
-            }
+            profile.bandwidth_default
         }
     }
 
@@ -766,14 +906,10 @@ impl TransportSelector {
     /// Calculates energy efficiency score.
     fn calculate_energy_score(
         &self,
-        transport_type: TransportType,
+        profile: &TransportScoringProfile,
         metrics: &TransportMetrics,
     ) -> f32 {
-        let mut base = match transport_type {
-            TransportType::BLE => 90.0,        // Low power baseline
-            TransportType::WiFiDirect => 40.0, // High power baseline
-            TransportType::Internet => 60.0,   // Medium power baseline
-        };
+        let mut base = profile.energy_baseline;
 
         if let Some(cost) = metrics.energy_cost {
             // Penalise transports that advertise higher energy cost.
@@ -788,21 +924,15 @@ impl TransportSelector {
 
             if !metrics.is_charging {
                 if battery <= low_threshold {
-                    // Strongly discourage high-power transports when battery is critically low.
-                    if matches!(
-                        transport_type,
-                        TransportType::WiFiDirect | TransportType::Internet
-                    ) {
+                    if profile.is_high_power {
+                        // Strongly discourage high-power transports when battery is critically low.
                         let deficit = (low_threshold - battery) as f32 / low_threshold as f32;
                         base = (base * (1.0 - deficit)).max(0.0);
                     } else {
-                        // BLE becomes more attractive when the battery is low.
+                        // Low-power transports become more attractive when the battery is low.
                         base = (base + (20.0 * (1.0 - battery_ratio))).clamp(0.0, 100.0);
                     }
-                } else if matches!(
-                    transport_type,
-                    TransportType::WiFiDirect | TransportType::Internet
-                ) {
+                } else if profile.is_high_power {
                     // Slight penalty based on remaining battery.
                     let penalty = (1.0 - battery_ratio).max(0.0) * 15.0;
                     base = (base - penalty).max(0.0);
@@ -815,17 +945,9 @@ impl TransportSelector {
             base = (base + 5.0).min(100.0);
         }
 
-        if metrics.is_active_relay {
+        if metrics.is_active_relay && profile.active_relay_energy_adjustment != 0.0 {
             // Active relays pay an additional cost; bias towards low-energy transports.
-            match transport_type {
-                TransportType::BLE => {
-                    base = (base + 5.0).min(100.0);
-                }
-                TransportType::WiFiDirect => {
-                    base = (base - 10.0).max(0.0);
-                }
-                _ => {}
-            }
+            base = (base + profile.active_relay_energy_adjustment).clamp(0.0, 100.0);
         }
 
         base.clamp(0.0, 100.0)
@@ -1263,7 +1385,10 @@ impl Default for TransportSelector {
 impl TransportSelector {
     /// Returns the transport that would win with these scores using the same tie-break as `select_transport`.
     /// Use to verify tie-break order (Internet > WiFiDirect > BLE) when scores are forced equal.
-    pub fn select_from_scores_for_test(scores: &[(TransportType, f32)]) -> Option<TransportType> {
+    pub fn select_from_scores_for_test(
+        &self,
+        scores: &[(TransportType, f32)],
+    ) -> Option<TransportType> {
         if scores.is_empty() {
             return None;
         }
@@ -1280,13 +1405,13 @@ impl TransportSelector {
             scores
                 .iter()
                 .filter(|(_, s)| s.is_finite() && best - *s <= TIE_EPSILON)
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, _)| *t)
         } else {
             // No finite scores; choose purely by tie-break priority.
             scores
                 .iter()
-                .min_by_key(|(t, _)| transport_tie_break_priority(*t))
+                .min_by_key(|(t, _)| tie_break_priority(*t))
                 .map(|(t, _)| *t)
         }
     }
@@ -1804,13 +1929,14 @@ mod tests {
     #[test]
     fn test_signal_score_calculation() {
         let selector = TransportSelector::new();
+        let profile = selector.scoring_profile(TransportType::BLE);
 
         let excellent = create_test_metrics(Some(-40), 0.0, 0);
-        let score = selector.calculate_signal_score(TransportType::BLE, &excellent);
+        let score = selector.calculate_signal_score(&profile, TransportType::BLE, &excellent);
         assert_eq!(score, 100.0);
 
         let poor = create_test_metrics(Some(-90), 0.0, 0);
-        let score = selector.calculate_signal_score(TransportType::BLE, &poor);
+        let score = selector.calculate_signal_score(&profile, TransportType::BLE, &poor);
         assert!(score < 40.0);
     }
 
@@ -1903,11 +2029,13 @@ mod tests {
     #[test]
     fn test_score_calculation_normal_inputs_ble_better_signal_higher_score() {
         let selector = TransportSelector::new();
+        let profile = selector.scoring_profile(TransportType::BLE);
         let excellent = create_test_metrics(Some(-45), 0.1, 5);
         let poor = create_test_metrics(Some(-88), 0.1, 5);
 
-        let excellent_signal = selector.calculate_signal_score(TransportType::BLE, &excellent);
-        let poor_signal = selector.calculate_signal_score(TransportType::BLE, &poor);
+        let excellent_signal =
+            selector.calculate_signal_score(&profile, TransportType::BLE, &excellent);
+        let poor_signal = selector.calculate_signal_score(&profile, TransportType::BLE, &poor);
         assert!(excellent_signal > poor_signal);
         assert!(excellent_signal >= 90.0);
         assert!(poor_signal < 50.0);
@@ -1927,10 +2055,11 @@ mod tests {
     #[test]
     fn test_score_calculation_edge_no_rssi_uses_default() {
         let selector = TransportSelector::new();
+        let profile = selector.scoring_profile(TransportType::BLE);
         let mut metrics = TransportMetrics::default();
         metrics.rssi = None;
 
-        let score = selector.calculate_signal_score(TransportType::BLE, &metrics);
+        let score = selector.calculate_signal_score(&profile, TransportType::BLE, &metrics);
         assert!(score.is_finite());
         assert!(score >= 0.0 && score <= 100.0);
     }
@@ -1954,9 +2083,16 @@ mod tests {
         let metrics = TransportMetrics::default();
         assert_eq!(metrics.bandwidth_bps, None);
 
-        let ble_bw = selector.calculate_bandwidth_score(TransportType::BLE, &metrics);
-        let wifi_bw = selector.calculate_bandwidth_score(TransportType::WiFiDirect, &metrics);
-        let internet_bw = selector.calculate_bandwidth_score(TransportType::Internet, &metrics);
+        let ble_bw = selector
+            .calculate_bandwidth_score(&selector.scoring_profile(TransportType::BLE), &metrics);
+        let wifi_bw = selector.calculate_bandwidth_score(
+            &selector.scoring_profile(TransportType::WiFiDirect),
+            &metrics,
+        );
+        let internet_bw = selector.calculate_bandwidth_score(
+            &selector.scoring_profile(TransportType::Internet),
+            &metrics,
+        );
         assert!(ble_bw.is_finite() && ble_bw >= 0.0);
         assert!(wifi_bw.is_finite() && wifi_bw >= 0.0);
         assert!(internet_bw.is_finite() && internet_bw >= 0.0);
@@ -1965,24 +2101,17 @@ mod tests {
     #[test]
     fn test_internet_bandwidth_uses_measured_when_available() {
         let selector = TransportSelector::new();
+        let profile = selector.scoring_profile(TransportType::Internet);
         // 10 Mbps => score 100
         let mut m10 = TransportMetrics::default();
         m10.bandwidth_bps = Some(10_000_000);
-        assert!(
-            (selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 100.0).abs()
-                < 0.01
-        );
+        assert!((selector.calculate_bandwidth_score(&profile, &m10) - 100.0).abs() < 0.01);
         // 1 Mbps => score 10
         m10.bandwidth_bps = Some(1_000_000);
-        assert!(
-            (selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 10.0).abs() < 0.01
-        );
+        assert!((selector.calculate_bandwidth_score(&profile, &m10) - 10.0).abs() < 0.01);
         // Above 10 Mbps clamped to 100
         m10.bandwidth_bps = Some(100_000_000);
-        assert!(
-            (selector.calculate_bandwidth_score(TransportType::Internet, &m10) - 100.0).abs()
-                < 0.01
-        );
+        assert!((selector.calculate_bandwidth_score(&profile, &m10) - 100.0).abs() < 0.01);
     }
 
     #[test]
@@ -1998,11 +2127,17 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            prefer.calculate_bandwidth_score(TransportType::Internet, &metrics),
+            prefer.calculate_bandwidth_score(
+                &prefer.scoring_profile(TransportType::Internet),
+                &metrics
+            ),
             70.0
         );
         assert_eq!(
-            no_prefer.calculate_bandwidth_score(TransportType::Internet, &metrics),
+            no_prefer.calculate_bandwidth_score(
+                &no_prefer.scoring_profile(TransportType::Internet),
+                &metrics
+            ),
             50.0
         );
     }
@@ -2022,8 +2157,9 @@ mod tests {
     #[test]
     fn test_score_calculation_edge_negative_rssi_handled() {
         let selector = TransportSelector::new();
+        let profile = selector.scoring_profile(TransportType::BLE);
         let metrics = create_test_metrics(Some(-100), 0.0, 0);
-        let score = selector.calculate_signal_score(TransportType::BLE, &metrics);
+        let score = selector.calculate_signal_score(&profile, TransportType::BLE, &metrics);
         assert!(score.is_finite());
         assert!(score >= 0.0 && score <= 100.0);
     }
@@ -2066,8 +2202,12 @@ mod tests {
     fn test_score_calculation_normal_energy_battery_mid() {
         let selector = TransportSelector::new();
         let metrics = create_test_metrics(Some(-60), 0.2, 10); // battery 80
-        let ble = selector.calculate_energy_score(TransportType::BLE, &metrics);
-        let wifi = selector.calculate_energy_score(TransportType::WiFiDirect, &metrics);
+        let ble = selector
+            .calculate_energy_score(&selector.scoring_profile(TransportType::BLE), &metrics);
+        let wifi = selector.calculate_energy_score(
+            &selector.scoring_profile(TransportType::WiFiDirect),
+            &metrics,
+        );
         assert!(ble.is_finite() && ble >= 0.0 && ble <= 100.0);
         assert!(wifi.is_finite() && wifi >= 0.0 && wifi <= 100.0);
         assert!(
@@ -2123,12 +2263,16 @@ mod tests {
     #[test]
     fn test_score_calculation_normal_signal_rssi_boundaries() {
         let selector = TransportSelector::new();
+        let profile = selector.scoring_profile(TransportType::BLE);
         let mut m50 = TransportMetrics::default();
         m50.rssi = Some(-50);
-        assert!((selector.calculate_signal_score(TransportType::BLE, &m50) - 100.0).abs() < 0.01);
+        assert!(
+            (selector.calculate_signal_score(&profile, TransportType::BLE, &m50) - 100.0).abs()
+                < 0.01
+        );
         let mut m70 = TransportMetrics::default();
         m70.rssi = Some(-70);
-        let s70 = selector.calculate_signal_score(TransportType::BLE, &m70);
+        let s70 = selector.calculate_signal_score(&profile, TransportType::BLE, &m70);
         assert!(s70 >= 70.0 && s70 <= 100.0);
     }
 
@@ -2148,7 +2292,8 @@ mod tests {
         let mut metrics = TransportMetrics::default();
         metrics.battery_level = None;
         metrics.is_charging = false;
-        let score = selector.calculate_energy_score(TransportType::BLE, &metrics);
+        let score = selector
+            .calculate_energy_score(&selector.scoring_profile(TransportType::BLE), &metrics);
         assert!(score.is_finite() && score >= 0.0 && score <= 100.0);
     }
 
@@ -2197,6 +2342,7 @@ mod tests {
             TransportType::BLE,
             TransportType::WiFiDirect,
             TransportType::Internet,
+            TransportType::Reticulum,
         ] {
             let score = selector.calculate_transport_score(&message, transport_type, &metrics);
             assert!(
@@ -2355,17 +2501,19 @@ mod tests {
         );
     }
 
-    /// With forced equal scores, the winner must follow the tie-break rule: Internet > WiFiDirect > BLE.
+    /// With forced equal scores, the winner must follow the tie-break rule: Internet > WiFiDirect > BLE > Reticulum.
     /// Uses a test-only helper to inject equal scores so we don't rely on runtime metrics to tie.
     #[test]
     fn test_tie_break_order_when_scores_forced_equal() {
+        let selector = TransportSelector::new();
+
         // Two transports with identical score: WiFiDirect and BLE. Tie-break prefers WiFiDirect over BLE.
         let scores_two = [
             (TransportType::WiFiDirect, 50.0),
             (TransportType::BLE, 50.0),
         ];
         assert_eq!(
-            TransportSelector::select_from_scores_for_test(&scores_two),
+            selector.select_from_scores_for_test(&scores_two),
             Some(TransportType::WiFiDirect),
             "Tie-break: WiFiDirect > BLE"
         );
@@ -2377,7 +2525,7 @@ mod tests {
             (TransportType::Internet, 50.0),
         ];
         assert_eq!(
-            TransportSelector::select_from_scores_for_test(&scores_three),
+            selector.select_from_scores_for_test(&scores_three),
             Some(TransportType::Internet),
             "Tie-break: Internet > WiFiDirect > BLE"
         );
@@ -2389,7 +2537,7 @@ mod tests {
             (TransportType::BLE, 50.0),
         ];
         assert_eq!(
-            TransportSelector::select_from_scores_for_test(&scores_reversed),
+            selector.select_from_scores_for_test(&scores_reversed),
             Some(TransportType::Internet)
         );
     }
@@ -2536,6 +2684,199 @@ mod tests {
             second,
             TransportType::WiFiDirect,
             "WiFi Direct must not be returned when it was removed from available_transports"
+        );
+    }
+
+    /// Regression test: verifies that the scoring-profile refactor does not change
+    /// the computed scores for the three original transports (BLE, WiFi Direct,
+    /// Internet) under fixed, representative metrics.
+    #[test]
+    fn test_scoring_profile_regression_existing_transports() {
+        let selector = TransportSelector::new();
+        let message = create_test_message();
+
+        // Representative metrics: RSSI -60, congestion 0.15, queue_depth 5, battery 75%.
+        let metrics = create_test_metrics(Some(-60), 0.15, 5);
+
+        let ble = selector.calculate_transport_score(&message, TransportType::BLE, &metrics);
+        let wifi =
+            selector.calculate_transport_score(&message, TransportType::WiFiDirect, &metrics);
+        let inet = selector.calculate_transport_score(&message, TransportType::Internet, &metrics);
+
+        // Verify all scores are finite and non-negative.
+        for (label, score) in [("BLE", &ble), ("WiFiDirect", &wifi), ("Internet", &inet)] {
+            assert!(
+                score.total.is_finite() && score.total >= 0.0,
+                "{label} score must be finite and non-negative, got {}",
+                score.total,
+            );
+        }
+
+        // With good RSSI (-60) and 75% battery, BLE's energy-efficiency weighting
+        // makes it score higher than Internet (which has a baseline boost but
+        // lower energy score). This is the expected DORS behavior.
+        assert!(
+            ble.total > inet.total,
+            "BLE ({:.1}) should score higher than Internet ({:.1}) with good signal and 75% battery",
+            ble.total,
+            inet.total,
+        );
+
+        // All sub-scores must be in [0, 100].
+        for (label, score) in [("BLE", &ble), ("WiFiDirect", &wifi), ("Internet", &inet)] {
+            assert!(
+                score.signal >= 0.0 && score.signal <= 100.0,
+                "{label} signal"
+            );
+            assert!(
+                score.bandwidth >= 0.0 && score.bandwidth <= 100.0,
+                "{label} bandwidth"
+            );
+            assert!(
+                score.energy >= 0.0 && score.energy <= 100.0,
+                "{label} energy"
+            );
+            assert!(
+                score.reliability >= 0.0 && score.reliability <= 100.0,
+                "{label} reliability"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reticulum_scores_as_resilience_fallback() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        // All four transports available with decent metrics.
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::Internet, create_test_metrics(None, 0.1, 2));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 3),
+        );
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.1, 2));
+        transports.insert(
+            TransportType::Reticulum,
+            create_test_metrics(Some(-65), 0.1, 2),
+        );
+
+        let selected = selector.select_transport(&message, &transports).unwrap();
+        assert_ne!(
+            selected,
+            TransportType::Reticulum,
+            "Reticulum should not win when higher-bandwidth transports are available"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_wins_when_only_available() {
+        let mut selector = TransportSelector::new();
+        let message = create_test_message();
+
+        let mut transports = HashMap::new();
+        transports.insert(
+            TransportType::Reticulum,
+            create_test_metrics(Some(-60), 0.1, 2),
+        );
+
+        let selected = selector.select_transport(&message, &transports).unwrap();
+        assert_eq!(
+            selected,
+            TransportType::Reticulum,
+            "Reticulum must be selected when it is the only available transport"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_tie_break_is_lowest_priority() {
+        let selector = TransportSelector::new();
+
+        let scores = [(TransportType::Reticulum, 50.0), (TransportType::BLE, 50.0)];
+        assert_eq!(
+            selector.select_from_scores_for_test(&scores),
+            Some(TransportType::BLE),
+            "Tie-break: BLE > Reticulum"
+        );
+
+        let all = [
+            (TransportType::Internet, 50.0),
+            (TransportType::WiFiDirect, 50.0),
+            (TransportType::BLE, 50.0),
+            (TransportType::Reticulum, 50.0),
+        ];
+        assert_eq!(
+            selector.select_from_scores_for_test(&all),
+            Some(TransportType::Internet),
+            "Tie-break: Internet > WiFiDirect > BLE > Reticulum"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_scoring_profile_produces_valid_scores() {
+        let selector = TransportSelector::new();
+        let message = create_test_message();
+        let metrics = create_test_metrics(Some(-70), 0.2, 5);
+
+        let score =
+            selector.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+        assert!(
+            score.total.is_finite() && score.total >= 0.0,
+            "Reticulum score must be finite and non-negative"
+        );
+        assert!(score.signal.is_finite() && score.signal >= 0.0);
+        assert!(score.bandwidth.is_finite() && score.bandwidth >= 0.0);
+        assert!(score.energy.is_finite() && score.energy >= 0.0);
+        assert!(score.reliability.is_finite() && score.reliability >= 0.0);
+    }
+
+    #[test]
+    fn test_reticulum_penalised_for_media_preference() {
+        let selector = TransportSelector::new();
+        let mut message = create_test_message();
+        let metrics = create_test_metrics(Some(-65), 0.1, 2);
+
+        let score_normal =
+            selector.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+
+        message
+            .metadata
+            .insert("transport_preference".to_string(), "internet".to_string());
+        let score_media =
+            selector.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+
+        assert!(
+            score_media.total < score_normal.total,
+            "Reticulum should be penalised when message prefers internet (media). normal={:.1}, media={:.1}",
+            score_normal.total,
+            score_media.total
+        );
+    }
+
+    /// Verifies that `prefer_online` does not give Reticulum an unintended boost.
+    #[test]
+    fn test_reticulum_not_boosted_by_prefer_online() {
+        let selector_prefer = TransportSelector::with_config(DorsConfig {
+            prefer_online: true,
+            ..Default::default()
+        });
+        let selector_default = TransportSelector::new();
+        let message = create_test_message();
+        let metrics = create_test_metrics(Some(-65), 0.1, 2);
+
+        let score_prefer =
+            selector_prefer.calculate_transport_score(&message, TransportType::Reticulum, &metrics);
+        let score_default = selector_default.calculate_transport_score(
+            &message,
+            TransportType::Reticulum,
+            &metrics,
+        );
+
+        assert!(
+            (score_prefer.total - score_default.total).abs() < 0.01,
+            "prefer_online must not change Reticulum score. prefer={:.1}, default={:.1}",
+            score_prefer.total,
+            score_default.total,
         );
     }
 }

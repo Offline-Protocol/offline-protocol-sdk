@@ -135,6 +135,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             bleEnabled = json.optBoolean("bleEnabled", json.optBoolean("ble_enabled", true)),
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
+            reticulumEnabled = json.optBoolean("reticulumEnabled", json.optBoolean("reticulum_enabled", false)),
             preferOnline = json.optBoolean("preferOnline", json.optBoolean("prefer_online", false)),
             initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte(),
             encryptionEnabled = encryptionEnabled,
@@ -289,7 +290,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "userId" to config.userId,
                 "bleEnabled" to config.bleEnabled,
                 "wifiDirectEnabled" to config.wifiDirectEnabled,
-                "internetEnabled" to config.internetEnabled
+                "internetEnabled" to config.internetEnabled,
+                "reticulumEnabled" to config.reticulumEnabled
             ))
             
             // Set up event callback
@@ -2944,6 +2946,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             "internet" -> TransportType.INTERNET
             "ble" -> TransportType.BLE
             "wifidirect", "wifi_direct" -> TransportType.WI_FI_DIRECT
+            "reticulum" -> TransportType.RETICULUM
             else -> throw IllegalArgumentException("Unsupported transport type: $type")
         }
     }

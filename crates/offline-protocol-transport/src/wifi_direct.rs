@@ -3,7 +3,6 @@
 //! This module provides high-bandwidth peer-to-peer connectivity via Wi-Fi Direct.
 //! This is primarily for Android devices and offers faster data transfer than BLE.
 
-use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
@@ -117,12 +116,12 @@ impl WifiDirectTransport {
 
     /// Sets the platform-specific handle.
     pub fn set_platform_handle(&self, handle: usize) {
-        *self.platform_handle.lock().unwrap() = Some(handle);
+        crate::common::set_platform_handle(&self.platform_handle, handle);
     }
 
     /// Gets the platform-specific handle.
     pub fn platform_handle(&self) -> Option<usize> {
-        *self.platform_handle.lock().unwrap()
+        crate::common::platform_handle(&self.platform_handle)
     }
 
     /// Called when a peer device is discovered.
@@ -144,8 +143,7 @@ impl WifiDirectTransport {
 
     /// Called when a message is received from a peer.
     pub fn on_message_received(&self, message: Message) {
-        let mut queue = self.receive_queue.lock().unwrap();
-        queue.push_back(message);
+        crate::common::on_message_received(&self.receive_queue, message);
     }
 
     /// Like [`on_message_received`](Self::on_message_received), but attaches a
@@ -158,17 +156,8 @@ impl WifiDirectTransport {
     ///   connection. This is **not** the raw transport address (MAC, IP, etc.).
     ///   The protocol layer uses this value to verify that `message.sender`
     ///   matches the physical peer that delivered it.
-    pub fn on_message_received_from(&self, mut message: Message, peer_id: String) {
-        if let Err(e) = message.set_transport_peer_id(peer_id) {
-            tracing::warn!(
-                error = %e,
-                message_id = %message.id,
-                "Dropping message: transport provided invalid peer_id"
-            );
-            return;
-        }
-        let mut queue = self.receive_queue.lock().unwrap();
-        queue.push_back(message);
+    pub fn on_message_received_from(&self, message: Message, peer_id: String) {
+        crate::common::on_message_received_from(&self.receive_queue, message, peer_id);
     }
 
     /// Gets all discovered peers.
@@ -190,37 +179,17 @@ impl WifiDirectTransport {
 
     /// Serializes a message to JSON bytes.
     pub fn serialize_message(&self, message: &Message) -> Result<Vec<u8>> {
-        serde_json::to_vec(message).map_err(|e| {
-            crate::Error::SerializationError(format!("Failed to serialize message: {}", e))
-        })
+        crate::common::serialize_message(message)
     }
 
     /// Deserializes a message from JSON bytes.
     pub fn deserialize_message(&self, data: &[u8]) -> Result<Message> {
-        serde_json::from_slice(data).map_err(|e| {
-            crate::Error::SerializationError(format!("Failed to deserialize message: {}", e))
-        })
+        crate::common::deserialize_message(data)
     }
 
     /// Called when raw data is received (platform callback).
     pub fn on_data_received(&self, data: Vec<u8>) -> Result<()> {
-        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
-            return Err(crate::Error::MessageTooLarge(
-                data.len(),
-                DEFAULT_MAX_MESSAGE_SIZE,
-            ));
-        }
-        match self.deserialize_message(&data) {
-            Ok(message) => {
-                let mut queue = self.receive_queue.lock().unwrap();
-                queue.push_back(message);
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
-                Ok(()) // Don't fail - just drop bad data
-            }
-        }
+        crate::common::on_data_received(&self.receive_queue, data)
     }
 
     /// Like [`on_data_received`](Self::on_data_received), but attaches a
@@ -234,24 +203,7 @@ impl WifiDirectTransport {
     ///   The protocol layer uses this value to verify that `message.sender`
     ///   matches the physical peer that delivered it.
     pub fn on_data_received_from(&self, data: Vec<u8>, peer_id: String) -> Result<()> {
-        if data.len() > DEFAULT_MAX_MESSAGE_SIZE {
-            return Err(crate::Error::MessageTooLarge(
-                data.len(),
-                DEFAULT_MAX_MESSAGE_SIZE,
-            ));
-        }
-        match self.deserialize_message(&data) {
-            Ok(mut message) => {
-                message.set_transport_peer_id(peer_id)?;
-                let mut queue = self.receive_queue.lock().unwrap();
-                queue.push_back(message);
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Error deserializing message, dropping bad data");
-                Ok(())
-            }
-        }
+        crate::common::on_data_received_from(&self.receive_queue, data, peer_id)
     }
 
     /// Gets the next message to send (for platform implementation).
@@ -379,6 +331,7 @@ impl WifiDirectTransportBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::DEFAULT_MAX_MESSAGE_SIZE;
     use offline_protocol_core::{AppId, UserId};
 
     fn create_test_message() -> Message {

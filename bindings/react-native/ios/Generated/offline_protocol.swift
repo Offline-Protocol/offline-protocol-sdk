@@ -3555,6 +3555,7 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var bleEnabled: Bool
     public var wifiDirectEnabled: Bool
     public var internetEnabled: Bool
+    public var reticulumEnabled: Bool
     public var preferOnline: Bool
     public var initialTtl: UInt8
     public var encryptionEnabled: Bool
@@ -3571,12 +3572,13 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
+        self.reticulumEnabled = reticulumEnabled
         self.preferOnline = preferOnline
         self.initialTtl = initialTtl
         self.encryptionEnabled = encryptionEnabled
@@ -3610,9 +3612,10 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 userId: FfiConverterString.read(from: &buf), 
                 bleEnabled: FfiConverterBool.read(from: &buf), 
                 wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
-                internetEnabled: FfiConverterBool.read(from: &buf), 
-                preferOnline: FfiConverterBool.read(from: &buf), 
-                initialTtl: FfiConverterUInt8.read(from: &buf), 
+                internetEnabled: FfiConverterBool.read(from: &buf),
+                reticulumEnabled: FfiConverterBool.read(from: &buf),
+                preferOnline: FfiConverterBool.read(from: &buf),
+                initialTtl: FfiConverterUInt8.read(from: &buf),
                 encryptionEnabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
                 storePending: FfiConverterBool.read(from: &buf), 
@@ -3633,6 +3636,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.bleEnabled, into: &buf)
         FfiConverterBool.write(value.wifiDirectEnabled, into: &buf)
         FfiConverterBool.write(value.internetEnabled, into: &buf)
+        FfiConverterBool.write(value.reticulumEnabled, into: &buf)
         FfiConverterBool.write(value.preferOnline, into: &buf)
         FfiConverterUInt8.write(value.initialTtl, into: &buf)
         FfiConverterBool.write(value.encryptionEnabled, into: &buf)
@@ -4037,13 +4041,15 @@ public struct TransportConfig: Equatable, Hashable {
     public var bleEnabled: Bool
     public var wifiDirectEnabled: Bool
     public var internetEnabled: Bool
+    public var reticulumEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool) {
+    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool) {
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
+        self.reticulumEnabled = reticulumEnabled
     }
 
     
@@ -4060,9 +4066,10 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportConfig {
         return
             try TransportConfig(
-                bleEnabled: FfiConverterBool.read(from: &buf), 
-                wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
-                internetEnabled: FfiConverterBool.read(from: &buf)
+                bleEnabled: FfiConverterBool.read(from: &buf),
+                wifiDirectEnabled: FfiConverterBool.read(from: &buf),
+                internetEnabled: FfiConverterBool.read(from: &buf),
+                reticulumEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4070,6 +4077,7 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.bleEnabled, into: &buf)
         FfiConverterBool.write(value.wifiDirectEnabled, into: &buf)
         FfiConverterBool.write(value.internetEnabled, into: &buf)
+        FfiConverterBool.write(value.reticulumEnabled, into: &buf)
     }
 }
 
@@ -5030,10 +5038,11 @@ public func FfiConverterTypeRelayPriority_lower(_ value: RelayPriority) -> RustB
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum TransportType: Equatable, Hashable {
-    
+
     case internet
     case ble
     case wiFiDirect
+    case reticulum
 
 
 
@@ -5054,11 +5063,13 @@ public struct FfiConverterTypeTransportType: FfiConverterRustBuffer {
         switch variant {
         
         case 1: return .internet
-        
+
         case 2: return .ble
-        
+
         case 3: return .wiFiDirect
-        
+
+        case 4: return .reticulum
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -5077,7 +5088,11 @@ public struct FfiConverterTypeTransportType: FfiConverterRustBuffer {
         
         case .wiFiDirect:
             writeInt(&buf, Int32(3))
-        
+
+
+        case .reticulum:
+            writeInt(&buf, Int32(4))
+
         }
     }
 }

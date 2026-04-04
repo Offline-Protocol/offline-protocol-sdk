@@ -26,8 +26,8 @@ use offline_protocol_router::{
     DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
 };
 use offline_protocol_transport::{
-    ble::BleTransport, internet::InternetTransport, wifi_direct::WifiDirectTransport, Transport,
-    TransportType as CoreTransportType,
+    ble::BleTransport, internet::InternetTransport, reticulum::ReticulumTransport,
+    wifi_direct::WifiDirectTransport, Transport, TransportType as CoreTransportType,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -372,6 +372,7 @@ pub enum TransportType {
     Internet,
     Ble,
     WiFiDirect,
+    Reticulum,
 }
 
 /// Protocol state
@@ -754,6 +755,7 @@ pub struct TransportConfig {
     pub ble_enabled: bool,
     pub wifi_direct_enabled: bool,
     pub internet_enabled: bool,
+    pub reticulum_enabled: bool,
 }
 
 /// Encryption configuration for automatic MLS handling
@@ -817,6 +819,7 @@ pub struct ProtocolConfig {
     pub ble_enabled: bool,
     pub wifi_direct_enabled: bool,
     pub internet_enabled: bool,
+    pub reticulum_enabled: bool,
     pub prefer_online: bool,
     pub initial_ttl: u8,
     pub encryption_enabled: bool,
@@ -851,6 +854,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.ble_enabled = config.ble_enabled;
         core_config.transport.wifi_direct_enabled = config.wifi_direct_enabled;
         core_config.transport.internet_enabled = config.internet_enabled;
+        core_config.transport.reticulum_enabled = config.reticulum_enabled;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
         core_config.encryption.enabled = config.encryption_enabled;
@@ -963,6 +967,7 @@ impl OfflineProtocol {
         let user_id = config.user_id.clone();
         let ble_enabled = config.ble_enabled;
         let internet_enabled = config.internet_enabled;
+        let reticulum_enabled = config.reticulum_enabled;
         let core_config: CoreConfig = config.into();
         core_config.validate().map_err(ProtocolError::from)?;
 
@@ -985,6 +990,15 @@ impl OfflineProtocol {
             protocol
                 .transport_manager_mut()
                 .add_transport(CoreTransportType::Internet, Box::new(internet_transport));
+        }
+
+        // Add Reticulum transport if enabled
+        // The platform bridges to a running Reticulum daemon or RNode hardware
+        if reticulum_enabled {
+            let reticulum_transport = ReticulumTransport::new(user_id.clone());
+            protocol
+                .transport_manager_mut()
+                .add_transport(CoreTransportType::Reticulum, Box::new(reticulum_transport));
         }
 
         // Create the event queue and callback that will be shared with the event handler
@@ -1320,6 +1334,7 @@ impl OfflineProtocol {
                 TransportType::Internet => CoreTransportType::Internet,
                 TransportType::Ble => CoreTransportType::BLE,
                 TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
+                TransportType::Reticulum => CoreTransportType::Reticulum,
             };
             protocol
                 .send_message_via_transport(
@@ -2195,6 +2210,7 @@ impl OfflineProtocol {
             TransportType::Internet => CoreTransportType::Internet,
             TransportType::Ble => CoreTransportType::BLE,
             TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
+            TransportType::Reticulum => CoreTransportType::Reticulum,
         };
 
         let mut protocol = self.lock_inner()?;
@@ -3534,6 +3550,7 @@ mod tests {
             ble_enabled: true,
             wifi_direct_enabled: true,
             internet_enabled: true,
+            reticulum_enabled: false,
             prefer_online: false,
             initial_ttl: 8,
             encryption_enabled: true,
@@ -3557,6 +3574,7 @@ mod tests {
             ble_enabled: true,
             wifi_direct_enabled: false,
             internet_enabled: false,
+            reticulum_enabled: false,
             prefer_online: false,
             initial_ttl: 8,
             encryption_enabled: true,

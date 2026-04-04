@@ -135,6 +135,15 @@ export interface WifiDirectTransportConfig {
 }
 
 /**
+ * Reticulum mesh transport configuration.
+ * Requires a running Reticulum daemon or RNode hardware.
+ */
+export interface ReticulumTransportConfig {
+  /** Enable Reticulum transport (default: false) */
+  enabled: boolean;
+}
+
+/**
  * Content type for messages
  */
 export enum ContentType {
@@ -202,6 +211,8 @@ export interface TransportsConfig {
   internet?: InternetTransportConfig;
   /** WiFi Direct transport configuration (Android only) */
   wifiDirect?: WifiDirectTransportConfig;
+  /** Reticulum mesh transport configuration (requires external Reticulum daemon) */
+  reticulum?: ReticulumTransportConfig;
 }
 
 /**
@@ -317,7 +328,7 @@ export interface ProtocolConfig {
 /**
  * Transport type names
  */
-export type TransportType = 'ble' | 'internet' | 'wifiDirect';
+export type TransportType = 'ble' | 'internet' | 'wifiDirect' | 'reticulum';
 
 /**
  * Forwarding attribution (present when a message was forwarded).

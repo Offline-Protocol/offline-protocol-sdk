@@ -2,7 +2,7 @@
 
 ## Overview
 
-DORS is the intelligent transport selection engine at the heart of the Offline Protocol SDK. It automatically evaluates, selects, and switches between available transport layers, Internet, BLE Mesh, and Wi-Fi Direct, based on real-time network conditions. The goal is to ensure optimal message delivery while balancing performance, reliability, and energy consumption.
+DORS is the intelligent transport selection engine at the heart of the Offline Protocol SDK. It automatically evaluates, selects, and switches between available transport layers — Internet, BLE Mesh, Wi-Fi Direct, and Reticulum — based on real-time network conditions. The goal is to ensure optimal message delivery while balancing performance, reliability, and energy consumption.
 
 ## How DORS Works
 
@@ -50,6 +50,7 @@ Reflects how close the message is to its destination, measured by hop count. Few
 ### Bandwidth
 Measures the throughput capability of each transport. Higher bandwidth transports are preferred for larger messages or time-sensitive data.
 
+- Reticulum (LoRa): ~0.7 KB/s typical, ~2.7 KB/s peak (20 points default)
 - BLE: ~150 KB/s baseline (40 points default)
 - Wi-Fi Direct: ~2 MB/s baseline (90 points default)
 - Internet: Assumed high bandwidth (100 points default)
@@ -65,10 +66,11 @@ Indicates how backed up the transport queue is. Less congested paths receive hig
 Considers the battery impact of each transport. On battery-constrained devices, energy-efficient options are preferred.
 
 - BLE: Low power (90 points baseline)
+- Reticulum: Low-medium power (75 points baseline)
 - Internet: Medium power (60 points baseline)
 - Wi-Fi Direct: High power (40 points baseline)
 - Devices that are charging get a bonus
-- Low battery devices strongly prefer BLE
+- Low battery devices strongly prefer BLE or Reticulum
 
 ### Reliability
 Tracks the historical success rate of message delivery for each transport. Transports with higher delivery rates are preferred.
@@ -122,7 +124,21 @@ Optimized for server connectivity when available, with optional preference boost
 | Energy | 10% |
 | Load | 10% |
 
-The Internet transport receives a baseline bonus (10 points by default, or 25 points if `preferOnline` is enabled) to ensure it's competitive when connected. The total score is clamped to 0-100.
+The Internet transport receives a baseline bonus (10 points by default, or 25 points if `preferOnline` is enabled) to ensure it's competitive when connected.
+
+### Reticulum Transport
+Optimized for resilience and long-range delivery via LoRa and other Reticulum mediums.
+
+| Factor | Weight |
+|--------|--------|
+| Reliability | 30% |
+| Energy | 25% |
+| Proximity | 20% |
+| Congestion | 15% |
+| Signal | 5% |
+| Bandwidth | 5% |
+
+Reticulum has no base score bonus and the lowest tie-break priority (Internet > WiFi Direct > BLE > Reticulum). It acts as a resilience fallback when other transports are unavailable or degraded.
 
 ## Switching Safeguards
 

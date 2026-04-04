@@ -9,10 +9,12 @@
 #![warn(missing_docs)]
 
 pub mod ble;
+pub(crate) mod common;
 pub mod constants;
 pub mod error;
 pub mod internet;
 pub mod mock;
+pub mod reticulum;
 pub mod traits;
 pub mod types;
 pub mod wifi_direct;
@@ -21,6 +23,7 @@ pub use ble::{BleTransport, BleTransportBuilder, PeerDevice};
 pub use constants::DEFAULT_MAX_MESSAGE_SIZE;
 pub use error::{Error, Result};
 pub use internet::{InternetConfig, InternetTransport};
+pub use reticulum::{ReticulumConfig, ReticulumTransport};
 pub use traits::{Transport, TransportStatus};
 pub use types::{LinkQuality, SharedCallback, TransportMetrics, TransportType};
 pub use wifi_direct::{WifiDirectConfig, WifiDirectPeer, WifiDirectTransport};
