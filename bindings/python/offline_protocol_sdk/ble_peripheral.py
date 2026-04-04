@@ -338,7 +338,7 @@ class BlePeripheral(TransportManager):
                 sender_id=sender_id, fragment=list(fragment)
             )
             logger.debug("_on_write: fragment fed to protocol OK")
-        except BaseException as exc:
+        except Exception as exc:
             logger.exception("_on_write failed: %s", exc)
 
     def _resolve_sender(self) -> str:

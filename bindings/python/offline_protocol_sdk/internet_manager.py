@@ -371,7 +371,8 @@ class InternetManager(TransportManager):
     async def _receive_loop(self) -> None:
         """Continuously receive messages from the WebSocket."""
         try:
-            assert self._ws is not None
+            if self._ws is None:
+                return
             async for raw in self._ws:
                 if isinstance(raw, bytes):
                     data = raw
@@ -631,7 +632,10 @@ class InternetManager(TransportManager):
                     message_id=message_id, reason="Not connected"
                 )
             except Exception:
-                self._protocol.internet_send_failed(message_id=message_id)
+                try:
+                    self._protocol.internet_send_failed(message_id=message_id)
+                except Exception:
+                    logger.debug("internet_send_failed also failed", exc_info=True)
             return
 
         async with self._send_semaphore:
@@ -663,7 +667,10 @@ class InternetManager(TransportManager):
                         message_id=message_id, reason=str(exc)
                     )
                 except Exception:
-                    self._protocol.internet_send_failed(message_id=message_id)
+                    try:
+                        self._protocol.internet_send_failed(message_id=message_id)
+                    except Exception:
+                        logger.debug("internet_send_failed also failed", exc_info=True)
 
                 if self._consecutive_send_failures >= _MAX_CONSECUTIVE_FAILURES:
                     self._emit_diagnostic(
