@@ -106,6 +106,9 @@ class BlePeripheral(TransportManager):
         # Connected centrals: uuid -> connection timestamp
         self._connected_centrals: dict[str, float] = {}
 
+        # Event loop — captured in start() for thread-safe callback scheduling
+        self._loop: asyncio.AbstractEventLoop | None = None
+
         # Metrics
         self._bytes_sent: int = 0
         self._bytes_received: int = 0
@@ -132,6 +135,7 @@ class BlePeripheral(TransportManager):
                 f"BLE peripheral not available on {sys.platform}"
             )
 
+        self._loop = asyncio.get_running_loop()
         self._update_state(TransportState.STARTING)
         self._emit_diagnostic("info", "Starting BLE peripheral", {
             "device_id": self._device_id,
@@ -234,8 +238,14 @@ class BlePeripheral(TransportManager):
         await self._server.add_new_service(SERVICE_UUID)
 
         # MESSAGE characteristic — bidirectional fragment transport
+        # NOTE: ``write`` (with-response) is required on macOS because the
+        # CoreBluetooth ``peripheralManager:didReceiveWriteRequests:``
+        # delegate callback is only invoked for ATT Write Requests, **not**
+        # ATT Write Commands (write-without-response).  We keep both so
+        # peers that prefer write-without-response still see the property.
         msg_props = (
-            GATTCharacteristicProperties.write_without_response
+            GATTCharacteristicProperties.write
+            | GATTCharacteristicProperties.write_without_response
             | GATTCharacteristicProperties.notify
         )
         msg_perms = (
@@ -297,23 +307,35 @@ class BlePeripheral(TransportManager):
         return bytearray(b"")
 
     def _on_write(self, char_uuid: Any, value: Any) -> None:
-        """Handle incoming GATT write requests (fragments from phones)."""
-        if self._resolve_char_uuid(char_uuid) != MESSAGE_CHAR_UUID.lower():
-            return
+        """Handle incoming GATT write requests (fragments from phones).
 
-        fragment = bytes(value)
-        self._bytes_received += len(fragment)
-        self._fragments_received += 1
-
-        sender_id = self._resolve_sender()
-
+        This runs inside the bless/CoreBluetooth delegate callback.  Any
+        unhandled exception here prevents ``respondToRequest:withResult:``
+        from being called, which causes CoreBluetooth to **drop the
+        connection**.  Therefore the entire body is wrapped in try/except.
+        """
         try:
+            resolved = self._resolve_char_uuid(char_uuid)
+            if resolved != MESSAGE_CHAR_UUID.lower():
+                return
+
+            fragment = bytes(value)
+            logger.debug(
+                "[ble_peripheral] _on_write: %d bytes from %s",
+                len(fragment), type(char_uuid).__name__,
+            )
+            self._bytes_received += len(fragment)
+            self._fragments_received += 1
+
+            sender_id = self._resolve_sender()
+
             self._protocol.ble_fragment_received(
                 sender_id=sender_id, fragment=list(fragment)
             )
         except Exception as exc:
+            logger.error("[ble_peripheral] Write handler exception: %s", exc, exc_info=True)
             self._emit_diagnostic(
-                "error", f"Error feeding fragment to protocol: {exc}"
+                "error", f"Error in write handler: {exc}"
             )
 
     def _resolve_sender(self) -> str:
@@ -335,8 +357,13 @@ class BlePeripheral(TransportManager):
 
         Drains outgoing fragments from the protocol core and sends them
         to subscribed centrals via GATT notifications.
+
+        This is invoked from a Rust UniFFI callback thread, so we must use
+        ``call_soon_threadsafe`` to schedule work on the asyncio event loop.
         """
-        asyncio.ensure_future(self._drain_outgoing_fragments())
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(asyncio.ensure_future, self._drain_outgoing_fragments())
 
     async def _drain_outgoing_fragments(self) -> None:
         """Send all queued outgoing fragments as notifications."""

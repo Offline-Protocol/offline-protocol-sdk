@@ -96,6 +96,9 @@ class BleManager(TransportManager):
         self._fragments_sent: int = 0
         self._fragments_received: int = 0
 
+        # Event loop — captured in start() for thread-safe callback scheduling
+        self._loop: asyncio.AbstractEventLoop | None = None
+
         # Tasks
         self._peer_cleanup_task: asyncio.Task[None] | None = None
 
@@ -110,6 +113,7 @@ class BleManager(TransportManager):
         if self._state == TransportState.RUNNING:
             raise TransportError("BLE transport is already running")
 
+        self._loop = asyncio.get_running_loop()
         self._update_state(TransportState.STARTING)
         self._emit_diagnostic("info", "Starting BLE transport", {
             "device_id": self._device_id,
@@ -333,8 +337,13 @@ class BleManager(TransportManager):
 
         Drains outgoing fragments from the protocol core and writes them
         to connected peers via GATT.
+
+        This is invoked from a Rust UniFFI callback thread, so we must use
+        ``call_soon_threadsafe`` to schedule work on the asyncio event loop.
         """
-        asyncio.ensure_future(self._drain_outgoing_fragments())
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(asyncio.ensure_future, self._drain_outgoing_fragments())
 
     async def _drain_outgoing_fragments(self) -> None:
         """Poll and send all queued outgoing fragments."""
