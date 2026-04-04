@@ -15,5 +15,6 @@
 # Audit tool: pip-audit --strict
 
 bleak==3.0.1
+bless==0.3.0
 websockets==16.0
 keyring==25.7.0

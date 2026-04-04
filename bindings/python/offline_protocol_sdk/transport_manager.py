@@ -131,6 +131,7 @@ class TransportManager(ABC):
 
 _LOG_LEVELS: dict[str, int] = {
     "error": logging.ERROR,
+    "warning": logging.WARNING,
     "warn": logging.WARNING,
     "info": logging.INFO,
     "debug": logging.DEBUG,

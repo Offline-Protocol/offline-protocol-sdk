@@ -254,6 +254,14 @@ class InternetManager(TransportManager):
         except Exception as exc:
             self._emit_diagnostic("error", f"Failed to send auth: {exc}")
 
+    async def _safe_handle_authenticated(self, user_id: str, username: str) -> None:
+        """Wrapper that catches exceptions to prevent stuck STARTING state."""
+        try:
+            await self._handle_authenticated(user_id, username)
+        except Exception as exc:
+            self._emit_diagnostic("error", f"Authentication handler failed: {exc}")
+            await self._handle_connection_closed(exc)
+
     async def _handle_authenticated(self, user_id: str, username: str) -> None:
         self._authenticated = True
         self._update_state(TransportState.RUNNING)
@@ -378,7 +386,7 @@ class InternetManager(TransportManager):
         if msg_type == "Authenticated":
             user_id = msg.get("user_id", self._device_id)
             username = msg.get("username", self._device_id)
-            asyncio.ensure_future(self._handle_authenticated(user_id, username))
+            asyncio.ensure_future(self._safe_handle_authenticated(user_id, username))
 
         elif msg_type == "AuthError":
             reason = msg.get("reason", "Unknown")
@@ -574,7 +582,7 @@ class InternetManager(TransportManager):
         """
         # Limit to available concurrency slots to avoid creating thousands
         # of tasks that all block on the semaphore.
-        available_slots = self._send_semaphore._value
+        available_slots = max(0, 50 - len(self._send_tasks))
         drained = 0
         while drained < available_slots:
             try:

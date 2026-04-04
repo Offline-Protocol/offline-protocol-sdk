@@ -92,7 +92,7 @@ async def main(user_id: str, server_url: str) -> None:
         logger.info("Type 'quit' to exit.\n")
 
         # Read stdin in a non-blocking way
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         protocol = await loop.connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(reader), sys.stdin
