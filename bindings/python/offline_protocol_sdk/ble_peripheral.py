@@ -120,6 +120,9 @@ class BlePeripheral(TransportManager):
         self._fragments_received: int = 0
         self._is_advertising: bool = False
 
+        # Serialisation flag — prevents concurrent _drain_outgoing_fragments
+        self._draining: bool = False
+
         # Background tasks
         self._peer_monitor_task: asyncio.Task[None] | None = None
 
@@ -383,6 +386,17 @@ class BlePeripheral(TransportManager):
 
     async def _drain_outgoing_fragments(self) -> None:
         """Send all queued outgoing fragments as notifications."""
+        if self._server is None:
+            return
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            await self._drain_outgoing_fragments_inner()
+        finally:
+            self._draining = False
+
+    async def _drain_outgoing_fragments_inner(self) -> None:
         if self._server is None:
             return
 

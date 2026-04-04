@@ -182,6 +182,33 @@ class TestOutgoingFragments:
         mock_server.update_value.assert_not_called()
         assert peripheral._fragments_sent == 0
 
+    @pytest.mark.asyncio
+    async def test_concurrent_drain_is_serialised(self, started_peripheral, mock_protocol):
+        """A second drain call while one is running returns immediately."""
+        peripheral, mock_server, mock_char = started_peripheral
+
+        frag = MagicMock()
+        frag.data = [0x01]
+        frag.recipient_id = "phone-1"
+
+        mock_protocol.ble_get_next_fragment = MagicMock(
+            side_effect=[frag, None]
+        )
+
+        # Simulate concurrent drain: set flag before calling
+        peripheral._draining = True
+        await peripheral._drain_outgoing_fragments()
+        mock_protocol.ble_get_next_fragment.assert_not_called()
+
+        # Reset and verify normal drain works
+        peripheral._draining = False
+        mock_protocol.ble_get_next_fragment = MagicMock(
+            side_effect=[frag, None]
+        )
+        await peripheral._drain_outgoing_fragments()
+        mock_protocol.ble_get_next_fragment.assert_called()
+        assert peripheral._draining is False
+
 
 # ---------------------------------------------------------------------------
 # Peer monitoring

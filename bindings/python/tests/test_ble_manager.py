@@ -255,6 +255,39 @@ class TestFragmentHandling:
         mock_protocol.ble_return_fragment.assert_called_once()
         assert manager._bytes_sent == 0
 
+    @pytest.mark.asyncio
+    async def test_concurrent_drain_is_serialised(self, manager, mock_protocol):
+        """A second _drain_outgoing_fragments call while one is running returns immediately."""
+        frag = MagicMock()
+        frag.recipient_id = "peer-1"
+        frag.data = [0x01]
+
+        mock_client = AsyncMock()
+        mock_client.is_connected = True
+        manager._clients["AA:BB"] = mock_client
+        manager._peer_device_ids["AA:BB"] = "peer-1"
+        manager._device_id_to_addr["peer-1"] = "AA:BB"
+
+        # First fragment returned, then None
+        mock_protocol.ble_get_next_fragment = MagicMock(
+            side_effect=[frag, None]
+        )
+
+        # Simulate concurrent drain: set flag before calling
+        manager._draining = True
+        await manager._drain_outgoing_fragments()
+        # Should have returned immediately without calling get_next_fragment
+        mock_protocol.ble_get_next_fragment.assert_not_called()
+
+        # Reset and verify normal drain works after flag is cleared
+        manager._draining = False
+        mock_protocol.ble_get_next_fragment = MagicMock(
+            side_effect=[frag, None]
+        )
+        await manager._drain_outgoing_fragments()
+        mock_protocol.ble_get_next_fragment.assert_called()
+        assert manager._draining is False
+
 
 # ---------------------------------------------------------------------------
 # Client lookup

@@ -172,6 +172,32 @@ class TestInternetManagerConnectionClosedGuard:
         await mgr._handle_connection_closed(RuntimeError("test"))
         mock_protocol.internet_status_changed.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_handle_connection_closed_schedules_reconnect_on_initial_failure(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """When initial connect fails (_connected never set True), reconnect is still scheduled."""
+        mgr = InternetManager(
+            mock_protocol, "dev-1",
+            server_url="ws://x.com",
+            auto_reconnect=True,
+        )
+        mgr._loop = asyncio.get_running_loop()
+        # Simulate state after start() calls _connect() which sets STARTING
+        mgr._state = TransportState.STARTING
+        # _connected and _authenticated remain False (connect failed before handshake)
+
+        await mgr._handle_connection_closed(RuntimeError("connect failed"))
+
+        # Should NOT be stuck in STARTING — should schedule reconnect
+        # which transitions to STARTING via _schedule_reconnect
+        assert mgr._reconnect_attempts == 1
+        assert mgr._state == TransportState.STARTING
+
+        # Clean up the timer handle
+        if mgr._reconnect_handle is not None:
+            mgr._reconnect_handle.cancel()
+
 
 class TestInternetManagerSendMessageTOCTOU:
     @pytest.mark.asyncio

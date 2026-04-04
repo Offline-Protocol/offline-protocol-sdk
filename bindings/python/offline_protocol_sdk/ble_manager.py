@@ -108,6 +108,9 @@ class BleManager(TransportManager):
         # Event loop — captured in start() for thread-safe callback scheduling
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # Serialisation flag — prevents concurrent _drain_outgoing_fragments
+        self._draining: bool = False
+
         # Tasks
         self._peer_cleanup_task: asyncio.Task[None] | None = None
 
@@ -394,6 +397,15 @@ class BleManager(TransportManager):
 
     async def _drain_outgoing_fragments(self) -> None:
         """Poll and send all queued outgoing fragments."""
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            await self._drain_outgoing_fragments_inner()
+        finally:
+            self._draining = False
+
+    async def _drain_outgoing_fragments_inner(self) -> None:
         while True:
             try:
                 frag = self._protocol.ble_get_next_fragment()

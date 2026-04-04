@@ -302,7 +302,11 @@ class InternetManager(TransportManager):
         })
 
     async def _handle_connection_closed(self, error: Exception | None) -> None:
-        if not self._connected and not self._authenticated:
+        if (
+            not self._connected
+            and not self._authenticated
+            and self._state in (TransportState.STOPPING, TransportState.STOPPED)
+        ):
             return  # already handled — guard against concurrent callers
         was_connected = self._connected
         self._connected = False
