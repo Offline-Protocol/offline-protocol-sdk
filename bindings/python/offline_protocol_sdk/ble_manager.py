@@ -249,8 +249,13 @@ class BleManager(TransportManager):
             client = BleakClient(
                 device,
                 timeout=CONNECTION_TIMEOUT,
-                disconnected_callback=lambda c: asyncio.ensure_future(
-                    self._on_peer_disconnected(addr)
+                disconnected_callback=lambda c, _addr=addr: (
+                    self._loop.call_soon_threadsafe(
+                        asyncio.ensure_future,
+                        self._on_peer_disconnected(_addr),
+                    )
+                    if self._loop is not None and self._loop.is_running()
+                    else None
                 ),
             )
             await client.connect()

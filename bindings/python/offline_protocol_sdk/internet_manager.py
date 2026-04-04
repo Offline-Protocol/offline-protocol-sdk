@@ -92,10 +92,14 @@ class InternetManager(TransportManager):
         self._messages_sent: int = 0
         self._messages_received: int = 0
 
+        # Event loop — captured in start() for thread-safe scheduling
+        self._loop: asyncio.AbstractEventLoop | None = None
+
         # Async tasks
         self._recv_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._ping_task: asyncio.Task[None] | None = None
+        self._send_tasks: set[asyncio.Task[None]] = set()
         self._reconnect_handle: asyncio.TimerHandle | None = None
 
     # -- configuration --------------------------------------------------------
@@ -134,6 +138,7 @@ class InternetManager(TransportManager):
             raise TransportError(
                 "Server URL not configured. Call configure(server_url=...) first."
             )
+        self._loop = asyncio.get_running_loop()
         self._emit_diagnostic("info", "Starting Internet transport", {
             "device_id": self._device_id,
             "server_url": self._server_url,
@@ -156,6 +161,12 @@ class InternetManager(TransportManager):
             if task is not None and not task.done():
                 task.cancel()
         self._recv_task = self._poll_task = self._ping_task = None
+
+        # Cancel in-flight send tasks
+        for task in list(self._send_tasks):
+            if not task.done():
+                task.cancel()
+        self._send_tasks.clear()
 
         # Close WebSocket
         await self._disconnect()
@@ -309,7 +320,12 @@ class InternetManager(TransportManager):
             "delay_seconds": delay,
         })
 
-        loop = asyncio.get_event_loop()
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            self._emit_diagnostic("warning", "No running event loop for reconnect")
+            self._update_state(TransportState.STOPPED)
+            return
+
         self._reconnect_handle = loop.call_later(
             delay,
             lambda: asyncio.ensure_future(self._connect()),
@@ -548,9 +564,11 @@ class InternetManager(TransportManager):
             recipient = msg.recipient
             data = bytes(msg.data)
 
-            asyncio.ensure_future(
+            task = asyncio.ensure_future(
                 self._send_message(message_id, recipient, data)
             )
+            self._send_tasks.add(task)
+            task.add_done_callback(self._send_tasks.discard)
 
     async def _send_message(
         self, message_id: str, recipient: str, data: bytes

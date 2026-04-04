@@ -316,13 +316,19 @@ class BlePeripheral(TransportManager):
         """
         try:
             resolved = self._resolve_char_uuid(char_uuid)
-            print(f"[ble_peripheral] _on_write called: uuid={resolved}, value_type={type(value).__name__}, value_len={len(value) if value else 0}")
+            logger.debug(
+                "_on_write called: uuid=%s, value_type=%s, value_len=%d",
+                resolved, type(value).__name__, len(value) if value else 0,
+            )
             if resolved != MESSAGE_CHAR_UUID.lower():
-                print(f"[ble_peripheral] _on_write: ignoring write to {resolved}")
+                logger.debug("_on_write: ignoring write to %s", resolved)
                 return
 
             fragment = bytes(value)
-            print(f"[ble_peripheral] _on_write: {len(fragment)} bytes, sender={self._resolve_sender()}")
+            logger.debug(
+                "_on_write: %d bytes, sender=%s",
+                len(fragment), self._resolve_sender(),
+            )
             self._bytes_received += len(fragment)
             self._fragments_received += 1
 
@@ -331,11 +337,9 @@ class BlePeripheral(TransportManager):
             self._protocol.ble_fragment_received(
                 sender_id=sender_id, fragment=list(fragment)
             )
-            print("[ble_peripheral] _on_write: fragment fed to protocol OK")
+            logger.debug("_on_write: fragment fed to protocol OK")
         except BaseException as exc:
-            print(f"[ble_peripheral] _on_write EXCEPTION: {type(exc).__name__}: {exc}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("_on_write failed: %s", exc)
 
     def _resolve_sender(self) -> str:
         """Best-effort identification of the writing central.
@@ -411,8 +415,12 @@ class BlePeripheral(TransportManager):
                 if self._server is None:
                     continue
 
-                delegate = self._server.peripheral_manager_delegate
-                current = set(delegate._central_subscriptions.keys())
+                try:
+                    delegate = self._server.peripheral_manager_delegate
+                    current = set(delegate._central_subscriptions.keys())
+                except (AttributeError, TypeError):
+                    # bless internal API may change across versions
+                    continue
 
                 # New centrals
                 for central_uuid in current - known:
