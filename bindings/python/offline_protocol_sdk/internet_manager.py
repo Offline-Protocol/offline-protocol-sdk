@@ -8,6 +8,7 @@ relay server for internet-based message routing and drives the UniFFI
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from typing import Any
@@ -28,6 +29,7 @@ _RECONNECT_BACKOFF_MULTIPLIER = 2.0
 _PING_INTERVAL = 10.0  # seconds
 _CONNECTION_TIMEOUT = 10.0
 _MAX_CONSECUTIVE_FAILURES = 2
+_MAX_CONCURRENT_SENDS = 50
 
 
 class InternetManager(TransportManager):
@@ -100,7 +102,7 @@ class InternetManager(TransportManager):
         self._poll_task: asyncio.Task[None] | None = None
         self._ping_task: asyncio.Task[None] | None = None
         self._send_tasks: set[asyncio.Task[None]] = set()
-        self._send_semaphore: asyncio.Semaphore = asyncio.Semaphore(50)
+        self._send_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SENDS)
         self._reconnect_handle: asyncio.TimerHandle | None = None
 
     # -- configuration --------------------------------------------------------
@@ -262,6 +264,13 @@ class InternetManager(TransportManager):
             self._emit_diagnostic("error", f"Authentication handler failed: {exc}")
             await self._handle_connection_closed(exc)
 
+    async def _safe_handle_connection_closed(self, error: Exception | None) -> None:
+        """Wrapper that catches exceptions from connection-closed handling."""
+        try:
+            await self._handle_connection_closed(error)
+        except Exception as exc:
+            self._emit_diagnostic("error", f"Connection-closed handler failed: {exc}")
+
     async def _handle_authenticated(self, user_id: str, username: str) -> None:
         self._authenticated = True
         self._update_state(TransportState.RUNNING)
@@ -271,6 +280,12 @@ class InternetManager(TransportManager):
             self._protocol.internet_status_changed(is_connected=True)
         except Exception as exc:
             self._emit_diagnostic("error", f"Protocol notify failed: {exc}")
+
+        # Cancel any existing poll/ping tasks before creating new ones
+        # (guards against duplicate Authenticated messages from the server)
+        for task in (self._poll_task, self._ping_task):
+            if task is not None and not task.done():
+                task.cancel()
 
         # Start polling and ping tasks
         self._poll_task = asyncio.ensure_future(self._poll_outgoing_loop())
@@ -391,7 +406,7 @@ class InternetManager(TransportManager):
         elif msg_type == "AuthError":
             reason = msg.get("reason", "Unknown")
             self._emit_diagnostic("error", f"Auth failed: {reason}")
-            asyncio.ensure_future(self._handle_connection_closed(None))
+            asyncio.ensure_future(self._safe_handle_connection_closed(None))
 
         elif msg_type == "MessageReceived":
             self._handle_incoming_message(msg)
@@ -582,7 +597,7 @@ class InternetManager(TransportManager):
         """
         # Limit to available concurrency slots to avoid creating thousands
         # of tasks that all block on the semaphore.
-        available_slots = max(0, 50 - len(self._send_tasks))
+        available_slots = max(0, _MAX_CONCURRENT_SENDS - len(self._send_tasks))
         drained = 0
         while drained < available_slots:
             try:
@@ -621,10 +636,14 @@ class InternetManager(TransportManager):
 
         async with self._send_semaphore:
             try:
+                try:
+                    content = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    content = base64.b64encode(data).decode("ascii")
                 payload = json.dumps({
                     "type": "SendMessage",
                     "recipient": recipient,
-                    "content": data.decode("utf-8", errors="replace"),
+                    "content": content,
                 })
                 await self._ws.send(payload)
                 self._bytes_sent += len(payload)
