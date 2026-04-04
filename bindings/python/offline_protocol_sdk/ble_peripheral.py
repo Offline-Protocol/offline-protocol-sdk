@@ -270,18 +270,35 @@ class BlePeripheral(TransportManager):
 
     # -- GATT callbacks -------------------------------------------------------
 
-    def _on_read(self, char_uuid: str) -> bytearray:
+    @staticmethod
+    def _resolve_char_uuid(char_uuid: Any) -> str:
+        """Extract a lowercase UUID string from a characteristic or string.
+
+        ``bless`` may pass either a plain UUID string or a
+        ``BlessGATTCharacteristic*`` object depending on version/platform.
+        """
+        if isinstance(char_uuid, str):
+            return char_uuid.lower()
+        # BlessGATTCharacteristic objects expose a .uuid property (str)
+        if hasattr(char_uuid, "uuid"):
+            return str(char_uuid.uuid).lower()
+        # CoreBluetooth-backed objects — try ObjC CBCharacteristic.UUID()
+        if hasattr(char_uuid, "UUID"):
+            return str(char_uuid.UUID().UUIDString()).lower()
+        return str(char_uuid).lower()
+
+    def _on_read(self, char_uuid: Any) -> bytearray:
         """Handle incoming GATT read requests."""
-        uuid = char_uuid.lower()
+        uuid = self._resolve_char_uuid(char_uuid)
         if uuid == DEVICE_ID_CHAR_UUID.lower():
             return bytearray(self._device_id.encode("utf-8"))
         if uuid == IDENTITY_CHAR_UUID.lower():
             return bytearray(self._identity_bytes)
         return bytearray(b"")
 
-    def _on_write(self, char_uuid: str, value: Any) -> None:
+    def _on_write(self, char_uuid: Any, value: Any) -> None:
         """Handle incoming GATT write requests (fragments from phones)."""
-        if char_uuid.lower() != MESSAGE_CHAR_UUID.lower():
+        if self._resolve_char_uuid(char_uuid) != MESSAGE_CHAR_UUID.lower():
             return
 
         fragment = bytes(value)
