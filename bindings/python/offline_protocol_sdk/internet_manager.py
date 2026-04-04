@@ -100,6 +100,7 @@ class InternetManager(TransportManager):
         self._poll_task: asyncio.Task[None] | None = None
         self._ping_task: asyncio.Task[None] | None = None
         self._send_tasks: set[asyncio.Task[None]] = set()
+        self._send_semaphore: asyncio.Semaphore = asyncio.Semaphore(50)
         self._reconnect_handle: asyncio.TimerHandle | None = None
 
     # -- configuration --------------------------------------------------------
@@ -162,11 +163,13 @@ class InternetManager(TransportManager):
                 task.cancel()
         self._recv_task = self._poll_task = self._ping_task = None
 
-        # Cancel in-flight send tasks
-        for task in list(self._send_tasks):
+        # Cancel in-flight send tasks — snapshot to avoid "Set changed size
+        # during iteration" if done-callbacks fire concurrently.
+        pending_sends = list(self._send_tasks)
+        self._send_tasks.clear()
+        for task in pending_sends:
             if not task.done():
                 task.cancel()
-        self._send_tasks.clear()
 
         # Close WebSocket
         await self._disconnect()
@@ -211,11 +214,12 @@ class InternetManager(TransportManager):
             self._consecutive_send_failures = 0
             self._consecutive_ping_failures = 0
 
+            # Start receive loop BEFORE auth so it's always cleaned up on
+            # failure — prevents _recv_task staying None if auth throws.
+            self._recv_task = asyncio.ensure_future(self._receive_loop())
+
             self._emit_diagnostic("info", "WebSocket connected, authenticating...")
             await self._send_authentication()
-
-            # Start receive loop
-            self._recv_task = asyncio.ensure_future(self._receive_loop())
 
         except Exception as exc:
             self._emit_diagnostic("error", "WebSocket connection failed", {
@@ -315,13 +319,17 @@ class InternetManager(TransportManager):
             _RECONNECT_MAX_DELAY,
         )
 
+        # Transition to STARTING so callers see a consistent state while
+        # waiting for the reconnect timer (avoids RUNNING + _connected=False).
+        self._update_state(TransportState.STARTING)
+
         self._emit_diagnostic("info", "Scheduling reconnect", {
             "attempt": self._reconnect_attempts,
             "delay_seconds": delay,
         })
 
         loop = self._loop
-        if loop is None or not loop.is_running():
+        if loop is None or loop.is_closed() or not loop.is_running():
             self._emit_diagnostic("warning", "No running event loop for reconnect")
             self._update_state(TransportState.STOPPED)
             return
@@ -551,11 +559,19 @@ class InternetManager(TransportManager):
             return
 
     def _poll_and_send_messages(self) -> None:
-        """Drain outgoing messages from the protocol and send them."""
+        """Drain outgoing messages from the protocol and send them.
+
+        Concurrency is bounded by ``_send_semaphore`` to prevent unbounded
+        task spawning when the protocol core has a large outbox.
+        """
         while True:
             try:
                 msg = self._protocol.internet_get_next_message()
-            except Exception:
+            except (AttributeError, ReferenceError) as exc:
+                logger.error("Protocol instance invalid: %s", exc)
+                break
+            except Exception as exc:
+                logger.warning("Unexpected error polling outgoing messages: %s", exc)
                 break
             if msg is None:
                 break
@@ -582,37 +598,38 @@ class InternetManager(TransportManager):
                 self._protocol.internet_send_failed(message_id=message_id)
             return
 
-        try:
-            payload = json.dumps({
-                "type": "SendMessage",
-                "recipient": recipient,
-                "content": data.decode("utf-8", errors="replace"),
-            })
-            await self._ws.send(payload)
-            self._bytes_sent += len(payload)
-            self._messages_sent += 1
-            self._consecutive_send_failures = 0
-
-            self._protocol.internet_confirm_sent(message_id=message_id)
-
-        except Exception as exc:
-            self._consecutive_send_failures += 1
-            self._emit_diagnostic("error", f"Send failed: {exc}", {
-                "message_id": message_id,
-                "consecutive_failures": self._consecutive_send_failures,
-            })
+        async with self._send_semaphore:
             try:
-                self._protocol.internet_send_failed_with_reason(
-                    message_id=message_id, reason=str(exc)
-                )
-            except Exception:
-                self._protocol.internet_send_failed(message_id=message_id)
+                payload = json.dumps({
+                    "type": "SendMessage",
+                    "recipient": recipient,
+                    "content": data.decode("utf-8", errors="replace"),
+                })
+                await self._ws.send(payload)
+                self._bytes_sent += len(payload)
+                self._messages_sent += 1
+                self._consecutive_send_failures = 0
 
-            if self._consecutive_send_failures >= _MAX_CONSECUTIVE_FAILURES:
-                self._emit_diagnostic(
-                    "error", "Too many consecutive send failures, disconnecting"
-                )
-                await self._handle_connection_closed(exc)
+                self._protocol.internet_confirm_sent(message_id=message_id)
+
+            except Exception as exc:
+                self._consecutive_send_failures += 1
+                self._emit_diagnostic("error", f"Send failed: {exc}", {
+                    "message_id": message_id,
+                    "consecutive_failures": self._consecutive_send_failures,
+                })
+                try:
+                    self._protocol.internet_send_failed_with_reason(
+                        message_id=message_id, reason=str(exc)
+                    )
+                except Exception:
+                    self._protocol.internet_send_failed(message_id=message_id)
+
+                if self._consecutive_send_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    self._emit_diagnostic(
+                        "error", "Too many consecutive send failures, disconnecting"
+                    )
+                    await self._handle_connection_closed(exc)
 
     # -- ping loop ------------------------------------------------------------
 

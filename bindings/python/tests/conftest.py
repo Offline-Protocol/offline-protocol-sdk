@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from offline_protocol_sdk.offline_protocol import (
@@ -13,25 +15,34 @@ from offline_protocol_sdk.offline_protocol import (
 
 
 class InMemoryStorage(MlsStorageProvider):
-    """Dict-backed MlsStorageProvider for testing (no keyring dependency)."""
+    """Thread-safe dict-backed MlsStorageProvider for testing.
+
+    Mirrors the locking behaviour of :class:`SecureStorage` so that tests
+    exercise the same concurrency contract the real storage provides.
+    """
 
     def __init__(self) -> None:
         self._data: dict[tuple[str, str], bytes] = {}
+        self._lock = threading.Lock()
 
     def store(self, key_type: str, key_id: str, data: list[int]) -> None:
-        self._data[(key_type, key_id)] = bytes(data)
+        with self._lock:
+            self._data[(key_type, key_id)] = bytes(data)
 
     def load(self, key_type: str, key_id: str) -> list[int] | None:
-        raw = self._data.get((key_type, key_id))
-        if raw is None:
-            return None
-        return list(raw)
+        with self._lock:
+            raw = self._data.get((key_type, key_id))
+            if raw is None:
+                return None
+            return list(raw)
 
     def delete(self, key_type: str, key_id: str) -> None:
-        self._data.pop((key_type, key_id), None)
+        with self._lock:
+            self._data.pop((key_type, key_id), None)
 
     def list_keys(self, key_type: str) -> list[str]:
-        return [kid for (kt, kid) in self._data if kt == key_type]
+        with self._lock:
+            return [kid for (kt, kid) in self._data if kt == key_type]
 
 
 @pytest.fixture

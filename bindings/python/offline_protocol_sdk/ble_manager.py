@@ -197,7 +197,11 @@ class BleManager(TransportManager):
     def _on_advertisement(
         self, device: BLEDevice, adv_data: AdvertisementData
     ) -> None:
-        """Called by bleak for each BLE advertisement detected."""
+        """Called by bleak for each BLE advertisement detected.
+
+        NOTE: This is invoked from bleak's scanner thread, not the asyncio
+        event loop.  All shared-state access must be thread-safe.
+        """
         addr = device.address
         rssi = adv_data.rssi if adv_data.rssi is not None else -100
 
@@ -216,10 +220,20 @@ class BleManager(TransportManager):
         except Exception:
             pass
 
-        # Attempt connection if not already connected / connecting
+        # Attempt connection if not already connected / connecting.
+        # Mark as connecting BEFORE scheduling the task to prevent duplicate
+        # connection attempts from near-simultaneous advertisements.
         if addr not in self._clients and addr not in self._connecting:
             if self._should_connect(addr, now):
-                asyncio.ensure_future(self._connect_to_peer(device))
+                self._connecting.add(addr)
+                loop = self._loop
+                if loop is not None and not loop.is_closed() and loop.is_running():
+                    loop.call_soon_threadsafe(
+                        asyncio.ensure_future,
+                        self._connect_to_peer(device),
+                    )
+                else:
+                    self._connecting.discard(addr)
 
     def _should_connect(self, addr: str, now: float) -> bool:
         """Adaptive rate-limiting (mirrors iOS adaptive scan logic)."""
@@ -240,7 +254,7 @@ class BleManager(TransportManager):
 
     async def _connect_to_peer(self, device: BLEDevice) -> None:
         addr = device.address
-        self._connecting.add(addr)
+        # addr is already in self._connecting (added in _on_advertisement)
         now = time.monotonic()
         self._connection_attempts[addr] = now
         self._global_attempts.append(now)
@@ -254,7 +268,9 @@ class BleManager(TransportManager):
                         asyncio.ensure_future,
                         self._on_peer_disconnected(_addr),
                     )
-                    if self._loop is not None and self._loop.is_running()
+                    if self._loop is not None
+                    and not self._loop.is_closed()
+                    and self._loop.is_running()
                     else None
                 ),
             )
@@ -347,7 +363,7 @@ class BleManager(TransportManager):
         ``call_soon_threadsafe`` to schedule work on the asyncio event loop.
         """
         loop = self._loop
-        if loop is not None and loop.is_running():
+        if loop is not None and not loop.is_closed() and loop.is_running():
             loop.call_soon_threadsafe(asyncio.ensure_future, self._drain_outgoing_fragments())
 
     async def _drain_outgoing_fragments(self) -> None:
@@ -355,7 +371,11 @@ class BleManager(TransportManager):
         while True:
             try:
                 frag = self._protocol.ble_get_next_fragment()
-            except Exception:
+            except (AttributeError, ReferenceError) as exc:
+                logger.error("Protocol instance invalid: %s", exc)
+                break
+            except Exception as exc:
+                logger.warning("Unexpected error getting next fragment: %s", exc)
                 break
             if frag is None:
                 break

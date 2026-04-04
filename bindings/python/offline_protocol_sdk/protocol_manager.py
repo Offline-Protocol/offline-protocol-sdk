@@ -135,6 +135,10 @@ class ProtocolManager:
         self._process_task: asyncio.Task[None] | None = None
         self._running = False
 
+        # Registry of objects whose pointers are held by the Rust/UniFFI side.
+        # Prevents garbage collection while the protocol is alive.
+        self._prevent_gc: list[Any] = []
+
     @property
     def protocol(self) -> OfflineProtocol:
         """Direct access to the underlying UniFFI ``OfflineProtocol``."""
@@ -157,6 +161,16 @@ class ProtocolManager:
 
         self._wifi_cb = _WifiDirectTransportCallbackImpl()
         self._protocol.set_wifi_direct_transport_callback(self._wifi_cb)
+
+        # Keep strong references to all objects passed to the Rust/UniFFI
+        # side so that Python's GC cannot collect them while Rust holds
+        # raw callback pointers.
+        self._prevent_gc = [
+            self._event_cb,
+            self._ble_cb,
+            self._wifi_cb,
+            self._storage,
+        ]
 
         # Initialise MLS encryption
         try:
@@ -203,7 +217,18 @@ class ProtocolManager:
         except Exception:
             pass
 
+        # Release GC-prevention references now that Rust no longer calls back.
+        self._prevent_gc.clear()
+
         logger.info("ProtocolManager stopped")
+
+    def __del__(self) -> None:
+        if self._running:
+            logger.error(
+                "ProtocolManager garbage-collected while still running! "
+                "Call await stop() before discarding the manager to avoid "
+                "dangling callback pointers on the Rust side."
+            )
 
     async def __aenter__(self) -> ProtocolManager:
         await self.start()

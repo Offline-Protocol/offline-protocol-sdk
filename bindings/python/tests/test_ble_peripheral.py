@@ -151,6 +151,7 @@ class TestOutgoingFragments:
         peripheral._server = mock_server
         return peripheral, mock_server, mock_char
 
+    @pytest.mark.asyncio
     async def test_drain_sends_fragments(self, started_peripheral, mock_protocol):
         peripheral, mock_server, mock_char = started_peripheral
 
@@ -171,6 +172,7 @@ class TestOutgoingFragments:
         assert peripheral._fragments_sent == 1
         assert peripheral._bytes_sent == 4
 
+    @pytest.mark.asyncio
     async def test_drain_no_fragments(self, started_peripheral, mock_protocol):
         peripheral, mock_server, _ = started_peripheral
         mock_protocol.ble_get_next_fragment = MagicMock(return_value=None)
@@ -186,6 +188,7 @@ class TestOutgoingFragments:
 # ---------------------------------------------------------------------------
 
 class TestPeerMonitoring:
+    @pytest.mark.asyncio
     async def test_detects_new_central(self, peripheral, mock_protocol):
         """Simulate a central appearing in _central_subscriptions."""
         mock_delegate = MagicMock()
@@ -199,14 +202,14 @@ class TestPeerMonitoring:
         # Start the monitor loop
         task = asyncio.ensure_future(peripheral._peer_monitor_loop())
 
-        # First tick: no centrals
-        await asyncio.sleep(1.2)
+        # Wait for first tick (interval=1.0s) with generous margin
+        await asyncio.sleep(1.5)
         assert len(peripheral._connected_centrals) == 0
 
         # Simulate a central subscribing
         mock_delegate._central_subscriptions["PHONE-UUID-1"] = ["6e400002"]
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.5)
         assert "PHONE-UUID-1" in peripheral._connected_centrals
         mock_protocol.ble_peer_discovered.assert_called_with(
             peer_id="PHONE-UUID-1", rssi=-50
@@ -215,7 +218,7 @@ class TestPeerMonitoring:
         # Simulate central disconnecting
         mock_delegate._central_subscriptions.clear()
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.5)
         assert len(peripheral._connected_centrals) == 0
         mock_protocol.ble_peer_lost.assert_called_with(peer_id="PHONE-UUID-1")
 
@@ -225,6 +228,7 @@ class TestPeerMonitoring:
         except asyncio.CancelledError:
             pass
 
+    @pytest.mark.asyncio
     async def test_respects_max_connections(self, peripheral, mock_protocol):
         """Connections beyond max_connections are ignored."""
         peripheral._max_connections = 1
@@ -241,7 +245,7 @@ class TestPeerMonitoring:
         peripheral._server = mock_server
 
         task = asyncio.ensure_future(peripheral._peer_monitor_loop())
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.5)
 
         # Only 1 should be accepted
         assert len(peripheral._connected_centrals) == 1

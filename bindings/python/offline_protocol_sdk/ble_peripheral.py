@@ -344,10 +344,17 @@ class BlePeripheral(TransportManager):
     def _resolve_sender(self) -> str:
         """Best-effort identification of the writing central.
 
-        The bless write callback does not pass the central's UUID, so we
-        use the subscription dict as a proxy.  When exactly one central is
-        connected the mapping is unambiguous.  With multiple centrals the
-        Rust core identifies the sender from the reassembled message content.
+        **Known limitation:** The ``bless`` write callback does not provide
+        the central's identity (UUID).  We use the subscription dict as a
+        proxy: when exactly one central is connected the mapping is
+        unambiguous.  With multiple centrals we return ``"ble-peer"`` and
+        rely on the Rust core to identify the sender from the reassembled
+        message payload.
+
+        This means that **sender attribution is unreliable when multiple
+        centrals are connected simultaneously**.  Do not use sender identity
+        from BLE peripheral writes for authorisation decisions in
+        multi-central deployments.
         """
         if len(self._connected_centrals) == 1:
             return next(iter(self._connected_centrals))
@@ -365,7 +372,7 @@ class BlePeripheral(TransportManager):
         ``call_soon_threadsafe`` to schedule work on the asyncio event loop.
         """
         loop = self._loop
-        if loop is not None and loop.is_running():
+        if loop is not None and not loop.is_closed() and loop.is_running():
             loop.call_soon_threadsafe(asyncio.ensure_future, self._drain_outgoing_fragments())
 
     async def _drain_outgoing_fragments(self) -> None:
@@ -376,7 +383,11 @@ class BlePeripheral(TransportManager):
         while True:
             try:
                 frag = self._protocol.ble_get_next_fragment()
-            except Exception:
+            except (AttributeError, ReferenceError) as exc:
+                logger.error("Protocol instance invalid: %s", exc)
+                break
+            except Exception as exc:
+                logger.warning("Unexpected error getting next fragment: %s", exc)
                 break
             if frag is None:
                 break
