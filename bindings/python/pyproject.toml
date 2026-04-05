@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "offline-protocol-sdk"
+version = "0.1.0"
+description = "Python bindings for the Offline Protocol SDK — offline-first mesh networking with MLS encryption"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Offline Protocol Contributors" }]
+keywords = ["offline", "messaging", "p2p", "mesh", "ble", "mls", "encryption"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Communications",
+    "Topic :: Security :: Cryptography",
+]
+
+# Audited dependencies — see plan for supply chain security audit results.
+# Upper bounds prevent surprise major-version upgrades.
+dependencies = [
+    "bleak>=0.21,<1.0",
+    "bless>=0.3,<1.0",
+    "websockets>=12.0,<17.0",
+    "keyring>=25.0,<26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pip-audit>=2.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/nicholasgasior/offline-protocol-sdk"
+Repository = "https://github.com/nicholasgasior/offline-protocol-sdk"
+Issues = "https://github.com/nicholasgasior/offline-protocol-sdk/issues"
+
+[tool.setuptools.packages.find]
+include = ["offline_protocol_sdk*"]
+
+[tool.setuptools.package-data]
+offline_protocol_sdk = ["*.dylib", "*.so", "*.dll", "libuniffi.*", "uniffi.dll"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

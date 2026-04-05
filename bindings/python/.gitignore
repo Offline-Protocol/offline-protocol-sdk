@@ -1,0 +1,32 @@
+# Generated Python bindings (regenerated from UDL via uniffi-bindgen)
+offline_protocol_sdk/offline_protocol.py
+
+# Native libraries (built from Rust source)
+offline_protocol_sdk/*.dylib
+offline_protocol_sdk/*.so
+offline_protocol_sdk/*.dll
+# Symlink expected by generated Python (UDL-mode generates "libuniffi.*" name)
+offline_protocol_sdk/libuniffi.*
+offline_protocol_sdk/uniffi.dll
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.whl
+*.tar.gz
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

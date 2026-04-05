@@ -1,0 +1,20 @@
+# Pinned dependencies for reproducible installs.
+# Regenerate with: pip-compile pyproject.toml -o requirements.lock
+#
+# NOTE: This lockfile pins exact versions but does NOT include hashes.
+# For production/CI deployments requiring supply-chain protection, regenerate
+# with hashes:
+#
+#   pip-compile --generate-hashes pyproject.toml -o requirements.lock
+#   pip install --require-hashes -r requirements.lock
+#
+# This file should be regenerated periodically to pick up security patches.
+# Run pip-audit after regeneration to verify no CVEs are present.
+#
+# Last audited: 2026-04-04
+# Audit tool: pip-audit --strict
+
+bleak==3.0.1
+bless==0.3.0
+websockets==16.0
+keyring==25.7.0
