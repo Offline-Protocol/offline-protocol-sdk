@@ -61,7 +61,15 @@ class _BleTransportCallbackImpl(BleTransportCallback):
         self._peripheral = ble_peripheral
 
     def on_fragments_available(self) -> None:
-        if self._ble is not None:
+        # The scanner and peripheral share a single fragment queue.
+        # Only let the scanner drain if it has connected clients;
+        # otherwise the scanner pops fragments it can't deliver,
+        # starving the peripheral.
+        scanner_has_clients = (
+            self._ble is not None
+            and bool(self._ble._clients)
+        )
+        if scanner_has_clients:
             self._ble.on_fragments_available()
         if self._peripheral is not None:
             self._peripheral.on_fragments_available()
