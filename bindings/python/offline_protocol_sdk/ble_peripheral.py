@@ -107,6 +107,12 @@ class BlePeripheral(TransportManager):
         # Connected centrals: uuid -> connection timestamp
         self._connected_centrals: dict[str, float] = {}
 
+        # Central UUID -> resolved user_id mapping.  Populated when the
+        # protocol core emits a message_received event containing a
+        # ``sender`` field.  Used to re-register the peer with its real
+        # user_id so the Rust BLE transport can route outgoing messages.
+        self._central_to_user_id: dict[str, str] = {}
+
         # Event loop — captured in start() for thread-safe callback scheduling
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -210,13 +216,20 @@ class BlePeripheral(TransportManager):
             self._server = None
         self._is_advertising = False
 
-        # Notify protocol about all lost peers
+        # Notify protocol about all lost peers (both raw UUID and resolved user_id)
         for central_uuid in list(self._connected_centrals):
             try:
                 self._protocol.ble_peer_lost(peer_id=central_uuid)
             except Exception:
                 logger.debug("ble_peer_lost failed for %s", central_uuid)
+            resolved_uid = self._central_to_user_id.get(central_uuid)
+            if resolved_uid:
+                try:
+                    self._protocol.ble_peer_lost(peer_id=resolved_uid)
+                except Exception:
+                    logger.debug("ble_peer_lost failed for resolved %s", resolved_uid)
         self._connected_centrals.clear()
+        self._central_to_user_id.clear()
 
         try:
             self._protocol.ble_status_changed(is_available=False)
@@ -353,21 +366,68 @@ class BlePeripheral(TransportManager):
     def _resolve_sender(self) -> str:
         """Best-effort identification of the writing central.
 
-        **Known limitation:** The ``bless`` write callback does not provide
-        the central's identity (UUID).  We use the subscription dict as a
-        proxy: when exactly one central is connected the mapping is
-        unambiguous.  With multiple centrals we return ``"ble-peer"`` and
-        rely on the Rust core to identify the sender from the reassembled
-        message payload.
-
-        This means that **sender attribution is unreliable when multiple
-        centrals are connected simultaneously**.  Do not use sender identity
-        from BLE peripheral writes for authorisation decisions in
-        multi-central deployments.
+        Returns a stable sender ID so that the Rust core can group
+        fragments from the same source.  If the peer monitor hasn't
+        detected the subscription yet (``_connected_centrals`` is empty),
+        fall back to the last known central UUID.  This prevents the
+        sender flipping between ``"ble-peer"`` and a UUID within the
+        same message's fragments, which breaks reassembly.
         """
         if len(self._connected_centrals) == 1:
-            return next(iter(self._connected_centrals))
-        return "ble-peer"
+            central = next(iter(self._connected_centrals))
+            self._last_known_central = central
+            return central
+        if len(self._connected_centrals) > 1:
+            return "ble-peer"
+        # No centrals currently tracked — use last known if available
+        return getattr(self, '_last_known_central', 'ble-peer')
+
+    def resolve_sender_identity(self, sender_user_id: str) -> None:
+        """Associate a sender's user_id with the currently connected central.
+
+        Called by ``ProtocolManager`` when a reassembled message reveals the
+        sender's real user_id (from the message ``sender`` field).  The BLE
+        central (scanner) path learns the peer's user_id by reading the
+        DEVICE_ID characteristic; the peripheral has no equivalent mechanism,
+        so it relies on the first received message to learn the mapping.
+
+        Once the mapping is established, the peer is re-registered with the
+        Rust core under its real user_id so that ``send_message(user_id, ...)``
+        can route back through the BLE peripheral.
+        """
+        if not self._connected_centrals:
+            return
+
+        # With one central connected the mapping is unambiguous.
+        # With multiple, we can't reliably attribute — skip.
+        if len(self._connected_centrals) != 1:
+            logger.debug(
+                "resolve_sender_identity: %d centrals connected, skipping",
+                len(self._connected_centrals),
+            )
+            return
+
+        central_uuid = next(iter(self._connected_centrals))
+
+        # Avoid redundant re-registration
+        if self._central_to_user_id.get(central_uuid) == sender_user_id:
+            return
+
+        self._central_to_user_id[central_uuid] = sender_user_id
+        logger.info(
+            "Resolved central %s -> user_id %s — re-registering peer",
+            central_uuid, sender_user_id,
+        )
+
+        try:
+            self._protocol.ble_peer_discovered(
+                peer_id=sender_user_id, rssi=-50
+            )
+        except Exception:
+            logger.debug(
+                "ble_peer_discovered failed for resolved user_id %s",
+                sender_user_id,
+            )
 
     # -- outgoing fragment handling -------------------------------------------
 
@@ -486,10 +546,19 @@ class BlePeripheral(TransportManager):
                 # Lost centrals
                 for central_uuid in known - current:
                     self._connected_centrals.pop(central_uuid, None)
+                    # Notify peer lost for both the raw UUID and the
+                    # resolved user_id (if any) so the Rust core removes
+                    # both routing entries.
+                    resolved_uid = self._central_to_user_id.pop(central_uuid, None)
                     try:
                         self._protocol.ble_peer_lost(peer_id=central_uuid)
                     except Exception:
                         logger.debug("ble_peer_lost failed for %s", central_uuid)
+                    if resolved_uid:
+                        try:
+                            self._protocol.ble_peer_lost(peer_id=resolved_uid)
+                        except Exception:
+                            logger.debug("ble_peer_lost failed for resolved %s", resolved_uid)
                     self._emit_diagnostic(
                         "info", "Central disconnected", {"central": central_uuid}
                     )
