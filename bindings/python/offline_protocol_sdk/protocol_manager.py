@@ -302,15 +302,30 @@ class ProtocolManager:
             if raw is None:
                 break
             drained += 1
-            if handler is not None:
-                try:
-                    event = json.loads(raw)
-                    if isinstance(event, dict):
-                        event.setdefault("type", "message_received")
-                    else:
-                        event = {"type": "message_received", "raw": raw}
-                except json.JSONDecodeError:
+
+            try:
+                event = json.loads(raw)
+                if isinstance(event, dict):
+                    event.setdefault("type", "message_received")
+                else:
                     event = {"type": "message_received", "raw": raw}
+            except json.JSONDecodeError:
+                event = {"type": "message_received", "raw": raw}
+
+            # Resolve BLE peripheral peer identity from the sender field.
+            # The BLE central path reads the DEVICE_ID characteristic to
+            # learn the peer's user_id; the peripheral has no equivalent
+            # mechanism, so we extract it from the first received message.
+            if (
+                self.ble_peripheral is not None
+                and isinstance(event, dict)
+                and event.get("type") == "message_received"
+            ):
+                sender = event.get("sender") or event.get("sender_id")
+                if sender:
+                    self.ble_peripheral.resolve_sender_identity(sender)
+
+            if handler is not None:
                 try:
                     handler(event)
                 except Exception:
