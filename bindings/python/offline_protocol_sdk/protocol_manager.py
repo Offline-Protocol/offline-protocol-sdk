@@ -257,13 +257,49 @@ class ProtocolManager:
         priority: MessagePriority = MessagePriority.MEDIUM,
         reply_to: str | None = None,
     ) -> str:
-        """Send a text message and return its message ID."""
+        """Send a text message and return its message ID.
+
+        If *recipient* is ``"*"`` (broadcast), the message is sent
+        individually to every known BLE peer.  The Rust core's
+        ``BleTransport::send()`` treats ``"*"`` as a literal peer-ID
+        lookup which always fails; expanding here ensures broadcasts
+        reach all connected devices.
+        """
+        if recipient == "*":
+            peers = self._get_known_ble_peers()
+            if peers:
+                last_id = ""
+                for peer_id in peers:
+                    last_id = self._protocol.send_message(
+                        recipient=peer_id,
+                        content=content,
+                        priority=priority,
+                        reply_to_msg=reply_to,
+                    )
+                return last_id
+
         return self._protocol.send_message(
             recipient=recipient,
             content=content,
             priority=priority,
             reply_to_msg=reply_to,
         )
+
+    def _get_known_ble_peers(self) -> list[str]:
+        """Return user_ids of all BLE-discovered peers."""
+        peers: list[str] = []
+        if self.ble is not None:
+            try:
+                with self.ble._lock:
+                    peers.extend(self.ble._peer_device_ids.values())
+            except (AttributeError, Exception):
+                pass
+        if self.ble_peripheral is not None:
+            try:
+                peers.extend(self.ble_peripheral._central_to_user_id.values())
+            except (AttributeError, Exception):
+                pass
+        return list(set(peers))
 
     def get_state(self) -> Any:
         """Return the current protocol state."""
@@ -302,15 +338,30 @@ class ProtocolManager:
             if raw is None:
                 break
             drained += 1
-            if handler is not None:
-                try:
-                    event = json.loads(raw)
-                    if isinstance(event, dict):
-                        event.setdefault("type", "message_received")
-                    else:
-                        event = {"type": "message_received", "raw": raw}
-                except json.JSONDecodeError:
+
+            try:
+                event = json.loads(raw)
+                if isinstance(event, dict):
+                    event.setdefault("type", "message_received")
+                else:
                     event = {"type": "message_received", "raw": raw}
+            except json.JSONDecodeError:
+                event = {"type": "message_received", "raw": raw}
+
+            # Resolve BLE peripheral peer identity from the sender field.
+            # The BLE central path reads the DEVICE_ID characteristic to
+            # learn the peer's user_id; the peripheral has no equivalent
+            # mechanism, so we extract it from the first received message.
+            if (
+                self.ble_peripheral is not None
+                and isinstance(event, dict)
+                and event.get("type") == "message_received"
+            ):
+                sender = event.get("sender") or event.get("sender_id")
+                if sender:
+                    self.ble_peripheral.resolve_sender_identity(sender)
+
+            if handler is not None:
                 try:
                     handler(event)
                 except Exception:
