@@ -473,6 +473,11 @@ class BlePeripheral(TransportManager):
                 break
 
             data = bytes(frag.data)
+            recipient = getattr(frag, 'recipient_id', None)
+            logger.info(
+                "OUTGOING fragment: %d bytes, recipient=%s",
+                len(data), recipient,
+            )
 
             char = self._server.get_characteristic(MESSAGE_CHAR_UUID)
             if char is not None:
