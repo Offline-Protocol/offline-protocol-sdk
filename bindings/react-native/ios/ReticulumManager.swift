@@ -311,7 +311,8 @@ public class ReticulumManager: NSObject, TransportManager {
                 self.receiveBuffer.append(data)
 
                 // Process complete lines (newline-delimited JSON)
-                while let newlineRange = self.receiveBuffer.range(of: Data([0x0A])) {
+                let newlineByte = Data([0x0A])
+                while let newlineRange = self.receiveBuffer.range(of: newlineByte) {
                     let lineData = self.receiveBuffer.subdata(in: self.receiveBuffer.startIndex..<newlineRange.lowerBound)
                     self.receiveBuffer.removeSubrange(self.receiveBuffer.startIndex...newlineRange.lowerBound)
                     if !lineData.isEmpty {

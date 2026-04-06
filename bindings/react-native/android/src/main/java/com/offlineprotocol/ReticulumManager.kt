@@ -30,6 +30,7 @@ class ReticulumManager(
 
     override val transportId = "reticulum"
     override val transportName = "Reticulum (Mesh)"
+    @Volatile
     override var state: TransportState = TransportState.UNAVAILABLE
         private set
     override var listener: TransportManagerListener? = null
@@ -79,7 +80,7 @@ class ReticulumManager(
     private val isConnected = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
     private var reconnectAttempts = AtomicInteger(0)
-    private var currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+    private var currentReconnectDelay = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
     private var reconnectRunnable: Runnable? = null
 
     // Failure tracking for DORS
@@ -321,7 +322,7 @@ class ReticulumManager(
         isConnected.set(true)
         isConnecting.set(false)
         reconnectAttempts.set(0)
-        currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+        currentReconnectDelay.set(RECONNECT_INITIAL_DELAY_MS)
         consecutiveSendFailures.set(0)
 
         emitDiagnostic("info", "Connected to Reticulum daemon")
@@ -407,11 +408,11 @@ class ReticulumManager(
             return
         }
 
-        val delay = currentReconnectDelay
-        currentReconnectDelay = minOf(
-            (currentReconnectDelay * RECONNECT_BACKOFF_MULTIPLIER).toLong(),
+        val delay = currentReconnectDelay.get()
+        currentReconnectDelay.set(minOf(
+            (delay * RECONNECT_BACKOFF_MULTIPLIER).toLong(),
             RECONNECT_MAX_DELAY_MS
-        )
+        ))
 
         emitDiagnostic("info", "Scheduling reconnect to Reticulum daemon", mapOf(
             "attempt" to attempts,
