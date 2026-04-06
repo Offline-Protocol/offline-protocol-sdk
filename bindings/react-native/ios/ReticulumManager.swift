@@ -314,7 +314,7 @@ public class ReticulumManager: NSObject, TransportManager {
                 let newlineByte = Data([0x0A])
                 while let newlineRange = self.receiveBuffer.range(of: newlineByte) {
                     let lineData = self.receiveBuffer.subdata(in: self.receiveBuffer.startIndex..<newlineRange.lowerBound)
-                    self.receiveBuffer.removeSubrange(self.receiveBuffer.startIndex...newlineRange.lowerBound)
+                    self.receiveBuffer.removeSubrange(self.receiveBuffer.startIndex..<newlineRange.upperBound)
                     if !lineData.isEmpty {
                         self.processReceivedData(lineData)
                     }
@@ -399,7 +399,7 @@ public class ReticulumManager: NSObject, TransportManager {
             self?.connect()
         }
         reconnectWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        connectionQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     // MARK: - Event-Driven Sending
@@ -417,17 +417,10 @@ public class ReticulumManager: NSObject, TransportManager {
     private func processReceivedData(_ data: Data) {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let messageType = json["type"] as? String else {
-            // Raw message data — pass directly to protocol
-            do {
-                let bytes = [UInt8](data)
-                try protocolInstance.reticulumMessageReceived(senderId: "", data: bytes)
-                messagesReceived += 1
-            } catch {
-                emitDiagnostic("warning", "Failed to process raw Reticulum data", context: [
-                    "size": data.count,
-                    "error": error.localizedDescription
-                ])
-            }
+            // Non-JSON data with no sender information — cannot route, skip
+            emitDiagnostic("warning", "Received non-JSON data from Reticulum daemon, skipping", context: [
+                "size": data.count
+            ])
             return
         }
 
@@ -435,9 +428,16 @@ public class ReticulumManager: NSObject, TransportManager {
         case "MessageReceived":
             guard let senderId = json["sender"] as? String,
                   let content = json["content"] as? String else {
-                emitDiagnostic("warning", "Invalid MessageReceived: missing sender")
+                emitDiagnostic("warning", "Invalid MessageReceived: missing sender or content")
                 return
             }
+
+            guard !senderId.isEmpty else {
+                emitDiagnostic("warning", "Invalid MessageReceived: empty sender")
+                return
+            }
+
+            let encoding = json["encoding"] as? String
 
             messagesReceived += 1
 
@@ -446,11 +446,8 @@ public class ReticulumManager: NSObject, TransportManager {
 
                 do {
                     let messageData: Data
-                    // Try to parse content as full Message JSON
-                    if let contentData = content.data(using: .utf8),
-                       let contentJson = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any],
-                       contentJson["sender"] != nil && contentJson["recipient"] != nil {
-                        messageData = contentData
+                    if encoding == "base64", let decoded = Data(base64Encoded: content) {
+                        messageData = decoded
                     } else if let contentData = content.data(using: .utf8) {
                         messageData = contentData
                     } else {
@@ -545,12 +542,13 @@ public class ReticulumManager: NSObject, TransportManager {
             return
         }
 
-        let content = String(data: data, encoding: .utf8) ?? data.base64EncodedString()
+        let content = data.base64EncodedString()
 
         var reticulumMessage: [String: Any] = [
             "type": "SendMessage",
             "recipient": recipientId,
-            "content": content
+            "content": content,
+            "encoding": "base64"
         ]
         if let replyToMsg = replyToMsg, !replyToMsg.isEmpty {
             reticulumMessage["reply_to_msg"] = replyToMsg

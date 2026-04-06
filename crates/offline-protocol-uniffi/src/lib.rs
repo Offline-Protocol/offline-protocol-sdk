@@ -2358,7 +2358,7 @@ impl OfflineProtocol {
         let is_blocked = protocol.is_user_blocked(&sender_id);
         drop(protocol);
 
-        if !is_blocked {
+        if !sender_id.is_empty() && !is_blocked {
             let event = CoreEvent::NeighborDiscovered {
                 peer_id: sender_id.clone(),
                 transport: "Reticulum".to_string(),
@@ -2393,16 +2393,26 @@ impl OfflineProtocol {
                     .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
             {
                 if let Ok(Some((message_id, data))) = reticulum_transport.get_next_message() {
-                    if let Ok(message) = reticulum_transport.deserialize_message(&data) {
-                        return Some(ReticulumMessage {
-                            message_id,
-                            recipient_id: message.recipient.as_str().to_string(),
-                            data,
-                            reply_to_msg: message
-                                .reply_to_msg
-                                .as_ref()
-                                .map(|id| id.as_str().to_string()),
-                        });
+                    match reticulum_transport.deserialize_message(&data) {
+                        Ok(message) => {
+                            return Some(ReticulumMessage {
+                                message_id,
+                                recipient_id: message.recipient.as_str().to_string(),
+                                data,
+                                reply_to_msg: message
+                                    .reply_to_msg
+                                    .as_ref()
+                                    .map(|id| id.as_str().to_string()),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                message_id = %message_id,
+                                error = %e,
+                                "Failed to deserialize reticulum message, reporting failure"
+                            );
+                            reticulum_transport.report_send_failure(&message_id);
+                        }
                     }
                 }
             }

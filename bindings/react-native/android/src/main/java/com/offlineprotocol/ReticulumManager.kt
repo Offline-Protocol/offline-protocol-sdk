@@ -260,8 +260,8 @@ class ReticulumManager(
             "port" to daemonPort
         ))
 
-        // Connect on a background thread to avoid blocking
-        Thread {
+        // Connect on the IO thread to avoid blocking and prevent unmanaged threads
+        ioHandler?.post {
             try {
                 val sock = Socket()
                 sock.connect(
@@ -298,7 +298,7 @@ class ReticulumManager(
                 ))
                 mainHandler.post { handleConnectionClosed(-1, e.message) }
             }
-        }.start()
+        }
     }
 
     private fun disconnect() {
@@ -327,20 +327,22 @@ class ReticulumManager(
 
         emitDiagnostic("info", "Connected to Reticulum daemon")
 
-        // Notify protocol
-        try {
-            protocol.reticulumStatusChanged(true)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error notifying protocol of connect", e)
-        }
-
-        // Update state on main thread, start polling on IO thread
+        // Update state first, then notify protocol, so state is RUNNING before
+        // protocol sees the connection event
         mainHandler.post {
             updateState(TransportState.RUNNING)
+
+            // Notify protocol on main thread (consistent with handleConnectionClosed)
+            try {
+                protocol.reticulumStatusChanged(true)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying protocol of connect", e)
+            }
+
+            // Start polling + immediately flush queued messages on IO thread
             startMessagePolling()
+            ioHandler?.post { pollAndSendMessages() }
         }
-        // Immediately flush queued messages on IO thread
-        ioHandler?.post { pollAndSendMessages() }
     }
 
     private fun startReceiveLoop(reader: BufferedReader) {
@@ -437,17 +439,11 @@ class ReticulumManager(
             json = org.json.JSONObject(String(data, Charsets.UTF_8))
             messageType = json.optString("type", "")
         } catch (e: Exception) {
-            // Raw message data — pass directly to protocol
-            try {
-                val senderId = "" // Unknown sender for raw data
-                protocol.reticulumMessageReceived(senderId, data.map { it.toUByte() })
-                messagesReceived.incrementAndGet()
-            } catch (ex: Exception) {
-                emitDiagnostic("warning", "Failed to process raw Reticulum data", mapOf(
-                    "size" to data.size,
-                    "error" to (ex.message ?: "unknown")
-                ))
-            }
+            // Non-JSON data with no sender information — cannot route, skip
+            emitDiagnostic("warning", "Received non-JSON data from Reticulum daemon, skipping", mapOf(
+                "size" to data.size,
+                "error" to (e.message ?: "unknown")
+            ))
             return
         }
 
@@ -455,6 +451,7 @@ class ReticulumManager(
             "MessageReceived" -> {
                 val senderId = json.optString("sender", "")
                 val content = json.optString("content", "")
+                val encoding = json.optString("encoding", "")
 
                 if (senderId.isEmpty()) {
                     emitDiagnostic("warning", "Invalid MessageReceived: missing sender")
@@ -464,15 +461,9 @@ class ReticulumManager(
                 messagesReceived.incrementAndGet()
 
                 try {
-                    val messageBytes: ByteArray = try {
-                        // Try to parse content as full Message JSON
-                        val contentJson = org.json.JSONObject(content)
-                        if (contentJson.has("sender") && contentJson.has("recipient")) {
-                            contentJson.toString().toByteArray(Charsets.UTF_8)
-                        } else {
-                            content.toByteArray(Charsets.UTF_8)
-                        }
-                    } catch (_: org.json.JSONException) {
+                    val messageBytes: ByteArray = if (encoding == "base64") {
+                        android.util.Base64.decode(content, android.util.Base64.NO_WRAP)
+                    } else {
                         content.toByteArray(Charsets.UTF_8)
                     }
 
@@ -575,12 +566,13 @@ class ReticulumManager(
             return
         }
 
-        val content = String(data, Charsets.UTF_8)
+        val content = android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP)
 
         val reticulumMessage = org.json.JSONObject().apply {
             put("type", "SendMessage")
             put("recipient", recipientId)
             put("content", content)
+            put("encoding", "base64")
             if (replyToMsg != null && replyToMsg.isNotEmpty()) {
                 put("reply_to_msg", replyToMsg)
             }
