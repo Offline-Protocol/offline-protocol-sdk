@@ -393,6 +393,11 @@ callback interface WifiDirectTransportCallback {
     void on_messages_available();
 };
 
+// Reticulum transport callback - notifies platform when outgoing messages are available.
+callback interface ReticulumTransportCallback {
+    void on_messages_available();
+};
+
 // Main protocol interface
 interface OfflineProtocol {
     // Create a new protocol instance
@@ -502,7 +507,25 @@ interface OfflineProtocol {
     
     [Throws=ProtocolError]
     void wifi_direct_peer_disconnected(string peer_id);
-    
+
+    // Reticulum transport callback (event-driven sending)
+    void set_reticulum_transport_callback(ReticulumTransportCallback callback);
+
+    // Reticulum transport operations
+    [Throws=ProtocolError]
+    void reticulum_status_changed(boolean is_connected);
+
+    [Throws=ProtocolError]
+    void reticulum_message_received(string sender_id, sequence<u8> data);
+
+    ReticulumMessage? reticulum_get_next_message();
+
+    void reticulum_confirm_sent(string message_id);
+
+    void reticulum_send_failed(string message_id);
+
+    void reticulum_send_failed_with_reason(string message_id, string? reason);
+
     // Transport management
     [Throws=ProtocolError]
     void remove_transport(TransportType transport_type);
@@ -883,5 +906,13 @@ dictionary InternetMessage {
 dictionary WifiDirectMessage {
     string recipient_id;
     sequence<u8> data;
+};
+
+// Reticulum message for outgoing data
+dictionary ReticulumMessage {
+    string message_id;
+    string recipient_id;
+    sequence<u8> data;
+    string? reply_to_msg;
 };
 

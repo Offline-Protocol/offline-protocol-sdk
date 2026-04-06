@@ -25,6 +25,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var bleManager: BleManager? = null
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
+    private var reticulumManager: ReticulumManager? = null
     private var processScheduler: ScheduledExecutorService? = null
     private var listenerCount: Int = 0
     private var currentConfig: ProtocolConfig? = null
@@ -68,6 +69,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         internetManager = null
         wifiDirectManager?.stop()
         wifiDirectManager = null
+        reticulumManager?.stop()
+        reticulumManager = null
         protocol = null
         stopForegroundService()
     }
@@ -400,7 +403,56 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     "userId" to config.userId
                 ))
             }
-            
+
+            // Initialize Reticulum manager if reticulum is enabled
+            if (config.reticulumEnabled) {
+                reticulumManager = ReticulumManager(reactApplicationContext, proto, config.userId) { level, message, context ->
+                    emitDiagnostic(level, message, context)
+                }.also { manager ->
+                    manager.listener = object : TransportManagerListener {
+                        override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
+                            emitDiagnostic("info", "Reticulum transport state changed", mapOf(
+                                "transport" to manager.transportId,
+                                "state" to state.name.lowercase()
+                            ))
+                        }
+
+                        override fun onTransportError(manager: TransportManager, error: Throwable) {
+                            emitDiagnostic("error", "Reticulum transport error", mapOf(
+                                "transport" to manager.transportId,
+                                "message" to (error.message ?: "unknown"),
+                                "exception" to error.javaClass.simpleName
+                            ))
+                        }
+
+                        override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
+                            val enrichedMetrics = metrics.toMutableMap()
+                            enrichedMetrics["transport"] = manager.transportId
+                            emitDiagnostic("info", "Reticulum transport metrics", enrichedMetrics)
+                        }
+
+                        override fun onTransportDiagnostic(
+                            manager: TransportManager,
+                            level: String,
+                            message: String,
+                            context: Map<String, Any?>
+                        ) {
+                            val enrichedContext = context.toMutableMap()
+                            enrichedContext["transport"] = manager.transportId
+                            emitDiagnostic(level, message, enrichedContext)
+                        }
+                    }
+                }
+                android.util.Log.i(NAME, "Reticulum Manager initialized for user: ${config.userId}")
+                emitDiagnostic("info", "Reticulum manager initialized", mapOf(
+                    "userId" to config.userId
+                ))
+            } else {
+                emitDiagnostic("info", "Reticulum disabled in configuration", mapOf(
+                    "userId" to config.userId
+                ))
+            }
+
             // Wire Rust transport callbacks for event-driven sending.
             // These replace the 100ms polling loops; the Rust core calls back into
             // Kotlin when outgoing data is enqueued, and the manager drains the queue
@@ -547,6 +599,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         android.util.Log.i(NAME, "WiFi Direct Manager stopped")
         emitDiagnostic("info", "WiFi Direct manager stopped")
 
+        // Stop Reticulum manager
+        reticulumManager?.stop()
+        android.util.Log.i(NAME, "Reticulum Manager stopped")
+        emitDiagnostic("info", "Reticulum manager stopped")
+
         // Stop foreground service
         stopForegroundService()
         
@@ -573,6 +630,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             bleManager?.pause()
             internetManager?.pause()
             wifiDirectManager?.pause()
+            reticulumManager?.pause()
             
             protocol?.pause()
             promise.resolve(null)
@@ -590,6 +648,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             bleManager?.resume()
             internetManager?.resume()
             wifiDirectManager?.resume()
+            reticulumManager?.resume()
 
             // Restart the process scheduler
             if (protocol?.getState() == ProtocolState.RUNNING) {
@@ -919,6 +978,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             internetManager = null
             wifiDirectManager?.stop()
             wifiDirectManager = null
+            reticulumManager?.stop()
+            reticulumManager = null
 
             try {
                 protocol?.stop()
@@ -995,14 +1056,32 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         }
                         emitDiagnostic("info", "BLE manager created on demand")
                     }
-                    
+
                     val manager = bleManager
                         ?: throw IllegalStateException("Failed to create BLE manager")
-                    
+
                     if (manager.state != TransportState.RUNNING) {
                         manager.start()
                         emitDiagnostic("info", "BLE transport enabled")
                     }
+                }
+                "reticulum" -> {
+                    if (reticulumManager == null) {
+                        reticulumManager = ReticulumManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                            emitDiagnostic(level, message, context)
+                        }
+                        emitDiagnostic("info", "Reticulum manager created on demand")
+                    }
+
+                    val manager = reticulumManager
+                        ?: throw IllegalStateException("Failed to create Reticulum manager")
+
+                    if (manager.state == TransportState.RUNNING) {
+                        manager.stop()
+                    }
+
+                    configureAndStartReticulum(manager, config)
+                    emitDiagnostic("info", "Reticulum transport enabled")
                 }
                 else -> throw IllegalArgumentException("Unsupported transport type: $type")
             }
@@ -1069,6 +1148,31 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         ))
     }
 
+    private fun configureAndStartReticulum(manager: ReticulumManager, config: ReadableMap?) {
+        val daemonAddress = config?.getString("daemonAddress")
+            ?: config?.getString("daemon_address")
+            ?: "localhost:4242"
+
+        val autoReconnect = if (config?.hasKey("autoReconnect") == true) {
+            config.getBoolean("autoReconnect")
+        } else {
+            true
+        }
+        val maxRetries = if (config?.hasKey("maxReconnectAttempts") == true) {
+            config.getDouble("maxReconnectAttempts").toInt()
+        } else {
+            0
+        }
+
+        manager.configure(daemonAddress, autoReconnect, maxRetries)
+        manager.start()
+
+        emitDiagnostic("info", "Reticulum transport enabled", mapOf(
+            "daemonAddress" to daemonAddress,
+            "autoReconnect" to autoReconnect
+        ))
+    }
+
     @ReactMethod
     fun disableTransport(type: String, promise: Promise) {
         try {
@@ -1102,9 +1206,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     }
                     emitDiagnostic("info", "BLE transport disabled (manager stopped)")
                 }
+                "reticulum" -> {
+                    reticulumManager?.stop()
+                    try {
+                        proto.reticulumStatusChanged(false)
+                    } catch (e: Exception) {
+                        android.util.Log.w(NAME, "Failed to notify reticulum status change: ${e.message}")
+                    }
+                    emitDiagnostic("info", "Reticulum transport disabled (manager stopped)")
+                }
                 else -> throw IllegalArgumentException("Unsupported transport type: $type")
             }
-            
+
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("ERROR_TRANSPORT_DISABLE", "Failed to disable transport: ${e.message}", e)

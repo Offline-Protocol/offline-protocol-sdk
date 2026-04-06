@@ -25,6 +25,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var bleManager: BleManager?
     private var internetManager: InternetManager?
     private var wifiDirectManager: WifiDirectManager?
+    private var reticulumManager: ReticulumManager?
     private var hasListeners = false
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
@@ -48,6 +49,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         internetManager = nil
         wifiDirectManager?.stop()
         wifiDirectManager = nil
+        reticulumManager?.stop()
+        reticulumManager = nil
         protocolInstance = nil
     }
     
@@ -405,7 +408,31 @@ class OfflineProtocolModule: RCTEventEmitter {
                     "userId": config.userId
                 ])
             }
-            
+
+            // Initialize Reticulum manager if reticulum is enabled
+            if config.reticulumEnabled {
+                reticulumManager = ReticulumManager(protocol: proto, deviceId: config.userId)
+                reticulumManager?.delegate = self
+                print("[OfflineProtocolModule] Reticulum Manager initialized for user: \(config.userId)")
+
+                // Extract and store reticulum config for use during start()
+                if let transportsDict = parsed.raw["transports"] as? [String: Any],
+                   let reticulumDict = transportsDict["reticulum"] as? [String: Any] {
+                    let daemonAddress = (reticulumDict["daemonAddress"] as? String) ?? (reticulumDict["daemon_address"] as? String) ?? "localhost:4242"
+                    let autoReconnect = (reticulumDict["autoReconnect"] as? Bool) ?? (reticulumDict["auto_reconnect"] as? Bool) ?? true
+                    let maxReconnectAttempts = (reticulumDict["maxReconnectAttempts"] as? Int) ?? 0
+                    reticulumManager?.configure(daemonAddress: daemonAddress, autoReconnect: autoReconnect, maxReconnectAttempts: maxReconnectAttempts)
+                }
+
+                emitDiagnostic(level: "info", message: "Reticulum manager initialized", context: [
+                    "userId": config.userId
+                ])
+            } else {
+                emitDiagnostic(level: "info", message: "Reticulum disabled in configuration", context: [
+                    "userId": config.userId
+                ])
+            }
+
             // Start process timer
             startProcessTimer()
             emitDiagnostic(level: "info", message: "Protocol process timer started")
@@ -616,7 +643,22 @@ class OfflineProtocolModule: RCTEventEmitter {
             } else if internetManager != nil {
                 emitDiagnostic(level: "warning", message: "Internet manager exists but no server URL configured")
             }
-            
+
+            // Start Reticulum manager if configured
+            if let manager = reticulumManager {
+                do {
+                    try manager.start()
+                    print("[OfflineProtocolModule] Reticulum Manager started")
+                    emitDiagnostic(level: "info", message: "Reticulum manager started")
+                } catch {
+                    print("[OfflineProtocolModule] Warning: Failed to start Reticulum Manager: \(error.localizedDescription)")
+                    emitDiagnostic(level: "error", message: "Failed to start Reticulum manager", context: [
+                        "error": error.localizedDescription
+                    ])
+                    // Don't fail the entire start if Reticulum fails
+                }
+            }
+
             resolver(nil)
         } catch {
             emitDiagnostic(level: "error", message: "Failed to start protocol", context: [
@@ -645,7 +687,12 @@ class OfflineProtocolModule: RCTEventEmitter {
         internetManager?.stop()
         print("[OfflineProtocolModule] Internet Manager stopped")
         emitDiagnostic(level: "info", message: "Internet manager stopped")
-        
+
+        // Stop Reticulum manager
+        reticulumManager?.stop()
+        print("[OfflineProtocolModule] Reticulum Manager stopped")
+        emitDiagnostic(level: "info", message: "Reticulum manager stopped")
+
         do {
             try protocolInstance?.stop()
             emitDiagnostic(level: "info", message: "Protocol stopped")
@@ -661,9 +708,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     @objc func pause(_ resolver: @escaping RCTPromiseResolveBlock,
                     rejecter: @escaping RCTPromiseRejectBlock) {
         do {
-            // Pause BLE manager for background mode
+            // Pause transports for background mode
             bleManager?.pause()
-            
+            reticulumManager?.pause()
+
             try protocolInstance?.pause()
             resolver(nil)
         } catch {
@@ -676,8 +724,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         do {
             try protocolInstance?.resume()
             
-            // Resume BLE manager
+            // Resume transports
             bleManager?.resume()
+            reticulumManager?.resume()
             
             resolver(nil)
         } catch {
@@ -1086,6 +1135,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         stopProcessTimer()
         bleManager?.stop()
         bleManager = nil
+        internetManager?.stop()
+        internetManager = nil
+        reticulumManager?.stop()
+        reticulumManager = nil
         do {
             try protocolInstance?.stop()
         } catch {
@@ -1163,16 +1216,35 @@ class OfflineProtocolModule: RCTEventEmitter {
                     proto.setBleTransportCallback(callback: BleTransportCallbackImpl(bleManager: newManager))
                     emitDiagnostic(level: "info", message: "BLE manager created on demand")
                 }
-                
+
                 guard let manager = bleManager else {
                     throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create BLE manager"])
                 }
-                
+
                 if manager.state != .running {
                     try manager.start()
                     emitDiagnostic(level: "info", message: "BLE transport enabled")
                 }
-                
+
+            case "reticulum":
+                if reticulumManager == nil {
+                    let newManager = ReticulumManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    newManager.delegate = self
+                    reticulumManager = newManager
+                    emitDiagnostic(level: "info", message: "Reticulum manager created on demand")
+                }
+
+                guard let manager = reticulumManager else {
+                    throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create Reticulum manager"])
+                }
+
+                if manager.state == .running {
+                    manager.stop()
+                }
+
+                configureAndStartReticulum(manager: manager, config: config)
+                emitDiagnostic(level: "info", message: "Reticulum transport enabled")
+
             default:
                 throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
             }
@@ -1221,7 +1293,21 @@ class OfflineProtocolModule: RCTEventEmitter {
             "hasAuthToken": config?["authToken"] != nil
         ])
     }
-    
+
+    private func configureAndStartReticulum(manager: ReticulumManager, config: NSDictionary?) {
+        let daemonAddress = (config?["daemonAddress"] as? String) ?? (config?["daemon_address"] as? String) ?? "localhost:4242"
+        let autoReconnect = (config?["autoReconnect"] as? Bool) ?? true
+        let maxRetries = (config?["maxReconnectAttempts"] as? Int) ?? 0
+
+        manager.configure(daemonAddress: daemonAddress, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries)
+        try? manager.start()
+
+        emitDiagnostic(level: "info", message: "Reticulum transport enabled", context: [
+            "daemonAddress": daemonAddress,
+            "autoReconnect": autoReconnect
+        ])
+    }
+
     @objc func disableTransport(_ type: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
@@ -1247,6 +1333,10 @@ class OfflineProtocolModule: RCTEventEmitter {
                 bleManager?.stop()
                 try? proto.bleStatusChanged(isAvailable: false)
                 emitDiagnostic(level: "info", message: "BLE transport disabled (manager stopped)")
+            case "reticulum":
+                reticulumManager?.stop()
+                try? proto.reticulumStatusChanged(isConnected: false)
+                emitDiagnostic(level: "info", message: "Reticulum transport disabled (manager stopped)")
             default:
                 throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
             }

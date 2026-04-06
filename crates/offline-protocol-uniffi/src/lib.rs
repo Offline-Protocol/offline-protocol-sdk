@@ -893,6 +893,11 @@ pub trait WifiDirectTransportCallback: Send + Sync {
     fn on_messages_available(&self);
 }
 
+/// Reticulum transport callback trait — notifies platform when outgoing messages are available.
+pub trait ReticulumTransportCallback: Send + Sync {
+    fn on_messages_available(&self);
+}
+
 /// BLE fragment for outgoing data
 #[derive(Debug, Clone)]
 pub struct BleFragment {
@@ -917,6 +922,18 @@ pub struct InternetMessage {
 pub struct WifiDirectMessage {
     pub recipient_id: String,
     pub data: Vec<u8>,
+}
+
+/// Reticulum message for outgoing data
+#[derive(Debug, Clone)]
+pub struct ReticulumMessage {
+    /// Unique message identifier. Use this with `reticulum_confirm_sent()` or
+    /// `reticulum_send_failed()`/`reticulum_send_failed_with_reason()` to report
+    /// the send outcome.
+    pub message_id: String,
+    pub recipient_id: String,
+    pub data: Vec<u8>,
+    pub reply_to_msg: Option<String>,
 }
 
 /// Internal state for BLE operations
@@ -944,6 +961,14 @@ struct WifiDirectState {
     connected_peer: Option<String>,
 }
 
+/// Internal state for Reticulum transport operations
+struct ReticulumState {
+    /// Outgoing messages queue
+    outgoing_messages: VecDeque<(String, Vec<u8>)>,
+    /// Whether Reticulum transport is connected
+    is_connected: bool,
+}
+
 /// Main protocol wrapper for UniFFI - COMPLETE IMPLEMENTATION
 pub struct OfflineProtocol {
     inner: Mutex<CoreProtocol>,
@@ -953,6 +978,7 @@ pub struct OfflineProtocol {
     ble_state: Mutex<BleState>,
     internet_state: Mutex<InternetState>,
     wifi_direct_state: Mutex<WifiDirectState>,
+    reticulum_state: Mutex<ReticulumState>,
     visualizer: Mutex<NetworkVisualizer>,
     path_selector: Mutex<PathSelector>,
     battery_level: RwLock<Option<u8>>,
@@ -1052,6 +1078,10 @@ impl OfflineProtocol {
                 is_connected: false,
                 connected_peer: None,
             }),
+            reticulum_state: Mutex::new(ReticulumState {
+                outgoing_messages: VecDeque::new(),
+                is_connected: false,
+            }),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
             path_selector: Mutex::new(PathSelector::new()),
             battery_level: RwLock::new(None),
@@ -1098,6 +1128,13 @@ impl OfflineProtocol {
         self.wifi_direct_state
             .lock()
             .map_err(|e| ProtocolError::LockPoisoned(format!("wifi_direct_state: {}", e)))
+    }
+
+    /// Lock the Reticulum state mutex, converting poison errors.
+    fn lock_reticulum(&self) -> Result<std::sync::MutexGuard<'_, ReticulumState>, ProtocolError> {
+        self.reticulum_state
+            .lock()
+            .map_err(|e| ProtocolError::LockPoisoned(format!("reticulum_state: {}", e)))
     }
 
     /// Lock the visualizer mutex, converting poison errors.
@@ -1305,6 +1342,29 @@ impl OfflineProtocol {
             if let Some(wifi_transport) = transport.as_any().downcast_ref::<WifiDirectTransport>() {
                 let cb = callback.clone();
                 wifi_transport.set_on_messages_available(Arc::new(move || {
+                    cb.on_messages_available();
+                }));
+            }
+        }
+    }
+
+    /// Registers a Reticulum transport callback that fires when outgoing
+    /// messages become available. This replaces timer-based polling.
+    pub fn set_reticulum_transport_callback(&self, callback: Box<dyn ReticulumTransportCallback>) {
+        let callback: Arc<dyn ReticulumTransportCallback> = Arc::from(callback);
+        let protocol = recover_mutex(&self.inner, "inner");
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Reticulum)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(reticulum_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+            {
+                let cb = callback.clone();
+                reticulum_transport.set_on_messages_available(Arc::new(move || {
                     cb.on_messages_available();
                 }));
             }
@@ -2198,6 +2258,261 @@ impl OfflineProtocol {
         self.emit_event(event);
 
         Ok(())
+    }
+
+    // ========================================================================
+    // RETICULUM TRANSPORT
+    // ========================================================================
+
+    /// Called by the platform when the Reticulum daemon connection status changes.
+    pub fn reticulum_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
+        // Track previous state for edge case handling
+        let was_connected = {
+            let reticulum_state = self.lock_reticulum()?;
+            reticulum_state.is_connected
+        };
+
+        // Update internal state
+        {
+            let mut reticulum_state = self.lock_reticulum()?;
+            reticulum_state.is_connected = is_connected;
+        }
+
+        // Update the Reticulum transport status in the transport manager
+        {
+            let protocol = self.lock_inner()?;
+            if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::Reticulum)
+            {
+                let transport = transport_arc
+                    .lock()
+                    .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+                if let Some(reticulum_transport) =
+                    transport
+                        .as_any()
+                        .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+                {
+                    let new_status = if is_connected {
+                        offline_protocol_transport::TransportStatus::Available
+                    } else {
+                        offline_protocol_transport::TransportStatus::Disconnected
+                    };
+                    reticulum_transport.on_status_changed(new_status);
+                }
+            }
+        }
+
+        // When reconnecting after disconnection, immediately flush all pending
+        // outbox messages (bypasses backoff timers)
+        if is_connected && !was_connected {
+            let mut protocol = self.lock_inner()?;
+            protocol.flush_outbox_all();
+        }
+
+        // Emit connection event
+        let event = if is_connected {
+            CoreEvent::TransportSwitched {
+                from: None,
+                to: "Reticulum".to_string(),
+                reason: "Connected to Reticulum daemon".to_string(),
+            }
+        } else {
+            CoreEvent::TransportSwitched {
+                from: Some("Reticulum".to_string()),
+                to: "None".to_string(),
+                reason: "Disconnected from Reticulum daemon".to_string(),
+            }
+        };
+        self.emit_event(event);
+
+        Ok(())
+    }
+
+    /// Called by the platform when data is received from the Reticulum daemon.
+    pub fn reticulum_message_received(
+        &self,
+        sender_id: String,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner()?;
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Reticulum)
+        {
+            let transport = transport_arc
+                .lock()
+                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+            if let Some(reticulum_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+            {
+                if let Err(e) = reticulum_transport.on_data_received(data) {
+                    return Err(ProtocolError::Other(format!(
+                        "Failed to process reticulum message: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        while protocol.receive_message().is_some() {}
+        let is_blocked = protocol.is_user_blocked(&sender_id);
+        drop(protocol);
+
+        if !is_blocked {
+            let event = CoreEvent::NeighborDiscovered {
+                peer_id: sender_id.clone(),
+                transport: "Reticulum".to_string(),
+                rssi: None,
+            };
+            self.emit_event(event);
+        }
+
+        Ok(())
+    }
+
+    /// Returns the next outgoing Reticulum message, if any.
+    /// The platform should send this via the Reticulum daemon, then call
+    /// `reticulum_confirm_sent()` or `reticulum_send_failed()`.
+    pub fn reticulum_get_next_message(&self) -> Option<ReticulumMessage> {
+        {
+            let reticulum_state = recover_mutex(&self.reticulum_state, "reticulum_state");
+            if !reticulum_state.is_connected {
+                return None;
+            }
+        }
+
+        let protocol = recover_mutex(&self.inner, "inner");
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Reticulum)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(reticulum_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+            {
+                if let Ok(Some((message_id, data))) = reticulum_transport.get_next_message() {
+                    if let Ok(message) = reticulum_transport.deserialize_message(&data) {
+                        return Some(ReticulumMessage {
+                            message_id,
+                            recipient_id: message.recipient.as_str().to_string(),
+                            data,
+                            reply_to_msg: message
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Fallback to local queue
+        let mut reticulum_state = recover_mutex(&self.reticulum_state, "reticulum_state");
+        while let Some((recipient, data)) = reticulum_state.outgoing_messages.pop_front() {
+            let parsed = if let Some(transport_arc) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::Reticulum)
+            {
+                let transport = recover_mutex(&transport_arc, "transport");
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+                    .and_then(|rt| rt.deserialize_message(&data).ok())
+            } else {
+                None
+            };
+
+            let msg_id = parsed
+                .as_ref()
+                .map(|msg| msg.id.as_str().to_string())
+                .unwrap_or_default();
+
+            if msg_id.is_empty() {
+                tracing::warn!(
+                    recipient = %recipient,
+                    data_len = data.len(),
+                    "Dropping fallback reticulum message: could not recover message_id from deserialization — message is permanently lost"
+                );
+                continue;
+            }
+
+            let reply_to_msg = parsed
+                .as_ref()
+                .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()));
+
+            return Some(ReticulumMessage {
+                message_id: msg_id,
+                recipient_id: recipient,
+                data,
+                reply_to_msg,
+            });
+        }
+
+        None
+    }
+
+    /// Called by the platform after successfully sending a Reticulum message.
+    pub fn reticulum_confirm_sent(&self, message_id: String) {
+        let mut protocol = recover_mutex(&self.inner, "inner");
+        if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
+            tracing::warn!(
+                message_id = %message_id,
+                error = %err,
+                "Failed to apply welcome lifecycle transport confirmation (reticulum)"
+            );
+        }
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Reticulum)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(reticulum_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+            {
+                reticulum_transport.confirm_sent(&message_id);
+            }
+        }
+    }
+
+    /// Called by the platform when sending a Reticulum message fails.
+    pub fn reticulum_send_failed(&self, message_id: String) {
+        self.reticulum_send_failed_with_reason(
+            message_id,
+            Some("Reticulum transport send failed".to_string()),
+        );
+    }
+
+    /// Called by the platform when sending a Reticulum message fails, with an
+    /// optional reason for diagnostics.
+    pub fn reticulum_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
+        let mut protocol = recover_mutex(&self.inner, "inner");
+        if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+            tracing::warn!(
+                message_id = %message_id,
+                error = %err,
+                "Failed to apply welcome lifecycle transport failure (reticulum)"
+            );
+        }
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Reticulum)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(reticulum_transport) =
+                transport
+                    .as_any()
+                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+            {
+                reticulum_transport.report_send_failure(&message_id);
+            }
+        }
     }
 
     // ========================================================================

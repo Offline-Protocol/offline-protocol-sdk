@@ -1,0 +1,620 @@
+package com.offlineprotocol
+
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import uniffi.offline_protocol.OfflineProtocol
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.PrintWriter
+import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * Reticulum Manager implementing TransportManager for Reticulum daemon communication.
+ * Connects to a local Reticulum daemon via TCP for long-range mesh networking
+ * (LoRa, serial, I2P, TCP, UDP).
+ */
+class ReticulumManager(
+    private val context: android.content.Context,
+    private val protocol: OfflineProtocol,
+    private val deviceId: String,
+    private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
+) : TransportManager {
+
+    // MARK: - TransportManager Implementation
+
+    override val transportId = "reticulum"
+    override val transportName = "Reticulum (Mesh)"
+    override var state: TransportState = TransportState.UNAVAILABLE
+        private set
+    override var listener: TransportManagerListener? = null
+
+    companion object {
+        private const val TAG = "ReticulumManager"
+
+        private const val MESSAGE_POLL_INTERVAL_MS = 100L
+        private const val RECONNECT_INITIAL_DELAY_MS = 1000L
+        private const val RECONNECT_MAX_DELAY_MS = 30000L
+        private const val RECONNECT_BACKOFF_MULTIPLIER = 2.0
+        private const val CONNECTION_TIMEOUT_MS = 60000  // 60s — Reticulum paths can be high-latency
+        private const val MAX_CONSECUTIVE_FAILURES = 3
+    }
+
+    // MARK: - Properties
+
+    private var daemonHost: String = "localhost"
+    private var daemonPort: Int = 4242
+    private var autoReconnect = true
+    private var maxReconnectAttempts = 0 // 0 = infinite
+
+    // Handler for main thread operations
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Message polling runnable
+    private val messagePollingRunnable = object : Runnable {
+        override fun run() {
+            pollAndSendMessages()
+            if (state == TransportState.RUNNING && isConnected.get()) {
+                mainHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    // TCP connection
+    private var socket: Socket? = null
+    private var writer: PrintWriter? = null
+    private var reader: BufferedReader? = null
+    private var receiveThread: Thread? = null
+
+    // Connection state
+    private val isConnected = AtomicBoolean(false)
+    private val isConnecting = AtomicBoolean(false)
+    private var reconnectAttempts = AtomicInteger(0)
+    private var currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+    private var reconnectRunnable: Runnable? = null
+
+    // Failure tracking for DORS
+    private var consecutiveSendFailures = AtomicInteger(0)
+
+    // Metrics
+    private var bytesSent: Long = 0
+    private var bytesReceived: Long = 0
+    private var messagesSent: Long = 0
+    private var messagesReceived: Long = 0
+
+    // MARK: - Helper
+
+    private fun <T> runOnMainSync(action: () -> T): T {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return action()
+        }
+
+        val latch = CountDownLatch(1)
+        var outcome: Result<T>? = null
+        mainHandler.post {
+            outcome = try {
+                Result.success(action())
+            } catch (t: Throwable) {
+                Result.failure(t)
+            }
+            latch.countDown()
+        }
+
+        try {
+            latch.await()
+        } catch (ie: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw RuntimeException("Interrupted while executing on main thread", ie)
+        }
+
+        return outcome!!.getOrThrow()
+    }
+
+    // MARK: - Configuration
+
+    /**
+     * Configure the Reticulum daemon connection.
+     * @param daemonAddress TCP address in "host:port" format (default: "localhost:4242")
+     * @param autoReconnect Whether to auto-reconnect on disconnect (default: true)
+     * @param maxReconnectAttempts Max reconnect attempts, 0 = infinite (default: 0)
+     */
+    fun configure(
+        daemonAddress: String = "localhost:4242",
+        autoReconnect: Boolean = true,
+        maxReconnectAttempts: Int = 0
+    ) {
+        val parts = daemonAddress.split(":")
+        this.daemonHost = parts.getOrElse(0) { "localhost" }
+        this.daemonPort = parts.getOrElse(1) { "4242" }.toIntOrNull() ?: 4242
+        this.autoReconnect = autoReconnect
+        this.maxReconnectAttempts = maxReconnectAttempts
+
+        emitDiagnostic("info", "Reticulum transport configured", mapOf(
+            "daemonHost" to daemonHost,
+            "daemonPort" to daemonPort,
+            "autoReconnect" to autoReconnect,
+            "maxReconnectAttempts" to maxReconnectAttempts
+        ))
+    }
+
+    // MARK: - TransportManager Implementation
+
+    override fun isAvailable(): Boolean {
+        return true // Reticulum daemon can always be attempted
+    }
+
+    override fun start() {
+        runOnMainSync {
+            startUnsafe()
+        }
+    }
+
+    private fun startUnsafe() {
+        if (state == TransportState.RUNNING) {
+            throw TransportException.AlreadyRunning()
+        }
+
+        Log.i(TAG, "Starting Reticulum transport for device: $deviceId")
+        emitDiagnostic("info", "Starting Reticulum transport", mapOf(
+            "deviceId" to deviceId,
+            "daemonAddress" to "$daemonHost:$daemonPort"
+        ))
+
+        updateState(TransportState.STARTING)
+        connect()
+    }
+
+    override fun stop() {
+        runOnMainSync {
+            stopUnsafe()
+        }
+    }
+
+    private fun stopUnsafe() {
+        if (state != TransportState.RUNNING && state != TransportState.STARTING) {
+            return
+        }
+
+        updateState(TransportState.STOPPING)
+
+        // Cancel reconnect attempts
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
+
+        // Stop timers
+        stopMessagePolling()
+
+        // Close TCP connection
+        disconnect()
+
+        // Notify protocol
+        try {
+            protocol.reticulumStatusChanged(false)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying protocol of disconnect", e)
+        }
+
+        updateState(TransportState.STOPPED)
+        emitDiagnostic("info", "Reticulum transport stopped")
+    }
+
+    override fun pause() {
+        runOnMainSync {
+            stopMessagePolling()
+        }
+    }
+
+    override fun resume() {
+        runOnMainSync {
+            if (state == TransportState.RUNNING && isConnected.get()) {
+                startMessagePolling()
+            }
+        }
+    }
+
+    override fun getMetrics(): Map<String, Any> {
+        return mapOf(
+            "bytes_sent" to bytesSent,
+            "bytes_received" to bytesReceived,
+            "messages_sent" to messagesSent,
+            "messages_received" to messagesReceived,
+            "is_connected" to isConnected.get(),
+            "reconnect_attempts" to reconnectAttempts.get()
+        )
+    }
+
+    // MARK: - Connection Management
+
+    private fun connect() {
+        if (isConnecting.get() || isConnected.get()) return
+        isConnecting.set(true)
+
+        emitDiagnostic("info", "Connecting to Reticulum daemon", mapOf(
+            "host" to daemonHost,
+            "port" to daemonPort
+        ))
+
+        // Connect on a background thread to avoid blocking
+        Thread {
+            try {
+                val sock = Socket()
+                sock.connect(
+                    java.net.InetSocketAddress(daemonHost, daemonPort),
+                    CONNECTION_TIMEOUT_MS
+                )
+                sock.soTimeout = 0 // No read timeout — blocking receive
+
+                val w = PrintWriter(sock.getOutputStream(), true)
+                val r = BufferedReader(InputStreamReader(sock.getInputStream()))
+
+                synchronized(this) {
+                    socket = sock
+                    writer = w
+                    reader = r
+                }
+
+                // Send identification
+                val identifyMsg = org.json.JSONObject().apply {
+                    put("type", "Identify")
+                    put("device_id", deviceId)
+                }
+                w.println(identifyMsg.toString())
+
+                handleConnectionOpened()
+                startReceiveLoop(r)
+            } catch (e: Exception) {
+                isConnecting.set(false)
+                Log.e(TAG, "Failed to connect to Reticulum daemon", e)
+                emitDiagnostic("error", "Failed to connect to Reticulum daemon", mapOf(
+                    "error" to (e.message ?: "unknown"),
+                    "host" to daemonHost,
+                    "port" to daemonPort
+                ))
+                mainHandler.post { handleConnectionClosed(-1, e.message) }
+            }
+        }.start()
+    }
+
+    private fun disconnect() {
+        receiveThread?.interrupt()
+        receiveThread = null
+
+        synchronized(this) {
+            try { writer?.close() } catch (_: Exception) {}
+            try { reader?.close() } catch (_: Exception) {}
+            try { socket?.close() } catch (_: Exception) {}
+            writer = null
+            reader = null
+            socket = null
+        }
+
+        isConnected.set(false)
+        isConnecting.set(false)
+    }
+
+    private fun handleConnectionOpened() {
+        isConnected.set(true)
+        isConnecting.set(false)
+        reconnectAttempts.set(0)
+        currentReconnectDelay = RECONNECT_INITIAL_DELAY_MS
+        consecutiveSendFailures.set(0)
+
+        emitDiagnostic("info", "Connected to Reticulum daemon")
+
+        // Notify protocol
+        try {
+            protocol.reticulumStatusChanged(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying protocol of connect", e)
+        }
+
+        // Start polling on main thread
+        mainHandler.post {
+            updateState(TransportState.RUNNING)
+            startMessagePolling()
+            // Immediately flush queued messages
+            pollAndSendMessages()
+        }
+    }
+
+    private fun startReceiveLoop(reader: BufferedReader) {
+        receiveThread = Thread {
+            try {
+                while (isConnected.get() && !Thread.currentThread().isInterrupted) {
+                    val line = reader.readLine() ?: break
+                    processReceivedData(line.toByteArray(Charsets.UTF_8))
+                }
+            } catch (e: Exception) {
+                if (isConnected.get()) {
+                    Log.e(TAG, "Receive loop error", e)
+                }
+            }
+            // Connection closed or errored
+            if (isConnected.get()) {
+                mainHandler.post { handleConnectionClosed(-1, "Connection lost") }
+            }
+        }.also { it.start() }
+    }
+
+    private fun handleConnectionClosed(code: Int, reason: String?) {
+        val wasConnected = isConnected.getAndSet(false)
+        isConnecting.set(false)
+
+        // Stop polling immediately
+        mainHandler.post {
+            stopMessagePolling()
+        }
+
+        // Notify protocol
+        try {
+            protocol.reticulumStatusChanged(false)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying protocol of disconnect", e)
+            emitDiagnostic("error", "Failed to notify protocol of disconnection", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+        }
+
+        emitDiagnostic("warning", "Reticulum daemon disconnected", mapOf(
+            "code" to code,
+            "reason" to (reason ?: "none"),
+            "wasConnected" to wasConnected
+        ))
+
+        // Attempt reconnection if enabled
+        if (autoReconnect && state != TransportState.STOPPING && state != TransportState.STOPPED) {
+            mainHandler.post { scheduleReconnect() }
+        } else {
+            mainHandler.post { updateState(TransportState.STOPPED) }
+        }
+    }
+
+    private fun scheduleReconnect() {
+        if (!autoReconnect) return
+
+        val attempts = reconnectAttempts.incrementAndGet()
+        if (maxReconnectAttempts > 0 && attempts > maxReconnectAttempts) {
+            emitDiagnostic("error", "Max reconnect attempts reached", mapOf(
+                "attempts" to attempts,
+                "maxAttempts" to maxReconnectAttempts
+            ))
+            updateState(TransportState.STOPPED)
+            return
+        }
+
+        val delay = currentReconnectDelay
+        currentReconnectDelay = minOf(
+            (currentReconnectDelay * RECONNECT_BACKOFF_MULTIPLIER).toLong(),
+            RECONNECT_MAX_DELAY_MS
+        )
+
+        emitDiagnostic("info", "Scheduling reconnect to Reticulum daemon", mapOf(
+            "attempt" to attempts,
+            "delayMs" to delay
+        ))
+
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable { connect() }
+        reconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, delay)
+    }
+
+    // MARK: - Message Handling
+
+    private fun processReceivedData(data: ByteArray) {
+        bytesReceived += data.size
+
+        val json: org.json.JSONObject
+        val messageType: String
+
+        try {
+            json = org.json.JSONObject(String(data, Charsets.UTF_8))
+            messageType = json.optString("type", "")
+        } catch (e: Exception) {
+            // Raw message data — pass directly to protocol
+            try {
+                val senderId = "" // Unknown sender for raw data
+                protocol.reticulumMessageReceived(senderId, data.map { it.toUByte() })
+                messagesReceived++
+            } catch (ex: Exception) {
+                emitDiagnostic("warning", "Failed to process raw Reticulum data", mapOf(
+                    "size" to data.size,
+                    "error" to (ex.message ?: "unknown")
+                ))
+            }
+            return
+        }
+
+        when (messageType) {
+            "MessageReceived" -> {
+                val senderId = json.optString("sender", "")
+                val content = json.optString("content", "")
+
+                if (senderId.isEmpty()) {
+                    emitDiagnostic("warning", "Invalid MessageReceived: missing sender")
+                    return
+                }
+
+                messagesReceived++
+
+                try {
+                    val messageBytes: ByteArray = try {
+                        // Try to parse content as full Message JSON
+                        val contentJson = org.json.JSONObject(content)
+                        if (contentJson.has("sender") && contentJson.has("recipient")) {
+                            contentJson.toString().toByteArray(Charsets.UTF_8)
+                        } else {
+                            content.toByteArray(Charsets.UTF_8)
+                        }
+                    } catch (_: org.json.JSONException) {
+                        content.toByteArray(Charsets.UTF_8)
+                    }
+
+                    protocol.reticulumMessageReceived(
+                        senderId,
+                        messageBytes.map { it.toUByte() }
+                    )
+
+                    emitDiagnostic("debug", "Message received from Reticulum", mapOf(
+                        "senderId" to senderId,
+                        "contentLength" to content.length
+                    ))
+                } catch (e: Exception) {
+                    emitDiagnostic("error", "Error processing Reticulum message", mapOf(
+                        "error" to (e.message ?: "unknown")
+                    ))
+                }
+            }
+
+            "StatusUpdate" -> {
+                val daemonStatus = json.optString("status", "unknown")
+                emitDiagnostic("debug", "Reticulum daemon status update", mapOf(
+                    "status" to daemonStatus
+                ))
+            }
+
+            else -> {
+                emitDiagnostic("debug", "Unknown Reticulum message type", mapOf(
+                    "type" to messageType
+                ))
+            }
+        }
+    }
+
+    private fun startMessagePolling() {
+        stopMessagePolling()
+        mainHandler.post(messagePollingRunnable)
+    }
+
+    private fun stopMessagePolling() {
+        mainHandler.removeCallbacks(messagePollingRunnable)
+    }
+
+    private fun pollAndSendMessages() {
+        if (!isConnected.get()) return
+
+        try {
+            var sent = 0
+            val maxBatchSize = 10
+
+            while (sent < maxBatchSize) {
+                if (!isConnected.get()) {
+                    emitDiagnostic("warning", "Connection lost mid-batch, stopping message send", mapOf(
+                        "messagesSent" to sent
+                    ))
+                    break
+                }
+
+                val message = protocol.reticulumGetNextMessage() ?: break
+                sendMessage(
+                    message.messageId,
+                    message.recipientId,
+                    message.data.map { it.toByte() }.toByteArray(),
+                    message.replyToMsg
+                )
+                sent++
+            }
+
+            if (sent > 1) {
+                emitDiagnostic("debug", "Batch sent messages via Reticulum", mapOf(
+                    "count" to sent
+                ))
+            }
+        } catch (e: Exception) {
+            emitDiagnostic("error", "Error polling Reticulum messages", mapOf(
+                "error" to (e.message ?: "unknown")
+            ))
+        }
+    }
+
+    private fun sendMessage(
+        messageId: String,
+        recipientId: String,
+        data: ByteArray,
+        replyToMsg: String? = null
+    ) {
+        val w: PrintWriter?
+        synchronized(this) {
+            w = writer
+        }
+
+        if (!isConnected.get() || w == null) {
+            emitDiagnostic("warning", "Cannot send message - not connected", mapOf(
+                "messageId" to messageId,
+                "recipientId" to recipientId
+            ))
+            try { protocol.reticulumSendFailed(messageId) } catch (e: Exception) {
+                Log.e(TAG, "Failed to report send failure for $messageId", e)
+            }
+            return
+        }
+
+        val content = String(data, Charsets.UTF_8)
+
+        val reticulumMessage = org.json.JSONObject().apply {
+            put("type", "SendMessage")
+            put("recipient", recipientId)
+            put("content", content)
+            if (replyToMsg != null && replyToMsg.isNotEmpty()) {
+                put("reply_to_msg", replyToMsg)
+            }
+        }
+
+        try {
+            val jsonString = reticulumMessage.toString()
+            w.println(jsonString)
+
+            if (w.checkError()) {
+                throw java.io.IOException("PrintWriter error flag set after write")
+            }
+
+            consecutiveSendFailures.set(0)
+            bytesSent += jsonString.length
+            messagesSent++
+            try { protocol.reticulumConfirmSent(messageId) } catch (e: Exception) {
+                Log.e(TAG, "Failed to confirm send for $messageId", e)
+            }
+
+            emitDiagnostic("debug", "Message sent via Reticulum", mapOf(
+                "messageId" to messageId,
+                "recipientId" to recipientId,
+                "contentLength" to content.length
+            ))
+        } catch (e: Exception) {
+            val failures = consecutiveSendFailures.incrementAndGet()
+            try { protocol.reticulumSendFailed(messageId) } catch (ex: Exception) {
+                Log.e(TAG, "Failed to report send failure for $messageId", ex)
+            }
+            emitDiagnostic("error", "Failed to send Reticulum message", mapOf(
+                "messageId" to messageId,
+                "recipientId" to recipientId,
+                "consecutiveFailures" to failures,
+                "error" to (e.message ?: "unknown")
+            ))
+
+            if (failures >= MAX_CONSECUTIVE_FAILURES) {
+                emitDiagnostic("warning", "Too many consecutive send failures, triggering reconnect", mapOf(
+                    "failures" to failures
+                ))
+                mainHandler.post { handleConnectionClosed(-1, "Send failures exceeded threshold") }
+            }
+        }
+    }
+
+    // MARK: - State Management
+
+    private fun updateState(newState: TransportState) {
+        state = newState
+        listener?.onTransportStateChanged(this, newState)
+    }
+
+    // MARK: - Diagnostics
+
+    private fun emitDiagnostic(level: String, message: String, context: Map<String, Any?> = emptyMap()) {
+        diagnosticEmitter?.invoke(level, message, context)
+        listener?.onTransportDiagnostic(this, level, message, context)
+    }
+}
