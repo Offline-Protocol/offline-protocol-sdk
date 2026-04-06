@@ -91,6 +91,19 @@ pub const RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 120;
 /// Resource mechanism over an established Link.
 pub const RETICULUM_MAX_PAYLOAD_SIZE: usize = 65536;
 
+// Nostr Transport Constants
+/// Connection timeout for Nostr relay WebSocket connections (seconds).
+pub const NOSTR_CONNECTION_TIMEOUT_SECS: u64 = 30;
+
+/// Timeout for pending Nostr send confirmations (seconds).
+/// Higher than Internet (relay propagation can be slower) but lower than
+/// Reticulum (no multi-hop mesh delays).
+pub const NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS: u64 = 30;
+
+/// Default maximum payload size for Nostr events (bytes).
+/// Nostr relays typically accept events up to 64KB–128KB.
+pub const NOSTR_MAX_PAYLOAD_SIZE: usize = 65536;
+
 // Transport-wide Constants
 /// Default maximum message size in bytes (1 MB).
 /// Applied at the transport layer before JSON deserialization to prevent
