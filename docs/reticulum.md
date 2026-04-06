@@ -180,6 +180,26 @@ Regardless of which integration strategy you choose, the platform bridge interac
 7. **Report disconnection** via `reticulumStatusChanged(false)` on connection loss
 8. **Reconnect** automatically if `auto_reconnect` is enabled (default)
 
+### Daemon TCP Protocol
+
+The built-in `ReticulumManager` (iOS and Android) communicates with a Reticulum daemon over a newline-delimited JSON protocol on TCP (default `localhost:4242`). Both platforms must implement the same message types to stay in sync.
+
+**Client-to-daemon messages:**
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `Identify` | `device_id` (string) | Sent immediately after TCP connect to register this device with the daemon |
+| `SendMessage` | `recipient` (string), `content` (string), `encoding` (string, `"base64"`), `reply_to_msg` (string, optional) | Request the daemon to deliver a message to a recipient. Content is base64-encoded binary. |
+
+**Daemon-to-client messages:**
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `MessageReceived` | `sender` (string), `content` (string), `encoding` (string, optional `"base64"`) | An incoming message from a remote peer. If `encoding` is `"base64"`, content is base64-decoded; otherwise treated as UTF-8. |
+| `StatusUpdate` | `status` (string) | Informational daemon status (logged, not acted upon) |
+
+All messages are JSON objects terminated by a newline (`\n`). Each TCP read is buffered and split on newlines to handle partial reads.
+
 ### Send Confirmation Loop
 
 The send confirmation loop is critical for accurate DORS scoring. Without it, DORS cannot measure Reticulum's actual delivery performance.

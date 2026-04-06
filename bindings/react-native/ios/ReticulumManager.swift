@@ -67,6 +67,13 @@ public class ReticulumManager: NSObject, TransportManager {
         set { stateLock.lock(); defer { stateLock.unlock() }; _currentReconnectDelay = newValue }
     }
 
+    // Whether configure() has been called (guarded by stateLock)
+    private var _isConfigured = false
+    private var isConfigured: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isConfigured }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isConfigured = newValue }
+    }
+
     // State tracking (guarded by stateLock)
     private var _isConnected = false
     private var isConnected: Bool {
@@ -145,6 +152,8 @@ public class ReticulumManager: NSObject, TransportManager {
             ])
         }
 
+        isConfigured = true
+
         emitDiagnostic("info", "Reticulum transport configured", context: [
             "daemonHost": daemonHost,
             "daemonPort": daemonPort,
@@ -156,7 +165,9 @@ public class ReticulumManager: NSObject, TransportManager {
     // MARK: - TransportManager Implementation
 
     public func isAvailable() -> Bool {
-        return true // Reticulum daemon can always be attempted
+        // Only report available after configure() has been called, so DORS
+        // doesn't select an unconfigured Reticulum transport.
+        return isConfigured
     }
 
     public func start() throws {

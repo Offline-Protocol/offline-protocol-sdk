@@ -10,6 +10,7 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.Socket
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -76,6 +77,9 @@ class ReticulumManager(
     private var reader: BufferedReader? = null
     private var receiveThread: Thread? = null
 
+    // Configuration state
+    private val isConfigured = AtomicBoolean(false)
+
     // Connection state
     private val isConnected = AtomicBoolean(false)
     private val isConnecting = AtomicBoolean(false)
@@ -111,7 +115,9 @@ class ReticulumManager(
         }
 
         try {
-            latch.await()
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw RuntimeException("Timed out waiting for main thread execution (5s)")
+            }
         } catch (ie: InterruptedException) {
             Thread.currentThread().interrupt()
             throw RuntimeException("Interrupted while executing on main thread", ie)
@@ -138,6 +144,7 @@ class ReticulumManager(
         this.daemonPort = parts.getOrElse(1) { "4242" }.toIntOrNull() ?: 4242
         this.autoReconnect = autoReconnect
         this.maxReconnectAttempts = maxReconnectAttempts
+        isConfigured.set(true)
 
         // Warn when connecting to a non-localhost daemon — the TCP link is unencrypted
         val localhostAliases = setOf("localhost", "127.0.0.1", "::1")
@@ -159,7 +166,9 @@ class ReticulumManager(
     // MARK: - TransportManager Implementation
 
     override fun isAvailable(): Boolean {
-        return true // Reticulum daemon can always be attempted
+        // Only report available after configure() has been called, so DORS
+        // doesn't select an unconfigured Reticulum transport.
+        return isConfigured.get()
     }
 
     override fun start() {
