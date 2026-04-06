@@ -2345,7 +2345,7 @@ impl OfflineProtocol {
                     .as_any()
                     .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
             {
-                if let Err(e) = reticulum_transport.on_data_received(data) {
+                if let Err(e) = reticulum_transport.on_data_received_from(data, sender_id.clone()) {
                     return Err(ProtocolError::Other(format!(
                         "Failed to process reticulum message: {}",
                         e
@@ -4177,5 +4177,134 @@ mod tests {
         let stats = protocol.get_routing_stats();
         assert_eq!(stats.destination_count, 0);
         assert_eq!(stats.route_count, 0);
+    }
+
+    fn create_reticulum_config() -> ProtocolConfig {
+        ProtocolConfig {
+            app_id: "test-app".to_string(),
+            user_id: "user123".to_string(),
+            ble_enabled: false,
+            wifi_direct_enabled: false,
+            internet_enabled: false,
+            reticulum_enabled: true,
+            prefer_online: false,
+            initial_ttl: 8,
+            encryption_enabled: true,
+            auto_key_exchange: true,
+            store_pending: true,
+            require_encryption: false,
+            max_pending_per_peer: 64,
+            max_pending_global: 4096,
+            pending_ttl_ms: 120_000,
+            overflow_policy: OverflowPolicy::DropOldest,
+            max_group_members: 256,
+            group_relay_enabled: true,
+            require_transport_identity: false,
+        }
+    }
+
+    #[test]
+    fn test_reticulum_status_changed() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        // Connect
+        assert!(protocol.reticulum_status_changed(true).is_ok());
+
+        // Disconnect
+        assert!(protocol.reticulum_status_changed(false).is_ok());
+    }
+
+    #[test]
+    fn test_reticulum_get_next_message_when_disconnected() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        // Not connected — should return None
+        assert!(protocol.reticulum_get_next_message().is_none());
+    }
+
+    #[test]
+    fn test_reticulum_get_next_message_when_connected() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+
+        // No messages queued — should return None without error
+        assert!(protocol.reticulum_get_next_message().is_none());
+    }
+
+    #[test]
+    fn test_reticulum_confirm_sent() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+
+        // Confirming a non-existent message_id should not panic
+        protocol.reticulum_confirm_sent("nonexistent-id".to_string());
+    }
+
+    #[test]
+    fn test_reticulum_send_failed() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+
+        // Reporting failure for a non-existent message_id should not panic
+        protocol.reticulum_send_failed("nonexistent-id".to_string());
+    }
+
+    #[test]
+    fn test_reticulum_send_failed_with_reason() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+
+        protocol.reticulum_send_failed_with_reason(
+            "nonexistent-id".to_string(),
+            Some("timeout".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_reticulum_status_rapid_toggle() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        // Rapid connect/disconnect cycling should not panic or corrupt state
+        for _ in 0..10 {
+            protocol.reticulum_status_changed(true).unwrap();
+            protocol.reticulum_status_changed(false).unwrap();
+        }
+
+        // Final connect to verify state is healthy
+        protocol.reticulum_status_changed(true).unwrap();
+        assert!(protocol.reticulum_get_next_message().is_none());
+    }
+
+    #[test]
+    fn test_reticulum_message_received_empty_sender() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+
+        // Empty sender_id — should not panic; NeighborDiscovered should be suppressed
+        let result = protocol.reticulum_message_received("".to_string(), vec![0u8; 10]);
+        // The data isn't valid JSON/message format so the transport may reject it,
+        // but it should not panic regardless.
+        let _ = result;
     }
 }

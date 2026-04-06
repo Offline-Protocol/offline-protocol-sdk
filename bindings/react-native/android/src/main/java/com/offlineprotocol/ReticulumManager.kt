@@ -38,7 +38,7 @@ class ReticulumManager(
     companion object {
         private const val TAG = "ReticulumManager"
 
-        private const val MESSAGE_POLL_INTERVAL_MS = 100L
+        private const val MESSAGE_POLL_INTERVAL_MS = 1000L // 1s fallback; primary path is event-driven
         private const val RECONNECT_INITIAL_DELAY_MS = 1000L
         private const val RECONNECT_MAX_DELAY_MS = 30000L
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2.0

@@ -25,7 +25,7 @@ public class ReticulumManager: NSObject, TransportManager {
 
     // MARK: - Constants
 
-    private let MESSAGE_POLL_INTERVAL: TimeInterval = 0.1 // 100ms
+    private let MESSAGE_POLL_INTERVAL: TimeInterval = 1.0 // 1s fallback; primary path is event-driven
     private let RECONNECT_INITIAL_DELAY: TimeInterval = 1.0
     private let RECONNECT_MAX_DELAY: TimeInterval = 30.0
     private let RECONNECT_BACKOFF_MULTIPLIER: Double = 2.0
