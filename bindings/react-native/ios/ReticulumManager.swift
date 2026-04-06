@@ -50,20 +50,51 @@ public class ReticulumManager: NSObject, TransportManager {
     private var maxReconnectAttempts: Int = 0 // 0 = infinite
     private var autoReconnect: Bool = true
 
-    // State tracking
-    private var isConnected = false
-    private var isConnecting = false
+    // Lock protecting mutable state accessed from multiple queues
+    private let stateLock = NSLock()
 
-    // Failure tracking for DORS
-    private var consecutiveSendFailures: Int = 0
+    // State tracking (guarded by stateLock)
+    private var _isConnected = false
+    private var isConnected: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isConnected = newValue }
+    }
+    private var _isConnecting = false
+    private var isConnecting: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnecting }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isConnecting = newValue }
+    }
 
-    // Metrics
-    private var bytesSent: UInt64 = 0
-    private var bytesReceived: UInt64 = 0
-    private var messagesSent: UInt64 = 0
-    private var messagesReceived: UInt64 = 0
+    // Failure tracking for DORS (guarded by stateLock)
+    private var _consecutiveSendFailures: Int = 0
+    private var consecutiveSendFailures: Int {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _consecutiveSendFailures }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _consecutiveSendFailures = newValue }
+    }
 
-    // Receive buffer for line-delimited TCP
+    // Metrics (guarded by stateLock)
+    private var _bytesSent: UInt64 = 0
+    private var bytesSent: UInt64 {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _bytesSent }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _bytesSent = newValue }
+    }
+    private var _bytesReceived: UInt64 = 0
+    private var bytesReceived: UInt64 {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _bytesReceived }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _bytesReceived = newValue }
+    }
+    private var _messagesSent: UInt64 = 0
+    private var messagesSent: UInt64 {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _messagesSent }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _messagesSent = newValue }
+    }
+    private var _messagesReceived: UInt64 = 0
+    private var messagesReceived: UInt64 {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _messagesReceived }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _messagesReceived = newValue }
+    }
+
+    // Receive buffer for line-delimited TCP (only accessed on connectionQueue)
     private var receiveBuffer = Data()
 
     // MARK: - Initialization
@@ -546,7 +577,7 @@ public class ReticulumManager: NSObject, TransportManager {
 
     private func sendRaw(_ string: String, completion: ((NWError?) -> Void)? = nil) {
         guard let data = string.data(using: .utf8) else {
-            completion?(nil)
+            completion?(.posix(.EINVAL))
             return
         }
         connection?.send(content: data, completion: .contentProcessed { error in

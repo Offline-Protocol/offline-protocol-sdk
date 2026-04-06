@@ -1242,7 +1242,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     manager.stop()
                 }
 
-                configureAndStartReticulum(manager: manager, config: config)
+                try configureAndStartReticulum(manager: manager, config: config)
                 emitDiagnostic(level: "info", message: "Reticulum transport enabled")
 
             default:
@@ -1294,13 +1294,13 @@ class OfflineProtocolModule: RCTEventEmitter {
         ])
     }
 
-    private func configureAndStartReticulum(manager: ReticulumManager, config: NSDictionary?) {
+    private func configureAndStartReticulum(manager: ReticulumManager, config: NSDictionary?) throws {
         let daemonAddress = (config?["daemonAddress"] as? String) ?? (config?["daemon_address"] as? String) ?? "localhost:4242"
         let autoReconnect = (config?["autoReconnect"] as? Bool) ?? true
         let maxRetries = (config?["maxReconnectAttempts"] as? Int) ?? 0
 
         manager.configure(daemonAddress: daemonAddress, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries)
-        try? manager.start()
+        try manager.start()
 
         emitDiagnostic(level: "info", message: "Reticulum transport enabled", context: [
             "daemonAddress": daemonAddress,

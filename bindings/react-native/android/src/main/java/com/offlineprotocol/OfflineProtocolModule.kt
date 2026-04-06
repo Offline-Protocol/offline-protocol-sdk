@@ -1069,6 +1069,40 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     if (reticulumManager == null) {
                         reticulumManager = ReticulumManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
                             emitDiagnostic(level, message, context)
+                        }.also { newManager ->
+                            newManager.listener = object : TransportManagerListener {
+                                override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
+                                    emitDiagnostic("info", "Reticulum transport state changed", mapOf(
+                                        "transport" to manager.transportId,
+                                        "state" to state.name.lowercase()
+                                    ))
+                                }
+
+                                override fun onTransportError(manager: TransportManager, error: Throwable) {
+                                    emitDiagnostic("error", "Reticulum transport error", mapOf(
+                                        "transport" to manager.transportId,
+                                        "message" to (error.message ?: "unknown"),
+                                        "exception" to error.javaClass.simpleName
+                                    ))
+                                }
+
+                                override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
+                                    val enrichedMetrics = metrics.toMutableMap()
+                                    enrichedMetrics["transport"] = manager.transportId
+                                    emitDiagnostic("info", "Reticulum transport metrics", enrichedMetrics)
+                                }
+
+                                override fun onTransportDiagnostic(
+                                    manager: TransportManager,
+                                    level: String,
+                                    message: String,
+                                    context: Map<String, Any?>
+                                ) {
+                                    val enrichedContext = context.toMutableMap()
+                                    enrichedContext["transport"] = manager.transportId
+                                    emitDiagnostic(level, message, enrichedContext)
+                                }
+                            }
                         }
                         emitDiagnostic("info", "Reticulum manager created on demand")
                     }
