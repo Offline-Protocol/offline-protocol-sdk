@@ -411,8 +411,13 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             // Initialize Reticulum manager if reticulum is enabled
             if config.reticulumEnabled {
-                reticulumManager = ReticulumManager(protocol: proto, deviceId: config.userId)
-                reticulumManager?.delegate = self
+                let retManager = ReticulumManager(protocol: proto, deviceId: config.userId)
+                retManager.delegate = self
+                reticulumManager = retManager
+
+                // Register event-driven transport callback — replaces timer-based polling.
+                proto.setReticulumTransportCallback(callback: ReticulumTransportCallbackImpl(reticulumManager: retManager))
+
                 print("[OfflineProtocolModule] Reticulum Manager initialized for user: \(config.userId)")
 
                 // Extract and store reticulum config for use during start()
@@ -1231,6 +1236,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                     let newManager = ReticulumManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
                     newManager.delegate = self
                     reticulumManager = newManager
+                    proto.setReticulumTransportCallback(callback: ReticulumTransportCallbackImpl(reticulumManager: newManager))
                     emitDiagnostic(level: "info", message: "Reticulum manager created on demand")
                 }
 
@@ -3440,13 +3446,27 @@ class BleTransportCallbackImpl: BleTransportCallback, @unchecked Sendable {
 
 class WifiDirectTransportCallbackImpl: WifiDirectTransportCallback, @unchecked Sendable {
     weak var wifiDirectManager: WifiDirectManager?
-    
+
     init(wifiDirectManager: WifiDirectManager) {
         self.wifiDirectManager = wifiDirectManager
     }
-    
+
     func onMessagesAvailable() {
         wifiDirectManager?.onMessagesAvailable()
+    }
+}
+
+// MARK: - Reticulum Transport Callback (Event-Driven Sending)
+
+class ReticulumTransportCallbackImpl: ReticulumTransportCallback, @unchecked Sendable {
+    weak var reticulumManager: ReticulumManager?
+
+    init(reticulumManager: ReticulumManager) {
+        self.reticulumManager = reticulumManager
+    }
+
+    func onMessagesAvailable() {
+        reticulumManager?.onMessagesAvailable()
     }
 }
 

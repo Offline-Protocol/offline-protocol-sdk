@@ -1,6 +1,7 @@
 package com.offlineprotocol
 
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import uniffi.offline_protocol.OfflineProtocol
@@ -11,6 +12,7 @@ import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Reticulum Manager implementing TransportManager for Reticulum daemon communication.
@@ -50,15 +52,19 @@ class ReticulumManager(
     private var autoReconnect = true
     private var maxReconnectAttempts = 0 // 0 = infinite
 
-    // Handler for main thread operations
+    // Handler for main thread operations (state updates, listener callbacks)
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Message polling runnable
+    // Background handler thread for message polling and TCP I/O
+    private var ioThread: HandlerThread? = null
+    private var ioHandler: Handler? = null
+
+    // Message polling runnable — runs on ioHandler (background thread)
     private val messagePollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendMessages()
             if (state == TransportState.RUNNING && isConnected.get()) {
-                mainHandler.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
+                ioHandler?.postDelayed(this, MESSAGE_POLL_INTERVAL_MS)
             }
         }
     }
@@ -79,11 +85,11 @@ class ReticulumManager(
     // Failure tracking for DORS
     private var consecutiveSendFailures = AtomicInteger(0)
 
-    // Metrics
-    private var bytesSent: Long = 0
-    private var bytesReceived: Long = 0
-    private var messagesSent: Long = 0
-    private var messagesReceived: Long = 0
+    // Metrics (accessed from receive thread + IO thread)
+    private val bytesSent = AtomicLong(0)
+    private val bytesReceived = AtomicLong(0)
+    private val messagesSent = AtomicLong(0)
+    private val messagesReceived = AtomicLong(0)
 
     // MARK: - Helper
 
@@ -163,6 +169,11 @@ class ReticulumManager(
             "daemonAddress" to "$daemonHost:$daemonPort"
         ))
 
+        // Start background IO thread for polling and TCP writes
+        val thread = HandlerThread("ReticulumIO").also { it.start() }
+        ioThread = thread
+        ioHandler = Handler(thread.looper)
+
         updateState(TransportState.STARTING)
         connect()
     }
@@ -190,6 +201,11 @@ class ReticulumManager(
         // Close TCP connection
         disconnect()
 
+        // Shut down IO thread
+        ioThread?.quitSafely()
+        ioThread = null
+        ioHandler = null
+
         // Notify protocol
         try {
             protocol.reticulumStatusChanged(false)
@@ -202,25 +218,31 @@ class ReticulumManager(
     }
 
     override fun pause() {
-        runOnMainSync {
-            stopMessagePolling()
-        }
+        ioHandler?.post { stopMessagePolling() }
     }
 
     override fun resume() {
-        runOnMainSync {
+        ioHandler?.post {
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
             }
         }
     }
 
+    /**
+     * Called by the Rust transport callback when new outgoing messages are available.
+     * This is the primary send path, replacing timer-based polling.
+     */
+    fun onMessagesAvailable() {
+        ioHandler?.post { pollAndSendMessages() }
+    }
+
     override fun getMetrics(): Map<String, Any> {
         return mapOf(
-            "bytes_sent" to bytesSent,
-            "bytes_received" to bytesReceived,
-            "messages_sent" to messagesSent,
-            "messages_received" to messagesReceived,
+            "bytes_sent" to bytesSent.get(),
+            "bytes_received" to bytesReceived.get(),
+            "messages_sent" to messagesSent.get(),
+            "messages_received" to messagesReceived.get(),
             "is_connected" to isConnected.get(),
             "reconnect_attempts" to reconnectAttempts.get()
         )
@@ -311,13 +333,13 @@ class ReticulumManager(
             Log.e(TAG, "Error notifying protocol of connect", e)
         }
 
-        // Start polling on main thread
+        // Update state on main thread, start polling on IO thread
         mainHandler.post {
             updateState(TransportState.RUNNING)
             startMessagePolling()
-            // Immediately flush queued messages
-            pollAndSendMessages()
         }
+        // Immediately flush queued messages on IO thread
+        ioHandler?.post { pollAndSendMessages() }
     }
 
     private fun startReceiveLoop(reader: BufferedReader) {
@@ -343,8 +365,8 @@ class ReticulumManager(
         val wasConnected = isConnected.getAndSet(false)
         isConnecting.set(false)
 
-        // Stop polling immediately
-        mainHandler.post {
+        // Stop polling immediately on IO thread
+        ioHandler?.post {
             stopMessagePolling()
         }
 
@@ -405,7 +427,7 @@ class ReticulumManager(
     // MARK: - Message Handling
 
     private fun processReceivedData(data: ByteArray) {
-        bytesReceived += data.size
+        bytesReceived.addAndGet(data.size.toLong())
 
         val json: org.json.JSONObject
         val messageType: String
@@ -418,7 +440,7 @@ class ReticulumManager(
             try {
                 val senderId = "" // Unknown sender for raw data
                 protocol.reticulumMessageReceived(senderId, data.map { it.toUByte() })
-                messagesReceived++
+                messagesReceived.incrementAndGet()
             } catch (ex: Exception) {
                 emitDiagnostic("warning", "Failed to process raw Reticulum data", mapOf(
                     "size" to data.size,
@@ -438,7 +460,7 @@ class ReticulumManager(
                     return
                 }
 
-                messagesReceived++
+                messagesReceived.incrementAndGet()
 
                 try {
                     val messageBytes: ByteArray = try {
@@ -486,11 +508,11 @@ class ReticulumManager(
 
     private fun startMessagePolling() {
         stopMessagePolling()
-        mainHandler.post(messagePollingRunnable)
+        ioHandler?.post(messagePollingRunnable)
     }
 
     private fun stopMessagePolling() {
-        mainHandler.removeCallbacks(messagePollingRunnable)
+        ioHandler?.removeCallbacks(messagePollingRunnable)
     }
 
     private fun pollAndSendMessages() {
@@ -572,8 +594,8 @@ class ReticulumManager(
             }
 
             consecutiveSendFailures.set(0)
-            bytesSent += jsonString.length
-            messagesSent++
+            bytesSent.addAndGet(jsonString.length.toLong())
+            messagesSent.incrementAndGet()
             try { protocol.reticulumConfirmSent(messageId) } catch (e: Exception) {
                 Log.e(TAG, "Failed to confirm send for $messageId", e)
             }

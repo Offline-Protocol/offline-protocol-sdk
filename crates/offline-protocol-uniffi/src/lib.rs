@@ -963,8 +963,6 @@ struct WifiDirectState {
 
 /// Internal state for Reticulum transport operations
 struct ReticulumState {
-    /// Outgoing messages queue
-    outgoing_messages: VecDeque<(String, Vec<u8>)>,
     /// Whether Reticulum transport is connected
     is_connected: bool,
 }
@@ -1079,7 +1077,6 @@ impl OfflineProtocol {
                 connected_peer: None,
             }),
             reticulum_state: Mutex::new(ReticulumState {
-                outgoing_messages: VecDeque::new(),
                 is_connected: false,
             }),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
@@ -2409,48 +2406,6 @@ impl OfflineProtocol {
                     }
                 }
             }
-        }
-
-        // Fallback to local queue
-        let mut reticulum_state = recover_mutex(&self.reticulum_state, "reticulum_state");
-        while let Some((recipient, data)) = reticulum_state.outgoing_messages.pop_front() {
-            let parsed = if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::Reticulum)
-            {
-                let transport = recover_mutex(&transport_arc, "transport");
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
-                    .and_then(|rt| rt.deserialize_message(&data).ok())
-            } else {
-                None
-            };
-
-            let msg_id = parsed
-                .as_ref()
-                .map(|msg| msg.id.as_str().to_string())
-                .unwrap_or_default();
-
-            if msg_id.is_empty() {
-                tracing::warn!(
-                    recipient = %recipient,
-                    data_len = data.len(),
-                    "Dropping fallback reticulum message: could not recover message_id from deserialization — message is permanently lost"
-                );
-                continue;
-            }
-
-            let reply_to_msg = parsed
-                .as_ref()
-                .and_then(|msg| msg.reply_to_msg.as_ref().map(|id| id.as_str().to_string()));
-
-            return Some(ReticulumMessage {
-                message_id: msg_id,
-                recipient_id: recipient,
-                data,
-                reply_to_msg,
-            });
         }
 
         None

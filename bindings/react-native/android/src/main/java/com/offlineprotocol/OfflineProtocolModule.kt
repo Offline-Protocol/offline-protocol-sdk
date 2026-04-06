@@ -406,43 +406,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             // Initialize Reticulum manager if reticulum is enabled
             if (config.reticulumEnabled) {
-                reticulumManager = ReticulumManager(reactApplicationContext, proto, config.userId) { level, message, context ->
-                    emitDiagnostic(level, message, context)
-                }.also { manager ->
-                    manager.listener = object : TransportManagerListener {
-                        override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
-                            emitDiagnostic("info", "Reticulum transport state changed", mapOf(
-                                "transport" to manager.transportId,
-                                "state" to state.name.lowercase()
-                            ))
-                        }
-
-                        override fun onTransportError(manager: TransportManager, error: Throwable) {
-                            emitDiagnostic("error", "Reticulum transport error", mapOf(
-                                "transport" to manager.transportId,
-                                "message" to (error.message ?: "unknown"),
-                                "exception" to error.javaClass.simpleName
-                            ))
-                        }
-
-                        override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
-                            val enrichedMetrics = metrics.toMutableMap()
-                            enrichedMetrics["transport"] = manager.transportId
-                            emitDiagnostic("info", "Reticulum transport metrics", enrichedMetrics)
-                        }
-
-                        override fun onTransportDiagnostic(
-                            manager: TransportManager,
-                            level: String,
-                            message: String,
-                            context: Map<String, Any?>
-                        ) {
-                            val enrichedContext = context.toMutableMap()
-                            enrichedContext["transport"] = manager.transportId
-                            emitDiagnostic(level, message, enrichedContext)
-                        }
-                    }
-                }
+                reticulumManager = createReticulumManager(proto, config.userId)
                 android.util.Log.i(NAME, "Reticulum Manager initialized for user: ${config.userId}")
                 emitDiagnostic("info", "Reticulum manager initialized", mapOf(
                     "userId" to config.userId
@@ -1067,43 +1031,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 }
                 "reticulum" -> {
                     if (reticulumManager == null) {
-                        reticulumManager = ReticulumManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
-                            emitDiagnostic(level, message, context)
-                        }.also { newManager ->
-                            newManager.listener = object : TransportManagerListener {
-                                override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
-                                    emitDiagnostic("info", "Reticulum transport state changed", mapOf(
-                                        "transport" to manager.transportId,
-                                        "state" to state.name.lowercase()
-                                    ))
-                                }
-
-                                override fun onTransportError(manager: TransportManager, error: Throwable) {
-                                    emitDiagnostic("error", "Reticulum transport error", mapOf(
-                                        "transport" to manager.transportId,
-                                        "message" to (error.message ?: "unknown"),
-                                        "exception" to error.javaClass.simpleName
-                                    ))
-                                }
-
-                                override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
-                                    val enrichedMetrics = metrics.toMutableMap()
-                                    enrichedMetrics["transport"] = manager.transportId
-                                    emitDiagnostic("info", "Reticulum transport metrics", enrichedMetrics)
-                                }
-
-                                override fun onTransportDiagnostic(
-                                    manager: TransportManager,
-                                    level: String,
-                                    message: String,
-                                    context: Map<String, Any?>
-                                ) {
-                                    val enrichedContext = context.toMutableMap()
-                                    enrichedContext["transport"] = manager.transportId
-                                    emitDiagnostic(level, message, enrichedContext)
-                                }
-                            }
-                        }
+                        reticulumManager = createReticulumManager(proto, currentConfig?.userId ?: "unknown")
                         emitDiagnostic("info", "Reticulum manager created on demand")
                     }
 
@@ -1180,6 +1108,46 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             "autoReconnect" to autoReconnect,
             "hasAuthToken" to (authToken != null)
         ))
+    }
+
+    private fun createReticulumManager(proto: OfflineProtocol, userId: String): ReticulumManager {
+        return ReticulumManager(reactApplicationContext, proto, userId) { level, message, context ->
+            emitDiagnostic(level, message, context)
+        }.also { manager ->
+            manager.listener = object : TransportManagerListener {
+                override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
+                    emitDiagnostic("info", "Reticulum transport state changed", mapOf(
+                        "transport" to manager.transportId,
+                        "state" to state.name.lowercase()
+                    ))
+                }
+
+                override fun onTransportError(manager: TransportManager, error: Throwable) {
+                    emitDiagnostic("error", "Reticulum transport error", mapOf(
+                        "transport" to manager.transportId,
+                        "message" to (error.message ?: "unknown"),
+                        "exception" to error.javaClass.simpleName
+                    ))
+                }
+
+                override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
+                    val enrichedMetrics = metrics.toMutableMap()
+                    enrichedMetrics["transport"] = manager.transportId
+                    emitDiagnostic("info", "Reticulum transport metrics", enrichedMetrics)
+                }
+
+                override fun onTransportDiagnostic(
+                    manager: TransportManager,
+                    level: String,
+                    message: String,
+                    context: Map<String, Any?>
+                ) {
+                    val enrichedContext = context.toMutableMap()
+                    enrichedContext["transport"] = manager.transportId
+                    emitDiagnostic(level, message, enrichedContext)
+                }
+            }
+        }
     }
 
     private fun configureAndStartReticulum(manager: ReticulumManager, config: ReadableMap?) {
@@ -2951,6 +2919,29 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "WiFi Direct transport callback not available; using fallback polling", e)
                 emitDiagnostic("warning", "WiFi Direct callback wiring skipped (regenerate UniFFI bindings)")
+            }
+        }
+
+        // Reticulum callback
+        reticulumManager?.let { manager ->
+            try {
+                val callbackClass = Class.forName("uniffi.offline_protocol.ReticulumTransportCallback")
+                val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    callbackClass.classLoader,
+                    arrayOf(callbackClass)
+                ) { _, method, _ ->
+                    if (method.name == "onMessagesAvailable") {
+                        manager.onMessagesAvailable()
+                    }
+                    null
+                }
+                val setter = proto.javaClass.getMethod("setReticulumTransportCallback", callbackClass)
+                setter.invoke(proto, proxy)
+                android.util.Log.i(NAME, "Reticulum transport callback wired (event-driven sending active)")
+                emitDiagnostic("info", "Reticulum transport callback wired")
+            } catch (e: Throwable) {
+                android.util.Log.w(NAME, "Reticulum transport callback not available; using fallback polling", e)
+                emitDiagnostic("warning", "Reticulum callback wiring skipped (regenerate UniFFI bindings)")
             }
         }
     }

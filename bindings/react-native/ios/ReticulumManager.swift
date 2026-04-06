@@ -16,7 +16,11 @@ public class ReticulumManager: NSObject, TransportManager {
 
     public let transportId = "reticulum"
     public let transportName = "Reticulum (Mesh)"
-    public private(set) var state: TransportState = .unavailable
+    private var _state: TransportState = .unavailable
+    public private(set) var state: TransportState {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _state }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _state = newValue }
+    }
     public weak var delegate: TransportManagerDelegate?
 
     // MARK: - Constants
@@ -43,15 +47,24 @@ public class ReticulumManager: NSObject, TransportManager {
     private var messageTimer: DispatchSourceTimer?
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.reticulum.messages")
 
-    // Reconnection
-    private var reconnectAttempts: Int = 0
-    private var currentReconnectDelay: TimeInterval = 1.0
+    // Reconnection (guarded by stateLock)
+    private var _reconnectAttempts: Int = 0
+    private var _currentReconnectDelay: TimeInterval = 1.0
     private var reconnectWorkItem: DispatchWorkItem?
     private var maxReconnectAttempts: Int = 0 // 0 = infinite
     private var autoReconnect: Bool = true
 
     // Lock protecting mutable state accessed from multiple queues
     private let stateLock = NSLock()
+
+    private var reconnectAttempts: Int {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _reconnectAttempts }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _reconnectAttempts = newValue }
+    }
+    private var currentReconnectDelay: TimeInterval {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _currentReconnectDelay }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _currentReconnectDelay = newValue }
+    }
 
     // State tracking (guarded by stateLock)
     private var _isConnected = false
@@ -386,6 +399,16 @@ public class ReticulumManager: NSObject, TransportManager {
         }
         reconnectWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    // MARK: - Event-Driven Sending
+
+    /// Called by the Rust transport callback when new outgoing messages are available.
+    /// This is the primary send path, replacing timer-based polling.
+    public func onMessagesAvailable() {
+        messageQueue.async { [weak self] in
+            self?.pollAndSendMessages()
+        }
     }
 
     // MARK: - Message Handling
