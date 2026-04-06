@@ -281,10 +281,10 @@ public class ReticulumManager: NSObject, TransportManager {
         connection = nil
         isConnected = false
         isConnecting = false
-        // Reset receiveBuffer on connectionQueue to avoid racing with startReceiving()
-        connectionQueue.sync {
-            receiveBuffer = Data()
-        }
+        // Reset receiveBuffer — safe because either we are already on
+        // connectionQueue (reconnect path) or the connection has been
+        // cancelled above so no receive callbacks can fire (stop path).
+        receiveBuffer = Data()
     }
 
     private func handleConnectionOpened() {
