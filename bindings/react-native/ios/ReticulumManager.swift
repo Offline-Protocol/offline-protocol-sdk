@@ -362,26 +362,30 @@ public class ReticulumManager: NSObject, TransportManager {
             self?.stopMessagePolling()
         }
 
-        // Notify protocol
-        do {
-            try protocolInstance.reticulumStatusChanged(isConnected: false)
-        } catch {
-            emitDiagnostic("error", "Failed to notify protocol of disconnection", context: [
-                "error": error.localizedDescription
-            ])
-        }
-
         emitDiagnostic("warning", "Reticulum daemon disconnected", context: [
             "error": error?.localizedDescription ?? "none",
             "wasConnected": wasConnected
         ])
 
-        // Attempt reconnection if enabled
-        if autoReconnect && state != .stopping && state != .stopped {
-            scheduleReconnect()
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.updateState(.stopped)
+        // Notify protocol and handle reconnection on main thread,
+        // consistent with handleConnectionOpened which also dispatches to main.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            // Notify protocol
+            do {
+                try self.protocolInstance.reticulumStatusChanged(isConnected: false)
+            } catch {
+                self.emitDiagnostic("error", "Failed to notify protocol of disconnection", context: [
+                    "error": error.localizedDescription
+                ])
+            }
+
+            // Attempt reconnection if enabled
+            if self.autoReconnect && self.state != .stopping && self.state != .stopped {
+                self.scheduleReconnect()
+            } else {
+                self.updateState(.stopped)
             }
         }
     }

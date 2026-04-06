@@ -4307,4 +4307,158 @@ mod tests {
         // but it should not panic regardless.
         let _ = result;
     }
+
+    #[test]
+    fn test_reticulum_send_receive_round_trip() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        // Connect and force Reticulum transport so DORS doesn't pick another
+        protocol.reticulum_status_changed(true).unwrap();
+        protocol
+            .force_transport(TransportType::Reticulum)
+            .unwrap();
+
+        // Send a message — this enqueues it in the Reticulum transport's send_queue
+        let msg_id = protocol
+            .send_message(
+                "recipient-peer".to_string(),
+                "hello via reticulum".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+        assert!(!msg_id.is_empty());
+
+        // Retrieve the outgoing message via the platform bridge method
+        let outgoing = protocol.reticulum_get_next_message();
+        assert!(outgoing.is_some(), "Expected an outgoing Reticulum message");
+        let outgoing = outgoing.unwrap();
+        assert_eq!(outgoing.recipient_id, "recipient-peer");
+        assert!(!outgoing.data.is_empty());
+
+        // Confirm the message was sent — should not panic
+        protocol.reticulum_confirm_sent(outgoing.message_id.clone());
+
+        // Queue should now be empty
+        assert!(protocol.reticulum_get_next_message().is_none());
+    }
+
+    #[test]
+    fn test_reticulum_send_round_trip_with_failure() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+        protocol
+            .force_transport(TransportType::Reticulum)
+            .unwrap();
+
+        let _msg_id = protocol
+            .send_message(
+                "recipient-peer".to_string(),
+                "will fail".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+
+        let outgoing = protocol.reticulum_get_next_message().unwrap();
+
+        // Report failure — should not panic and should update metrics
+        protocol.reticulum_send_failed_with_reason(
+            outgoing.message_id,
+            Some("daemon unreachable".to_string()),
+        );
+
+        // Queue should be empty after the failure report
+        assert!(protocol.reticulum_get_next_message().is_none());
+    }
+
+    #[test]
+    fn test_reticulum_reconnect_flushes_outbox() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        protocol.reticulum_status_changed(true).unwrap();
+        protocol
+            .force_transport(TransportType::Reticulum)
+            .unwrap();
+
+        // Send a message while connected
+        protocol
+            .send_message(
+                "peer-a".to_string(),
+                "buffered msg".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+
+        // Disconnect — the message stays in the outbox
+        protocol.reticulum_status_changed(false).unwrap();
+        assert!(
+            protocol.reticulum_get_next_message().is_none(),
+            "Should return None when disconnected"
+        );
+
+        // Reconnect — this triggers flush_outbox_all
+        protocol.reticulum_status_changed(true).unwrap();
+
+        // The flushed message should now be retrievable
+        let outgoing = protocol.reticulum_get_next_message();
+        assert!(
+            outgoing.is_some(),
+            "Expected outbox to be flushed on reconnect"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_set_transport_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        struct TestCallback {
+            count: Arc<AtomicUsize>,
+        }
+
+        impl ReticulumTransportCallback for TestCallback {
+            fn on_messages_available(&self) {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        protocol.set_reticulum_transport_callback(Box::new(TestCallback {
+            count: call_count.clone(),
+        }));
+
+        // Connect and force Reticulum
+        protocol.reticulum_status_changed(true).unwrap();
+        protocol
+            .force_transport(TransportType::Reticulum)
+            .unwrap();
+
+        // Send a message — should trigger the callback
+        protocol
+            .send_message(
+                "peer-b".to_string(),
+                "trigger callback".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            call_count.load(Ordering::SeqCst) > 0,
+            "Expected transport callback to have been invoked"
+        );
+    }
 }
