@@ -2263,17 +2263,13 @@ impl OfflineProtocol {
 
     /// Called by the platform when the Reticulum daemon connection status changes.
     pub fn reticulum_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
-        // Track previous state for edge case handling
+        // Atomically read previous state and update in a single lock scope
         let was_connected = {
-            let reticulum_state = self.lock_reticulum()?;
-            reticulum_state.is_connected
-        };
-
-        // Update internal state
-        {
             let mut reticulum_state = self.lock_reticulum()?;
+            let prev = reticulum_state.is_connected;
             reticulum_state.is_connected = is_connected;
-        }
+            prev
+        };
 
         // Update the Reticulum transport status in the transport manager
         {

@@ -139,6 +139,15 @@ class ReticulumManager(
         this.autoReconnect = autoReconnect
         this.maxReconnectAttempts = maxReconnectAttempts
 
+        // Warn when connecting to a non-localhost daemon — the TCP link is unencrypted
+        val localhostAliases = setOf("localhost", "127.0.0.1", "::1")
+        if (daemonHost !in localhostAliases) {
+            Log.w(TAG, "Reticulum daemon is not on localhost ($daemonHost) — TCP connection is unencrypted")
+            emitDiagnostic("warning", "Reticulum daemon is not on localhost — TCP connection is unencrypted", mapOf(
+                "daemonHost" to daemonHost
+            ))
+        }
+
         emitDiagnostic("info", "Reticulum transport configured", mapOf(
             "daemonHost" to daemonHost,
             "daemonPort" to daemonPort,

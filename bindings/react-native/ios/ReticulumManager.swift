@@ -137,6 +137,14 @@ public class ReticulumManager: NSObject, TransportManager {
         self.autoReconnect = autoReconnect
         self.maxReconnectAttempts = maxReconnectAttempts
 
+        // Warn when connecting to a non-localhost daemon — the TCP link is unencrypted
+        let localhostAliases: Set<String> = ["localhost", "127.0.0.1", "::1"]
+        if !localhostAliases.contains(daemonHost) {
+            emitDiagnostic("warning", "Reticulum daemon is not on localhost — TCP connection is unencrypted", context: [
+                "daemonHost": daemonHost
+            ])
+        }
+
         emitDiagnostic("info", "Reticulum transport configured", context: [
             "daemonHost": daemonHost,
             "daemonPort": daemonPort,
@@ -273,7 +281,10 @@ public class ReticulumManager: NSObject, TransportManager {
         connection = nil
         isConnected = false
         isConnecting = false
-        receiveBuffer = Data()
+        // Reset receiveBuffer on connectionQueue to avoid racing with startReceiving()
+        connectionQueue.sync {
+            receiveBuffer = Data()
+        }
     }
 
     private func handleConnectionOpened() {
