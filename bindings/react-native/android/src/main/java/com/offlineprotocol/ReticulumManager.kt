@@ -252,6 +252,7 @@ class ReticulumManager(
     // MARK: - Connection Management
 
     private fun connect() {
+        if (state == TransportState.STOPPING || state == TransportState.STOPPED) return
         if (isConnecting.get() || isConnected.get()) return
         isConnecting.set(true)
 
@@ -366,7 +367,10 @@ class ReticulumManager(
 
     private fun handleConnectionClosed(code: Int, reason: String?) {
         val wasConnected = isConnected.getAndSet(false)
-        isConnecting.set(false)
+        val wasConnecting = isConnecting.getAndSet(false)
+
+        // Prevent duplicate disconnect handling
+        if (!wasConnected && !wasConnecting) return
 
         // Stop polling immediately on IO thread
         ioHandler?.post {
