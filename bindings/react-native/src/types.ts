@@ -141,6 +141,12 @@ export interface WifiDirectTransportConfig {
 export interface ReticulumTransportConfig {
   /** Enable Reticulum transport (default: false) */
   enabled: boolean;
+  /** TCP address of the Reticulum daemon in "host:port" format (default: "localhost:4242") */
+  daemonAddress?: string;
+  /** Whether to auto-reconnect on disconnect (default: true) */
+  autoReconnect?: boolean;
+  /** Maximum reconnect attempts, 0 = infinite (default: 0) */
+  maxReconnectAttempts?: number;
 }
 
 /**
