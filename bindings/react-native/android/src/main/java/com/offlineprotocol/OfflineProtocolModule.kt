@@ -2863,34 +2863,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Wire Rust transport callbacks for event-driven sending.
-     *
-     * Requires regenerated UniFFI Android bindings that expose
-     * BleTransportCallback / WifiDirectTransportCallback interfaces and
-     * setBleTransportCallback / setWifiDirectTransportCallback methods.
-     *
-     * Uses reflection so the build succeeds even with stale bindings;
-     * the fallback polling timer covers sending until callbacks are wired.
-     *
-     * Once the UniFFI bindings are regenerated, this method can be simplified
-     * to direct calls (see iOS OfflineProtocolModule.swift for reference).
+     * Wire event-driven transport callbacks using direct typed UniFFI calls.
+     * Each callback fires when Rust enqueues outgoing data, replacing timer-based polling.
+     * Falls back to polling if bindings are stale (logged as warning).
      */
     private fun wireTransportCallbacks(proto: OfflineProtocol) {
         // BLE callback
         bleManager?.let { manager ->
             try {
-                val callbackClass = Class.forName("uniffi.offline_protocol.BleTransportCallback")
-                val proxy = java.lang.reflect.Proxy.newProxyInstance(
-                    callbackClass.classLoader,
-                    arrayOf(callbackClass)
-                ) { _, method, _ ->
-                    if (method.name == "onFragmentsAvailable") {
+                proto.setBleTransportCallback(object : uniffi.offline_protocol.BleTransportCallback {
+                    override fun onFragmentsAvailable() {
                         manager.onFragmentsAvailable()
                     }
-                    null
-                }
-                val setter = proto.javaClass.getMethod("setBleTransportCallback", callbackClass)
-                setter.invoke(proto, proxy)
+                })
                 android.util.Log.i(NAME, "BLE transport callback wired (event-driven sending active)")
                 emitDiagnostic("info", "BLE transport callback wired")
             } catch (e: Throwable) {
@@ -2902,18 +2887,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // WiFi Direct callback
         wifiDirectManager?.let { manager ->
             try {
-                val callbackClass = Class.forName("uniffi.offline_protocol.WifiDirectTransportCallback")
-                val proxy = java.lang.reflect.Proxy.newProxyInstance(
-                    callbackClass.classLoader,
-                    arrayOf(callbackClass)
-                ) { _, method, _ ->
-                    if (method.name == "onMessagesAvailable") {
+                proto.setWifiDirectTransportCallback(object : uniffi.offline_protocol.WifiDirectTransportCallback {
+                    override fun onMessagesAvailable() {
                         manager.onMessagesAvailable()
                     }
-                    null
-                }
-                val setter = proto.javaClass.getMethod("setWifiDirectTransportCallback", callbackClass)
-                setter.invoke(proto, proxy)
+                })
                 android.util.Log.i(NAME, "WiFi Direct transport callback wired (event-driven sending active)")
                 emitDiagnostic("info", "WiFi Direct transport callback wired")
             } catch (e: Throwable) {
@@ -2922,7 +2900,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        // Reticulum callback — direct typed invocation (matches iOS implementation)
+        // Reticulum callback
         reticulumManager?.let { manager ->
             try {
                 proto.setReticulumTransportCallback(object : uniffi.offline_protocol.ReticulumTransportCallback {
