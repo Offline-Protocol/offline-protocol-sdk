@@ -2923,6 +2923,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
 
         // Reticulum callback
+        // TODO: Replace reflection-based proxy with direct typed invocation
+        // (e.g. `proto.setReticulumTransportCallback(object : ReticulumTransportCallback { ... })`)
+        // once UniFFI Kotlin bindings are regenerated and the callback interface is available at compile time.
         reticulumManager?.let { manager ->
             try {
                 val callbackClass = Class.forName("uniffi.offline_protocol.ReticulumTransportCallback")

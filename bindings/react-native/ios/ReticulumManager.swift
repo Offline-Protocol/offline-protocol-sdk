@@ -298,13 +298,12 @@ public class ReticulumManager: NSObject, TransportManager {
             sendRaw(jsonString + "\n")
         }
 
-        // Notify protocol
-        try? protocolInstance.reticulumStatusChanged(isConnected: true)
-
-        // Start polling on main thread
+        // Start polling on main thread; notify protocol after state is .running
+        // so that any protocol handler querying transport state sees the correct value.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.updateState(.running)
+            try? self.protocolInstance.reticulumStatusChanged(isConnected: true)
             self.startMessagePolling()
             // Immediately flush queued messages
             self.messageQueue.async {

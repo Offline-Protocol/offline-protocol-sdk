@@ -303,6 +303,11 @@ class ReticulumManager(
     }
 
     private fun disconnect() {
+        // Clear flags before interrupting the receive thread so it sees
+        // isConnected == false and skips the redundant handleConnectionClosed post.
+        isConnected.set(false)
+        isConnecting.set(false)
+
         receiveThread?.interrupt()
         receiveThread = null
 
@@ -314,9 +319,6 @@ class ReticulumManager(
             reader = null
             socket = null
         }
-
-        isConnected.set(false)
-        isConnecting.set(false)
     }
 
     private fun handleConnectionOpened() {
