@@ -25,7 +25,7 @@ public class ReticulumManager: NSObject, TransportManager {
 
     // MARK: - Constants
 
-    private let MESSAGE_POLL_INTERVAL: TimeInterval = 1.0 // 1s fallback; primary path is event-driven
+    private let MESSAGE_POLL_INTERVAL: TimeInterval = 5.0 // 5s fallback; primary path is event-driven
     private let RECONNECT_INITIAL_DELAY: TimeInterval = 1.0
     private let RECONNECT_MAX_DELAY: TimeInterval = 30.0
     private let RECONNECT_BACKOFF_MULTIPLIER: Double = 2.0
@@ -531,45 +531,51 @@ public class ReticulumManager: NSObject, TransportManager {
 
     private func pollAndSendMessages() {
         guard isConnected else { return }
+        sendNextMessage(sent: 0, maxBatchSize: 10)
+    }
 
-        var sent = 0
-        let maxBatchSize = 10
-
-        while sent < maxBatchSize {
-            guard isConnected else {
-                emitDiagnostic("warning", "Connection lost mid-batch, stopping message send", context: [
-                    "messagesSent": sent
+    /// Sends messages one at a time, chaining the next send from each completion
+    /// handler so that NWConnection writes are serialized (no concurrent sends).
+    private func sendNextMessage(sent: Int, maxBatchSize: Int) {
+        guard sent < maxBatchSize, isConnected else {
+            if sent > 1 {
+                emitDiagnostic("debug", "Batch sent messages via Reticulum", context: [
+                    "count": sent
                 ])
-                break
             }
-
-            guard let message = protocolInstance.reticulumGetNextMessage() else {
-                break
-            }
-
-            sendMessage(
-                messageId: message.messageId,
-                recipientId: message.recipientId,
-                data: Data(message.data),
-                replyToMsg: message.replyToMsg
-            )
-            sent += 1
+            return
         }
 
-        if sent > 1 {
-            emitDiagnostic("debug", "Batch sent messages via Reticulum", context: [
-                "count": sent
-            ])
+        guard let message = protocolInstance.reticulumGetNextMessage() else {
+            if sent > 1 {
+                emitDiagnostic("debug", "Batch sent messages via Reticulum", context: [
+                    "count": sent
+                ])
+            }
+            return
+        }
+
+        sendMessage(
+            messageId: message.messageId,
+            recipientId: message.recipientId,
+            data: Data(message.data),
+            replyToMsg: message.replyToMsg
+        ) { [weak self] in
+            guard let self = self else { return }
+            self.messageQueue.async {
+                self.sendNextMessage(sent: sent + 1, maxBatchSize: maxBatchSize)
+            }
         }
     }
 
-    private func sendMessage(messageId: String, recipientId: String, data: Data, replyToMsg: String? = nil) {
+    private func sendMessage(messageId: String, recipientId: String, data: Data, replyToMsg: String? = nil, completion: (() -> Void)? = nil) {
         guard isConnected, connection != nil else {
             emitDiagnostic("warning", "Cannot send message - not connected", context: [
                 "messageId": messageId,
                 "recipientId": recipientId
             ])
             protocolInstance.reticulumSendFailed(messageId: messageId)
+            completion?()
             return
         }
 
@@ -589,6 +595,7 @@ public class ReticulumManager: NSObject, TransportManager {
               let jsonString = String(data: jsonData, encoding: .utf8) else {
             emitDiagnostic("error", "Failed to create Reticulum message")
             protocolInstance.reticulumSendFailed(messageId: messageId)
+            completion?()
             return
         }
 
@@ -623,6 +630,8 @@ public class ReticulumManager: NSObject, TransportManager {
                     "contentLength": content.count
                 ])
             }
+
+            completion?()
         }
     }
 

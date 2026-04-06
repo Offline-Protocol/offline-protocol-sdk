@@ -1134,6 +1134,58 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::LockPoisoned(format!("reticulum_state: {}", e)))
     }
 
+    /// Acquire the inner + transport locks, downcast to `ReticulumTransport`,
+    /// and call `f` with it.  Returns `None` when the transport is absent or
+    /// not a `ReticulumTransport`.
+    fn with_reticulum_transport<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(
+            &offline_protocol_transport::reticulum::ReticulumTransport,
+        ) -> R,
+    {
+        let protocol = recover_mutex(&self.inner, "inner");
+        let transport_arc = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Reticulum)?;
+        let transport = recover_mutex(&transport_arc, "transport");
+        let reticulum_transport = transport
+            .as_any()
+            .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()?;
+        Some(f(reticulum_transport))
+    }
+
+    /// Like `with_reticulum_transport` but uses fallible lock acquisition
+    /// (`lock_inner`) so it can propagate lock-poison errors.
+    fn with_reticulum_transport_fallible<F, R>(
+        &self,
+        f: F,
+    ) -> Result<Option<R>, ProtocolError>
+    where
+        F: FnOnce(
+            &offline_protocol_transport::reticulum::ReticulumTransport,
+        ) -> R,
+    {
+        let protocol = self.lock_inner()?;
+        let transport_arc = match protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Reticulum)
+        {
+            Some(arc) => arc,
+            None => return Ok(None),
+        };
+        let transport = transport_arc
+            .lock()
+            .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+        let reticulum_transport = match transport
+            .as_any()
+            .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
+        {
+            Some(rt) => rt,
+            None => return Ok(None),
+        };
+        Ok(Some(f(reticulum_transport)))
+    }
+
     /// Lock the visualizer mutex, converting poison errors.
     fn lock_visualizer(
         &self,
@@ -1349,23 +1401,12 @@ impl OfflineProtocol {
     /// messages become available. This replaces timer-based polling.
     pub fn set_reticulum_transport_callback(&self, callback: Box<dyn ReticulumTransportCallback>) {
         let callback: Arc<dyn ReticulumTransportCallback> = Arc::from(callback);
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::Reticulum)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(reticulum_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
-            {
-                let cb = callback.clone();
-                reticulum_transport.set_on_messages_available(Arc::new(move || {
-                    cb.on_messages_available();
-                }));
-            }
-        }
+        self.with_reticulum_transport(|rt| {
+            let cb = callback.clone();
+            rt.set_on_messages_available(Arc::new(move || {
+                cb.on_messages_available();
+            }));
+        });
     }
 
     // ========================================================================
@@ -2272,29 +2313,14 @@ impl OfflineProtocol {
         };
 
         // Update the Reticulum transport status in the transport manager
-        {
-            let protocol = self.lock_inner()?;
-            if let Some(transport_arc) = protocol
-                .transport_manager()
-                .get_transport(CoreTransportType::Reticulum)
-            {
-                let transport = transport_arc
-                    .lock()
-                    .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-                if let Some(reticulum_transport) =
-                    transport
-                        .as_any()
-                        .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
-                {
-                    let new_status = if is_connected {
-                        offline_protocol_transport::TransportStatus::Available
-                    } else {
-                        offline_protocol_transport::TransportStatus::Disconnected
-                    };
-                    reticulum_transport.on_status_changed(new_status);
-                }
-            }
-        }
+        self.with_reticulum_transport_fallible(|rt| {
+            let new_status = if is_connected {
+                offline_protocol_transport::TransportStatus::Available
+            } else {
+                offline_protocol_transport::TransportStatus::Disconnected
+            };
+            rt.on_status_changed(new_status);
+        })?;
 
         // When reconnecting after disconnection, immediately flush all pending
         // outbox messages (bypasses backoff timers)
@@ -2328,31 +2354,24 @@ impl OfflineProtocol {
         sender_id: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
-        let mut protocol = self.lock_inner()?;
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::Reticulum)
-        {
-            let transport = transport_arc
-                .lock()
-                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
-            if let Some(reticulum_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
-            {
-                if let Err(e) = reticulum_transport.on_data_received_from(data, sender_id.clone()) {
-                    return Err(ProtocolError::Other(format!(
-                        "Failed to process reticulum message: {}",
-                        e
-                    )));
-                }
-            }
+        // Deliver data to the transport in an isolated lock scope so the
+        // inner + transport locks are released before we re-acquire inner
+        // for receive_message().  This reduces contention.
+        if let Some(Err(e)) = self.with_reticulum_transport_fallible(|rt| {
+            rt.on_data_received_from(data, sender_id.clone())
+        })? {
+            return Err(ProtocolError::Other(format!(
+                "Failed to process reticulum message: {}",
+                e
+            )));
         }
 
-        while protocol.receive_message().is_some() {}
-        let is_blocked = protocol.is_user_blocked(&sender_id);
-        drop(protocol);
+        // Separate lock scope: drain received messages and check block status
+        let is_blocked = {
+            let mut protocol = self.lock_inner()?;
+            while protocol.receive_message().is_some() {}
+            protocol.is_user_blocked(&sender_id)
+        };
 
         if !sender_id.is_empty() && !is_blocked {
             let event = CoreEvent::NeighborDiscovered {
@@ -2377,69 +2396,50 @@ impl OfflineProtocol {
             }
         }
 
-        let protocol = recover_mutex(&self.inner, "inner");
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::Reticulum)
-        {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(reticulum_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
-            {
-                if let Ok(Some((message_id, data))) = reticulum_transport.get_next_message() {
-                    match reticulum_transport.deserialize_message(&data) {
-                        Ok(message) => {
-                            return Some(ReticulumMessage {
-                                message_id,
-                                recipient_id: message.recipient.as_str().to_string(),
-                                data,
-                                reply_to_msg: message
-                                    .reply_to_msg
-                                    .as_ref()
-                                    .map(|id| id.as_str().to_string()),
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                message_id = %message_id,
-                                error = %e,
-                                "Failed to deserialize reticulum message, reporting failure"
-                            );
-                            reticulum_transport.report_send_failure(&message_id);
-                        }
+        self.with_reticulum_transport(|rt| {
+            if let Ok(Some((message_id, data))) = rt.get_next_message() {
+                match rt.deserialize_message(&data) {
+                    Ok(message) => {
+                        return Some(ReticulumMessage {
+                            message_id,
+                            recipient_id: message.recipient.as_str().to_string(),
+                            data,
+                            reply_to_msg: message
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            message_id = %message_id,
+                            error = %e,
+                            "Failed to deserialize reticulum message, reporting failure"
+                        );
+                        rt.report_send_failure(&message_id);
                     }
                 }
             }
-        }
-
-        None
+            None
+        })
+        .flatten()
     }
 
     /// Called by the platform after successfully sending a Reticulum message.
     pub fn reticulum_confirm_sent(&self, message_id: String) {
-        let mut protocol = recover_mutex(&self.inner, "inner");
-        if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
-            tracing::warn!(
-                message_id = %message_id,
-                error = %err,
-                "Failed to apply welcome lifecycle transport confirmation (reticulum)"
-            );
-        }
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::Reticulum)
         {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(reticulum_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
-            {
-                reticulum_transport.confirm_sent(&message_id);
+            let mut protocol = recover_mutex(&self.inner, "inner");
+            if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
+                tracing::warn!(
+                    message_id = %message_id,
+                    error = %err,
+                    "Failed to apply welcome lifecycle transport confirmation (reticulum)"
+                );
             }
         }
+        self.with_reticulum_transport(|rt| {
+            rt.confirm_sent(&message_id);
+        });
     }
 
     /// Called by the platform when sending a Reticulum message fails.
@@ -2453,27 +2453,19 @@ impl OfflineProtocol {
     /// Called by the platform when sending a Reticulum message fails, with an
     /// optional reason for diagnostics.
     pub fn reticulum_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
-        let mut protocol = recover_mutex(&self.inner, "inner");
-        if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
-            tracing::warn!(
-                message_id = %message_id,
-                error = %err,
-                "Failed to apply welcome lifecycle transport failure (reticulum)"
-            );
-        }
-        if let Some(transport_arc) = protocol
-            .transport_manager()
-            .get_transport(CoreTransportType::Reticulum)
         {
-            let transport = recover_mutex(&transport_arc, "transport");
-            if let Some(reticulum_transport) =
-                transport
-                    .as_any()
-                    .downcast_ref::<offline_protocol_transport::reticulum::ReticulumTransport>()
-            {
-                reticulum_transport.report_send_failure(&message_id);
+            let mut protocol = recover_mutex(&self.inner, "inner");
+            if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+                tracing::warn!(
+                    message_id = %message_id,
+                    error = %err,
+                    "Failed to apply welcome lifecycle transport failure (reticulum)"
+                );
             }
         }
+        self.with_reticulum_transport(|rt| {
+            rt.report_send_failure(&message_id);
+        });
     }
 
     // ========================================================================
@@ -4455,6 +4447,81 @@ mod tests {
         assert!(
             call_count.load(Ordering::SeqCst) > 0,
             "Expected transport callback to have been invoked"
+        );
+    }
+
+    #[test]
+    fn test_reticulum_status_changed_idempotent_disconnect() {
+        let config = create_reticulum_config();
+        let protocol = OfflineProtocol::new(config).unwrap();
+        protocol.start().unwrap();
+
+        // Disconnecting when already disconnected should be idempotent
+        assert!(protocol.reticulum_status_changed(false).is_ok());
+        assert!(protocol.reticulum_status_changed(false).is_ok());
+
+        // Connect then double-disconnect
+        protocol.reticulum_status_changed(true).unwrap();
+        assert!(protocol.reticulum_status_changed(false).is_ok());
+        assert!(protocol.reticulum_status_changed(false).is_ok());
+
+        // State should remain healthy
+        assert!(protocol.reticulum_get_next_message().is_none());
+        assert!(protocol.reticulum_status_changed(true).is_ok());
+    }
+
+    #[test]
+    fn test_reticulum_message_received_valid_data() {
+        // Sender protocol sends a message; we capture the serialized bytes
+        // from its transport queue and feed them into a receiver protocol
+        // via reticulum_message_received.
+        let sender_config = ProtocolConfig {
+            user_id: "sender-user".to_string(),
+            ..create_reticulum_config()
+        };
+        let sender = OfflineProtocol::new(sender_config).unwrap();
+        sender.start().unwrap();
+        sender.reticulum_status_changed(true).unwrap();
+        sender
+            .force_transport(TransportType::Reticulum)
+            .unwrap();
+
+        sender
+            .send_message(
+                "receiver-user".to_string(),
+                "hello from sender".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+
+        let outgoing = sender
+            .reticulum_get_next_message()
+            .expect("Expected outgoing message from sender");
+        let serialized_data = outgoing.data;
+
+        // Receiver protocol ingests the serialized bytes
+        let receiver_config = ProtocolConfig {
+            user_id: "receiver-user".to_string(),
+            ..create_reticulum_config()
+        };
+        let receiver = OfflineProtocol::new(receiver_config).unwrap();
+        receiver.start().unwrap();
+        receiver.reticulum_status_changed(true).unwrap();
+
+        // Feed valid serialized message data — should succeed
+        let result = receiver.reticulum_message_received(
+            "sender-user".to_string(),
+            serialized_data,
+        );
+        assert!(result.is_ok(), "Expected valid message to be processed successfully");
+
+        // The message should have been received and drained by receive_message()
+        // inside reticulum_message_received, so the high-level receive_message
+        // should return None (already consumed).
+        assert!(
+            receiver.receive_message().is_none(),
+            "Message should have been consumed internally"
         );
     }
 }
