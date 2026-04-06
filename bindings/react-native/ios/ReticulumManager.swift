@@ -51,6 +51,7 @@ public class ReticulumManager: NSObject, TransportManager {
     private var _reconnectAttempts: Int = 0
     private var _currentReconnectDelay: TimeInterval = 1.0
     private var reconnectWorkItem: DispatchWorkItem?
+    private var connectionTimeoutWorkItem: DispatchWorkItem?
     private var maxReconnectAttempts: Int = 0 // 0 = infinite
     private var autoReconnect: Bool = true
 
@@ -151,7 +152,7 @@ public class ReticulumManager: NSObject, TransportManager {
     }
 
     public func start() throws {
-        guard state != .running else {
+        guard state != .running && state != .starting else {
             throw TransportError.alreadyRunning
         }
 
@@ -212,8 +213,11 @@ public class ReticulumManager: NSObject, TransportManager {
     // MARK: - Connection Management
 
     private func connect() {
-        guard !isConnecting && !isConnected else { return }
-        isConnecting = true
+        stateLock.lock()
+        let skip = _isConnecting || _isConnected
+        if !skip { _isConnecting = true }
+        stateLock.unlock()
+        guard !skip else { return }
 
         emitDiagnostic("info", "Connecting to Reticulum daemon", context: [
             "host": daemonHost,
@@ -251,15 +255,20 @@ public class ReticulumManager: NSObject, TransportManager {
         connection = conn
         conn.start(queue: connectionQueue)
 
-        // Connection timeout
-        connectionQueue.asyncAfter(deadline: .now() + CONNECTION_TIMEOUT) { [weak self] in
+        // Connection timeout (cancellable)
+        connectionTimeoutWorkItem?.cancel()
+        let timeoutItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.isConnecting else { return }
             self.emitDiagnostic("error", "Connection timeout to Reticulum daemon")
             self.handleConnectionClosed(error: nil)
         }
+        connectionTimeoutWorkItem = timeoutItem
+        connectionQueue.asyncAfter(deadline: .now() + CONNECTION_TIMEOUT, execute: timeoutItem)
     }
 
     private func disconnect() {
+        connectionTimeoutWorkItem?.cancel()
+        connectionTimeoutWorkItem = nil
         connection?.cancel()
         connection = nil
         isConnected = false
@@ -268,6 +277,8 @@ public class ReticulumManager: NSObject, TransportManager {
     }
 
     private func handleConnectionOpened() {
+        connectionTimeoutWorkItem?.cancel()
+        connectionTimeoutWorkItem = nil
         isConnected = true
         isConnecting = false
         reconnectAttempts = 0
@@ -337,9 +348,15 @@ public class ReticulumManager: NSObject, TransportManager {
     }
 
     private func handleConnectionClosed(error: NWError?) {
-        let wasConnected = isConnected
-        isConnected = false
-        isConnecting = false
+        stateLock.lock()
+        let wasConnected = _isConnected
+        let wasConnecting = _isConnecting
+        _isConnected = false
+        _isConnecting = false
+        stateLock.unlock()
+
+        // Prevent duplicate disconnect handling
+        guard wasConnected || wasConnecting else { return }
 
         // Stop polling immediately
         DispatchQueue.main.async { [weak self] in

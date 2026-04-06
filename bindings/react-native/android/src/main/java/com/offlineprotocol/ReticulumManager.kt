@@ -160,7 +160,7 @@ class ReticulumManager(
     }
 
     private fun startUnsafe() {
-        if (state == TransportState.RUNNING) {
+        if (state == TransportState.RUNNING || state == TransportState.STARTING) {
             throw TransportException.AlreadyRunning()
         }
 
