@@ -7,13 +7,11 @@ import React, {
   useEffect,
 } from 'react';
 import {OfflineProtocol} from '@offline-protocol/mesh-sdk';
-import type {Neighbor, ChatMessage, Chat, LogEntry} from '../types';
+import type {Neighbor, ChatMessage, Chat, LogEntry, ConnectionStatus} from '../types';
 import {
   PROTOCOL_CONFIG,
   DEFAULT_RELAYS,
   MAX_LOG_ENTRIES,
-  STALE_NEIGHBOR_MS,
-  STALE_NEIGHBOR_CLEANUP_INTERVAL_MS,
 } from '../constants';
 
 // ─── Context Shape ───────────────────────────────────────────
@@ -35,6 +33,10 @@ interface ProtocolContextValue {
   sendMessage: (recipientId: string, content: string) => Promise<void>;
   toggleTransport: () => Promise<void>;
   markChatRead: (peerId: string) => void;
+  sendConnectionRequest: (recipientId: string) => Promise<void>;
+  acceptConnection: (peerId: string) => Promise<void>;
+  rejectConnection: (peerId: string) => Promise<void>;
+  cancelConnectionRequest: (peerId: string) => Promise<void>;
 }
 
 const ProtocolContext = createContext<ProtocolContextValue | null>(null);
@@ -62,9 +64,11 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const protocolRef = useRef<OfflineProtocol | null>(null);
   const processedMessagesRef = useRef<Set<string>>(new Set());
   const userIdRef = useRef(userId);
+  const userNameRef = useRef(userName);
 
   // Keep refs in sync
   useEffect(() => { userIdRef.current = userId; }, [userId]);
+  useEffect(() => { userNameRef.current = userName; }, [userName]);
 
   // ─── Logging ─────────────────────────────────────────────
 
@@ -194,10 +198,14 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         if (peerId) {
           setNeighbors(prev => {
             const next = new Map(prev);
+            const existing = next.get(peerId);
+            // Preserve connection status if peer already known
             next.set(peerId, {
               peerId,
               transport: event.transport || 'nostr',
               discoveredAt: Date.now(),
+              connectionStatus: existing?.connectionStatus || 'none',
+              displayName: existing?.displayName,
             });
             return next;
           });
@@ -219,6 +227,82 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         break;
       }
 
+      // ─── Connection Request Events ─────────────────────────
+
+      case 'connection_request_received': {
+        const sender = event.sender;
+        const senderName = event.sender_name || sender;
+        if (sender) {
+          setNeighbors(prev => {
+            const next = new Map(prev);
+            const existing = next.get(sender);
+            next.set(sender, {
+              peerId: sender,
+              transport: existing?.transport || 'nostr',
+              discoveredAt: existing?.discoveredAt || Date.now(),
+              connectionStatus: 'pending_received',
+              displayName: senderName,
+            });
+            return next;
+          });
+          addLog('info', `Connection request from ${senderName} (${sender})`);
+        }
+        break;
+      }
+
+      case 'connection_accepted': {
+        const acceptedBy = event.accepted_by;
+        const acceptedByName = event.accepted_by_name || acceptedBy;
+        if (acceptedBy) {
+          setNeighbors(prev => {
+            const next = new Map(prev);
+            const existing = next.get(acceptedBy);
+            if (existing) {
+              next.set(acceptedBy, {
+                ...existing,
+                connectionStatus: 'accepted',
+                displayName: existing.displayName || acceptedByName,
+              });
+            }
+            return next;
+          });
+          addLog('info', `Connection accepted by ${acceptedByName}`);
+        }
+        break;
+      }
+
+      case 'connection_rejected': {
+        const rejectedBy = event.rejected_by;
+        if (rejectedBy) {
+          setNeighbors(prev => {
+            const next = new Map(prev);
+            const existing = next.get(rejectedBy);
+            if (existing) {
+              next.set(rejectedBy, {...existing, connectionStatus: 'rejected'});
+            }
+            return next;
+          });
+          addLog('info', `Connection rejected by ${rejectedBy}`);
+        }
+        break;
+      }
+
+      case 'connection_request_cancelled': {
+        const cancelledBy = event.cancelled_by;
+        if (cancelledBy) {
+          setNeighbors(prev => {
+            const next = new Map(prev);
+            const existing = next.get(cancelledBy);
+            if (existing) {
+              next.set(cancelledBy, {...existing, connectionStatus: 'none'});
+            }
+            return next;
+          });
+          addLog('info', `Connection request cancelled by ${cancelledBy}`);
+        }
+        break;
+      }
+
       case 'transport_switched':
         addLog('info', `Transport switched to: ${event.to}`);
         break;
@@ -228,29 +312,6 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         break;
     }
   }, [addLog]);
-
-  // ─── Stale Neighbor Cleanup ──────────────────────────────
-
-  useEffect(() => {
-    if (!isStarted) {return;}
-
-    const interval = setInterval(() => {
-      const now = Date.now();
-      setNeighbors(prev => {
-        let changed = false;
-        const next = new Map(prev);
-        for (const [peerId, neighbor] of next) {
-          if (now - neighbor.discoveredAt > STALE_NEIGHBOR_MS) {
-            next.delete(peerId);
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
-    }, STALE_NEIGHBOR_CLEANUP_INTERVAL_MS);
-
-    return () => clearInterval(interval);
-  }, [isStarted]);
 
   // ─── Shutdown Cleanup ────────────────────────────────────
 
@@ -400,6 +461,92 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     });
   }, []);
 
+  // ─── Connection Request Actions ──────────────────────────
+
+  const sendConnectionRequest = useCallback(async (recipientId: string) => {
+    if (!protocolRef.current) {return;}
+    try {
+      await protocolRef.current.sendConnectionRequest(
+        recipientId,
+        userNameRef.current,
+        null,
+      );
+      setNeighbors(prev => {
+        const next = new Map(prev);
+        const existing = next.get(recipientId);
+        next.set(recipientId, {
+          peerId: recipientId,
+          transport: existing?.transport || 'nostr',
+          discoveredAt: existing?.discoveredAt || Date.now(),
+          connectionStatus: 'pending_sent',
+          displayName: existing?.displayName,
+        });
+        return next;
+      });
+      addLog('info', `Connection request sent to ${recipientId}`);
+    } catch (error: any) {
+      addLog('error', `Failed to send connection request: ${error.message}`);
+    }
+  }, [addLog]);
+
+  const acceptConnection = useCallback(async (peerId: string) => {
+    if (!protocolRef.current) {return;}
+    try {
+      await protocolRef.current.acceptConnectionRequest(
+        peerId,
+        userNameRef.current,
+        null,
+      );
+      setNeighbors(prev => {
+        const next = new Map(prev);
+        const existing = next.get(peerId);
+        if (existing) {
+          next.set(peerId, {...existing, connectionStatus: 'accepted'});
+        }
+        return next;
+      });
+      addLog('info', `Connection accepted for ${peerId}`);
+    } catch (error: any) {
+      addLog('error', `Failed to accept connection: ${error.message}`);
+    }
+  }, [addLog]);
+
+  const rejectConnection = useCallback(async (peerId: string) => {
+    if (!protocolRef.current) {return;}
+    try {
+      await protocolRef.current.rejectConnectionRequest(peerId);
+      setNeighbors(prev => {
+        const next = new Map(prev);
+        const existing = next.get(peerId);
+        if (existing) {
+          next.set(peerId, {...existing, connectionStatus: 'rejected'});
+        }
+        return next;
+      });
+      addLog('info', `Connection rejected for ${peerId}`);
+    } catch (error: any) {
+      addLog('error', `Failed to reject connection: ${error.message}`);
+    }
+  }, [addLog]);
+
+  const cancelConnectionRequest = useCallback(async (peerId: string) => {
+    if (!protocolRef.current) {return;}
+    try {
+      await protocolRef.current.cancelConnectionRequest(peerId);
+      setNeighbors(prev => {
+        const next = new Map(prev);
+        const existing = next.get(peerId);
+        if (existing) {
+          next.set(peerId, {...existing, connectionStatus: 'none'});
+        }
+        return next;
+      });
+      addLog('info', `Connection request cancelled for ${peerId}`);
+    } catch (error: any) {
+      addLog('error', `Failed to cancel connection request: ${error.message}`);
+    }
+  }, [addLog]);
+
   // ─── Context Value ───────────────────────────────────────
 
   const value: ProtocolContextValue = {
@@ -416,6 +563,10 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     sendMessage,
     toggleTransport,
     markChatRead,
+    sendConnectionRequest,
+    acceptConnection,
+    rejectConnection,
+    cancelConnectionRequest,
   };
 
   return (

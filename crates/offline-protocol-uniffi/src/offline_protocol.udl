@@ -552,6 +552,10 @@ interface OfflineProtocol {
 
     void nostr_send_failed_with_reason(string message_id, string? reason);
 
+    string? nostr_get_public_key();
+
+    string? nostr_get_subscription_filter(string subscription_id);
+
     // Transport management
     [Throws=ProtocolError]
     void remove_transport(TransportType transport_type);
@@ -947,6 +951,7 @@ dictionary NostrMessage {
     string message_id;
     string recipient_id;
     sequence<u8> data;
+    string event_json;
     string? reply_to_msg;
 };
 

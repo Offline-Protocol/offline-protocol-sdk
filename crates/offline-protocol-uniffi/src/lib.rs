@@ -955,6 +955,9 @@ pub struct NostrMessage {
     pub message_id: String,
     pub recipient_id: String,
     pub data: Vec<u8>,
+    /// Complete signed Nostr event JSON: `["EVENT", {...}]`.
+    /// The platform should send this string directly over the WebSocket.
+    pub event_json: String,
     pub reply_to_msg: Option<String>,
 }
 
@@ -1058,7 +1061,12 @@ impl OfflineProtocol {
         // Add Nostr transport if enabled
         // The platform bridges to Nostr relay WebSocket connections
         if nostr_enabled {
-            let nostr_transport = NostrTransport::new(user_id.clone());
+            let nostr_transport = NostrTransport::new(user_id.clone()).map_err(|e| {
+                ProtocolError::InvalidConfiguration(format!(
+                    "Failed to create Nostr keypair: {}",
+                    e
+                ))
+            })?;
             protocol
                 .transport_manager_mut()
                 .add_transport(CoreTransportType::Nostr, Box::new(nostr_transport));
@@ -2631,11 +2639,27 @@ impl OfflineProtocol {
     }
 
     /// Called by the platform when data is received from a Nostr relay.
+    ///
+    /// `sender_id` is the Nostr pubkey hex of the sender (used as
+    /// transport-level peer identity). The real protocol-level sender
+    /// is extracted from the deserialized `Message.sender` field and
+    /// used for `NeighborDiscovered` events.
     pub fn nostr_message_received(
         &self,
         sender_id: String,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
+        // Extract the real sender from the protocol message before consuming `data`.
+        // The Message.sender field is the authoritative user identity; the Nostr
+        // pubkey (`sender_id`) is only a transport-level routing key.
+        let real_sender: Option<String> = self
+            .with_nostr_transport(|nt| {
+                nt.deserialize_message(&data)
+                    .ok()
+                    .map(|msg| msg.sender.as_str().to_string())
+            })
+            .flatten();
+
         if let Some(Err(e)) = self
             .with_nostr_transport_fallible(|nt| nt.on_data_received_from(data, sender_id.clone()))?
         {
@@ -2645,15 +2669,19 @@ impl OfflineProtocol {
             )));
         }
 
+        // Use the real sender (from protocol message) for identity, falling
+        // back to the Nostr pubkey if deserialization failed.
+        let peer_id = real_sender.unwrap_or(sender_id);
+
         let is_blocked = {
             let mut protocol = self.lock_inner()?;
             while protocol.receive_message().is_some() {}
-            protocol.is_user_blocked(&sender_id)
+            protocol.is_user_blocked(&peer_id)
         };
 
-        if !sender_id.is_empty() && !is_blocked {
+        if !peer_id.is_empty() && !is_blocked {
             let event = CoreEvent::NeighborDiscovered {
-                peer_id: sender_id.clone(),
+                peer_id,
                 transport: "Nostr".to_string(),
                 rssi: None,
             };
@@ -2664,8 +2692,10 @@ impl OfflineProtocol {
     }
 
     /// Returns the next outgoing Nostr message, if any.
-    /// The platform should publish this as a Nostr event, then call
-    /// `nostr_confirm_sent()` or `nostr_send_failed()`.
+    ///
+    /// The `event_json` field contains a complete, signed `["EVENT", {...}]`
+    /// string. The platform should send it directly over the relay WebSocket,
+    /// then call `nostr_confirm_sent()` or `nostr_send_failed()`.
     pub fn nostr_get_next_message(&self) -> Option<NostrMessage> {
         {
             let nostr_state = recover_mutex(&self.nostr_state, "nostr_state");
@@ -2674,31 +2704,22 @@ impl OfflineProtocol {
             }
         }
 
-        self.with_nostr_transport(|nt| {
-            if let Ok(Some((message_id, data))) = nt.get_next_message() {
-                match nt.deserialize_message(&data) {
-                    Ok(message) => {
-                        return Some(NostrMessage {
-                            message_id,
-                            recipient_id: message.recipient.as_str().to_string(),
-                            data,
-                            reply_to_msg: message
-                                .reply_to_msg
-                                .as_ref()
-                                .map(|id| id.as_str().to_string()),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            message_id = %message_id,
-                            error = %e,
-                            "Failed to deserialize nostr message — message permanently lost, reporting failure"
-                        );
-                        nt.report_send_failure(&message_id);
-                    }
-                }
+        self.with_nostr_transport(|nt| match nt.get_next_signed_event() {
+            Ok(Some((message_id, recipient_id, event_json))) => Some(NostrMessage {
+                message_id,
+                recipient_id,
+                data: Vec::new(),
+                event_json,
+                reply_to_msg: None,
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Failed to create signed Nostr event"
+                );
+                None
             }
-            None
         })
         .flatten()
     }
@@ -2744,6 +2765,23 @@ impl OfflineProtocol {
         self.with_nostr_transport(|nt| {
             nt.report_send_failure(&message_id);
         });
+    }
+
+    /// Returns this device's Nostr x-only public key as a 64-char hex string.
+    ///
+    /// The platform uses this for display and for filtering out self-authored
+    /// events. Returns `None` if the Nostr transport is not configured.
+    pub fn nostr_get_public_key(&self) -> Option<String> {
+        self.with_nostr_transport(|nt| nt.public_key_hex().to_string())
+    }
+
+    /// Returns a NIP-01 subscription filter JSON for this device's pubkey.
+    ///
+    /// Send this to each relay after connecting:
+    /// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4]}]`
+    pub fn nostr_get_subscription_filter(&self, subscription_id: String) -> Option<String> {
+        self.with_nostr_transport(|nt| nt.create_subscription(&subscription_id).ok())
+            .flatten()
     }
 
     // ========================================================================

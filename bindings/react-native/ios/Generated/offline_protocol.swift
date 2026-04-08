@@ -904,6 +904,10 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func nostrGetNextMessage()  -> NostrMessage?
     
+    func nostrGetPublicKey()  -> String?
+    
+    func nostrGetSubscriptionFilter(subscriptionId: String)  -> String?
+    
     func nostrMessageReceived(senderId: String, data: [UInt8]) throws 
     
     func nostrSendFailed(messageId: String) 
@@ -1758,6 +1762,23 @@ open func nostrGetNextMessage() -> NostrMessage?  {
     return try!  FfiConverterOptionTypeNostrMessage.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(
             self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func nostrGetPublicKey() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func nostrGetSubscriptionFilter(subscriptionId: String) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(subscriptionId),$0
     )
 })
 }
@@ -3529,14 +3550,16 @@ public struct NostrMessage: Equatable, Hashable {
     public var messageId: String
     public var recipientId: String
     public var data: [UInt8]
+    public var eventJson: String
     public var replyToMsg: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(messageId: String, recipientId: String, data: [UInt8], replyToMsg: String?) {
+    public init(messageId: String, recipientId: String, data: [UInt8], eventJson: String, replyToMsg: String?) {
         self.messageId = messageId
         self.recipientId = recipientId
         self.data = data
+        self.eventJson = eventJson
         self.replyToMsg = replyToMsg
     }
 
@@ -3557,6 +3580,7 @@ public struct FfiConverterTypeNostrMessage: FfiConverterRustBuffer {
                 messageId: FfiConverterString.read(from: &buf), 
                 recipientId: FfiConverterString.read(from: &buf), 
                 data: FfiConverterSequenceUInt8.read(from: &buf), 
+                eventJson: FfiConverterString.read(from: &buf), 
                 replyToMsg: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -3565,6 +3589,7 @@ public struct FfiConverterTypeNostrMessage: FfiConverterRustBuffer {
         FfiConverterString.write(value.messageId, into: &buf)
         FfiConverterString.write(value.recipientId, into: &buf)
         FfiConverterSequenceUInt8.write(value.data, into: &buf)
+        FfiConverterString.write(value.eventJson, into: &buf)
         FfiConverterOptionString.write(value.replyToMsg, into: &buf)
     }
 }
@@ -7119,6 +7144,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 55139) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 62102) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056) {

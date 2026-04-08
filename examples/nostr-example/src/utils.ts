@@ -4,9 +4,8 @@ export function generateUserId(): string {
   if (cachedUserId) {
     return cachedUserId;
   }
-  const timestamp = Date.now().toString(36);
   const random = Math.random().toString(36).substring(2, 8);
-  cachedUserId = `user_${timestamp}_${random}`;
+  cachedUserId = `u${random}`;
   return cachedUserId;
 }
 

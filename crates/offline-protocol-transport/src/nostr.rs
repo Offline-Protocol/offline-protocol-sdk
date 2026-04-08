@@ -6,7 +6,9 @@
 //! queues, metrics, and the confirmation loop.
 
 use crate::constants::{NOSTR_CONNECTION_TIMEOUT_SECS, NOSTR_PENDING_CONFIRMATION_TIMEOUT_SECS};
+use crate::nostr_crypto::{self, NostrKeypair};
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
+use base64::Engine;
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -60,6 +62,7 @@ impl Default for NostrConfig {
 /// 6. `reconnect_attempts` / `platform_handle`
 pub struct NostrTransport {
     device_id: String,
+    keypair: NostrKeypair,
     config: NostrConfig,
     status: Arc<Mutex<TransportStatus>>,
     receive_queue: Arc<Mutex<VecDeque<Message>>>,
@@ -74,14 +77,17 @@ pub struct NostrTransport {
 
 impl NostrTransport {
     /// Creates a new Nostr transport with default configuration.
-    pub fn new(device_id: impl Into<String>) -> Self {
+    pub fn new(device_id: impl Into<String>) -> Result<Self> {
         Self::with_config(device_id, NostrConfig::default())
     }
 
     /// Creates a new Nostr transport with custom configuration.
-    pub fn with_config(device_id: impl Into<String>, config: NostrConfig) -> Self {
-        Self {
-            device_id: device_id.into(),
+    pub fn with_config(device_id: impl Into<String>, config: NostrConfig) -> Result<Self> {
+        let device_id = device_id.into();
+        let keypair = NostrKeypair::from_device_id(&device_id)?;
+        Ok(Self {
+            device_id,
+            keypair,
             config,
             status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -91,7 +97,7 @@ impl NostrTransport {
             reconnect_attempts: Arc::new(Mutex::new(0)),
             platform_handle: Arc::new(Mutex::new(None)),
             on_messages_available: Arc::new(Mutex::new(None)),
-        }
+        })
     }
 
     /// Gets the local device ID.
@@ -279,6 +285,62 @@ impl NostrTransport {
         self.pending_confirmation.lock().unwrap().len()
     }
 
+    // ========================================================================
+    // Nostr crypto methods
+    // ========================================================================
+
+    /// Returns this device's Nostr x-only public key as a 64-char hex string.
+    pub fn public_key_hex(&self) -> &str {
+        self.keypair.public_key_hex()
+    }
+
+    /// Pops the next outgoing message, creates a signed Nostr event, and returns
+    /// `(message_id, recipient_device_id, relay_event_json)`.
+    ///
+    /// The `relay_event_json` is a complete `["EVENT", {...}]` string ready to
+    /// send over a WebSocket connection. The platform no longer needs to do
+    /// any signing or event creation.
+    pub fn get_next_signed_event(&self) -> Result<Option<(String, String, String)>> {
+        self.drain_expired_pending();
+
+        let message = {
+            let mut queue = self.send_queue.lock().unwrap();
+            match queue.pop_front() {
+                Some(m) => m,
+                None => return Ok(None),
+            }
+        };
+
+        let message_id = message.id.to_string();
+        let recipient_device_id = message.recipient.as_str().to_string();
+
+        let data = self.serialize_message(&message)?;
+        let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
+
+        let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id(&recipient_device_id)?;
+        let event = crate::nostr_crypto::NostrEvent::create_dm(
+            &self.keypair,
+            &recipient_pubkey,
+            &content_base64,
+        )?;
+        let relay_msg = event.to_relay_message()?;
+
+        self.pending_confirmation
+            .lock()
+            .unwrap()
+            .insert(message_id.clone(), Instant::now());
+
+        Ok(Some((message_id, recipient_device_id, relay_msg)))
+    }
+
+    /// Returns a NIP-01 subscription filter JSON for this device's pubkey.
+    ///
+    /// The platform should send this to each relay after connecting:
+    /// `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4]}]`
+    pub fn create_subscription(&self, subscription_id: &str) -> Result<String> {
+        nostr_crypto::create_subscription_message(self.keypair.public_key_hex(), subscription_id)
+    }
+
     /// Fails all pending confirmations and records them as failures.
     fn fail_all_pending(&self) {
         let pending = {
@@ -436,7 +498,7 @@ impl NostrTransportBuilder {
     }
 
     /// Builds the transport.
-    pub fn build(self) -> NostrTransport {
+    pub fn build(self) -> Result<NostrTransport> {
         NostrTransport::with_config(self.device_id, self.config)
     }
 }
@@ -458,7 +520,7 @@ mod tests {
 
     #[test]
     fn test_nostr_transport_creation() {
-        let transport = NostrTransport::new("device1");
+        let transport = NostrTransport::new("device1").unwrap();
         assert_eq!(transport.device_id(), "device1");
         assert_eq!(transport.transport_type(), TransportType::Nostr);
         assert_eq!(transport.status(), TransportStatus::Unavailable);
@@ -473,7 +535,8 @@ mod tests {
             .auto_reconnect(false)
             .reconnect_delay(Duration::from_secs(10))
             .max_reconnect_attempts(5)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(transport.config().relay_urls.len(), 2);
         assert_eq!(
             transport.config().connection_timeout,
@@ -486,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_send_receive() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -503,20 +566,20 @@ mod tests {
 
     #[test]
     fn test_send_when_unavailable_fails() {
-        let transport = NostrTransport::new("device1");
+        let transport = NostrTransport::new("device1").unwrap();
         let msg = create_test_message();
         assert!(transport.send(&msg).is_err());
     }
 
     #[test]
     fn test_receive_when_empty_returns_none() {
-        let transport = NostrTransport::new("device1");
+        let transport = NostrTransport::new("device1").unwrap();
         assert!(transport.receive().unwrap().is_none());
     }
 
     #[test]
     fn test_confirmation_loop() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -533,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_send_failure_reporting() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -550,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_fail_all_pending_on_disconnect() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -566,7 +629,7 @@ mod tests {
 
     #[test]
     fn test_stop_fails_pending() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -582,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_serialization() {
-        let transport = NostrTransport::new("device1");
+        let transport = NostrTransport::new("device1").unwrap();
         let msg = create_test_message();
         let data = transport.serialize_message(&msg).unwrap();
         let deserialized = transport.deserialize_message(&data).unwrap();
@@ -593,7 +656,8 @@ mod tests {
     fn test_reconnect_logic() {
         let transport = NostrTransportBuilder::new("device1")
             .max_reconnect_attempts(3)
-            .build();
+            .build()
+            .unwrap();
 
         assert!(transport.should_reconnect());
         transport.increment_reconnect_attempts();
@@ -605,7 +669,7 @@ mod tests {
 
     #[test]
     fn test_on_data_received_invalid_json_drops_ok() {
-        let transport = NostrTransport::new("device1");
+        let transport = NostrTransport::new("device1").unwrap();
         let result = transport.on_data_received(b"not json".to_vec());
         assert!(result.is_ok());
         assert!(transport.receive().unwrap().is_none());
@@ -613,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_on_data_received_rejects_oversized_payload() {
-        let transport = NostrTransport::new("device1");
+        let transport = NostrTransport::new("device1").unwrap();
         let oversized = vec![0u8; DEFAULT_MAX_MESSAGE_SIZE + 1];
         let result = transport.on_data_received(oversized);
         assert!(result.is_err());
@@ -621,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_on_messages_available_callback() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -638,7 +702,7 @@ mod tests {
 
     #[test]
     fn test_update_metrics_preserves_confirmation_counts() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -658,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_platform_handle() {
-        let transport = NostrTransport::new("device1");
+        let transport = NostrTransport::new("device1").unwrap();
         assert!(transport.platform_handle().is_none());
         transport.set_platform_handle(42);
         assert_eq!(transport.platform_handle(), Some(42));
@@ -666,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_drain_expired_pending_expires_old_entries() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -708,7 +772,7 @@ mod tests {
 
     #[test]
     fn test_has_pending_sends() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 
@@ -721,7 +785,7 @@ mod tests {
 
     #[test]
     fn test_pending_confirmation_count() {
-        let mut transport = NostrTransport::new("device1");
+        let mut transport = NostrTransport::new("device1").unwrap();
         transport.start().unwrap();
         transport.on_status_changed(TransportStatus::Available);
 

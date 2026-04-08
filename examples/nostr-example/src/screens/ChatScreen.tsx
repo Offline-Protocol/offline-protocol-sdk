@@ -17,7 +17,7 @@ export function ChatScreen() {
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
   const [peerInput, setPeerInput] = useState('');
   const [messageText, setMessageText] = useState('');
-  const {chats, sendMessage, markChatRead, userId} = useProtocol();
+  const {chats, sendMessage, markChatRead, userId, neighbors} = useProtocol();
   const listRef = useRef<FlatList>(null);
 
   // Mark as read when viewing a chat
@@ -98,14 +98,27 @@ export function ChatScreen() {
 
   // ─── Chat List ───────────────────────────────────────────
 
-  const chatList = Array.from(chats.values());
+  // Show chats only for accepted connections (or chats with existing messages)
+  const chatList = Array.from(chats.values()).filter(chat => {
+    const peer = neighbors.get(chat.peerId);
+    return peer?.connectionStatus === 'accepted' || chat.messages.length > 0;
+  });
 
   const handleStartChat = () => {
-    if (!peerInput.trim()) {
+    const peerId = peerInput.trim();
+    if (!peerId) {
       Alert.alert('Error', 'Enter a peer ID to start chatting.');
       return;
     }
-    setSelectedPeerId(peerInput.trim());
+    const peer = neighbors.get(peerId);
+    if (!peer || peer.connectionStatus !== 'accepted') {
+      Alert.alert(
+        'Not Connected',
+        'You need to send a connection request first. Go to the Peers tab to connect.',
+      );
+      return;
+    }
+    setSelectedPeerId(peerId);
     setPeerInput('');
   };
 

@@ -3,11 +3,12 @@
 // OfflineProtocol
 //
 // Nostr transport implementation using WebSocket connections to Nostr relays.
-// Publishes and subscribes to NIP-04 (kind 4) direct messages for protocol message routing.
+// All event creation, signing (BIP-340 Schnorr), and subscription filters
+// are handled by the Rust core via UniFFI. This class is a thin WebSocket
+// bridge that sends pre-signed events and routes received events to Rust.
 //
 
 import Foundation
-import CommonCrypto
 
 /// Nostr Manager implementing TransportManager for Nostr relay communication
 public class NostrManager: NSObject, TransportManager {
@@ -45,8 +46,7 @@ public class NostrManager: NSObject, TransportManager {
     private var subscriptionIds: [String: String] = [:]
     private var urlSession: URLSession?
 
-    // Nostr identity (deterministic from deviceId)
-    private var privateKeyBytes: [UInt8] = []
+    // Nostr public key (obtained from Rust core)
     private var publicKeyHex: String = ""
 
     // Message polling
@@ -143,11 +143,6 @@ public class NostrManager: NSObject, TransportManager {
     // MARK: - Configuration
 
     /// Configure the Nostr relay connection.
-    /// - Parameters:
-    ///   - relayUrls: List of Nostr relay WebSocket URLs (e.g., ["wss://relay.damus.io"])
-    ///   - autoReconnect: Whether to auto-reconnect on disconnect (default: true)
-    ///   - maxReconnectAttempts: Max reconnect attempts per relay, 0 = infinite (default: 0)
-    ///   - connectionTimeout: Connection timeout in seconds (default: 30)
     public func configure(
         relayUrls: [String],
         autoReconnect: Bool = true,
@@ -158,8 +153,8 @@ public class NostrManager: NSObject, TransportManager {
         self.autoReconnect = autoReconnect
         self.maxReconnectAttempts = maxReconnectAttempts
 
-        // Derive deterministic Nostr keypair from deviceId
-        deriveKeyPair()
+        // Get the Nostr pubkey from the Rust core (deterministic from user_id)
+        self.publicKeyHex = protocolInstance.nostrGetPublicKey() ?? ""
 
         isConfigured = true
 
@@ -213,11 +208,13 @@ public class NostrManager: NSObject, TransportManager {
 
         updateState(.stopping)
 
-        // Cancel all reconnect attempts
-        for (_, workItem) in reconnectWorkItems {
-            workItem.cancel()
+        // Cancel all reconnect attempts (on connectionQueue for thread safety)
+        connectionQueue.sync {
+            for (_, workItem) in reconnectWorkItems {
+                workItem.cancel()
+            }
+            reconnectWorkItems.removeAll()
         }
-        reconnectWorkItems.removeAll()
 
         // Stop timers
         stopMessagePolling()
@@ -285,8 +282,10 @@ public class NostrManager: NSObject, TransportManager {
             self?.relayConnected[relayUrl] = false
         }
 
-        // Start receiving messages from this relay
-        receiveMessage(from: relayUrl)
+        // Pass the task directly to avoid deadlock on reconnect path
+        if let wsTask = task {
+            receiveMessage(from: relayUrl, task: wsTask)
+        }
     }
 
     private func disconnectRelay(_ relayUrl: String) {
@@ -362,22 +361,17 @@ public class NostrManager: NSObject, TransportManager {
         isConnected = anyConnected
 
         if anyConnected && !wasConnected {
-            // Became connected
-            DispatchQueue.main.async { [weak self] in
+            messageQueue.async { [weak self] in
                 guard let self = self else { return }
                 self.updateState(.running)
                 try? self.protocolInstance.nostrStatusChanged(isConnected: true)
                 self.consecutiveSendFailures = 0
                 self.startMessagePolling()
                 self.startPingTimer()
-                // Immediately flush queued messages
-                self.messageQueue.async {
-                    self.pollAndSendMessages()
-                }
+                self.pollAndSendMessages()
             }
         } else if !anyConnected && wasConnected {
-            // Lost all connections
-            DispatchQueue.main.async { [weak self] in
+            messageQueue.async { [weak self] in
                 guard let self = self else { return }
                 self.stopMessagePolling()
                 self.stopPingTimer()
@@ -416,17 +410,21 @@ public class NostrManager: NSObject, TransportManager {
             "delaySeconds": delay
         ])
 
-        reconnectWorkItems[relayUrl]?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.connectToRelay(relayUrl)
+        connectionQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.reconnectWorkItems[relayUrl]?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.connectToRelay(relayUrl)
+            }
+            self.reconnectWorkItems[relayUrl] = workItem
+            self.connectionQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
         }
-        reconnectWorkItems[relayUrl] = workItem
-        connectionQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    // MARK: - Nostr Protocol (NIP-01 / NIP-04)
+    // MARK: - Nostr Protocol (NIP-01)
 
     /// Send subscription request to receive DMs addressed to this device's pubkey.
+    /// The subscription filter is created by the Rust core (real secp256k1 pubkey).
     private func sendSubscription(to relayUrl: String) {
         let subId = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16)
         let subIdStr = String(subId)
@@ -435,8 +433,11 @@ public class NostrManager: NSObject, TransportManager {
             self?.subscriptionIds[relayUrl] = subIdStr
         }
 
-        // NIP-01 REQ: subscribe to kind 4 (DM) events tagged with our pubkey
-        let reqJson = "[\"REQ\",\"\(subIdStr)\",{\"#p\":[\"\(publicKeyHex)\"],\"kinds\":[4]}]"
+        // Get the subscription filter from Rust (uses the real BIP-340 pubkey)
+        guard let reqJson = protocolInstance.nostrGetSubscriptionFilter(subscriptionId: subIdStr) else {
+            emitDiagnostic("error", "Failed to get subscription filter from Rust core")
+            return
+        }
 
         sendToRelay(relayUrl, message: reqJson)
 
@@ -445,31 +446,6 @@ public class NostrManager: NSObject, TransportManager {
             "subscriptionId": subIdStr,
             "publicKey": publicKeyHex
         ])
-    }
-
-    /// Create and sign a NIP-04 direct message event.
-    private func createNostrEvent(content: String, recipientPubkey: String) -> String? {
-        let createdAt = Int(Date().timeIntervalSince1970)
-        let kind = 4  // NIP-04 DM
-
-        // Build event for signing (NIP-01 serialization)
-        // [0, pubkey, created_at, kind, tags, content]
-        let tagsJson = "[[\"p\",\"\(recipientPubkey)\"]]"
-        let serialized = "[0,\"\(publicKeyHex)\",\(createdAt),\(kind),\(tagsJson),\(escapeJsonString(content))]"
-
-        // Compute event ID (SHA-256 of serialized event)
-        let eventId = sha256Hex(serialized)
-
-        // Sign with schnorr (BIP-340) — simplified: we use ECDSA for compatibility
-        // Note: Full Schnorr signing requires secp256k1 library.
-        // For now, use a simplified signature that works with relay acceptance.
-        let signature = signEvent(eventId: eventId)
-
-        let eventJson = """
-        {"id":"\(eventId)","pubkey":"\(publicKeyHex)","created_at":\(createdAt),"kind":\(kind),"tags":[["p","\(recipientPubkey)"]],"content":\(escapeJsonString(content)),"sig":"\(signature)"}
-        """
-
-        return "[\"EVENT\",\(eventJson)]"
     }
 
     /// Parse an incoming Nostr EVENT message.
@@ -494,9 +470,6 @@ public class NostrManager: NSObject, TransportManager {
 
             messagesReceived += 1
 
-            // Derive sender's deviceId from their pubkey
-            let senderId = deviceIdFromPubkey(senderPubkey)
-
             messageQueue.async { [weak self] in
                 guard let self = self else { return }
 
@@ -511,11 +484,12 @@ public class NostrManager: NSObject, TransportManager {
                         return
                     }
 
+                    // Pass the Nostr pubkey as sender_id — Rust extracts
+                    // the real protocol-level sender from Message.sender
                     let bytes = [UInt8](messageData)
-                    try self.protocolInstance.nostrMessageReceived(senderId: senderId, data: bytes)
+                    try self.protocolInstance.nostrMessageReceived(senderId: senderPubkey, data: bytes)
 
                     self.emitDiagnostic("debug", "Message received from Nostr", context: [
-                        "senderId": senderId,
                         "senderPubkey": String(senderPubkey.prefix(16)) + "...",
                         "contentLength": content.count
                     ])
@@ -551,12 +525,7 @@ public class NostrManager: NSObject, TransportManager {
 
     // MARK: - WebSocket Message Handling
 
-    private func receiveMessage(from relayUrl: String) {
-        let task: URLSessionWebSocketTask? = connectionQueue.sync {
-            relayConnections[relayUrl]
-        }
-        guard let wsTask = task else { return }
-
+    private func receiveMessage(from relayUrl: String, task wsTask: URLSessionWebSocketTask) {
         wsTask.receive { [weak self] result in
             guard let self = self else { return }
 
@@ -574,8 +543,8 @@ public class NostrManager: NSObject, TransportManager {
                 @unknown default:
                     break
                 }
-                // Continue receiving
-                self.receiveMessage(from: relayUrl)
+                // Continue receiving with the same task reference
+                self.receiveMessage(from: relayUrl, task: wsTask)
 
             case .failure(let error):
                 self.handleRelayDisconnected(relayUrl, error: error)
@@ -595,25 +564,6 @@ public class NostrManager: NSObject, TransportManager {
                     "relayUrl": relayUrl,
                     "error": error.localizedDescription
                 ])
-            }
-        }
-    }
-
-    private func sendToAllRelays(_ message: String) {
-        let tasks: [(String, URLSessionWebSocketTask)] = connectionQueue.sync {
-            relayConnections.compactMap { (url, task) in
-                guard relayConnected[url] == true else { return nil }
-                return (url, task)
-            }
-        }
-
-        for (_, task) in tasks {
-            task.send(.string(message)) { [weak self] error in
-                if let error = error {
-                    self?.emitDiagnostic("error", "Failed to send to relay", context: [
-                        "error": error.localizedDescription
-                    ])
-                }
             }
         }
     }
@@ -654,12 +604,11 @@ public class NostrManager: NSObject, TransportManager {
         pingTimer = nil
     }
 
+    /// Must be called on `connectionQueue` (the ping timer fires there).
     private func sendPings() {
-        let tasks: [(String, URLSessionWebSocketTask)] = connectionQueue.sync {
-            relayConnections.compactMap { (url, task) in
-                guard relayConnected[url] == true else { return nil }
-                return (url, task)
-            }
+        let tasks: [(String, URLSessionWebSocketTask)] = relayConnections.compactMap { (url, task) in
+            guard relayConnected[url] == true else { return nil }
+            return (url, task)
         }
 
         for (relayUrl, task) in tasks {
@@ -688,12 +637,60 @@ public class NostrManager: NSObject, TransportManager {
                 break
             }
 
-            publishMessage(
-                messageId: message.messageId,
-                recipientId: message.recipientId,
-                data: Data(message.data),
-                replyToMsg: message.replyToMsg
-            )
+            // event_json is the complete signed ["EVENT", {...}] from Rust
+            let eventMessage = message.eventJson
+
+            let tasks: [(String, URLSessionWebSocketTask)] = connectionQueue.sync {
+                relayConnections.compactMap { (url, task) in
+                    guard relayConnected[url] == true else { return nil }
+                    return (url, task)
+                }
+            }
+
+            guard !tasks.isEmpty else {
+                protocolInstance.nostrSendFailed(messageId: message.messageId)
+                continue
+            }
+
+            // Send to first connected relay with confirmation
+            let (primaryUrl, primaryTask) = tasks[0]
+            let otherTasks = Array(tasks.dropFirst())
+            let msgId = message.messageId
+
+            primaryTask.send(.string(eventMessage)) { [weak self] error in
+                guard let self = self else { return }
+
+                if let error = error {
+                    self.consecutiveSendFailures += 1
+                    self.protocolInstance.nostrSendFailed(messageId: msgId)
+                    self.emitDiagnostic("error", "Failed to send Nostr message", context: [
+                        "error": error.localizedDescription,
+                        "messageId": msgId,
+                        "relayUrl": primaryUrl,
+                        "consecutiveFailures": self.consecutiveSendFailures
+                    ])
+
+                    if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {
+                        self.handleRelayDisconnected(primaryUrl, error: error)
+                    }
+                } else {
+                    self.consecutiveSendFailures = 0
+                    self.bytesSent += UInt64(eventMessage.utf8.count)
+                    self.messagesSent += 1
+                    self.protocolInstance.nostrConfirmSent(messageId: msgId)
+
+                    self.emitDiagnostic("debug", "Message sent via Nostr", context: [
+                        "messageId": msgId,
+                        "contentLength": eventMessage.count
+                    ])
+                }
+            }
+
+            // Fan out to other relays (best-effort, no confirmation tracking)
+            for (_, task) in otherTasks {
+                task.send(.string(eventMessage)) { _ in }
+            }
+
             sent += 1
         }
 
@@ -702,166 +699,6 @@ public class NostrManager: NSObject, TransportManager {
                 "count": sent
             ])
         }
-    }
-
-    private func publishMessage(messageId: String, recipientId: String, data: Data, replyToMsg: String? = nil) {
-        guard isConnected else {
-            emitDiagnostic("warning", "Cannot send message - not connected", context: [
-                "messageId": messageId,
-                "recipientId": recipientId
-            ])
-            protocolInstance.nostrSendFailed(messageId: messageId)
-            return
-        }
-
-        // Derive recipient's Nostr pubkey from their deviceId
-        let recipientPubkey = pubkeyFromDeviceId(recipientId)
-
-        // Encode message data as base64 content
-        let content = data.base64EncodedString()
-
-        // Create signed Nostr event
-        guard let eventMessage = createNostrEvent(content: content, recipientPubkey: recipientPubkey) else {
-            emitDiagnostic("error", "Failed to create Nostr event")
-            protocolInstance.nostrSendFailed(messageId: messageId)
-            return
-        }
-
-        // Publish to all connected relays
-        let tasks: [(String, URLSessionWebSocketTask)] = connectionQueue.sync {
-            relayConnections.compactMap { (url, task) in
-                guard relayConnected[url] == true else { return nil }
-                return (url, task)
-            }
-        }
-
-        guard !tasks.isEmpty else {
-            protocolInstance.nostrSendFailed(messageId: messageId)
-            return
-        }
-
-        // Send to first connected relay and confirm; fan out to rest
-        let (primaryUrl, primaryTask) = tasks[0]
-        let otherTasks = Array(tasks.dropFirst())
-
-        primaryTask.send(.string(eventMessage)) { [weak self] error in
-            guard let self = self else { return }
-
-            if let error = error {
-                self.consecutiveSendFailures += 1
-                self.protocolInstance.nostrSendFailed(messageId: messageId)
-                self.emitDiagnostic("error", "Failed to send Nostr message", context: [
-                    "error": error.localizedDescription,
-                    "messageId": messageId,
-                    "recipientId": recipientId,
-                    "relayUrl": primaryUrl,
-                    "consecutiveFailures": self.consecutiveSendFailures
-                ])
-
-                if self.consecutiveSendFailures >= self.MAX_CONSECUTIVE_FAILURES {
-                    self.emitDiagnostic("warning", "Too many consecutive send failures, triggering disconnect", context: [
-                        "failures": self.consecutiveSendFailures
-                    ])
-                    self.handleRelayDisconnected(primaryUrl, error: error)
-                }
-            } else {
-                self.consecutiveSendFailures = 0
-                self.bytesSent += UInt64(eventMessage.utf8.count)
-                self.messagesSent += 1
-                self.protocolInstance.nostrConfirmSent(messageId: messageId)
-
-                self.emitDiagnostic("debug", "Message sent via Nostr", context: [
-                    "messageId": messageId,
-                    "recipientId": recipientId,
-                    "contentLength": content.count
-                ])
-            }
-        }
-
-        // Fan out to other relays (best-effort, no confirmation tracking)
-        for (_, task) in otherTasks {
-            task.send(.string(eventMessage)) { _ in }
-        }
-    }
-
-    // MARK: - Nostr Crypto Helpers
-
-    /// Derive a deterministic secp256k1 keypair from the deviceId.
-    /// Both peers can compute each other's pubkeys from device IDs.
-    private func deriveKeyPair() {
-        // SHA-256 of deviceId gives us 32 bytes for the private key
-        privateKeyBytes = sha256Bytes(deviceId)
-        // Public key is the x-coordinate of the secp256k1 point (simplified)
-        // For a full implementation, use a secp256k1 library.
-        // Here we use SHA-256 of the private key as a deterministic pubkey placeholder.
-        publicKeyHex = sha256Hex(Data(privateKeyBytes).base64EncodedString())
-
-        emitDiagnostic("debug", "Nostr keypair derived", context: [
-            "publicKey": publicKeyHex,
-            "deviceId": deviceId
-        ])
-    }
-
-    /// Derive a public key from a device ID (same algorithm as deriveKeyPair).
-    private func pubkeyFromDeviceId(_ deviceId: String) -> String {
-        let privKeyBytes = sha256Bytes(deviceId)
-        return sha256Hex(Data(privKeyBytes).base64EncodedString())
-    }
-
-    /// Reverse lookup: derive deviceId from pubkey.
-    /// Since we can't reverse a hash, we store a mapping during message receipt.
-    /// For now, we use the pubkey itself as the sender identifier.
-    private func deviceIdFromPubkey(_ pubkey: String) -> String {
-        // In a full implementation, maintain a pubkey->deviceId cache.
-        // The protocol layer handles peer identity via its own mechanisms.
-        return pubkey
-    }
-
-    /// Sign a Nostr event ID.
-    /// Note: This is a simplified signature. For production, use a secp256k1 Schnorr library.
-    private func signEvent(eventId: String) -> String {
-        // HMAC-SHA256 of the event ID using private key as the signing key.
-        // This is NOT a real Schnorr signature but allows the transport to function
-        // for testing. Replace with proper BIP-340 Schnorr when secp256k1.swift is added.
-        let key = Data(privateKeyBytes)
-        guard let messageData = eventId.data(using: .utf8) else {
-            return String(repeating: "0", count: 128)
-        }
-        var hmac = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        key.withUnsafeBytes { keyPtr in
-            messageData.withUnsafeBytes { msgPtr in
-                CCHmac(CCHmacAlgorithm(kCCHmacAlgSHA256),
-                        keyPtr.baseAddress, key.count,
-                        msgPtr.baseAddress, messageData.count,
-                        &hmac)
-            }
-        }
-        // Pad to 128 hex chars (64 bytes) as Nostr expects
-        let hmacHex = hmac.map { String(format: "%02x", $0) }.joined()
-        return hmacHex + hmacHex  // 64 bytes = 128 hex chars
-    }
-
-    // MARK: - Utility
-
-    private func sha256Bytes(_ string: String) -> [UInt8] {
-        guard let data = string.data(using: .utf8) else { return [] }
-        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        data.withUnsafeBytes {
-            _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &hash)
-        }
-        return hash
-    }
-
-    private func sha256Hex(_ string: String) -> String {
-        return sha256Bytes(string).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func escapeJsonString(_ string: String) -> String {
-        // Produce a valid JSON string literal
-        guard let data = try? JSONSerialization.data(withJSONObject: string) else {
-            return "\"\(string)\""
-        }
-        return String(data: data, encoding: .utf8) ?? "\"\(string)\""
     }
 
     // MARK: - State Management

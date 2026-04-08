@@ -1,7 +1,16 @@
+export type ConnectionStatus =
+  | 'none'
+  | 'pending_sent'
+  | 'pending_received'
+  | 'accepted'
+  | 'rejected';
+
 export interface Neighbor {
   peerId: string;
   transport: string;
   discoveredAt: number;
+  connectionStatus: ConnectionStatus;
+  displayName?: string;
 }
 
 export interface ChatMessage {
