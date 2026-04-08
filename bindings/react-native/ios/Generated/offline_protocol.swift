@@ -900,6 +900,18 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func mlsProcessWelcome(welcome: MlsWelcomeMessage) throws  -> MlsGroupInfo
     
+    func nostrConfirmSent(messageId: String) 
+    
+    func nostrGetNextMessage()  -> NostrMessage?
+    
+    func nostrMessageReceived(senderId: String, data: [UInt8]) throws 
+    
+    func nostrSendFailed(messageId: String) 
+    
+    func nostrSendFailedWithReason(messageId: String, reason: String?) 
+    
+    func nostrStatusChanged(isConnected: Bool) throws 
+    
     func pause() throws 
     
     func pollEvent()  -> String?
@@ -928,6 +940,18 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func resume() throws 
     
+    func reticulumConfirmSent(messageId: String) 
+    
+    func reticulumGetNextMessage()  -> ReticulumMessage?
+    
+    func reticulumMessageReceived(senderId: String, data: [UInt8]) throws 
+    
+    func reticulumSendFailed(messageId: String) 
+    
+    func reticulumSendFailedWithReason(messageId: String, reason: String?) 
+    
+    func reticulumStatusChanged(isConnected: Bool) throws 
+    
     func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?) throws  -> String
     
     func sendFile(recipient: String, fileData: [UInt8], fileName: String) throws  -> String
@@ -952,7 +976,11 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func setMemberRole(groupId: String, userId: String, role: String) throws 
     
+    func setNostrTransportCallback(callback: NostrTransportCallback) 
+    
     func setRelayPriority(priority: RelayPriority) throws 
+    
+    func setReticulumTransportCallback(callback: ReticulumTransportCallback) 
     
     func setTyping(conversationId: String) throws  -> String
     
@@ -1718,6 +1746,56 @@ open func mlsProcessWelcome(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  
 })
 }
     
+open func nostrConfirmSent(messageId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
+open func nostrGetNextMessage() -> NostrMessage?  {
+    return try!  FfiConverterOptionTypeNostrMessage.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func nostrMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(senderId),
+        FfiConverterSequenceUInt8.lower(data),$0
+    )
+}
+}
+    
+open func nostrSendFailed(messageId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
+open func nostrSendFailedWithReason(messageId: String, reason: String?)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed_with_reason(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterOptionString.lower(reason),$0
+    )
+}
+}
+    
+open func nostrStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(isConnected),$0
+    )
+}
+}
+    
 open func pause()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(
             self.uniffiCloneHandle(),$0
@@ -1833,6 +1911,56 @@ open func resetTofuForPeer(peerId: String)throws  -> Bool  {
 open func resume()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(
             self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+open func reticulumConfirmSent(messageId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
+open func reticulumGetNextMessage() -> ReticulumMessage?  {
+    return try!  FfiConverterOptionTypeReticulumMessage.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func reticulumMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(senderId),
+        FfiConverterSequenceUInt8.lower(data),$0
+    )
+}
+}
+    
+open func reticulumSendFailed(messageId: String)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),$0
+    )
+}
+}
+    
+open func reticulumSendFailedWithReason(messageId: String, reason: String?)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(messageId),
+        FfiConverterOptionString.lower(reason),$0
+    )
+}
+}
+    
+open func reticulumStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(isConnected),$0
     )
 }
 }
@@ -1961,10 +2089,26 @@ open func setMemberRole(groupId: String, userId: String, role: String)throws   {
 }
 }
     
+open func setNostrTransportCallback(callback: NostrTransportCallback)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceNostrTransportCallback_lower(callback),$0
+    )
+}
+}
+    
 open func setRelayPriority(priority: RelayPriority)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(
             self.uniffiCloneHandle(),
         FfiConverterTypeRelayPriority_lower(priority),$0
+    )
+}
+}
+    
+open func setReticulumTransportCallback(callback: ReticulumTransportCallback)  {try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceReticulumTransportCallback_lower(callback),$0
     )
 }
 }
@@ -3381,6 +3525,66 @@ public func FfiConverterTypeNetworkTopology_lower(_ value: NetworkTopology) -> R
 }
 
 
+public struct NostrMessage: Equatable, Hashable {
+    public var messageId: String
+    public var recipientId: String
+    public var data: [UInt8]
+    public var replyToMsg: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(messageId: String, recipientId: String, data: [UInt8], replyToMsg: String?) {
+        self.messageId = messageId
+        self.recipientId = recipientId
+        self.data = data
+        self.replyToMsg = replyToMsg
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension NostrMessage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNostrMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NostrMessage {
+        return
+            try NostrMessage(
+                messageId: FfiConverterString.read(from: &buf), 
+                recipientId: FfiConverterString.read(from: &buf), 
+                data: FfiConverterSequenceUInt8.read(from: &buf), 
+                replyToMsg: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NostrMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.recipientId, into: &buf)
+        FfiConverterSequenceUInt8.write(value.data, into: &buf)
+        FfiConverterOptionString.write(value.replyToMsg, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNostrMessage_lift(_ buf: RustBuffer) throws -> NostrMessage {
+    return try FfiConverterTypeNostrMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNostrMessage_lower(_ value: NostrMessage) -> RustBuffer {
+    return FfiConverterTypeNostrMessage.lower(value)
+}
+
+
 public struct PathConfig: Equatable, Hashable {
     public var forwardToTopK: UInt32
     public var maxCongestionLevel: UInt32
@@ -3556,6 +3760,7 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var wifiDirectEnabled: Bool
     public var internetEnabled: Bool
     public var reticulumEnabled: Bool
+    public var nostrEnabled: Bool
     public var preferOnline: Bool
     public var initialTtl: UInt8
     public var encryptionEnabled: Bool
@@ -3572,13 +3777,14 @@ public struct ProtocolConfig: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
+    public init(appId: String, userId: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, requireTransportIdentity: Bool = false) {
         self.appId = appId
         self.userId = userId
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
         self.reticulumEnabled = reticulumEnabled
+        self.nostrEnabled = nostrEnabled
         self.preferOnline = preferOnline
         self.initialTtl = initialTtl
         self.encryptionEnabled = encryptionEnabled
@@ -3612,10 +3818,11 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 userId: FfiConverterString.read(from: &buf), 
                 bleEnabled: FfiConverterBool.read(from: &buf), 
                 wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
-                internetEnabled: FfiConverterBool.read(from: &buf),
-                reticulumEnabled: FfiConverterBool.read(from: &buf),
-                preferOnline: FfiConverterBool.read(from: &buf),
-                initialTtl: FfiConverterUInt8.read(from: &buf),
+                internetEnabled: FfiConverterBool.read(from: &buf), 
+                reticulumEnabled: FfiConverterBool.read(from: &buf), 
+                nostrEnabled: FfiConverterBool.read(from: &buf), 
+                preferOnline: FfiConverterBool.read(from: &buf), 
+                initialTtl: FfiConverterUInt8.read(from: &buf), 
                 encryptionEnabled: FfiConverterBool.read(from: &buf), 
                 autoKeyExchange: FfiConverterBool.read(from: &buf), 
                 storePending: FfiConverterBool.read(from: &buf), 
@@ -3637,6 +3844,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.wifiDirectEnabled, into: &buf)
         FfiConverterBool.write(value.internetEnabled, into: &buf)
         FfiConverterBool.write(value.reticulumEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrEnabled, into: &buf)
         FfiConverterBool.write(value.preferOnline, into: &buf)
         FfiConverterUInt8.write(value.initialTtl, into: &buf)
         FfiConverterBool.write(value.encryptionEnabled, into: &buf)
@@ -3861,6 +4069,66 @@ public func FfiConverterTypeReliabilityConfig_lower(_ value: ReliabilityConfig) 
 }
 
 
+public struct ReticulumMessage: Equatable, Hashable {
+    public var messageId: String
+    public var recipientId: String
+    public var data: [UInt8]
+    public var replyToMsg: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(messageId: String, recipientId: String, data: [UInt8], replyToMsg: String?) {
+        self.messageId = messageId
+        self.recipientId = recipientId
+        self.data = data
+        self.replyToMsg = replyToMsg
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension ReticulumMessage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReticulumMessage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReticulumMessage {
+        return
+            try ReticulumMessage(
+                messageId: FfiConverterString.read(from: &buf), 
+                recipientId: FfiConverterString.read(from: &buf), 
+                data: FfiConverterSequenceUInt8.read(from: &buf), 
+                replyToMsg: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReticulumMessage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.recipientId, into: &buf)
+        FfiConverterSequenceUInt8.write(value.data, into: &buf)
+        FfiConverterOptionString.write(value.replyToMsg, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReticulumMessage_lift(_ buf: RustBuffer) throws -> ReticulumMessage {
+    return try FfiConverterTypeReticulumMessage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReticulumMessage_lower(_ value: ReticulumMessage) -> RustBuffer {
+    return FfiConverterTypeReticulumMessage.lower(value)
+}
+
+
 public struct RetryConfig: Equatable, Hashable {
     public var maxRetries: UInt32
     public var initialDelayMs: UInt64
@@ -4042,14 +4310,16 @@ public struct TransportConfig: Equatable, Hashable {
     public var wifiDirectEnabled: Bool
     public var internetEnabled: Bool
     public var reticulumEnabled: Bool
+    public var nostrEnabled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool) {
+    public init(bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool) {
         self.bleEnabled = bleEnabled
         self.wifiDirectEnabled = wifiDirectEnabled
         self.internetEnabled = internetEnabled
         self.reticulumEnabled = reticulumEnabled
+        self.nostrEnabled = nostrEnabled
     }
 
     
@@ -4066,10 +4336,11 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportConfig {
         return
             try TransportConfig(
-                bleEnabled: FfiConverterBool.read(from: &buf),
-                wifiDirectEnabled: FfiConverterBool.read(from: &buf),
-                internetEnabled: FfiConverterBool.read(from: &buf),
-                reticulumEnabled: FfiConverterBool.read(from: &buf)
+                bleEnabled: FfiConverterBool.read(from: &buf), 
+                wifiDirectEnabled: FfiConverterBool.read(from: &buf), 
+                internetEnabled: FfiConverterBool.read(from: &buf), 
+                reticulumEnabled: FfiConverterBool.read(from: &buf), 
+                nostrEnabled: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -4078,6 +4349,7 @@ public struct FfiConverterTypeTransportConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.wifiDirectEnabled, into: &buf)
         FfiConverterBool.write(value.internetEnabled, into: &buf)
         FfiConverterBool.write(value.reticulumEnabled, into: &buf)
+        FfiConverterBool.write(value.nostrEnabled, into: &buf)
     }
 }
 
@@ -5038,11 +5310,12 @@ public func FfiConverterTypeRelayPriority_lower(_ value: RelayPriority) -> RustB
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
 public enum TransportType: Equatable, Hashable {
-
+    
     case internet
     case ble
     case wiFiDirect
     case reticulum
+    case nostr
 
 
 
@@ -5063,13 +5336,15 @@ public struct FfiConverterTypeTransportType: FfiConverterRustBuffer {
         switch variant {
         
         case 1: return .internet
-
+        
         case 2: return .ble
-
+        
         case 3: return .wiFiDirect
-
+        
         case 4: return .reticulum
-
+        
+        case 5: return .nostr
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -5088,11 +5363,15 @@ public struct FfiConverterTypeTransportType: FfiConverterRustBuffer {
         
         case .wiFiDirect:
             writeInt(&buf, Int32(3))
-
-
+        
+        
         case .reticulum:
             writeInt(&buf, Int32(4))
-
+        
+        
+        case .nostr:
+            writeInt(&buf, Int32(5))
+        
         }
     }
 }
@@ -5576,6 +5855,250 @@ public func FfiConverterCallbackInterfaceMlsStorageProvider_lower(_ v: MlsStorag
 
 
 
+public protocol NostrTransportCallback: AnyObject, Sendable {
+    
+    func onMessagesAvailable() 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceNostrTransportCallback {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceNostrTransportCallback] = [UniffiVTableCallbackInterfaceNostrTransportCallback(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceNostrTransportCallback.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface NostrTransportCallback: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceNostrTransportCallback.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface NostrTransportCallback: handle missing in uniffiClone")
+            }
+        },
+        onMessagesAvailable: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceNostrTransportCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onMessagesAvailable(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitNostrTransportCallback() {
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(UniffiCallbackInterfaceNostrTransportCallback.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceNostrTransportCallback {
+    fileprivate static let handleMap = UniffiHandleMap<NostrTransportCallback>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceNostrTransportCallback : FfiConverter {
+    typealias SwiftType = NostrTransportCallback
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceNostrTransportCallback_lift(_ handle: UInt64) throws -> NostrTransportCallback {
+    return try FfiConverterCallbackInterfaceNostrTransportCallback.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceNostrTransportCallback_lower(_ v: NostrTransportCallback) -> UInt64 {
+    return FfiConverterCallbackInterfaceNostrTransportCallback.lower(v)
+}
+
+
+
+
+public protocol ReticulumTransportCallback: AnyObject, Sendable {
+    
+    func onMessagesAvailable() 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceReticulumTransportCallback {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceReticulumTransportCallback] = [UniffiVTableCallbackInterfaceReticulumTransportCallback(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceReticulumTransportCallback.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface ReticulumTransportCallback: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceReticulumTransportCallback.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface ReticulumTransportCallback: handle missing in uniffiClone")
+            }
+        },
+        onMessagesAvailable: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceReticulumTransportCallback.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onMessagesAvailable(
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitReticulumTransportCallback() {
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(UniffiCallbackInterfaceReticulumTransportCallback.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceReticulumTransportCallback {
+    fileprivate static let handleMap = UniffiHandleMap<ReticulumTransportCallback>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceReticulumTransportCallback : FfiConverter {
+    typealias SwiftType = ReticulumTransportCallback
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceReticulumTransportCallback_lift(_ handle: UInt64) throws -> ReticulumTransportCallback {
+    return try FfiConverterCallbackInterfaceReticulumTransportCallback.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceReticulumTransportCallback_lower(_ v: ReticulumTransportCallback) -> UInt64 {
+    return FfiConverterCallbackInterfaceReticulumTransportCallback.lower(v)
+}
+
+
+
+
 public protocol WifiDirectTransportCallback: AnyObject, Sendable {
     
     func onMessagesAvailable() 
@@ -5954,6 +6477,54 @@ fileprivate struct FfiConverterOptionTypeMlsWelcomeMessage: FfiConverterRustBuff
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeMlsWelcomeMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNostrMessage: FfiConverterRustBuffer {
+    typealias SwiftType = NostrMessage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNostrMessage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNostrMessage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeReticulumMessage: FfiConverterRustBuffer {
+    typealias SwiftType = ReticulumMessage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeReticulumMessage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeReticulumMessage.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -6544,6 +7115,24 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 44299) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() != 5599) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 43745) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 10118) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6586,6 +7175,24 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 38323) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 41914) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 11523) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 40553) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() != 13863) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 32395) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6622,7 +7229,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 56849) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 56341) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 27956) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing() != 10907) {
@@ -6709,6 +7322,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 24837) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 5919) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 48810) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6716,6 +7335,8 @@ private let initializationResult: InitializationResult = {
     uniffiCallbackInitBleTransportCallback()
     uniffiCallbackInitEventCallback()
     uniffiCallbackInitMlsStorageProvider()
+    uniffiCallbackInitNostrTransportCallback()
+    uniffiCallbackInitReticulumTransportCallback()
     uniffiCallbackInitWifiDirectTransportCallback()
     return InitializationResult.ok
 }()

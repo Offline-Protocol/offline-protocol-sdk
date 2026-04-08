@@ -698,20 +698,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
             }
 
-            // Start Nostr manager if configured
-            if let manager = nostrManager {
-                do {
-                    try manager.start()
-                    print("[OfflineProtocolModule] Nostr Manager started")
-                    emitDiagnostic(level: "info", message: "Nostr manager started")
-                } catch {
-                    print("[OfflineProtocolModule] Warning: Failed to start Nostr Manager: \(error.localizedDescription)")
-                    emitDiagnostic(level: "error", message: "Failed to start Nostr manager", context: [
-                        "error": error.localizedDescription
-                    ])
-                    // Don't fail the entire start if Nostr fails
-                }
-            }
+            // Nostr manager is started on-demand via enableTransport("nostr")
+            // from the JS layer, not here — avoids double-start conflicts.
 
             resolver(nil)
         } catch {
