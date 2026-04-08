@@ -115,6 +115,7 @@ fn tie_break_priority(transport_type: TransportType) -> u8 {
         TransportType::WiFiDirect => 1,
         TransportType::BLE => 2,
         TransportType::Reticulum => 3,
+        TransportType::Nostr => 4,
     }
 }
 
@@ -447,6 +448,28 @@ impl TransportSelector {
                 has_signal: true, // Radio interfaces report RSSI
                 default_signal_score: 60.0,
                 tie_break_priority: 3, // Lowest: resilience fallback
+            },
+            TransportType::Nostr => TransportScoringProfile {
+                weights: ScoringWeights {
+                    signal: 0.0,
+                    proximity: 0.0,
+                    bandwidth: 0.20,
+                    congestion: 0.20,
+                    energy: 0.15,
+                    reliability: 0.35,
+                    load: 0.10,
+                },
+                base_score: 5.0,   // Modest base, below Internet
+                media_bonus: 30.0, // Can handle media via relays
+                media_penalty: 0.0,
+                bandwidth_max_bps: 1_000_000, // Relay-limited, ~1 MB/s practical
+                bandwidth_default: 40.0,      // Conservative default
+                energy_baseline: 55.0,        // Similar to Internet (WebSocket)
+                is_high_power: true,          // Uses Internet radio
+                active_relay_energy_adjustment: 0.0,
+                has_signal: false, // No RSSI
+                default_signal_score: 50.0,
+                tie_break_priority: 4, // Censorship-resistant fallback
             },
         };
 

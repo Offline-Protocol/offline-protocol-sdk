@@ -21,6 +21,9 @@ pub enum TransportType {
     /// Reticulum mesh transport (LoRa, TCP, UDP, serial, I2P).
     #[serde(rename = "reticulum")]
     Reticulum,
+    /// Nostr relay transport (censorship-resistant, decentralized messaging).
+    #[serde(rename = "nostr")]
+    Nostr,
 }
 
 impl TransportType {
@@ -31,6 +34,7 @@ impl TransportType {
             TransportType::BLE => "ble",
             TransportType::WiFiDirect => "wifiDirect",
             TransportType::Reticulum => "reticulum",
+            TransportType::Nostr => "nostr",
         }
     }
 
@@ -41,6 +45,7 @@ impl TransportType {
             "internet" => TransportType::Internet,
             "wifidirect" | "wifi_direct" | "wifi-direct" => TransportType::WiFiDirect,
             "reticulum" => TransportType::Reticulum,
+            "nostr" => TransportType::Nostr,
             _ => TransportType::BLE,
         }
     }
@@ -210,6 +215,7 @@ mod tests {
         assert_eq!(TransportType::BLE.label(), "ble");
         assert_eq!(TransportType::WiFiDirect.label(), "wifiDirect");
         assert_eq!(TransportType::Reticulum.label(), "reticulum");
+        assert_eq!(TransportType::Nostr.label(), "nostr");
     }
 
     #[test]
@@ -248,6 +254,8 @@ mod tests {
             TransportType::from_label("RETICULUM"),
             TransportType::Reticulum
         );
+        assert_eq!(TransportType::from_label("nostr"), TransportType::Nostr);
+        assert_eq!(TransportType::from_label("NOSTR"), TransportType::Nostr);
         assert_eq!(TransportType::from_label("unknown"), TransportType::BLE);
         assert_eq!(TransportType::from_label(""), TransportType::BLE);
     }
@@ -258,6 +266,7 @@ mod tests {
         assert_eq!(TransportType::BLE.to_string(), "ble");
         assert_eq!(TransportType::WiFiDirect.to_string(), "wifiDirect");
         assert_eq!(TransportType::Reticulum.to_string(), "reticulum");
+        assert_eq!(TransportType::Nostr.to_string(), "nostr");
     }
 
     // --- TransportMetrics ---

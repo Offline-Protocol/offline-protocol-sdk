@@ -127,6 +127,7 @@ enum TransportType {
     "Ble",
     "WiFiDirect",
     "Reticulum",
+    "Nostr",
 };
 
 // Protocol state
@@ -319,6 +320,7 @@ dictionary TransportConfig {
     boolean wifi_direct_enabled;
     boolean internet_enabled;
     boolean reticulum_enabled;
+    boolean nostr_enabled;
 };
 
 enum OverflowPolicy {
@@ -350,6 +352,7 @@ dictionary ProtocolConfig {
     boolean wifi_direct_enabled;
     boolean internet_enabled;
     boolean reticulum_enabled;
+    boolean nostr_enabled;
     boolean prefer_online;
     u8 initial_ttl;
     boolean encryption_enabled;
@@ -395,6 +398,11 @@ callback interface WifiDirectTransportCallback {
 
 // Reticulum transport callback - notifies platform when outgoing messages are available.
 callback interface ReticulumTransportCallback {
+    void on_messages_available();
+};
+
+// Nostr transport callback - notifies platform when outgoing messages are available.
+callback interface NostrTransportCallback {
     void on_messages_available();
 };
 
@@ -525,6 +533,24 @@ interface OfflineProtocol {
     void reticulum_send_failed(string message_id);
 
     void reticulum_send_failed_with_reason(string message_id, string? reason);
+
+    // Nostr transport callback (event-driven sending)
+    void set_nostr_transport_callback(NostrTransportCallback callback);
+
+    // Nostr transport operations
+    [Throws=ProtocolError]
+    void nostr_status_changed(boolean is_connected);
+
+    [Throws=ProtocolError]
+    void nostr_message_received(string sender_id, sequence<u8> data);
+
+    NostrMessage? nostr_get_next_message();
+
+    void nostr_confirm_sent(string message_id);
+
+    void nostr_send_failed(string message_id);
+
+    void nostr_send_failed_with_reason(string message_id, string? reason);
 
     // Transport management
     [Throws=ProtocolError]
@@ -910,6 +936,14 @@ dictionary WifiDirectMessage {
 
 // Reticulum message for outgoing data
 dictionary ReticulumMessage {
+    string message_id;
+    string recipient_id;
+    sequence<u8> data;
+    string? reply_to_msg;
+};
+
+// Nostr message for outgoing data
+dictionary NostrMessage {
     string message_id;
     string recipient_id;
     sequence<u8> data;

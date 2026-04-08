@@ -128,6 +128,11 @@ pub struct TransportConfig {
     /// Defaults to `false` because Reticulum requires external infrastructure
     /// (a running Reticulum daemon or RNode hardware).
     pub reticulum_enabled: bool,
+
+    /// Whether Nostr relay transport is enabled.
+    /// Defaults to `false` because Nostr requires relay configuration
+    /// and a secp256k1 keypair.
+    pub nostr_enabled: bool,
 }
 
 impl Default for TransportConfig {
@@ -137,6 +142,7 @@ impl Default for TransportConfig {
             wifi_direct_enabled: true,
             internet_enabled: true,
             reticulum_enabled: false,
+            nostr_enabled: false,
         }
     }
 }
@@ -274,6 +280,7 @@ impl ProtocolConfig {
             && !self.transport.wifi_direct_enabled
             && !self.transport.internet_enabled
             && !self.transport.reticulum_enabled
+            && !self.transport.nostr_enabled
         {
             return Err(crate::Error::InvalidConfiguration(
                 "At least one transport must be enabled".to_string(),
@@ -383,6 +390,12 @@ impl ProtocolConfigBuilder {
     /// Enables or disables Internet transport.
     pub fn internet_enabled(mut self, enabled: bool) -> Self {
         self.config.transport.internet_enabled = enabled;
+        self
+    }
+
+    /// Enables or disables Nostr relay transport.
+    pub fn nostr_enabled(mut self, enabled: bool) -> Self {
+        self.config.transport.nostr_enabled = enabled;
         self
     }
 

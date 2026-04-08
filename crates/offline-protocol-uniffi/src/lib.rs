@@ -26,8 +26,9 @@ use offline_protocol_router::{
     DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
 };
 use offline_protocol_transport::{
-    ble::BleTransport, internet::InternetTransport, reticulum::ReticulumTransport,
-    wifi_direct::WifiDirectTransport, Transport, TransportType as CoreTransportType,
+    ble::BleTransport, internet::InternetTransport, nostr::NostrTransport,
+    reticulum::ReticulumTransport, wifi_direct::WifiDirectTransport, Transport,
+    TransportType as CoreTransportType,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -373,6 +374,7 @@ pub enum TransportType {
     Ble,
     WiFiDirect,
     Reticulum,
+    Nostr,
 }
 
 /// Protocol state
@@ -756,6 +758,7 @@ pub struct TransportConfig {
     pub wifi_direct_enabled: bool,
     pub internet_enabled: bool,
     pub reticulum_enabled: bool,
+    pub nostr_enabled: bool,
 }
 
 /// Encryption configuration for automatic MLS handling
@@ -820,6 +823,7 @@ pub struct ProtocolConfig {
     pub wifi_direct_enabled: bool,
     pub internet_enabled: bool,
     pub reticulum_enabled: bool,
+    pub nostr_enabled: bool,
     pub prefer_online: bool,
     pub initial_ttl: u8,
     pub encryption_enabled: bool,
@@ -855,6 +859,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.transport.wifi_direct_enabled = config.wifi_direct_enabled;
         core_config.transport.internet_enabled = config.internet_enabled;
         core_config.transport.reticulum_enabled = config.reticulum_enabled;
+        core_config.transport.nostr_enabled = config.nostr_enabled;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
         core_config.encryption.enabled = config.encryption_enabled;
@@ -898,6 +903,11 @@ pub trait ReticulumTransportCallback: Send + Sync {
     fn on_messages_available(&self);
 }
 
+/// Nostr transport callback trait — notifies platform when outgoing messages are available.
+pub trait NostrTransportCallback: Send + Sync {
+    fn on_messages_available(&self);
+}
+
 /// BLE fragment for outgoing data
 #[derive(Debug, Clone)]
 pub struct BleFragment {
@@ -936,6 +946,18 @@ pub struct ReticulumMessage {
     pub reply_to_msg: Option<String>,
 }
 
+/// Nostr message for outgoing data
+#[derive(Debug, Clone)]
+pub struct NostrMessage {
+    /// Unique message identifier. Use this with `nostr_confirm_sent()` or
+    /// `nostr_send_failed()`/`nostr_send_failed_with_reason()` to report
+    /// the send outcome.
+    pub message_id: String,
+    pub recipient_id: String,
+    pub data: Vec<u8>,
+    pub reply_to_msg: Option<String>,
+}
+
 /// Internal state for BLE operations
 struct BleState {
     fragments: VecDeque<(String, Vec<u8>)>,
@@ -967,6 +989,12 @@ struct ReticulumState {
     is_connected: bool,
 }
 
+/// Internal state for Nostr transport operations
+struct NostrState {
+    /// Whether Nostr transport is connected to relays
+    is_connected: bool,
+}
+
 /// Main protocol wrapper for UniFFI - COMPLETE IMPLEMENTATION
 pub struct OfflineProtocol {
     inner: Mutex<CoreProtocol>,
@@ -977,6 +1005,7 @@ pub struct OfflineProtocol {
     internet_state: Mutex<InternetState>,
     wifi_direct_state: Mutex<WifiDirectState>,
     reticulum_state: Mutex<ReticulumState>,
+    nostr_state: Mutex<NostrState>,
     visualizer: Mutex<NetworkVisualizer>,
     path_selector: Mutex<PathSelector>,
     battery_level: RwLock<Option<u8>>,
@@ -992,6 +1021,7 @@ impl OfflineProtocol {
         let ble_enabled = config.ble_enabled;
         let internet_enabled = config.internet_enabled;
         let reticulum_enabled = config.reticulum_enabled;
+        let nostr_enabled = config.nostr_enabled;
         let core_config: CoreConfig = config.into();
         core_config.validate().map_err(ProtocolError::from)?;
 
@@ -1023,6 +1053,15 @@ impl OfflineProtocol {
             protocol
                 .transport_manager_mut()
                 .add_transport(CoreTransportType::Reticulum, Box::new(reticulum_transport));
+        }
+
+        // Add Nostr transport if enabled
+        // The platform bridges to Nostr relay WebSocket connections
+        if nostr_enabled {
+            let nostr_transport = NostrTransport::new(user_id.clone());
+            protocol
+                .transport_manager_mut()
+                .add_transport(CoreTransportType::Nostr, Box::new(nostr_transport));
         }
 
         // Create the event queue and callback that will be shared with the event handler
@@ -1077,6 +1116,9 @@ impl OfflineProtocol {
                 connected_peer: None,
             }),
             reticulum_state: Mutex::new(ReticulumState {
+                is_connected: false,
+            }),
+            nostr_state: Mutex::new(NostrState {
                 is_connected: false,
             }),
             visualizer: Mutex::new(NetworkVisualizer::new(user_id.clone())),
@@ -1134,6 +1176,13 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::LockPoisoned(format!("reticulum_state: {}", e)))
     }
 
+    /// Lock the Nostr state mutex, converting poison errors.
+    fn lock_nostr(&self) -> Result<std::sync::MutexGuard<'_, NostrState>, ProtocolError> {
+        self.nostr_state
+            .lock()
+            .map_err(|e| ProtocolError::LockPoisoned(format!("nostr_state: {}", e)))
+    }
+
     /// Acquire the inner + transport locks, downcast to `ReticulumTransport`,
     /// and call `f` with it.  Returns `None` when the transport is absent or
     /// not a `ReticulumTransport`.
@@ -1178,6 +1227,52 @@ impl OfflineProtocol {
             None => return Ok(None),
         };
         Ok(Some(f(reticulum_transport)))
+    }
+
+    /// Acquire the inner + transport locks, downcast to `NostrTransport`,
+    /// and call `f` with it.  Returns `None` when the transport is absent or
+    /// not a `NostrTransport`.
+    fn with_nostr_transport<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&offline_protocol_transport::nostr::NostrTransport) -> R,
+    {
+        let protocol = recover_mutex(&self.inner, "inner");
+        let transport_arc = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Nostr)?;
+        let transport = recover_mutex(&transport_arc, "transport");
+        let nostr_transport = transport
+            .as_any()
+            .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>(
+        )?;
+        Some(f(nostr_transport))
+    }
+
+    /// Like `with_nostr_transport` but uses fallible lock acquisition
+    /// (`lock_inner`) so it can propagate lock-poison errors.
+    fn with_nostr_transport_fallible<F, R>(&self, f: F) -> Result<Option<R>, ProtocolError>
+    where
+        F: FnOnce(&offline_protocol_transport::nostr::NostrTransport) -> R,
+    {
+        let protocol = self.lock_inner()?;
+        let transport_arc = match protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::Nostr)
+        {
+            Some(arc) => arc,
+            None => return Ok(None),
+        };
+        let transport = transport_arc
+            .lock()
+            .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+        let nostr_transport = match transport
+            .as_any()
+            .downcast_ref::<offline_protocol_transport::nostr::NostrTransport>(
+        ) {
+            Some(nt) => nt,
+            None => return Ok(None),
+        };
+        Ok(Some(f(nostr_transport)))
     }
 
     /// Lock the visualizer mutex, converting poison errors.
@@ -1403,6 +1498,18 @@ impl OfflineProtocol {
         });
     }
 
+    /// Registers a Nostr transport callback that fires when outgoing
+    /// messages become available. This replaces timer-based polling.
+    pub fn set_nostr_transport_callback(&self, callback: Box<dyn NostrTransportCallback>) {
+        let callback: Arc<dyn NostrTransportCallback> = Arc::from(callback);
+        self.with_nostr_transport(|nt| {
+            let cb = callback.clone();
+            nt.set_on_messages_available(Arc::new(move || {
+                cb.on_messages_available();
+            }));
+        });
+    }
+
     // ========================================================================
     // MESSAGING
     // ========================================================================
@@ -1427,6 +1534,7 @@ impl OfflineProtocol {
                 TransportType::Ble => CoreTransportType::BLE,
                 TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
                 TransportType::Reticulum => CoreTransportType::Reticulum,
+                TransportType::Nostr => CoreTransportType::Nostr,
             };
             protocol
                 .send_message_via_transport(
@@ -2478,6 +2586,167 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // NOSTR TRANSPORT
+    // ========================================================================
+
+    /// Called by the platform when the Nostr relay connection status changes.
+    pub fn nostr_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
+        let was_connected = {
+            let mut nostr_state = self.lock_nostr()?;
+            let prev = nostr_state.is_connected;
+            nostr_state.is_connected = is_connected;
+            prev
+        };
+
+        self.with_nostr_transport_fallible(|nt| {
+            let new_status = if is_connected {
+                offline_protocol_transport::TransportStatus::Available
+            } else {
+                offline_protocol_transport::TransportStatus::Disconnected
+            };
+            nt.on_status_changed(new_status);
+        })?;
+
+        if is_connected && !was_connected {
+            let mut protocol = self.lock_inner()?;
+            protocol.flush_outbox_all();
+        }
+
+        let event = if is_connected {
+            CoreEvent::TransportSwitched {
+                from: None,
+                to: "Nostr".to_string(),
+                reason: "Connected to Nostr relays".to_string(),
+            }
+        } else {
+            CoreEvent::TransportSwitched {
+                from: Some("Nostr".to_string()),
+                to: "None".to_string(),
+                reason: "Disconnected from Nostr relays".to_string(),
+            }
+        };
+        self.emit_event(event);
+
+        Ok(())
+    }
+
+    /// Called by the platform when data is received from a Nostr relay.
+    pub fn nostr_message_received(
+        &self,
+        sender_id: String,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        if let Some(Err(e)) = self
+            .with_nostr_transport_fallible(|nt| nt.on_data_received_from(data, sender_id.clone()))?
+        {
+            return Err(ProtocolError::Other(format!(
+                "Failed to process nostr message: {}",
+                e
+            )));
+        }
+
+        let is_blocked = {
+            let mut protocol = self.lock_inner()?;
+            while protocol.receive_message().is_some() {}
+            protocol.is_user_blocked(&sender_id)
+        };
+
+        if !sender_id.is_empty() && !is_blocked {
+            let event = CoreEvent::NeighborDiscovered {
+                peer_id: sender_id.clone(),
+                transport: "Nostr".to_string(),
+                rssi: None,
+            };
+            self.emit_event(event);
+        }
+
+        Ok(())
+    }
+
+    /// Returns the next outgoing Nostr message, if any.
+    /// The platform should publish this as a Nostr event, then call
+    /// `nostr_confirm_sent()` or `nostr_send_failed()`.
+    pub fn nostr_get_next_message(&self) -> Option<NostrMessage> {
+        {
+            let nostr_state = recover_mutex(&self.nostr_state, "nostr_state");
+            if !nostr_state.is_connected {
+                return None;
+            }
+        }
+
+        self.with_nostr_transport(|nt| {
+            if let Ok(Some((message_id, data))) = nt.get_next_message() {
+                match nt.deserialize_message(&data) {
+                    Ok(message) => {
+                        return Some(NostrMessage {
+                            message_id,
+                            recipient_id: message.recipient.as_str().to_string(),
+                            data,
+                            reply_to_msg: message
+                                .reply_to_msg
+                                .as_ref()
+                                .map(|id| id.as_str().to_string()),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            message_id = %message_id,
+                            error = %e,
+                            "Failed to deserialize nostr message — message permanently lost, reporting failure"
+                        );
+                        nt.report_send_failure(&message_id);
+                    }
+                }
+            }
+            None
+        })
+        .flatten()
+    }
+
+    /// Called by the platform after successfully publishing a Nostr event.
+    pub fn nostr_confirm_sent(&self, message_id: String) {
+        {
+            let mut protocol = recover_mutex(&self.inner, "inner");
+            if let Err(err) = protocol.on_transport_send_confirmed(&message_id) {
+                tracing::warn!(
+                    message_id = %message_id,
+                    error = %err,
+                    "Failed to apply welcome lifecycle transport confirmation (nostr)"
+                );
+            }
+        }
+        self.with_nostr_transport(|nt| {
+            nt.confirm_sent(&message_id);
+        });
+    }
+
+    /// Called by the platform when publishing a Nostr event fails.
+    pub fn nostr_send_failed(&self, message_id: String) {
+        self.nostr_send_failed_with_reason(
+            message_id,
+            Some("Nostr transport send failed".to_string()),
+        );
+    }
+
+    /// Called by the platform when publishing a Nostr event fails, with an
+    /// optional reason for diagnostics.
+    pub fn nostr_send_failed_with_reason(&self, message_id: String, reason: Option<String>) {
+        {
+            let mut protocol = recover_mutex(&self.inner, "inner");
+            if let Err(err) = protocol.on_transport_send_failed(&message_id, reason) {
+                tracing::warn!(
+                    message_id = %message_id,
+                    error = %err,
+                    "Failed to apply welcome lifecycle transport failure (nostr)"
+                );
+            }
+        }
+        self.with_nostr_transport(|nt| {
+            nt.report_send_failure(&message_id);
+        });
+    }
+
+    // ========================================================================
     // TRANSPORT MANAGEMENT
     // ========================================================================
 
@@ -2488,6 +2757,7 @@ impl OfflineProtocol {
             TransportType::Ble => CoreTransportType::BLE,
             TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
             TransportType::Reticulum => CoreTransportType::Reticulum,
+            TransportType::Nostr => CoreTransportType::Nostr,
         };
 
         let mut protocol = self.lock_inner()?;
@@ -3828,6 +4098,7 @@ mod tests {
             wifi_direct_enabled: true,
             internet_enabled: true,
             reticulum_enabled: false,
+            nostr_enabled: false,
             prefer_online: false,
             initial_ttl: 8,
             encryption_enabled: true,
@@ -3852,6 +4123,7 @@ mod tests {
             wifi_direct_enabled: false,
             internet_enabled: false,
             reticulum_enabled: false,
+            nostr_enabled: false,
             prefer_online: false,
             initial_ttl: 8,
             encryption_enabled: true,
@@ -4184,6 +4456,7 @@ mod tests {
             wifi_direct_enabled: false,
             internet_enabled: false,
             reticulum_enabled: true,
+            nostr_enabled: false,
             prefer_online: false,
             initial_ttl: 8,
             encryption_enabled: true,

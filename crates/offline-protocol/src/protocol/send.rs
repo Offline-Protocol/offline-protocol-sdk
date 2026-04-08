@@ -1034,6 +1034,11 @@ impl OfflineProtocol {
                 use crate::constants::{CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE};
                 (CHUNK_SIZE_BLE, MEDIA_WINDOW_SIZE_BLE)
             }
+            TransportType::Nostr => {
+                // Nostr relays have decent bandwidth; use Internet-like chunk sizes.
+                use crate::constants::{CHUNK_SIZE_INTERNET, MEDIA_WINDOW_SIZE_INTERNET};
+                (CHUNK_SIZE_INTERNET, MEDIA_WINDOW_SIZE_INTERNET)
+            }
         };
         let chunks = self.file_transfer_manager.chunk_file(
             file_id.clone(),
