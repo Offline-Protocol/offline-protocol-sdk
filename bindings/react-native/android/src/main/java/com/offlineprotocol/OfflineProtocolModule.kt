@@ -26,6 +26,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
     private var reticulumManager: ReticulumManager? = null
+    private var nostrManager: NostrManager? = null
     private var processScheduler: ScheduledExecutorService? = null
     private var listenerCount: Int = 0
     private var currentConfig: ProtocolConfig? = null
@@ -71,6 +72,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         wifiDirectManager = null
         reticulumManager?.stop()
         reticulumManager = null
+        nostrManager?.stop()
+        nostrManager = null
         protocol = null
         stopForegroundService()
     }
@@ -139,6 +142,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             wifiDirectEnabled = json.optBoolean("wifiDirectEnabled", json.optBoolean("wifi_direct_enabled", true)),
             internetEnabled = json.optBoolean("internetEnabled", json.optBoolean("internet_enabled", true)),
             reticulumEnabled = json.optBoolean("reticulumEnabled", json.optBoolean("reticulum_enabled", false)),
+            nostrEnabled = json.optBoolean("nostrEnabled", json.optBoolean("nostr_enabled", false)),
             preferOnline = json.optBoolean("preferOnline", json.optBoolean("prefer_online", false)),
             initialTtl = json.optInt("initialTtl", json.optInt("initial_ttl", Constants.DEFAULT_INITIAL_TTL)).toUByte(),
             encryptionEnabled = encryptionEnabled,
@@ -417,6 +421,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 ))
             }
 
+            // Initialize Nostr manager if nostr is enabled
+            if (config.nostrEnabled) {
+                nostrManager = createNostrManager(proto, config.userId)
+                android.util.Log.i(NAME, "Nostr Manager initialized for user: ${config.userId}")
+                emitDiagnostic("info", "Nostr manager initialized", mapOf(
+                    "userId" to config.userId
+                ))
+            } else {
+                emitDiagnostic("info", "Nostr disabled in configuration", mapOf(
+                    "userId" to config.userId
+                ))
+            }
+
             // Wire Rust transport callbacks for event-driven sending.
             // These replace the 100ms polling loops; the Rust core calls back into
             // Kotlin when outgoing data is enqueued, and the manager drains the queue
@@ -568,6 +585,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         android.util.Log.i(NAME, "Reticulum Manager stopped")
         emitDiagnostic("info", "Reticulum manager stopped")
 
+        // Stop Nostr manager
+        nostrManager?.stop()
+        android.util.Log.i(NAME, "Nostr Manager stopped")
+        emitDiagnostic("info", "Nostr manager stopped")
+
         // Stop foreground service
         stopForegroundService()
         
@@ -595,7 +617,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             internetManager?.pause()
             wifiDirectManager?.pause()
             reticulumManager?.pause()
-            
+            nostrManager?.pause()
+
             protocol?.pause()
             promise.resolve(null)
         } catch (e: Exception) {
@@ -613,6 +636,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             internetManager?.resume()
             wifiDirectManager?.resume()
             reticulumManager?.resume()
+            nostrManager?.resume()
 
             // Restart the process scheduler
             if (protocol?.getState() == ProtocolState.RUNNING) {
@@ -944,6 +968,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             wifiDirectManager = null
             reticulumManager?.stop()
             reticulumManager = null
+            nostrManager?.stop()
+            nostrManager = null
 
             try {
                 protocol?.stop()
@@ -1044,6 +1070,22 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
                     configureAndStartReticulum(manager, config)
                     emitDiagnostic("info", "Reticulum transport enabled")
+                }
+                "nostr" -> {
+                    if (nostrManager == null) {
+                        nostrManager = createNostrManager(proto, currentConfig?.userId ?: "unknown")
+                        emitDiagnostic("info", "Nostr manager created on demand")
+                    }
+
+                    val manager = nostrManager
+                        ?: throw IllegalStateException("Failed to create Nostr manager")
+
+                    if (manager.state == TransportState.RUNNING) {
+                        manager.stop()
+                    }
+
+                    configureAndStartNostr(manager, config)
+                    emitDiagnostic("info", "Nostr transport enabled")
                 }
                 else -> throw IllegalArgumentException("Unsupported transport type: $type")
             }
@@ -1175,6 +1217,89 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         ))
     }
 
+    private fun createNostrManager(proto: OfflineProtocol, userId: String): NostrManager {
+        return NostrManager(reactApplicationContext, proto, userId) { level, message, context ->
+            emitDiagnostic(level, message, context)
+        }.also { manager ->
+            manager.listener = object : TransportManagerListener {
+                override fun onTransportStateChanged(manager: TransportManager, state: TransportState) {
+                    emitDiagnostic("info", "Nostr transport state changed", mapOf(
+                        "transport" to manager.transportId,
+                        "state" to state.name.lowercase()
+                    ))
+                }
+
+                override fun onTransportError(manager: TransportManager, error: Throwable) {
+                    emitDiagnostic("error", "Nostr transport error", mapOf(
+                        "transport" to manager.transportId,
+                        "message" to (error.message ?: "unknown"),
+                        "exception" to error.javaClass.simpleName
+                    ))
+                }
+
+                override fun onTransportMetricsUpdated(manager: TransportManager, metrics: Map<String, Any>) {
+                    val enrichedMetrics = metrics.toMutableMap()
+                    enrichedMetrics["transport"] = manager.transportId
+                    emitDiagnostic("info", "Nostr transport metrics", enrichedMetrics)
+                }
+
+                override fun onTransportDiagnostic(
+                    manager: TransportManager,
+                    level: String,
+                    message: String,
+                    context: Map<String, Any?>
+                ) {
+                    val enrichedContext = context.toMutableMap()
+                    enrichedContext["transport"] = manager.transportId
+                    emitDiagnostic(level, message, enrichedContext)
+                }
+            }
+        }
+    }
+
+    private fun configureAndStartNostr(manager: NostrManager, config: ReadableMap?) {
+        val relayUrls = mutableListOf<String>()
+        if (config?.hasKey("relayUrls") == true) {
+            val arr = config.getArray("relayUrls")
+            if (arr != null) {
+                for (i in 0 until arr.size()) {
+                    arr.getString(i)?.let { relayUrls.add(it) }
+                }
+            }
+        }
+        if (config?.hasKey("relay_urls") == true && relayUrls.isEmpty()) {
+            val arr = config.getArray("relay_urls")
+            if (arr != null) {
+                for (i in 0 until arr.size()) {
+                    arr.getString(i)?.let { relayUrls.add(it) }
+                }
+            }
+        }
+
+        if (relayUrls.isEmpty()) {
+            throw IllegalArgumentException("Nostr transport requires at least one relay URL")
+        }
+
+        val autoReconnect = if (config?.hasKey("autoReconnect") == true) {
+            config.getBoolean("autoReconnect")
+        } else {
+            true
+        }
+        val maxRetries = if (config?.hasKey("maxReconnectAttempts") == true) {
+            config.getDouble("maxReconnectAttempts").toInt()
+        } else {
+            0
+        }
+
+        manager.configure(relayUrls, autoReconnect, maxRetries)
+        manager.start()
+
+        emitDiagnostic("info", "Nostr transport enabled", mapOf(
+            "relayCount" to relayUrls.size,
+            "autoReconnect" to autoReconnect
+        ))
+    }
+
     @ReactMethod
     fun disableTransport(type: String, promise: Promise) {
         try {
@@ -1216,6 +1341,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         android.util.Log.w(NAME, "Failed to notify reticulum status change: ${e.message}")
                     }
                     emitDiagnostic("info", "Reticulum transport disabled (manager stopped)")
+                }
+                "nostr" -> {
+                    nostrManager?.stop()
+                    try {
+                        proto.nostrStatusChanged(false)
+                    } catch (e: Exception) {
+                        android.util.Log.w(NAME, "Failed to notify nostr status change: ${e.message}")
+                    }
+                    emitDiagnostic("info", "Nostr transport disabled (manager stopped)")
                 }
                 else -> throw IllegalArgumentException("Unsupported transport type: $type")
             }
@@ -2913,6 +3047,22 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "Reticulum transport callback not available; using fallback polling", e)
                 emitDiagnostic("warning", "Reticulum callback wiring skipped (regenerate UniFFI bindings)")
+            }
+        }
+
+        // Nostr callback
+        nostrManager?.let { manager ->
+            try {
+                proto.setNostrTransportCallback(object : uniffi.offline_protocol.NostrTransportCallback {
+                    override fun onMessagesAvailable() {
+                        manager.onMessagesAvailable()
+                    }
+                })
+                android.util.Log.i(NAME, "Nostr transport callback wired (event-driven sending active)")
+                emitDiagnostic("info", "Nostr transport callback wired")
+            } catch (e: Throwable) {
+                android.util.Log.w(NAME, "Nostr transport callback not available; using fallback polling", e)
+                emitDiagnostic("warning", "Nostr callback wiring skipped (regenerate UniFFI bindings)")
             }
         }
     }

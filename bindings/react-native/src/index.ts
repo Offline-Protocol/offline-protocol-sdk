@@ -29,6 +29,7 @@ import type {
   ProtocolState,
   MessageReceivedEvent,
   BleTransportConfig,
+  NostrTransportConfig,
   AckConfig,
   RetryConfig,
   DedupConfig,
@@ -93,6 +94,7 @@ interface NativeConfig {
   wifiDirectEnabled: boolean;
   internetEnabled: boolean;
   reticulumEnabled: boolean;
+  nostrEnabled: boolean;
   preferOnline: boolean;
   initialTtl: number;
   encryptionEnabled?: boolean;
@@ -284,6 +286,7 @@ export class OfflineProtocol {
       wifiDirectEnabled: this.config.transports?.wifiDirect?.enabled ?? false,
       internetEnabled: this.config.transports?.internet?.enabled ?? false,
       reticulumEnabled: this.config.transports?.reticulum?.enabled ?? false,
+      nostrEnabled: this.config.transports?.nostr?.enabled ?? false,
       preferOnline: dorsSource?.preferOnline ?? false,
       initialTtl: this.config.network?.initialTtl ?? 8,
       encryptionEnabled: this.config.encryption?.enabled ?? true,
@@ -308,6 +311,7 @@ export class OfflineProtocol {
       ble: this.config.transports?.ble,
       internet: this.config.transports?.internet,
       wifiDirect: this.config.transports?.wifiDirect,
+      nostr: this.config.transports?.nostr,
     });
     if (transportsConfig) {
       nativeConfig.transports = transportsConfig;
@@ -664,6 +668,20 @@ export class OfflineProtocol {
         );
       }
     }
+
+    // Auto-enable nostr transport if configured with relay URLs
+    const nostrConfig = this.config.transports?.nostr;
+    if (nostrConfig?.enabled && nostrConfig?.relayUrls?.length) {
+      try {
+        await this.enableTransport("nostr", nostrConfig);
+        console.log("[OfflineProtocol] Nostr transport auto-enabled");
+      } catch (error) {
+        console.warn(
+          "[OfflineProtocol] Failed to auto-enable nostr transport:",
+          error
+        );
+      }
+    }
   }
 
   /**
@@ -821,7 +839,7 @@ export class OfflineProtocol {
    */
   async enableTransport(
     type: TransportType,
-    config?: InternetTransportConfig | WifiDirectTransportConfig
+    config?: InternetTransportConfig | WifiDirectTransportConfig | NostrTransportConfig
   ): Promise<void> {
     return await OfflineProtocolNativeModule.enableTransport(type, config);
   }
