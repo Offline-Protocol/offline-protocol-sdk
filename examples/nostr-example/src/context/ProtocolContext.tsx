@@ -466,11 +466,10 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const sendConnectionRequest = useCallback(async (recipientId: string) => {
     if (!protocolRef.current) {return;}
     try {
-      await protocolRef.current.sendConnectionRequest(
-        recipientId,
-        userNameRef.current,
-        null,
-      );
+      await protocolRef.current.sendConnectionRequest({
+        recipient: recipientId,
+        senderName: userNameRef.current,
+      });
       setNeighbors(prev => {
         const next = new Map(prev);
         const existing = next.get(recipientId);
@@ -492,11 +491,10 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const acceptConnection = useCallback(async (peerId: string) => {
     if (!protocolRef.current) {return;}
     try {
-      await protocolRef.current.acceptConnectionRequest(
-        peerId,
-        userNameRef.current,
-        null,
-      );
+      await protocolRef.current.acceptConnectionRequest({
+        recipient: peerId,
+        accepterName: userNameRef.current,
+      });
       setNeighbors(prev => {
         const next = new Map(prev);
         const existing = next.get(peerId);
@@ -514,7 +512,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const rejectConnection = useCallback(async (peerId: string) => {
     if (!protocolRef.current) {return;}
     try {
-      await protocolRef.current.rejectConnectionRequest(peerId);
+      await protocolRef.current.rejectConnectionRequest({recipient: peerId});
       setNeighbors(prev => {
         const next = new Map(prev);
         const existing = next.get(peerId);
@@ -532,7 +530,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const cancelConnectionRequest = useCallback(async (peerId: string) => {
     if (!protocolRef.current) {return;}
     try {
-      await protocolRef.current.cancelConnectionRequest(peerId);
+      await protocolRef.current.cancelConnectionRequest({recipient: peerId});
       setNeighbors(prev => {
         const next = new Map(prev);
         const existing = next.get(peerId);

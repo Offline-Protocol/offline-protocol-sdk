@@ -13,15 +13,12 @@ import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.offline_protocol.OfflineProtocol
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Nostr Manager implementing TransportManager for Nostr relay communication.
@@ -52,7 +49,7 @@ class NostrManager(
         private const val RECONNECT_MAX_DELAY_MS = 30000L
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2.0
         private const val CONNECTION_TIMEOUT_MS = 30L  // seconds for OkHttp
-        private const val PING_INTERVAL_MS = 30000L
+        private const val PING_INTERVAL_MS = 30000L  // OkHttp WebSocket ping interval
         private const val MAX_CONSECUTIVE_FAILURES = 2
     }
 
@@ -79,16 +76,6 @@ class NostrManager(
         }
     }
 
-    // Ping runnable
-    private val pingRunnable = object : Runnable {
-        override fun run() {
-            sendPings()
-            if (state == TransportState.RUNNING && isConnected.get()) {
-                ioHandler?.postDelayed(this, PING_INTERVAL_MS)
-            }
-        }
-    }
-
     // OkHttp client for WebSocket connections
     private var okHttpClient: OkHttpClient? = null
 
@@ -98,8 +85,7 @@ class NostrManager(
     private val subscriptionIds = mutableMapOf<String, String>()
     private val relayLock = Object()
 
-    // Nostr identity (deterministic from deviceId)
-    private var privateKeyBytes: ByteArray = ByteArray(0)
+    // Nostr identity (obtained from Rust core)
     private var publicKeyHex: String = ""
 
     // Configuration state
@@ -167,8 +153,8 @@ class NostrManager(
         this.autoReconnect = autoReconnect
         this.maxReconnectAttempts = maxReconnectAttempts
 
-        // Derive deterministic Nostr keypair from deviceId
-        deriveKeyPair()
+        // Get the Nostr pubkey from the Rust core (deterministic from user_id)
+        this.publicKeyHex = protocol.nostrGetPublicKey() ?: ""
 
         isConfigured.set(true)
 
@@ -251,7 +237,6 @@ class NostrManager(
 
         // Stop timers
         stopMessagePolling()
-        stopPingTimer()
 
         // Close all WebSocket connections
         disconnectAll()
@@ -283,7 +268,6 @@ class NostrManager(
         ioHandler?.post {
             if (state == TransportState.RUNNING && isConnected.get()) {
                 startMessagePolling()
-                startPingTimer()
             }
         }
     }
@@ -429,7 +413,6 @@ class NostrManager(
                     Log.e(TAG, "Error notifying protocol of connect", e)
                 }
                 startMessagePolling()
-                startPingTimer()
                 ioHandler?.post { pollAndSendMessages() }
             }
         } else if (!anyConnected && wasConnected) {
@@ -489,8 +472,11 @@ class NostrManager(
             subscriptionIds[relayUrl] = subId
         }
 
-        // NIP-01 REQ: subscribe to kind 4 (DM) events tagged with our pubkey
-        val reqJson = "[\"REQ\",\"$subId\",{\"#p\":[\"$publicKeyHex\"],\"kinds\":[4]}]"
+        // Get the subscription filter from Rust (uses the real BIP-340 pubkey)
+        val reqJson = protocol.nostrGetSubscriptionFilter(subId) ?: run {
+            emitDiagnostic("error", "Failed to get subscription filter from Rust core")
+            return
+        }
         webSocket.send(reqJson)
 
         emitDiagnostic("debug", "Sent subscription to relay", mapOf(
@@ -498,37 +484,6 @@ class NostrManager(
             "subscriptionId" to subId,
             "publicKey" to publicKeyHex
         ))
-    }
-
-    private fun createNostrEvent(content: String, recipientPubkey: String): String? {
-        val createdAt = System.currentTimeMillis() / 1000
-        val kind = 4 // NIP-04 DM
-
-        // Build event for signing (NIP-01 serialization)
-        val serialized = "[0,\"$publicKeyHex\",$createdAt,$kind,[[\"p\",\"$recipientPubkey\"]],${JSONObject.quote(content)}]"
-
-        // Compute event ID (SHA-256)
-        val eventId = sha256Hex(serialized)
-
-        // Sign event
-        val signature = signEvent(eventId)
-
-        val eventJson = JSONObject().apply {
-            put("id", eventId)
-            put("pubkey", publicKeyHex)
-            put("created_at", createdAt)
-            put("kind", kind)
-            put("tags", JSONArray().apply {
-                put(JSONArray().apply {
-                    put("p")
-                    put(recipientPubkey)
-                })
-            })
-            put("content", content)
-            put("sig", signature)
-        }
-
-        return "[\"EVENT\",${eventJson}]"
     }
 
     private fun processNostrMessage(text: String) {
@@ -555,8 +510,6 @@ class NostrManager(
 
                 messagesReceived.incrementAndGet()
 
-                val senderId = deviceIdFromPubkey(senderPubkey)
-
                 try {
                     val messageBytes: ByteArray = try {
                         Base64.decode(content, Base64.NO_WRAP)
@@ -564,13 +517,14 @@ class NostrManager(
                         content.toByteArray(Charsets.UTF_8)
                     }
 
+                    // Pass the Nostr pubkey as sender_id — Rust extracts
+                    // the real protocol-level sender from Message.sender
                     protocol.nostrMessageReceived(
-                        senderId,
+                        senderPubkey,
                         messageBytes.map { it.toUByte() }
                     )
 
                     emitDiagnostic("debug", "Message received from Nostr", mapOf(
-                        "senderId" to senderId,
                         "senderPubkey" to senderPubkey.take(16) + "...",
                         "contentLength" to content.length
                     ))
@@ -620,19 +574,6 @@ class NostrManager(
         ioHandler?.removeCallbacks(messagePollingRunnable)
     }
 
-    private fun startPingTimer() {
-        stopPingTimer()
-        ioHandler?.postDelayed(pingRunnable, PING_INTERVAL_MS)
-    }
-
-    private fun stopPingTimer() {
-        ioHandler?.removeCallbacks(pingRunnable)
-    }
-
-    private fun sendPings() {
-        // OkHttp handles WebSocket pings via pingInterval, so this is a no-op.
-        // We keep the timer for consistency with the iOS implementation.
-    }
 
     private fun pollAndSendMessages() {
         if (!isConnected.get()) return
@@ -645,12 +586,8 @@ class NostrManager(
                 if (!isConnected.get()) break
 
                 val message = protocol.nostrGetNextMessage() ?: break
-                publishMessage(
-                    message.messageId,
-                    message.recipientId,
-                    message.data.map { it.toByte() }.toByteArray(),
-                    message.replyToMsg
-                )
+                // event_json is the complete signed ["EVENT", {...}] from Rust
+                publishMessage(message.messageId, message.eventJson)
                 sent++
             }
 
@@ -668,30 +605,12 @@ class NostrManager(
 
     private fun publishMessage(
         messageId: String,
-        recipientId: String,
-        data: ByteArray,
-        replyToMsg: String? = null
+        eventMessage: String
     ) {
         if (!isConnected.get()) {
             emitDiagnostic("warning", "Cannot send message - not connected", mapOf(
-                "messageId" to messageId,
-                "recipientId" to recipientId
+                "messageId" to messageId
             ))
-            try { protocol.nostrSendFailed(messageId) } catch (e: Exception) {
-                Log.e(TAG, "Failed to report send failure for $messageId", e)
-            }
-            return
-        }
-
-        // Derive recipient's Nostr pubkey from their deviceId
-        val recipientPubkey = pubkeyFromDeviceId(recipientId)
-
-        // Encode message data as base64
-        val content = Base64.encodeToString(data, Base64.NO_WRAP)
-
-        // Create signed Nostr event
-        val eventMessage = createNostrEvent(content, recipientPubkey) ?: run {
-            emitDiagnostic("error", "Failed to create Nostr event")
             try { protocol.nostrSendFailed(messageId) } catch (e: Exception) {
                 Log.e(TAG, "Failed to report send failure for $messageId", e)
             }
@@ -727,8 +646,7 @@ class NostrManager(
 
                 emitDiagnostic("debug", "Message sent via Nostr", mapOf(
                     "messageId" to messageId,
-                    "recipientId" to recipientId,
-                    "contentLength" to content.length
+                    "contentLength" to eventMessage.length
                 ))
             } else {
                 throw Exception("WebSocket send returned false")
@@ -740,7 +658,6 @@ class NostrManager(
             }
             emitDiagnostic("error", "Failed to send Nostr message", mapOf(
                 "messageId" to messageId,
-                "recipientId" to recipientId,
                 "relayUrl" to primary.key,
                 "consecutiveFailures" to failures,
                 "error" to (e.message ?: "unknown")
@@ -758,56 +675,6 @@ class NostrManager(
         for ((_, ws) in others) {
             try { ws.send(eventMessage) } catch (_: Exception) {}
         }
-    }
-
-    // MARK: - Nostr Crypto Helpers
-
-    /**
-     * Derive a deterministic secp256k1 keypair from the deviceId.
-     * Both peers can compute each other's pubkeys from device IDs.
-     */
-    private fun deriveKeyPair() {
-        privateKeyBytes = sha256Bytes(deviceId)
-        // Deterministic pubkey from private key (simplified — use secp256k1 library for production)
-        publicKeyHex = sha256Hex(Base64.encodeToString(privateKeyBytes, Base64.NO_WRAP))
-
-        emitDiagnostic("debug", "Nostr keypair derived", mapOf(
-            "publicKey" to publicKeyHex,
-            "deviceId" to deviceId
-        ))
-    }
-
-    private fun pubkeyFromDeviceId(deviceId: String): String {
-        val privKeyBytes = sha256Bytes(deviceId)
-        return sha256Hex(Base64.encodeToString(privKeyBytes, Base64.NO_WRAP))
-    }
-
-    private fun deviceIdFromPubkey(pubkey: String): String {
-        // In a full implementation, maintain a pubkey->deviceId cache
-        return pubkey
-    }
-
-    /**
-     * Sign a Nostr event ID.
-     * Note: Simplified HMAC signature. Replace with BIP-340 Schnorr when secp256k1-kmp is added.
-     */
-    private fun signEvent(eventId: String): String {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(privateKeyBytes, "HmacSHA256"))
-        val hmac = mac.doFinal(eventId.toByteArray(Charsets.UTF_8))
-        val hmacHex = hmac.joinToString("") { "%02x".format(it) }
-        // Pad to 128 hex chars (64 bytes) as Nostr expects
-        return hmacHex + hmacHex
-    }
-
-    // MARK: - Utility
-
-    private fun sha256Bytes(input: String): ByteArray {
-        return MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
-    }
-
-    private fun sha256Hex(input: String): String {
-        return sha256Bytes(input).joinToString("") { "%02x".format(it) }
     }
 
     // MARK: - State Management
