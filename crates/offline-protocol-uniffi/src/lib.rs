@@ -946,19 +946,20 @@ pub struct ReticulumMessage {
     pub reply_to_msg: Option<String>,
 }
 
-/// Nostr message for outgoing data
+/// Nostr message for outgoing data.
+///
+/// The `event_json` field contains a complete, pre-signed `["EVENT", {...}]`
+/// string. The platform should send it directly over the relay WebSocket,
+/// then call `nostr_confirm_sent()` or `nostr_send_failed()` with `message_id`.
 #[derive(Debug, Clone)]
 pub struct NostrMessage {
     /// Unique message identifier. Use this with `nostr_confirm_sent()` or
     /// `nostr_send_failed()`/`nostr_send_failed_with_reason()` to report
     /// the send outcome.
     pub message_id: String,
-    pub recipient_id: String,
-    pub data: Vec<u8>,
     /// Complete signed Nostr event JSON: `["EVENT", {...}]`.
     /// The platform should send this string directly over the WebSocket.
     pub event_json: String,
-    pub reply_to_msg: Option<String>,
 }
 
 /// Internal state for BLE operations
@@ -2715,10 +2716,7 @@ impl OfflineProtocol {
         self.with_nostr_transport(|nt| match nt.get_next_signed_event() {
             Ok(Some(signed)) => Some(NostrMessage {
                 message_id: signed.message_id,
-                recipient_id: signed.recipient_device_id,
-                data: signed.data,
                 event_json: signed.event_json,
-                reply_to_msg: signed.reply_to_msg,
             }),
             Ok(None) => None,
             Err(e) => {

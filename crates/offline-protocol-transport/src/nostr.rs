@@ -22,14 +22,8 @@ use crate::common::recalculate_delivery_ratios;
 pub struct SignedNostrEvent {
     /// Protocol message ID (for confirm/fail callbacks).
     pub message_id: String,
-    /// Recipient's device/user ID.
-    pub recipient_device_id: String,
-    /// Serialized protocol message bytes.
-    pub data: Vec<u8>,
     /// Complete `["EVENT", {...}]` JSON string for the relay WebSocket.
     pub event_json: String,
-    /// Optional reply-to message ID (thread continuation).
-    pub reply_to_msg: Option<String>,
 }
 
 /// Nostr transport configuration.
@@ -329,10 +323,6 @@ impl NostrTransport {
 
         let message_id = message.id.to_string();
         let recipient_device_id = message.recipient.as_str().to_string();
-        let reply_to_msg = message
-            .reply_to_msg
-            .as_ref()
-            .map(|id| id.as_str().to_string());
 
         let data = self.serialize_message(&message)?;
         let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -352,10 +342,7 @@ impl NostrTransport {
 
         Ok(Some(SignedNostrEvent {
             message_id,
-            recipient_device_id,
-            data,
             event_json,
-            reply_to_msg,
         }))
     }
 

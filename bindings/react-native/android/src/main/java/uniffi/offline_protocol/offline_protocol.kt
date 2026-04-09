@@ -6056,19 +6056,13 @@ public object FfiConverterTypeNetworkTopology: FfiConverterRustBuffer<NetworkTop
 
 data class NostrMessage (
     var `messageId`: kotlin.String
-    , 
-    var `recipientId`: kotlin.String
-    , 
-    var `data`: List<kotlin.UByte>
-    , 
+    ,
     var `eventJson`: kotlin.String
-    , 
-    var `replyToMsg`: kotlin.String?
-    
-){
-    
 
-    
+){
+
+
+
     companion object
 }
 
@@ -6080,26 +6074,17 @@ public object FfiConverterTypeNostrMessage: FfiConverterRustBuffer<NostrMessage>
         return NostrMessage(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterSequenceUByte.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: NostrMessage) = (
             FfiConverterString.allocationSize(value.`messageId`) +
-            FfiConverterString.allocationSize(value.`recipientId`) +
-            FfiConverterSequenceUByte.allocationSize(value.`data`) +
-            FfiConverterString.allocationSize(value.`eventJson`) +
-            FfiConverterOptionalString.allocationSize(value.`replyToMsg`)
+            FfiConverterString.allocationSize(value.`eventJson`)
     )
 
     override fun write(value: NostrMessage, buf: ByteBuffer) {
             FfiConverterString.write(value.`messageId`, buf)
-            FfiConverterString.write(value.`recipientId`, buf)
-            FfiConverterSequenceUByte.write(value.`data`, buf)
             FfiConverterString.write(value.`eventJson`, buf)
-            FfiConverterOptionalString.write(value.`replyToMsg`, buf)
     }
 }
 

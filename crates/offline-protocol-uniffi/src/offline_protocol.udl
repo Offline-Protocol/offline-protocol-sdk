@@ -949,9 +949,6 @@ dictionary ReticulumMessage {
 // Nostr message for outgoing data
 dictionary NostrMessage {
     string message_id;
-    string recipient_id;
-    sequence<u8> data;
     string event_json;
-    string? reply_to_msg;
 };
 

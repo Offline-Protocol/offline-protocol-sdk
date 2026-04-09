@@ -3548,22 +3548,16 @@ public func FfiConverterTypeNetworkTopology_lower(_ value: NetworkTopology) -> R
 
 public struct NostrMessage: Equatable, Hashable {
     public var messageId: String
-    public var recipientId: String
-    public var data: [UInt8]
     public var eventJson: String
-    public var replyToMsg: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(messageId: String, recipientId: String, data: [UInt8], eventJson: String, replyToMsg: String?) {
+    public init(messageId: String, eventJson: String) {
         self.messageId = messageId
-        self.recipientId = recipientId
-        self.data = data
         self.eventJson = eventJson
-        self.replyToMsg = replyToMsg
     }
 
-    
+
 }
 
 #if compiler(>=6)
@@ -3577,20 +3571,14 @@ public struct FfiConverterTypeNostrMessage: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NostrMessage {
         return
             try NostrMessage(
-                messageId: FfiConverterString.read(from: &buf), 
-                recipientId: FfiConverterString.read(from: &buf), 
-                data: FfiConverterSequenceUInt8.read(from: &buf), 
-                eventJson: FfiConverterString.read(from: &buf), 
-                replyToMsg: FfiConverterOptionString.read(from: &buf)
+                messageId: FfiConverterString.read(from: &buf),
+                eventJson: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: NostrMessage, into buf: inout [UInt8]) {
         FfiConverterString.write(value.messageId, into: &buf)
-        FfiConverterString.write(value.recipientId, into: &buf)
-        FfiConverterSequenceUInt8.write(value.data, into: &buf)
         FfiConverterString.write(value.eventJson, into: &buf)
-        FfiConverterOptionString.write(value.replyToMsg, into: &buf)
     }
 }
 
