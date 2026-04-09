@@ -324,26 +324,37 @@ impl NostrTransport {
         let message_id = message.id.to_string();
         let recipient_device_id = message.recipient.as_str().to_string();
 
-        let data = self.serialize_message(&message)?;
-        let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
+        let result = (|| {
+            let data = self.serialize_message(&message)?;
+            let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
 
-        let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id(&recipient_device_id)?;
-        let event = crate::nostr_crypto::NostrEvent::create_dm(
-            &self.keypair,
-            &recipient_pubkey,
-            &content_base64,
-        )?;
-        let event_json = event.to_relay_message()?;
+            let recipient_pubkey = NostrKeypair::pubkey_hex_for_device_id(&recipient_device_id)?;
+            let event = crate::nostr_crypto::NostrEvent::create_dm(
+                &self.keypair,
+                &recipient_pubkey,
+                &content_base64,
+            )?;
+            event.to_relay_message()
+        })();
 
-        self.pending_confirmation
-            .lock()
-            .unwrap()
-            .insert(message_id.clone(), Instant::now());
+        match result {
+            Ok(event_json) => {
+                self.pending_confirmation
+                    .lock()
+                    .unwrap()
+                    .insert(message_id.clone(), Instant::now());
 
-        Ok(Some(SignedNostrEvent {
-            message_id,
-            event_json,
-        }))
+                Ok(Some(SignedNostrEvent {
+                    message_id,
+                    event_json,
+                }))
+            }
+            Err(e) => {
+                // Re-enqueue the message so it is not silently lost.
+                self.send_queue.lock().unwrap().push_front(message);
+                Err(e)
+            }
+        }
     }
 
     /// Returns a NIP-01 subscription filter JSON for this device's pubkey.
@@ -822,5 +833,45 @@ mod tests {
         assert!(config.auto_reconnect);
         assert_eq!(config.reconnect_delay, Duration::from_secs(5));
         assert_eq!(config.max_reconnect_attempts, 0);
+    }
+
+    #[test]
+    fn test_get_next_signed_event() {
+        let mut transport = NostrTransport::new("device1").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = create_test_message();
+        transport.send(&msg).unwrap();
+
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        assert!(!signed.message_id.is_empty());
+        assert!(signed.event_json.starts_with("[\"EVENT\",{"));
+        assert!(signed.event_json.ends_with("}]"));
+
+        // Message was dequeued and moved to pending confirmation
+        assert!(!transport.has_pending_sends());
+        assert_eq!(transport.pending_confirmation_count(), 1);
+
+        // No more messages
+        assert!(transport.get_next_signed_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_next_signed_event_confirm_flow() {
+        let mut transport = NostrTransport::new("device1").unwrap();
+        transport.start().unwrap();
+        transport.on_status_changed(TransportStatus::Available);
+
+        let msg = create_test_message();
+        transport.send(&msg).unwrap();
+
+        let signed = transport.get_next_signed_event().unwrap().unwrap();
+        transport.confirm_sent(&signed.message_id);
+
+        let metrics = transport.metrics();
+        assert_eq!(metrics.success_count, 1);
+        assert_eq!(metrics.failure_count, 0);
+        assert_eq!(transport.pending_confirmation_count(), 0);
     }
 }

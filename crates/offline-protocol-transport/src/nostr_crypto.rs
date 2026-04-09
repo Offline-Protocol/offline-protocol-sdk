@@ -127,16 +127,18 @@ impl NostrEvent {
 
     /// Serializes just the event object (without the `["EVENT", ...]` wrapper).
     fn to_event_json(&self) -> Result<String> {
-        // Build JSON manually to ensure exact field order (some relays are picky)
-        let tags_json = serde_json::to_string(&self.tags)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
-        let content_escaped = serde_json::to_string(&self.content)
-            .map_err(|e| Error::SerializationError(e.to_string()))?;
-
-        Ok(format!(
-            "{{\"id\":\"{}\",\"pubkey\":\"{}\",\"created_at\":{},\"kind\":{},\"tags\":{},\"content\":{},\"sig\":\"{}\"}}",
-            self.id, self.pubkey, self.created_at, self.kind, tags_json, content_escaped, self.sig
-        ))
+        // Use serde_json for safe serialization (no injection via field values).
+        // Field order matches NIP-01 convention; most relays accept any order.
+        let obj = serde_json::json!({
+            "id": self.id,
+            "pubkey": self.pubkey,
+            "created_at": self.created_at,
+            "kind": self.kind,
+            "tags": self.tags,
+            "content": self.content,
+            "sig": self.sig,
+        });
+        serde_json::to_string(&obj).map_err(|e| Error::SerializationError(e.to_string()))
     }
 }
 
@@ -144,10 +146,12 @@ impl NostrEvent {
 ///
 /// Returns `["REQ", "<sub_id>", {"#p": ["<pubkey>"], "kinds": [4]}]`.
 pub fn create_subscription_message(pubkey_hex: &str, subscription_id: &str) -> Result<String> {
-    Ok(format!(
-        "[\"REQ\",\"{}\",{{\"#p\":[\"{}\"],\"kinds\":[4]}}]",
-        subscription_id, pubkey_hex
-    ))
+    let filter = serde_json::json!({
+        "#p": [pubkey_hex],
+        "kinds": [4]
+    });
+    let msg = serde_json::json!(["REQ", subscription_id, filter]);
+    serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
 }
 
 /// BIP-340 Schnorr signature of a 32-byte event ID hash.
