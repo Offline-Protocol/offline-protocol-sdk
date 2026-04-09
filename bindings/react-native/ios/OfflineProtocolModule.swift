@@ -683,20 +683,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 emitDiagnostic(level: "warning", message: "Internet manager exists but no server URL configured")
             }
 
-            // Start Reticulum manager if configured
-            if let manager = reticulumManager {
-                do {
-                    try manager.start()
-                    print("[OfflineProtocolModule] Reticulum Manager started")
-                    emitDiagnostic(level: "info", message: "Reticulum manager started")
-                } catch {
-                    print("[OfflineProtocolModule] Warning: Failed to start Reticulum Manager: \(error.localizedDescription)")
-                    emitDiagnostic(level: "error", message: "Failed to start Reticulum manager", context: [
-                        "error": error.localizedDescription
-                    ])
-                    // Don't fail the entire start if Reticulum fails
-                }
-            }
+            // Reticulum manager is started on-demand via enableTransport("reticulum")
+            // from the JS layer, not here — avoids double-start conflicts.
 
             // Nostr manager is started on-demand via enableTransport("nostr")
             // from the JS layer, not here — avoids double-start conflicts.
