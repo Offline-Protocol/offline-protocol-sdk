@@ -48,7 +48,7 @@ class NostrManager(
         private const val RECONNECT_INITIAL_DELAY_MS = 1000L
         private const val RECONNECT_MAX_DELAY_MS = 30000L
         private const val RECONNECT_BACKOFF_MULTIPLIER = 2.0
-        private const val CONNECTION_TIMEOUT_MS = 30L  // seconds for OkHttp
+        private const val CONNECTION_TIMEOUT_SECONDS = 30L
         private const val PING_INTERVAL_MS = 30000L  // OkHttp WebSocket ping interval
         private const val MAX_CONSECUTIVE_FAILURES = 2
     }
@@ -207,7 +207,7 @@ class NostrManager(
 
         // Create OkHttp client
         okHttpClient = OkHttpClient.Builder()
-            .connectTimeout(CONNECTION_TIMEOUT_MS, TimeUnit.SECONDS)
+            .connectTimeout(CONNECTION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS) // No read timeout for WebSocket
             .writeTimeout(10, TimeUnit.SECONDS)
             .pingInterval(PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
