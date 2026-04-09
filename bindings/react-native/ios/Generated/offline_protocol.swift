@@ -3548,12 +3548,14 @@ public func FfiConverterTypeNetworkTopology_lower(_ value: NetworkTopology) -> R
 
 public struct NostrMessage: Equatable, Hashable {
     public var messageId: String
+    public var eventId: String
     public var eventJson: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(messageId: String, eventJson: String) {
+    public init(messageId: String, eventId: String, eventJson: String) {
         self.messageId = messageId
+        self.eventId = eventId
         self.eventJson = eventJson
     }
 
@@ -3572,12 +3574,14 @@ public struct FfiConverterTypeNostrMessage: FfiConverterRustBuffer {
         return
             try NostrMessage(
                 messageId: FfiConverterString.read(from: &buf),
+                eventId: FfiConverterString.read(from: &buf),
                 eventJson: FfiConverterString.read(from: &buf)
         )
     }
 
     public static func write(_ value: NostrMessage, into buf: inout [UInt8]) {
         FfiConverterString.write(value.messageId, into: &buf)
+        FfiConverterString.write(value.eventId, into: &buf)
         FfiConverterString.write(value.eventJson, into: &buf)
     }
 }

@@ -65,6 +65,11 @@ public class NostrManager: NSObject, TransportManager {
     private var maxReconnectAttempts: Int = 0  // 0 = infinite
     private var autoReconnect: Bool = true
 
+    // Pending relay confirmations: Nostr event_id → protocol message_id.
+    // Populated when a WebSocket send succeeds; removed on relay ["OK", ...].
+    // Guarded by stateLock.
+    private var _pendingEventConfirmations: [String: String] = [:]
+
     private func reconnectAttempts(for relay: String) -> Int {
         stateLock.lock(); defer { stateLock.unlock() }
         return _reconnectAttempts[relay] ?? 0
@@ -501,11 +506,31 @@ public class NostrManager: NSObject, TransportManager {
             }
 
         case "OK":
-            // Event acceptance confirmation from relay
+            // Relay acceptance/rejection: ["OK", event_id, accepted, reason?]
             if json.count >= 3, let eventId = json[1] as? String, let accepted = json[2] as? Bool {
+                let reason = json.count >= 4 ? json[3] as? String : nil
+
+                // Look up the protocol message_id for this Nostr event_id
+                stateLock.lock()
+                let messageId = _pendingEventConfirmations.removeValue(forKey: eventId)
+                stateLock.unlock()
+
+                if let msgId = messageId {
+                    if accepted {
+                        protocolInstance.nostrConfirmSent(messageId: msgId)
+                    } else {
+                        protocolInstance.nostrSendFailedWithReason(
+                            messageId: msgId,
+                            reason: reason ?? "Relay rejected event"
+                        )
+                    }
+                }
+
                 emitDiagnostic("debug", "Relay event response", context: [
                     "eventId": String(eventId.prefix(16)) + "...",
-                    "accepted": accepted
+                    "accepted": accepted,
+                    "reason": reason ?? "none",
+                    "tracked": messageId != nil
                 ])
             }
 
@@ -656,6 +681,7 @@ public class NostrManager: NSObject, TransportManager {
             let (primaryUrl, primaryTask) = tasks[0]
             let otherTasks = Array(tasks.dropFirst())
             let msgId = message.messageId
+            let evtId = message.eventId
 
             primaryTask.send(.string(eventMessage)) { [weak self] error in
                 guard let self = self else { return }
@@ -677,10 +703,16 @@ public class NostrManager: NSObject, TransportManager {
                     self.consecutiveSendFailures = 0
                     self.bytesSent += UInt64(eventMessage.utf8.count)
                     self.messagesSent += 1
-                    self.protocolInstance.nostrConfirmSent(messageId: msgId)
+
+                    // Track event_id → message_id so we can confirm/fail
+                    // when the relay sends ["OK", event_id, accepted, reason].
+                    self.stateLock.lock()
+                    self._pendingEventConfirmations[evtId] = msgId
+                    self.stateLock.unlock()
 
                     self.emitDiagnostic("debug", "Message sent via Nostr", context: [
                         "messageId": msgId,
+                        "eventId": String(evtId.prefix(16)) + "...",
                         "contentLength": eventMessage.count
                     ])
                 }

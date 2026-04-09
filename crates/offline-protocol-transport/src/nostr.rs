@@ -16,12 +16,18 @@ use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
 
+/// Maximum number of signing attempts before a message is permanently failed.
+const MAX_SIGN_RETRIES: u8 = 3;
+
 /// A signed Nostr event ready for relay submission, together with the
 /// metadata the platform needs for confirmation tracking.
 #[derive(Debug, Clone)]
 pub struct SignedNostrEvent {
     /// Protocol message ID (for confirm/fail callbacks).
     pub message_id: String,
+    /// Nostr event ID (SHA-256 hex). The platform uses this to correlate
+    /// relay `["OK", event_id, ...]` responses back to the message.
+    pub event_id: String,
     /// Complete `["EVENT", {...}]` JSON string for the relay WebSocket.
     pub event_json: String,
 }
@@ -79,6 +85,9 @@ pub struct NostrTransport {
     send_queue: Arc<Mutex<VecDeque<Message>>>,
     /// Messages dequeued by the platform but not yet confirmed as sent.
     pending_confirmation: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Tracks how many times signing has been attempted for a given message ID.
+    /// Entries are removed on success or after reaching [`MAX_SIGN_RETRIES`].
+    sign_retry_counts: Arc<Mutex<HashMap<String, u8>>>,
     metrics: Arc<Mutex<TransportMetrics>>,
     reconnect_attempts: Arc<Mutex<u32>>,
     platform_handle: Arc<Mutex<Option<usize>>>,
@@ -103,6 +112,7 @@ impl NostrTransport {
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
             send_queue: Arc::new(Mutex::new(VecDeque::new())),
             pending_confirmation: Arc::new(Mutex::new(HashMap::new())),
+            sign_retry_counts: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new(Mutex::new(TransportMetrics::default())),
             reconnect_attempts: Arc::new(Mutex::new(0)),
             platform_handle: Arc::new(Mutex::new(None)),
@@ -334,11 +344,14 @@ impl NostrTransport {
                 &recipient_pubkey,
                 &content_base64,
             )?;
-            event.to_relay_message()
+            let event_id = event.id.clone();
+            let event_json = event.to_relay_message()?;
+            Ok((event_id, event_json))
         })();
 
         match result {
-            Ok(event_json) => {
+            Ok((event_id, event_json)) => {
+                self.sign_retry_counts.lock().unwrap().remove(&message_id);
                 self.pending_confirmation
                     .lock()
                     .unwrap()
@@ -346,12 +359,33 @@ impl NostrTransport {
 
                 Ok(Some(SignedNostrEvent {
                     message_id,
+                    event_id,
                     event_json,
                 }))
             }
             Err(e) => {
-                // Re-enqueue the message so it is not silently lost.
-                self.send_queue.lock().unwrap().push_front(message);
+                let retry_count = {
+                    let mut counts = self.sign_retry_counts.lock().unwrap();
+                    let count = counts.entry(message_id.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+
+                if retry_count < MAX_SIGN_RETRIES {
+                    // Re-enqueue for another attempt.
+                    self.send_queue.lock().unwrap().push_front(message);
+                } else {
+                    // Permanent failure — report it so metrics are updated and
+                    // the queue is not blocked by an undeliverable message.
+                    self.sign_retry_counts.lock().unwrap().remove(&message_id);
+                    self.report_send_failure(&message_id);
+                    tracing::error!(
+                        message_id = %message_id,
+                        attempts = retry_count,
+                        error = %e,
+                        "Nostr event signing failed permanently after max retries"
+                    );
+                }
                 Err(e)
             }
         }
@@ -846,8 +880,10 @@ mod tests {
 
         let signed = transport.get_next_signed_event().unwrap().unwrap();
         assert!(!signed.message_id.is_empty());
+        assert_eq!(signed.event_id.len(), 64); // 32-byte SHA-256 hex
         assert!(signed.event_json.starts_with("[\"EVENT\",{"));
         assert!(signed.event_json.ends_with("}]"));
+        assert!(signed.event_json.contains(&signed.event_id));
 
         // Message was dequeued and moved to pending confirmation
         assert!(!transport.has_pending_sends());

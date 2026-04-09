@@ -949,6 +949,7 @@ dictionary ReticulumMessage {
 // Nostr message for outgoing data
 dictionary NostrMessage {
     string message_id;
+    string event_id;
     string event_json;
 };
 

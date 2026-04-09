@@ -6057,6 +6057,8 @@ public object FfiConverterTypeNetworkTopology: FfiConverterRustBuffer<NetworkTop
 data class NostrMessage (
     var `messageId`: kotlin.String
     ,
+    var `eventId`: kotlin.String
+    ,
     var `eventJson`: kotlin.String
 
 ){
@@ -6074,16 +6076,19 @@ public object FfiConverterTypeNostrMessage: FfiConverterRustBuffer<NostrMessage>
         return NostrMessage(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: NostrMessage) = (
             FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterString.allocationSize(value.`eventId`) +
             FfiConverterString.allocationSize(value.`eventJson`)
     )
 
     override fun write(value: NostrMessage, buf: ByteBuffer) {
             FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterString.write(value.`eventId`, buf)
             FfiConverterString.write(value.`eventJson`, buf)
     }
 }

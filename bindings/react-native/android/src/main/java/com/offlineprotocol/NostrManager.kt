@@ -97,6 +97,11 @@ class NostrManager(
     private val currentReconnectDelay = mutableMapOf<String, AtomicLong>()
     private val reconnectRunnables = mutableMapOf<String, Runnable>()
 
+    // Pending relay confirmations: Nostr event_id → protocol message_id.
+    // Populated when a WebSocket send succeeds; removed on relay ["OK", ...].
+    private val pendingEventConfirmations = mutableMapOf<String, String>()
+    private val pendingEventLock = Object()
+
     // Failure tracking for DORS
     private val consecutiveSendFailures = AtomicInteger(0)
 
@@ -534,12 +539,37 @@ class NostrManager(
             }
 
             "OK" -> {
+                // Relay acceptance/rejection: ["OK", event_id, accepted, reason?]
                 if (json.length() >= 3) {
                     val eventId = json.optString(1, "")
                     val accepted = json.optBoolean(2, false)
+                    val reason = if (json.length() >= 4) json.optString(3, "") else null
+
+                    // Look up the protocol message_id for this Nostr event_id
+                    val messageId = synchronized(pendingEventLock) {
+                        pendingEventConfirmations.remove(eventId)
+                    }
+
+                    if (messageId != null) {
+                        try {
+                            if (accepted) {
+                                protocol.nostrConfirmSent(messageId)
+                            } else {
+                                protocol.nostrSendFailedWithReason(
+                                    messageId,
+                                    reason?.ifEmpty { "Relay rejected event" } ?: "Relay rejected event"
+                                )
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to report relay OK for $messageId", e)
+                        }
+                    }
+
                     emitDiagnostic("debug", "Relay event response", mapOf(
                         "eventId" to eventId.take(16) + "...",
-                        "accepted" to accepted
+                        "accepted" to accepted,
+                        "reason" to (reason ?: "none"),
+                        "tracked" to (messageId != null)
                     ))
                 }
             }
@@ -585,7 +615,7 @@ class NostrManager(
 
                 val message = protocol.nostrGetNextMessage() ?: break
                 // event_json is the complete signed ["EVENT", {...}] from Rust
-                publishMessage(message.messageId, message.eventJson)
+                publishMessage(message.messageId, message.eventId, message.eventJson)
                 sent++
             }
 
@@ -603,6 +633,7 @@ class NostrManager(
 
     private fun publishMessage(
         messageId: String,
+        eventId: String,
         eventMessage: String
     ) {
         if (!isConnected.get()) {
@@ -638,12 +669,16 @@ class NostrManager(
                 consecutiveSendFailures.set(0)
                 bytesSent.addAndGet(eventMessage.length.toLong())
                 messagesSent.incrementAndGet()
-                try { protocol.nostrConfirmSent(messageId) } catch (e: Exception) {
-                    Log.e(TAG, "Failed to confirm send for $messageId", e)
+
+                // Track event_id → message_id so we can confirm/fail
+                // when the relay sends ["OK", event_id, accepted, reason].
+                synchronized(pendingEventLock) {
+                    pendingEventConfirmations[eventId] = messageId
                 }
 
                 emitDiagnostic("debug", "Message sent via Nostr", mapOf(
                     "messageId" to messageId,
+                    "eventId" to eventId.take(16) + "...",
                     "contentLength" to eventMessage.length
                 ))
             } else {
