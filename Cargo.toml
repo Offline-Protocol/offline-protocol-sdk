@@ -54,6 +54,11 @@ openmls_traits = "0.4"
 
 # Encoding
 base64 = "0.22"
+hex = "0.4"
+
+# Crypto
+k256 = { version = "0.13", features = ["schnorr"] }
+sha2 = "0.10"
 
 # Internal dependencies
 offline-protocol-core = { path = "crates/offline-protocol-core" }

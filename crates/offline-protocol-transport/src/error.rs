@@ -42,6 +42,10 @@ pub enum Error {
     #[error("Message too large: {0} bytes exceeds limit of {1} bytes")]
     MessageTooLarge(usize, usize),
 
+    /// Cryptographic operation failed (key derivation, signing).
+    #[error("Crypto error: {0}")]
+    CryptoError(String),
+
     /// Generic error.
     #[error("{0}")]
     Other(String),

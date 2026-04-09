@@ -150,6 +150,25 @@ export interface ReticulumTransportConfig {
 }
 
 /**
+ * Nostr relay transport configuration.
+ * Connects to Nostr relays via WebSocket for message routing using NIP-04 direct messages.
+ */
+export interface NostrTransportConfig {
+  /** Enable Nostr transport (default: false) */
+  enabled: boolean;
+  /** List of Nostr relay WebSocket URLs (e.g., ["wss://relay.damus.io"]) */
+  relayUrls?: string[];
+  /** Connection timeout in seconds (default: 30) */
+  connectionTimeout?: number;
+  /** Whether to auto-reconnect on disconnect (default: true) */
+  autoReconnect?: boolean;
+  /** Reconnection delay in milliseconds (default: 1000) */
+  reconnectDelay?: number;
+  /** Maximum reconnect attempts per relay, 0 = infinite (default: 0) */
+  maxReconnectAttempts?: number;
+}
+
+/**
  * Content type for messages
  */
 export enum ContentType {
@@ -219,6 +238,8 @@ export interface TransportsConfig {
   wifiDirect?: WifiDirectTransportConfig;
   /** Reticulum mesh transport configuration (requires external Reticulum daemon) */
   reticulum?: ReticulumTransportConfig;
+  /** Nostr relay transport configuration */
+  nostr?: NostrTransportConfig;
 }
 
 /**
@@ -334,7 +355,7 @@ export interface ProtocolConfig {
 /**
  * Transport type names
  */
-export type TransportType = 'ble' | 'internet' | 'wifiDirect' | 'reticulum';
+export type TransportType = 'ble' | 'internet' | 'wifiDirect' | 'reticulum' | 'nostr';
 
 /**
  * Forwarding attribution (present when a message was forwarded).

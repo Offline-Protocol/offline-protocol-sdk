@@ -629,6 +629,12 @@ internal interface UniffiCallbackInterfaceMlsStorageProviderMethod2 : com.sun.jn
 internal interface UniffiCallbackInterfaceMlsStorageProviderMethod3 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`keyType`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceNostrTransportCallbackMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceReticulumTransportCallbackMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceWifiDirectTransportCallbackMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -695,6 +701,44 @@ internal open class UniffiVTableCallbackInterfaceMlsStorageProvider(
         `load` = other.`load`
         `delete` = other.`delete`
         `listKeys` = other.`listKeys`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onMessagesAvailable")
+internal open class UniffiVTableCallbackInterfaceNostrTransportCallback(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onMessagesAvailable`: UniffiCallbackInterfaceNostrTransportCallbackMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onMessagesAvailable`: UniffiCallbackInterfaceNostrTransportCallbackMethod0? = null,
+    ): UniffiVTableCallbackInterfaceNostrTransportCallback(`uniffiFree`,`uniffiClone`,`onMessagesAvailable`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceNostrTransportCallback) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onMessagesAvailable` = other.`onMessagesAvailable`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onMessagesAvailable")
+internal open class UniffiVTableCallbackInterfaceReticulumTransportCallback(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onMessagesAvailable`: UniffiCallbackInterfaceReticulumTransportCallbackMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onMessagesAvailable`: UniffiCallbackInterfaceReticulumTransportCallbackMethod0? = null,
+    ): UniffiVTableCallbackInterfaceReticulumTransportCallback(`uniffiFree`,`uniffiClone`,`onMessagesAvailable`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceReticulumTransportCallback) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onMessagesAvailable` = other.`onMessagesAvailable`
     }
 
 }
@@ -906,6 +950,22 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event(
@@ -934,6 +994,18 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rese
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file(
@@ -958,7 +1030,11 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing(
 ): Short
@@ -1016,6 +1092,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_d
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available(
 ): Short
 external fun ffi_offline_protocol_uniffi_uniffi_contract_version(
@@ -1037,6 +1117,8 @@ internal object UniffiLib {
         uniffiCallbackInterfaceBleTransportCallback.register(this)
         uniffiCallbackInterfaceEventCallback.register(this)
         uniffiCallbackInterfaceMlsStorageProvider.register(this)
+        uniffiCallbackInterfaceNostrTransportCallback.register(this)
+        uniffiCallbackInterfaceReticulumTransportCallback.register(this)
         uniffiCallbackInterfaceWifiDirectTransportCallback.register(this)
         
     }
@@ -1218,6 +1300,22 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_mark_k
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1246,6 +1344,18 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reset_tofu
 ): Byte
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1270,7 +1380,11 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_member_role(`ptr`: Long,`groupId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,`role`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(`ptr`: Long,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_typing(`ptr`: Long,`conversationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1317,6 +1431,10 @@ external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransport
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback(`vtable`: UniffiVTableCallbackInterfaceEventCallback,
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(`vtable`: UniffiVTableCallbackInterfaceMlsStorageProvider,
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(`vtable`: UniffiVTableCallbackInterfaceNostrTransportCallback,
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(`vtable`: UniffiVTableCallbackInterfaceReticulumTransportCallback,
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(`vtable`: UniffiVTableCallbackInterfaceWifiDirectTransportCallback,
 ): Unit
@@ -1688,6 +1806,30 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 44299.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() != 5599.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 55139.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 62102.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 43745.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 10118.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1730,6 +1872,24 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 38323.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 41914.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 11523.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 40553.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() != 13863.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 32395.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 11042.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1766,7 +1926,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 56849.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 56341.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 27956.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_typing() != 10907.toShort()) {
@@ -1851,6 +2017,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 24837.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 5919.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 48810.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635.toShort()) {
@@ -2817,6 +2989,22 @@ public interface OfflineProtocolInterface {
     
     fun `mlsProcessWelcome`(`welcome`: MlsWelcomeMessage): MlsGroupInfo
     
+    fun `nostrConfirmSent`(`messageId`: kotlin.String)
+    
+    fun `nostrGetNextMessage`(): NostrMessage?
+    
+    fun `nostrGetPublicKey`(): kotlin.String?
+    
+    fun `nostrGetSubscriptionFilter`(`subscriptionId`: kotlin.String): kotlin.String?
+    
+    fun `nostrMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+    
+    fun `nostrSendFailed`(`messageId`: kotlin.String)
+    
+    fun `nostrSendFailedWithReason`(`messageId`: kotlin.String, `reason`: kotlin.String?)
+    
+    fun `nostrStatusChanged`(`isConnected`: kotlin.Boolean)
+    
     fun `pause`()
     
     fun `pollEvent`(): kotlin.String?
@@ -2845,6 +3033,18 @@ public interface OfflineProtocolInterface {
     
     fun `resume`()
     
+    fun `reticulumConfirmSent`(`messageId`: kotlin.String)
+    
+    fun `reticulumGetNextMessage`(): ReticulumMessage?
+    
+    fun `reticulumMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+    
+    fun `reticulumSendFailed`(`messageId`: kotlin.String)
+    
+    fun `reticulumSendFailedWithReason`(`messageId`: kotlin.String, `reason`: kotlin.String?)
+    
+    fun `reticulumStatusChanged`(`isConnected`: kotlin.Boolean)
+    
     fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
     
     fun `sendFile`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String): kotlin.String
@@ -2869,7 +3069,11 @@ public interface OfflineProtocolInterface {
     
     fun `setMemberRole`(`groupId`: kotlin.String, `userId`: kotlin.String, `role`: kotlin.String)
     
+    fun `setNostrTransportCallback`(`callback`: NostrTransportCallback)
+    
     fun `setRelayPriority`(`priority`: RelayPriority)
+    
+    fun `setReticulumTransportCallback`(`callback`: ReticulumTransportCallback)
     
     fun `setTyping`(`conversationId`: kotlin.String): kotlin.String
     
@@ -4050,6 +4254,107 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `nostrConfirmSent`(`messageId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(
+        it,
+        FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    
+    
+
+    override fun `nostrGetNextMessage`(): NostrMessage? {
+            return FfiConverterOptionalTypeNostrMessage.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `nostrGetPublicKey`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `nostrGetSubscriptionFilter`(`subscriptionId`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(
+        it,
+        FfiConverterString.lower(`subscriptionId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `nostrMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(
+        it,
+        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+}
+    }
+    
+    
+
+    override fun `nostrSendFailed`(`messageId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(
+        it,
+        FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    
+    
+
+    override fun `nostrSendFailedWithReason`(`messageId`: kotlin.String, `reason`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed_with_reason(
+        it,
+        FfiConverterString.lower(`messageId`),FfiConverterOptionalString.lower(`reason`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `nostrStatusChanged`(`isConnected`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(
+        it,
+        FfiConverterBoolean.lower(`isConnected`),_status)
+}
+    }
+    
+    
+
     
     @Throws(ProtocolException::class)override fun `pause`()
         = 
@@ -4233,6 +4538,81 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    override fun `reticulumConfirmSent`(`messageId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(
+        it,
+        FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    
+    
+
+    override fun `reticulumGetNextMessage`(): ReticulumMessage? {
+            return FfiConverterOptionalTypeReticulumMessage.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `reticulumMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(
+        it,
+        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+}
+    }
+    
+    
+
+    override fun `reticulumSendFailed`(`messageId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(
+        it,
+        FfiConverterString.lower(`messageId`),_status)
+}
+    }
+    
+    
+
+    override fun `reticulumSendFailedWithReason`(`messageId`: kotlin.String, `reason`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(
+        it,
+        FfiConverterString.lower(`messageId`),FfiConverterOptionalString.lower(`reason`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `reticulumStatusChanged`(`isConnected`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(
+        it,
+        FfiConverterBoolean.lower(`isConnected`),_status)
+}
+    }
+    
+    
+
     
     @Throws(ProtocolException::class)override fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String {
             return FfiConverterString.lift(
@@ -4394,6 +4774,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
     
 
+    override fun `setNostrTransportCallback`(`callback`: NostrTransportCallback)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(
+        it,
+        FfiConverterTypeNostrTransportCallback.lower(`callback`),_status)
+}
+    }
+    
+    
+
     
     @Throws(ProtocolException::class)override fun `setRelayPriority`(`priority`: RelayPriority)
         = 
@@ -4402,6 +4794,18 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(
         it,
         FfiConverterTypeRelayPriority.lower(`priority`),_status)
+}
+    }
+    
+    
+
+    override fun `setReticulumTransportCallback`(`callback`: ReticulumTransportCallback)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(
+        it,
+        FfiConverterTypeReticulumTransportCallback.lower(`callback`),_status)
 }
     }
     
@@ -5650,6 +6054,47 @@ public object FfiConverterTypeNetworkTopology: FfiConverterRustBuffer<NetworkTop
 
 
 
+data class NostrMessage (
+    var `messageId`: kotlin.String
+    ,
+    var `eventId`: kotlin.String
+    ,
+    var `eventJson`: kotlin.String
+
+){
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNostrMessage: FfiConverterRustBuffer<NostrMessage> {
+    override fun read(buf: ByteBuffer): NostrMessage {
+        return NostrMessage(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NostrMessage) = (
+            FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterString.allocationSize(value.`eventId`) +
+            FfiConverterString.allocationSize(value.`eventJson`)
+    )
+
+    override fun write(value: NostrMessage, buf: ByteBuffer) {
+            FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterString.write(value.`eventId`, buf)
+            FfiConverterString.write(value.`eventJson`, buf)
+    }
+}
+
+
+
 data class PathConfig (
     var `forwardToTopK`: kotlin.UInt
     , 
@@ -5783,35 +6228,37 @@ data class ProtocolConfig (
     var `wifiDirectEnabled`: kotlin.Boolean
     , 
     var `internetEnabled`: kotlin.Boolean
-    ,
+    , 
     var `reticulumEnabled`: kotlin.Boolean
-    ,
+    , 
+    var `nostrEnabled`: kotlin.Boolean
+    , 
     var `preferOnline`: kotlin.Boolean
-    ,
+    , 
     var `initialTtl`: kotlin.UByte
-    ,
+    , 
     var `encryptionEnabled`: kotlin.Boolean
-    ,
+    , 
     var `autoKeyExchange`: kotlin.Boolean
-    ,
+    , 
     var `storePending`: kotlin.Boolean
-    ,
+    , 
     var `requireEncryption`: kotlin.Boolean
-    ,
+    , 
     var `maxPendingPerPeer`: kotlin.ULong
-    ,
+    , 
     var `maxPendingGlobal`: kotlin.ULong
-    ,
+    , 
     var `pendingTtlMs`: kotlin.ULong
-    ,
+    , 
     var `overflowPolicy`: OverflowPolicy
-    ,
-    var `maxGroupMembers`: kotlin.UInt = 256u
-    ,
-    var `groupRelayEnabled`: kotlin.Boolean = true
-    ,
-    var `requireTransportIdentity`: kotlin.Boolean = false
-
+    , 
+    var `maxGroupMembers`: kotlin.UInt = 256u 
+    , 
+    var `groupRelayEnabled`: kotlin.Boolean = true 
+    , 
+    var `requireTransportIdentity`: kotlin.Boolean = false 
+    
 ){
     
 
@@ -5827,6 +6274,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
         return ProtocolConfig(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
@@ -5854,6 +6302,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
             FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
             FfiConverterBoolean.allocationSize(value.`reticulumEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrEnabled`) +
             FfiConverterBoolean.allocationSize(value.`preferOnline`) +
             FfiConverterUByte.allocationSize(value.`initialTtl`) +
             FfiConverterBoolean.allocationSize(value.`encryptionEnabled`) +
@@ -5876,6 +6325,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`wifiDirectEnabled`, buf)
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
             FfiConverterBoolean.write(value.`reticulumEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrEnabled`, buf)
             FfiConverterBoolean.write(value.`preferOnline`, buf)
             FfiConverterUByte.write(value.`initialTtl`, buf)
             FfiConverterBoolean.write(value.`encryptionEnabled`, buf)
@@ -6047,6 +6497,52 @@ public object FfiConverterTypeReliabilityConfig: FfiConverterRustBuffer<Reliabil
 
 
 
+data class ReticulumMessage (
+    var `messageId`: kotlin.String
+    , 
+    var `recipientId`: kotlin.String
+    , 
+    var `data`: List<kotlin.UByte>
+    , 
+    var `replyToMsg`: kotlin.String?
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReticulumMessage: FfiConverterRustBuffer<ReticulumMessage> {
+    override fun read(buf: ByteBuffer): ReticulumMessage {
+        return ReticulumMessage(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceUByte.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ReticulumMessage) = (
+            FfiConverterString.allocationSize(value.`messageId`) +
+            FfiConverterString.allocationSize(value.`recipientId`) +
+            FfiConverterSequenceUByte.allocationSize(value.`data`) +
+            FfiConverterOptionalString.allocationSize(value.`replyToMsg`)
+    )
+
+    override fun write(value: ReticulumMessage, buf: ByteBuffer) {
+            FfiConverterString.write(value.`messageId`, buf)
+            FfiConverterString.write(value.`recipientId`, buf)
+            FfiConverterSequenceUByte.write(value.`data`, buf)
+            FfiConverterOptionalString.write(value.`replyToMsg`, buf)
+    }
+}
+
+
+
 data class RetryConfig (
     var `maxRetries`: kotlin.UInt
     , 
@@ -6182,16 +6678,19 @@ public object FfiConverterTypeRoutingStats: FfiConverterRustBuffer<RoutingStats>
 
 data class TransportConfig (
     var `bleEnabled`: kotlin.Boolean
-    ,
+    , 
     var `wifiDirectEnabled`: kotlin.Boolean
-    ,
+    , 
     var `internetEnabled`: kotlin.Boolean
-    ,
+    , 
     var `reticulumEnabled`: kotlin.Boolean
-
+    , 
+    var `nostrEnabled`: kotlin.Boolean
+    
 ){
+    
 
-
+    
     companion object
 }
 
@@ -6205,6 +6704,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -6212,7 +6712,8 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.allocationSize(value.`bleEnabled`) +
             FfiConverterBoolean.allocationSize(value.`wifiDirectEnabled`) +
             FfiConverterBoolean.allocationSize(value.`internetEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`reticulumEnabled`)
+            FfiConverterBoolean.allocationSize(value.`reticulumEnabled`) +
+            FfiConverterBoolean.allocationSize(value.`nostrEnabled`)
     )
 
     override fun write(value: TransportConfig, buf: ByteBuffer) {
@@ -6220,6 +6721,7 @@ public object FfiConverterTypeTransportConfig: FfiConverterRustBuffer<TransportC
             FfiConverterBoolean.write(value.`wifiDirectEnabled`, buf)
             FfiConverterBoolean.write(value.`internetEnabled`, buf)
             FfiConverterBoolean.write(value.`reticulumEnabled`, buf)
+            FfiConverterBoolean.write(value.`nostrEnabled`, buf)
     }
 }
 
@@ -6738,11 +7240,12 @@ public object FfiConverterTypeRelayPriority: FfiConverterRustBuffer<RelayPriorit
 
 
 enum class TransportType {
-
+    
     INTERNET,
     BLE,
     WI_FI_DIRECT,
-    RETICULUM;
+    RETICULUM,
+    NOSTR;
     companion object
 }
 
@@ -7013,6 +7516,124 @@ internal object uniffiCallbackInterfaceMlsStorageProvider {
  * @suppress
  */
 public object FfiConverterTypeMlsStorageProvider: FfiConverterCallbackInterface<MlsStorageProvider>()
+
+
+
+
+
+public interface NostrTransportCallback {
+    
+    fun `onMessagesAvailable`()
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceNostrTransportCallback {
+    internal object `onMessagesAvailable`: UniffiCallbackInterfaceNostrTransportCallbackMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeNostrTransportCallback.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onMessagesAvailable`(
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeNostrTransportCallback.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeNostrTransportCallback.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceNostrTransportCallback.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onMessagesAvailable`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeNostrTransportCallback: FfiConverterCallbackInterface<NostrTransportCallback>()
+
+
+
+
+
+public interface ReticulumTransportCallback {
+    
+    fun `onMessagesAvailable`()
+    
+    companion object
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceReticulumTransportCallback {
+    internal object `onMessagesAvailable`: UniffiCallbackInterfaceReticulumTransportCallbackMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeReticulumTransportCallback.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onMessagesAvailable`(
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeReticulumTransportCallback.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeReticulumTransportCallback.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceReticulumTransportCallback.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onMessagesAvailable`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(vtable)
+    }
+}
+
+/**
+ * The ffiConverter which transforms the Callbacks in to handles to pass to Rust.
+ *
+ * @suppress
+ */
+public object FfiConverterTypeReticulumTransportCallback: FfiConverterCallbackInterface<ReticulumTransportCallback>()
 
 
 
@@ -7421,6 +8042,70 @@ public object FfiConverterOptionalTypeMlsWelcomeMessage: FfiConverterRustBuffer<
         } else {
             buf.put(1)
             FfiConverterTypeMlsWelcomeMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNostrMessage: FfiConverterRustBuffer<NostrMessage?> {
+    override fun read(buf: ByteBuffer): NostrMessage? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNostrMessage.read(buf)
+    }
+
+    override fun allocationSize(value: NostrMessage?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNostrMessage.allocationSize(value)
+        }
+    }
+
+    override fun write(value: NostrMessage?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNostrMessage.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeReticulumMessage: FfiConverterRustBuffer<ReticulumMessage?> {
+    override fun read(buf: ByteBuffer): ReticulumMessage? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeReticulumMessage.read(buf)
+    }
+
+    override fun allocationSize(value: ReticulumMessage?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeReticulumMessage.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ReticulumMessage?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeReticulumMessage.write(value, buf)
         }
     }
 }

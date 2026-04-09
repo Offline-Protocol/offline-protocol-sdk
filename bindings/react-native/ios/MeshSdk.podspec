@@ -20,6 +20,8 @@ Pod::Spec.new do |s|
     "BleManager.swift",
     "InternetManager.swift",
     "WifiDirectManager.swift",
+    "NostrManager.swift",
+    "ReticulumManager.swift",
     "MlsSecureStorage.swift",
     "ble/**/*.swift",
     "mesh/**/*.swift",

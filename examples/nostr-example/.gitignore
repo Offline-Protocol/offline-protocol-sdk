@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# React Native
+.metro-health-check*
+
+# Bundle artifacts
+*.jsbundle
+*.bundle
+
+# iOS
+ios/Pods/
+ios/build/
+ios/.xcode.env.local
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Android
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+
+# Ruby (CocoaPods)
+Gemfile.lock
+vendor/
+
+# Env
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+*.swp

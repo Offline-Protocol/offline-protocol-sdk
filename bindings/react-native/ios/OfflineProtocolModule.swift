@@ -26,6 +26,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     private var internetManager: InternetManager?
     private var wifiDirectManager: WifiDirectManager?
     private var reticulumManager: ReticulumManager?
+    private var nostrManager: NostrManager?
     private var hasListeners = false
     private let processQueue = DispatchQueue(label: "offlineprotocol.processor")
     private var processTimer: DispatchSourceTimer?
@@ -51,6 +52,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         wifiDirectManager = nil
         reticulumManager?.stop()
         reticulumManager = nil
+        nostrManager?.stop()
+        nostrManager = nil
         protocolInstance = nil
     }
     
@@ -178,6 +181,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,
             internetEnabled: raw["internetEnabled"] as? Bool ?? raw["internet_enabled"] as? Bool ?? true,
             reticulumEnabled: raw["reticulumEnabled"] as? Bool ?? raw["reticulum_enabled"] as? Bool ?? false,
+            nostrEnabled: raw["nostrEnabled"] as? Bool ?? raw["nostr_enabled"] as? Bool ?? false,
             preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
             initialTtl: UInt8(raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8),
             encryptionEnabled: encryptionEnabled,
@@ -438,6 +442,36 @@ class OfflineProtocolModule: RCTEventEmitter {
                 ])
             }
 
+            // Initialize Nostr manager if nostr is enabled
+            if config.nostrEnabled {
+                let nostrMgr = NostrManager(protocol: proto, deviceId: config.userId)
+                nostrMgr.delegate = self
+                nostrManager = nostrMgr
+
+                // Register event-driven transport callback
+                proto.setNostrTransportCallback(callback: NostrTransportCallbackImpl(nostrManager: nostrMgr))
+
+                print("[OfflineProtocolModule] Nostr Manager initialized for user: \(config.userId)")
+
+                // Extract and store nostr config for use during start()
+                if let transportsDict = parsed.raw["transports"] as? [String: Any],
+                   let nostrDict = transportsDict["nostr"] as? [String: Any] {
+                    let relayUrls = (nostrDict["relayUrls"] as? [String]) ?? (nostrDict["relay_urls"] as? [String]) ?? []
+                    let autoReconnect = (nostrDict["autoReconnect"] as? Bool) ?? (nostrDict["auto_reconnect"] as? Bool) ?? true
+                    let maxReconnectAttempts = (nostrDict["maxReconnectAttempts"] as? Int) ?? (nostrDict["max_reconnect_attempts"] as? Int) ?? 0
+                    let connectionTimeout = (nostrDict["connectionTimeout"] as? Double) ?? (nostrDict["connection_timeout"] as? Double) ?? 30.0
+                    nostrManager?.configure(relayUrls: relayUrls, autoReconnect: autoReconnect, maxReconnectAttempts: maxReconnectAttempts, connectionTimeout: connectionTimeout)
+                }
+
+                emitDiagnostic(level: "info", message: "Nostr manager initialized", context: [
+                    "userId": config.userId
+                ])
+            } else {
+                emitDiagnostic(level: "info", message: "Nostr disabled in configuration", context: [
+                    "userId": config.userId
+                ])
+            }
+
             // Start process timer
             startProcessTimer()
             emitDiagnostic(level: "info", message: "Protocol process timer started")
@@ -664,6 +698,9 @@ class OfflineProtocolModule: RCTEventEmitter {
                 }
             }
 
+            // Nostr manager is started on-demand via enableTransport("nostr")
+            // from the JS layer, not here — avoids double-start conflicts.
+
             resolver(nil)
         } catch {
             emitDiagnostic(level: "error", message: "Failed to start protocol", context: [
@@ -672,7 +709,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_START", "Failed to start protocol: \(error.localizedDescription)", error)
         }
     }
-    
+
     @objc func emitTestEvent(_ resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
         protocolInstance?.emitTestEvent()
@@ -698,6 +735,11 @@ class OfflineProtocolModule: RCTEventEmitter {
         print("[OfflineProtocolModule] Reticulum Manager stopped")
         emitDiagnostic(level: "info", message: "Reticulum manager stopped")
 
+        // Stop Nostr manager
+        nostrManager?.stop()
+        print("[OfflineProtocolModule] Nostr Manager stopped")
+        emitDiagnostic(level: "info", message: "Nostr manager stopped")
+
         do {
             try protocolInstance?.stop()
             emitDiagnostic(level: "info", message: "Protocol stopped")
@@ -716,6 +758,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             // Pause transports for background mode
             bleManager?.pause()
             reticulumManager?.pause()
+            nostrManager?.pause()
 
             try protocolInstance?.pause()
             resolver(nil)
@@ -732,7 +775,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             // Resume transports
             bleManager?.resume()
             reticulumManager?.resume()
-            
+            nostrManager?.resume()
+
             resolver(nil)
         } catch {
             rejecter("ERROR_RESUME", "Failed to resume protocol: \(error.localizedDescription)", error)
@@ -1144,6 +1188,8 @@ class OfflineProtocolModule: RCTEventEmitter {
         internetManager = nil
         reticulumManager?.stop()
         reticulumManager = nil
+        nostrManager?.stop()
+        nostrManager = nil
         do {
             try protocolInstance?.stop()
         } catch {
@@ -1251,6 +1297,26 @@ class OfflineProtocolModule: RCTEventEmitter {
                 try configureAndStartReticulum(manager: manager, config: config)
                 emitDiagnostic(level: "info", message: "Reticulum transport enabled")
 
+            case "nostr":
+                if nostrManager == nil {
+                    let newManager = NostrManager(protocol: proto, deviceId: currentConfig?.userId ?? "unknown")
+                    newManager.delegate = self
+                    nostrManager = newManager
+                    proto.setNostrTransportCallback(callback: NostrTransportCallbackImpl(nostrManager: newManager))
+                    emitDiagnostic(level: "info", message: "Nostr manager created on demand")
+                }
+
+                guard let manager = nostrManager else {
+                    throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create Nostr manager"])
+                }
+
+                if manager.state == .running {
+                    manager.stop()
+                }
+
+                try configureAndStartNostr(manager: manager, config: config)
+                emitDiagnostic(level: "info", message: "Nostr transport enabled")
+
             default:
                 throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
             }
@@ -1314,6 +1380,24 @@ class OfflineProtocolModule: RCTEventEmitter {
         ])
     }
 
+    private func configureAndStartNostr(manager: NostrManager, config: NSDictionary?) throws {
+        let relayUrls = (config?["relayUrls"] as? [String]) ?? (config?["relay_urls"] as? [String]) ?? []
+        guard !relayUrls.isEmpty else {
+            throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Nostr transport requires at least one relay URL"])
+        }
+        let autoReconnect = (config?["autoReconnect"] as? Bool) ?? true
+        let maxRetries = (config?["maxReconnectAttempts"] as? Int) ?? 0
+        let connectionTimeout = (config?["connectionTimeout"] as? Double) ?? 30.0
+
+        manager.configure(relayUrls: relayUrls, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries, connectionTimeout: connectionTimeout)
+        try manager.start()
+
+        emitDiagnostic(level: "info", message: "Nostr transport enabled", context: [
+            "relayCount": relayUrls.count,
+            "autoReconnect": autoReconnect
+        ])
+    }
+
     @objc func disableTransport(_ type: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
@@ -1343,6 +1427,10 @@ class OfflineProtocolModule: RCTEventEmitter {
                 reticulumManager?.stop()
                 try? proto.reticulumStatusChanged(isConnected: false)
                 emitDiagnostic(level: "info", message: "Reticulum transport disabled (manager stopped)")
+            case "nostr":
+                nostrManager?.stop()
+                try? proto.nostrStatusChanged(isConnected: false)
+                emitDiagnostic(level: "info", message: "Nostr transport disabled (manager stopped)")
             default:
                 throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
             }
@@ -3467,6 +3555,20 @@ class ReticulumTransportCallbackImpl: ReticulumTransportCallback, @unchecked Sen
 
     func onMessagesAvailable() {
         reticulumManager?.onMessagesAvailable()
+    }
+}
+
+// MARK: - Nostr Transport Callback (Event-Driven Sending)
+
+class NostrTransportCallbackImpl: NostrTransportCallback, @unchecked Sendable {
+    weak var nostrManager: NostrManager?
+
+    init(nostrManager: NostrManager) {
+        self.nostrManager = nostrManager
+    }
+
+    func onMessagesAvailable() {
+        nostrManager?.onMessagesAvailable()
     }
 }
 
