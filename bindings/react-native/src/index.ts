@@ -30,6 +30,7 @@ import type {
   MessageReceivedEvent,
   BleTransportConfig,
   NostrTransportConfig,
+  ReticulumTransportConfig,
   AckConfig,
   RetryConfig,
   DedupConfig,
@@ -682,6 +683,20 @@ export class OfflineProtocol {
         );
       }
     }
+
+    // Auto-enable reticulum transport if configured
+    const reticulumConfig = this.config.transports?.reticulum;
+    if (reticulumConfig?.enabled) {
+      try {
+        await this.enableTransport("reticulum", reticulumConfig);
+        console.log("[OfflineProtocol] Reticulum transport auto-enabled");
+      } catch (error) {
+        console.warn(
+          "[OfflineProtocol] Failed to auto-enable reticulum transport:",
+          error
+        );
+      }
+    }
   }
 
   /**
@@ -839,7 +854,7 @@ export class OfflineProtocol {
    */
   async enableTransport(
     type: TransportType,
-    config?: InternetTransportConfig | WifiDirectTransportConfig | NostrTransportConfig
+    config?: InternetTransportConfig | WifiDirectTransportConfig | NostrTransportConfig | ReticulumTransportConfig
   ): Promise<void> {
     return await OfflineProtocolNativeModule.enableTransport(type, config);
   }
