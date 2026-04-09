@@ -16,6 +16,22 @@ use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
 
+/// A signed Nostr event ready for relay submission, together with the
+/// metadata the platform needs for confirmation tracking.
+#[derive(Debug, Clone)]
+pub struct SignedNostrEvent {
+    /// Protocol message ID (for confirm/fail callbacks).
+    pub message_id: String,
+    /// Recipient's device/user ID.
+    pub recipient_device_id: String,
+    /// Serialized protocol message bytes.
+    pub data: Vec<u8>,
+    /// Complete `["EVENT", {...}]` JSON string for the relay WebSocket.
+    pub event_json: String,
+    /// Optional reply-to message ID (thread continuation).
+    pub reply_to_msg: Option<String>,
+}
+
 /// Nostr transport configuration.
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
@@ -300,7 +316,7 @@ impl NostrTransport {
     /// The `relay_event_json` is a complete `["EVENT", {...}]` string ready to
     /// send over a WebSocket connection. The platform no longer needs to do
     /// any signing or event creation.
-    pub fn get_next_signed_event(&self) -> Result<Option<(String, String, String)>> {
+    pub fn get_next_signed_event(&self) -> Result<Option<SignedNostrEvent>> {
         self.drain_expired_pending();
 
         let message = {
@@ -313,6 +329,10 @@ impl NostrTransport {
 
         let message_id = message.id.to_string();
         let recipient_device_id = message.recipient.as_str().to_string();
+        let reply_to_msg = message
+            .reply_to_msg
+            .as_ref()
+            .map(|id| id.as_str().to_string());
 
         let data = self.serialize_message(&message)?;
         let content_base64 = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -323,14 +343,20 @@ impl NostrTransport {
             &recipient_pubkey,
             &content_base64,
         )?;
-        let relay_msg = event.to_relay_message()?;
+        let event_json = event.to_relay_message()?;
 
         self.pending_confirmation
             .lock()
             .unwrap()
             .insert(message_id.clone(), Instant::now());
 
-        Ok(Some((message_id, recipient_device_id, relay_msg)))
+        Ok(Some(SignedNostrEvent {
+            message_id,
+            recipient_device_id,
+            data,
+            event_json,
+            reply_to_msg,
+        }))
     }
 
     /// Returns a NIP-01 subscription filter JSON for this device's pubkey.

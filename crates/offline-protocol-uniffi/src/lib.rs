@@ -2713,12 +2713,12 @@ impl OfflineProtocol {
         }
 
         self.with_nostr_transport(|nt| match nt.get_next_signed_event() {
-            Ok(Some((message_id, recipient_id, event_json))) => Some(NostrMessage {
-                message_id,
-                recipient_id,
-                data: Vec::new(),
-                event_json,
-                reply_to_msg: None,
+            Ok(Some(signed)) => Some(NostrMessage {
+                message_id: signed.message_id,
+                recipient_id: signed.recipient_device_id,
+                data: signed.data,
+                event_json: signed.event_json,
+                reply_to_msg: signed.reply_to_msg,
             }),
             Ok(None) => None,
             Err(e) => {

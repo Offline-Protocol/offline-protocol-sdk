@@ -260,7 +260,6 @@ class NostrManager(
     override fun pause() {
         ioHandler?.post {
             stopMessagePolling()
-            stopPingTimer()
         }
     }
 
@@ -419,7 +418,6 @@ class NostrManager(
             // Lost all connections
             mainHandler.post {
                 stopMessagePolling()
-                stopPingTimer()
                 try {
                     protocol.nostrStatusChanged(false)
                 } catch (e: Exception) {
