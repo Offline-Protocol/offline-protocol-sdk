@@ -954,6 +954,10 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nost
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed(
@@ -1299,6 +1303,10 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_proces
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1802,6 +1810,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 55139.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 62102.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056.toShort()) {
@@ -2978,6 +2992,10 @@ public interface OfflineProtocolInterface {
     fun `nostrConfirmSent`(`messageId`: kotlin.String)
     
     fun `nostrGetNextMessage`(): NostrMessage?
+    
+    fun `nostrGetPublicKey`(): kotlin.String?
+    
+    fun `nostrGetSubscriptionFilter`(`subscriptionId`: kotlin.String): kotlin.String?
     
     fun `nostrMessageReceived`(`senderId`: kotlin.String, `data`: List<kotlin.UByte>)
     
@@ -4255,6 +4273,32 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `nostrGetPublicKey`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `nostrGetSubscriptionFilter`(`subscriptionId`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(
+        it,
+        FfiConverterString.lower(`subscriptionId`),_status)
 }
     }
     )
@@ -6017,6 +6061,8 @@ data class NostrMessage (
     , 
     var `data`: List<kotlin.UByte>
     , 
+    var `eventJson`: kotlin.String
+    , 
     var `replyToMsg`: kotlin.String?
     
 ){
@@ -6035,6 +6081,7 @@ public object FfiConverterTypeNostrMessage: FfiConverterRustBuffer<NostrMessage>
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceUByte.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
@@ -6043,6 +6090,7 @@ public object FfiConverterTypeNostrMessage: FfiConverterRustBuffer<NostrMessage>
             FfiConverterString.allocationSize(value.`messageId`) +
             FfiConverterString.allocationSize(value.`recipientId`) +
             FfiConverterSequenceUByte.allocationSize(value.`data`) +
+            FfiConverterString.allocationSize(value.`eventJson`) +
             FfiConverterOptionalString.allocationSize(value.`replyToMsg`)
     )
 
@@ -6050,6 +6098,7 @@ public object FfiConverterTypeNostrMessage: FfiConverterRustBuffer<NostrMessage>
             FfiConverterString.write(value.`messageId`, buf)
             FfiConverterString.write(value.`recipientId`, buf)
             FfiConverterSequenceUByte.write(value.`data`, buf)
+            FfiConverterString.write(value.`eventJson`, buf)
             FfiConverterOptionalString.write(value.`replyToMsg`, buf)
     }
 }

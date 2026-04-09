@@ -2640,10 +2640,16 @@ impl OfflineProtocol {
 
     /// Called by the platform when data is received from a Nostr relay.
     ///
-    /// `sender_id` is the Nostr pubkey hex of the sender (used as
-    /// transport-level peer identity). The real protocol-level sender
-    /// is extracted from the deserialized `Message.sender` field and
-    /// used for `NeighborDiscovered` events.
+    /// `sender_id` is the Nostr pubkey hex of the sender (used for
+    /// `NeighborDiscovered` events). The real protocol-level sender
+    /// is extracted from the deserialized `Message.sender` field.
+    ///
+    /// Unlike BLE/Reticulum, the Nostr pubkey is a transport-level routing
+    /// key derived from the device ID — not the protocol user ID. Setting it
+    /// as `transport_peer_id` would cause the security gate to reject every
+    /// control message (identity mismatch). We therefore enqueue with
+    /// `on_data_received` (no transport peer ID) and rely on the protocol-
+    /// level signature check instead.
     pub fn nostr_message_received(
         &self,
         sender_id: String,
@@ -2660,9 +2666,11 @@ impl OfflineProtocol {
             })
             .flatten();
 
-        if let Some(Err(e)) = self
-            .with_nostr_transport_fallible(|nt| nt.on_data_received_from(data, sender_id.clone()))?
-        {
+        // Use on_data_received (no transport_peer_id) because the Nostr pubkey
+        // is derived from device_id, not the protocol user_id. Passing the pubkey
+        // as transport_peer_id would cause validate_transport_sender to reject
+        // the message due to the identity mismatch.
+        if let Some(Err(e)) = self.with_nostr_transport_fallible(|nt| nt.on_data_received(data))? {
             return Err(ProtocolError::Other(format!(
                 "Failed to process nostr message: {}",
                 e
