@@ -9,19 +9,18 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.util.Log
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Owns the Android peripheral-side GATT server.
- *
- * Nordic's Android-BLE-Library does not wrap the GATT server role — its
- * `BleManager` base class is central-only. This class therefore wraps the
- * raw [BluetoothGattServer] directly, but enforces three things the old
- * inline implementation missed:
+ * Owns the Android peripheral-side GATT server. Wraps the raw
+ * [BluetoothGattServer] and enforces three things the old inline
+ * implementation in BleTransportFacade missed:
  *
  *   1. Every notify-propertied characteristic automatically gets a CCCD
  *      (0x2902) descriptor via [registerNotifyCharacteristic], so remote
@@ -35,6 +34,10 @@ import java.util.concurrent.ConcurrentHashMap
  *      escalate to [Listener.onSetupFailed] on a second failure — so a
  *      flaky GATT stack cannot silently leave the device invisible on the
  *      mesh.
+ *
+ * Note: the `Nordic*` class name prefix is a naming legacy from an
+ * earlier migration plan. This implementation does not depend on Nordic's
+ * Android-BLE-Library.
  */
 class NordicGattServer(
     private val context: Context,
@@ -79,6 +82,15 @@ class NordicGattServer(
 
     /** Centrals that have written ENABLE_NOTIFICATION_VALUE to the CCCD. */
     private val subscribedCentrals = ConcurrentHashMap<BluetoothDevice, Long>()
+
+    /**
+     * Serializes pre-Tiramisu notification writes. On API < 33 the value
+     * being notified is written to the shared [BluetoothGattCharacteristic]
+     * field before dispatch, so two threads notifying different centrals
+     * race on that field. Tiramisu+ uses the value-parameter overload and
+     * bypasses this lock entirely.
+     */
+    private val notifyLock = Any()
 
     private var serviceReadyTimeoutRunnable: Runnable? = null
     private var setupAttempts = 0
@@ -130,16 +142,29 @@ class NordicGattServer(
      * Push a notification to a specific subscribed central. Returns true on
      * a successful platform-level submit. Silently returns false if the
      * central is not subscribed or the server is not set up.
+     *
+     * On API 33+ this uses the value-parameter overload, which hands the
+     * payload to the platform atomically and is therefore safe to call
+     * concurrently from multiple threads. On older APIs the payload is
+     * assigned to the shared characteristic field first, so calls are
+     * serialized under [notifyLock].
      */
     fun notifySubscribed(device: BluetoothDevice, bytes: ByteArray): Boolean {
         if (!subscribedCentrals.containsKey(device)) return false
         val char = messageCharacteristic ?: return false
         val server = gattServer ?: return false
         return try {
-            @Suppress("DEPRECATION")
-            char.value = bytes
-            @Suppress("DEPRECATION")
-            server.notifyCharacteristicChanged(device, char, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val status = server.notifyCharacteristicChanged(device, char, false, bytes)
+                status == BluetoothStatusCodes.SUCCESS
+            } else {
+                synchronized(notifyLock) {
+                    @Suppress("DEPRECATION")
+                    char.value = bytes
+                    @Suppress("DEPRECATION")
+                    server.notifyCharacteristicChanged(device, char, false)
+                }
+            }
         } catch (e: SecurityException) {
             Log.w(TAG, "Permission denied while notifying ${device.address}", e)
             false
@@ -304,10 +329,10 @@ class NordicGattServer(
      * The only sanctioned path for creating a notify-propertied
      * characteristic on this server. Attaches a CCCD (0x2902) descriptor
      * unconditionally so remote centrals can subscribe via the standard
-     * GATT notification subscription flow. A unit test walks the
-     * registered service and fails if any notify characteristic lacks
-     * this descriptor — the CCCD-missing bug cannot regress without
-     * breaking that test.
+     * GATT notification subscription flow. Callers must use this helper
+     * instead of constructing a notify-propertied [BluetoothGattCharacteristic]
+     * directly — that was the shape of the original bug where iOS centrals
+     * saw the characteristic but couldn't subscribe.
      */
     private fun registerNotifyCharacteristic(uuid: UUID): BluetoothGattCharacteristic {
         val char = BluetoothGattCharacteristic(

@@ -12,13 +12,13 @@
 
 extern "C" {
 
-// Global reference to the BleManager instance
+// Global reference to the BleTransportFacade instance
 static jobject g_ble_manager = nullptr;
 static JavaVM* g_jvm = nullptr;
 
 /**
  * Initialize the BLE bridge
- * Called from Kotlin with the BleManager instance
+ * Called from Kotlin with the BleTransportFacade instance
  */
 JNIEXPORT void JNICALL
 Java_com_offlineprotocol_OfflineProtocolModule_nativeInitBleBridge(
@@ -33,7 +33,7 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeInitBleBridge(
         env->GetJavaVM(&g_jvm);
     }
     
-    // Store global reference to BleManager
+    // Store global reference to BleTransportFacade
     if (g_ble_manager != nullptr) {
         env->DeleteGlobalRef(g_ble_manager);
     }
@@ -55,7 +55,7 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeStartBle(
         return JNI_FALSE;
     }
     
-    // Call BleManager.start()
+    // Call BleTransportFacade.start()
     jclass bleManagerClass = env->GetObjectClass(g_ble_manager);
     jmethodID startMethod = env->GetMethodID(bleManagerClass, "start", "()Z");
     
@@ -83,7 +83,7 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeStopBle(
         return;
     }
     
-    // Call BleManager.stop()
+    // Call BleTransportFacade.stop()
     jclass bleManagerClass = env->GetObjectClass(g_ble_manager);
     jmethodID stopMethod = env->GetMethodID(bleManagerClass, "stop", "()V");
     
@@ -111,7 +111,7 @@ Java_com_offlineprotocol_OfflineProtocolModule_nativeSendBleMessage(
         return JNI_FALSE;
     }
     
-    // Call BleManager.sendMessage()
+    // Call BleTransportFacade.sendMessage()
     jclass bleManagerClass = env->GetObjectClass(g_ble_manager);
     jmethodID sendMethod = env->GetMethodID(
         bleManagerClass,

@@ -1,6 +1,5 @@
 package com.offlineprotocol.ble
 
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import com.offlineprotocol.mesh.MeshController.MeshRole
 import java.util.Collections
@@ -10,7 +9,15 @@ import java.util.concurrent.ConcurrentHashMap
  * Centralised registry for client and server-side BLE connections together with
  * auxiliary metadata (desired roles, resolved identifiers).
  *
- * Extracted from BleManager to keep the manager focused on orchestration.
+ * Extracted from [BleTransportFacade] to keep the facade focused on
+ * orchestration.
+ *
+ * All connection-indexed state is keyed by the peer's BLE address string as
+ * observed at the time of that specific connection. For the GATT-server
+ * (peripheral) side that is the remote central's address from
+ * `BluetoothGattServerCallback`; for the GATT-client (central) side it's the
+ * address we passed into `connectGatt`. Both are stable for the lifetime of
+ * a single LL connection, which is the only window these maps need to cover.
  */
 class MeshConnectionRegistry {
     private val gattClients = ConcurrentHashMap<String, BluetoothGatt>()
@@ -19,16 +26,6 @@ class MeshConnectionRegistry {
     private val pendingRoles = ConcurrentHashMap<String, MeshRole>()
     private val connectionRoles = ConcurrentHashMap<String, MeshRole>()
     private val serverConnections = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
-
-    /**
-     * Maps live inbound `BluetoothDevice` handles (server-side connections from
-     * remote centrals) to stable peer device IDs. This is RPA-safe: the handle
-     * reference is stable for the lifetime of a single connection even when the
-     * peer's advertised MAC rotates (iOS Random Resolvable Private Addresses).
-     * Keying pending inbound fragments by the handle avoids the lookup miss
-     * that the old `addressToDevice` path hit for iOS centrals.
-     */
-    private val handleToStableId = ConcurrentHashMap<BluetoothDevice, String>()
 
     fun registerGatt(address: String, gatt: BluetoothGatt) {
         gattClients[address] = gatt
@@ -89,37 +86,17 @@ class MeshConnectionRegistry {
 
     fun connectionRoleEntries(): List<Map.Entry<String, MeshRole>> = connectionRoles.entries.toList()
 
-    fun trackServerConnection(deviceId: String) {
-        serverConnections.add(deviceId)
+    fun trackServerConnection(address: String) {
+        serverConnections.add(address)
     }
 
-    fun untrackServerConnection(deviceId: String) {
-        serverConnections.remove(deviceId)
+    fun untrackServerConnection(address: String) {
+        serverConnections.remove(address)
     }
+
+    fun serverConnectionCount(): Int = serverConnections.size
 
     fun connectionCount(): Int = gattClients.size + serverConnections.size
-
-    // Server-connection handle tracking (RPA-safe for iOS centrals). See the
-    // field-level comment on [handleToStableId] for rationale.
-
-    fun setServerHandleIdentity(handle: BluetoothDevice, stableId: String) {
-        handleToStableId[handle] = stableId
-    }
-
-    fun serverHandleIdentity(handle: BluetoothDevice): String? = handleToStableId[handle]
-
-    fun removeServerHandle(handle: BluetoothDevice) {
-        handleToStableId.remove(handle)
-    }
-
-    /**
-     * Returns all server-side handles whose current address matches [address].
-     * Used to drain the handle-keyed pending fragment queue once the reverse
-     * identity resolution completes (the client-side code that learns the
-     * stable ID keys its lookup by address, not by handle).
-     */
-    fun handlesForAddress(address: String): List<BluetoothDevice> =
-        handleToStableId.keys.filter { it.address == address }
 
     fun clear() {
         gattClients.clear()
@@ -128,8 +105,5 @@ class MeshConnectionRegistry {
         pendingRoles.clear()
         connectionRoles.clear()
         serverConnections.clear()
-        handleToStableId.clear()
     }
 }
-
-

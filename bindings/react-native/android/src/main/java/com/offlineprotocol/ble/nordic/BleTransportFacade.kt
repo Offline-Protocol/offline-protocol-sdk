@@ -48,16 +48,13 @@ private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
  * BLE transport facade implementing [TransportManager] for Bluetooth Low Energy
  * communication. Ensures iOS ↔ Android cross-platform compatibility.
  *
- * This class was renamed from `com.offlineprotocol.BleManager` to
- * `com.offlineprotocol.ble.nordic.BleTransportFacade` as the final step of the
- * migration off raw BluetoothGatt/BluetoothGattServer. The peripheral GATT
- * server now lives in [NordicGattServer] (with CCCD handling and a
- * service-ready watchdog), advertising is owned by [NordicAdvertiser], and
- * the inbound fragment buffer is keyed by `BluetoothDevice` handle via
- * [MeshConnectionRegistry] for iOS RPA safety. The central-role path
- * (scanning + the GATT client callback + mesh orchestration + fragment
- * accounting) still lives in this class until it migrates to
- * [NordicPeerClient], which is why the file is large.
+ * The peripheral GATT server is delegated to [NordicGattServer] (which
+ * attaches a CCCD descriptor to every notify characteristic and runs a
+ * service-ready watchdog), advertising is delegated to [NordicAdvertiser],
+ * and connection bookkeeping lives in [MeshConnectionRegistry]. The
+ * central-role path (scanning + the GATT client callback + mesh
+ * orchestration + fragment accounting) still lives in this class — it is
+ * the next slice of the migration and its size is why this file is large.
  */
 class BleTransportFacade(
     private val context: Context,
@@ -188,6 +185,10 @@ class BleTransportFacade(
     private var nordicGattServer: NordicGattServer? = null
     
     // Cached signed identity data for serving via GATT
+    // Read by provideIdentityBytes() on the binder thread; written by
+    // updateSignedIdentity() on main / binder. @Volatile so the latest
+    // reference is visible to binder-thread readers.
+    @Volatile
     private var cachedSignedIdentity: com.offlineprotocol.mesh.SignedIdentityData? = null
     
     // Verified peer identities (device address -> SignedIdentityData)
@@ -204,15 +205,16 @@ class BleTransportFacade(
     // Pending fragments waiting for device ID
     private data class PendingFragment(val data: ByteArray, val timestamp: Long)
     private data class MeshObservation(val advertisement: MeshAdvertisementData, val rssi: Int?, val timestamp: Long)
+    // Single address-keyed inbound buffer used by both the GATT-client path
+    // (our notify callback) and the GATT-server path (central → peripheral
+    // writes). Entries are queued while a peer's stable device ID is still
+    // being resolved via a reverse GATT read, and drained by
+    // [processPendingFragments] once the device ID characteristic is read.
+    // Using the connection-specific address as the key is RPA-safe: the
+    // address is stable for the lifetime of a single LL connection on both
+    // sides, even if the peer's advertised MAC rotates outside of it.
     private val pendingFragments = HashMap<String, MutableList<PendingFragment>>()
     private val pendingFragmentsLock = Any()
-    // RPA-safe inbound fragment buffer keyed by the BluetoothDevice handle
-    // returned by BluetoothGattServerCallback. This replaces address-keyed
-    // queuing for the Android-peripheral inbound path, which missed for iOS
-    // centrals because their Random Resolvable Private Addresses do not match
-    // the address seen during scanning.
-    private val pendingByHandle = HashMap<BluetoothDevice, ArrayDeque<PendingFragment>>()
-    private val pendingByHandleLock = Any()
     private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
     private val LOAD_SATURATION_COUNT = 20
@@ -242,8 +244,6 @@ class BleTransportFacade(
     /** Tracks recently seen advertisements to avoid duplicate processing (hash, timestamp) */
     private data class AdvertisementCacheEntry(val hash: Int, val timestamp: Long)
     private val recentAdvertisementHashes = ConcurrentHashMap<String, AdvertisementCacheEntry>()
-    /** Tracks connected centrals (devices that connected to our GATT server) for connection count */
-    private val connectedCentrals = ConcurrentHashMap<String, Long>()
     /** Negative cache: devices verified via GATT as non-mesh (address -> timestamp) */
     private val verifiedNonMeshDevices = ConcurrentHashMap<String, Long>()
     /** Counter for consecutive scan restarts without discoveries */
@@ -571,19 +571,17 @@ class BleTransportFacade(
         unknownBootstrapAttempts.clear()
         recentAdvertisementHashes.clear()
         connectionRetryCount.clear()
-        connectedCentrals.clear()
         scanRestartCount = 0
         lastAdapterReset = 0L
         transportStartAt = 0L
         lastProactiveScanRefresh = 0L
         lastForcedBleRefresh = 0L
-        
+
         // Close GATT server (stops service, clears subscribed centrals, drops refs).
         nordicGattServer?.stop()
         nordicGattServer = null
         nordicAdvertiser.shutdown()
-        synchronized(pendingByHandleLock) { pendingByHandle.clear() }
-        
+
         updateState(TransportState.STOPPED)
         protocol.bleStatusChanged(false)
         
@@ -988,8 +986,8 @@ class BleTransportFacade(
     }
     
     // Advertising is owned by NordicAdvertiser. These thin wrappers preserve
-    // the existing call sites (refreshAdvertising / stopAdvertising are invoked
-    // from many places in BleManager) without threading the delegate object
+    // the existing call sites in this file (refreshAdvertising / stopAdvertising
+    // are invoked from many places) without threading the delegate object
     // through every caller.
 
     private fun startAdvertising(reason: String = "manual") {
@@ -1510,7 +1508,7 @@ class BleTransportFacade(
         }
     }
 
-    private fun currentConnectionCount(): Int = connections.connectionCount() + connectedCentrals.size
+    private fun currentConnectionCount(): Int = connections.connectionCount()
 
     private fun refreshSelfMetrics() {
         val rssiValues = lastSeenRssi.values.map { it.toInt() }
@@ -1916,119 +1914,6 @@ class BleTransportFacade(
         return true
     }
     
-    /**
-     * RPA-safe entry point for fragments arriving on the Android peripheral's
-     * message characteristic. Keys pending fragments by the stable
-     * `BluetoothDevice` handle rather than by the (potentially rotating) MAC
-     * address. When identity is already known for this handle or its address,
-     * we delegate to [handleReceivedData] immediately. Otherwise the fragment
-     * is queued in [pendingByHandle] and a reverse client connection is kicked
-     * off to read `DEVICE_ID_CHAR_UUID`; once that lands, the client callback
-     * path drains the queue via [drainPendingFragmentsForAddress].
-     */
-    private fun handleInboundFragmentFromCentral(device: BluetoothDevice, data: ByteArray) {
-        // First check the handle-keyed map (populated once identity is known
-        // for this specific connection), then fall back to the address-keyed
-        // lookup for completeness.
-        val stableId = connections.serverHandleIdentity(device)
-            ?: connections.deviceIdForAddress(device.address)
-
-        if (stableId != null) {
-            // Identity is known — ensure handle mapping is pinned for future
-            // writes on the same connection, then dispatch normally.
-            connections.setServerHandleIdentity(device, stableId)
-            handleReceivedData(data, device.address)
-            return
-        }
-
-        // Queue by handle and kick off reverse identity resolution.
-        synchronized(pendingByHandleLock) {
-            val queue = pendingByHandle.getOrPut(device) { ArrayDeque() }
-            while (queue.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
-                queue.removeFirst()
-            }
-            queue.add(PendingFragment(data, System.currentTimeMillis()))
-        }
-        if (logThrottler.shouldLog("queue_pending_handle_${device.address}")) {
-            Log.d(TAG, "Queued fragment by handle pending identity for ${device.address}")
-            emitDiagnostic(
-                "info",
-                "Queued BLE fragment pending handle identity",
-                mapOf("address" to device.address, "length" to data.size),
-            )
-        }
-        initiateReverseHandleIdentityResolution(device)
-        cleanupPendingByHandle()
-    }
-
-    private fun initiateReverseHandleIdentityResolution(device: BluetoothDevice) {
-        mainHandler.post {
-            if (connections.serverHandleIdentity(device) != null) return@post
-            val address = device.address
-            val hasGattClient = connections.getGatt(address) != null
-            val mappedId = connections.deviceIdForAddress(address)
-            val now = System.currentTimeMillis()
-            val lastAttempt = deviceIdResolutionAttempts[address] ?: 0L
-            val shouldAttempt = now - lastAttempt > PENDING_FRAGMENT_TIMEOUT_MS
-            if ((!hasGattClient || mappedId.isNullOrEmpty()) && shouldAttempt) {
-                deviceIdResolutionAttempts[address] = now
-                if (logThrottler.shouldLog("resolve_handle_$address", intervalMs = 5000)) {
-                    Log.d(TAG, "Reverse-connecting to resolve identity for handle $address")
-                    emitDiagnostic(
-                        "debug",
-                        "Reverse-connect for handle identity",
-                        mapOf("address" to address),
-                    )
-                }
-                connectToDevice(device)
-            }
-        }
-    }
-
-    /**
-     * Called from the client-side DEVICE_ID_CHAR_UUID read handler after we
-     * learn the stable device ID for a given MAC. Binds the stable id to any
-     * matching server-side handle and drains its pending queue.
-     */
-    private fun drainPendingFragmentsForAddress(address: String, stableId: String) {
-        val handles = connections.handlesForAddress(address).toMutableList()
-        // Include any queued handles that do not yet have a stableId binding.
-        val unboundHandles = synchronized(pendingByHandleLock) {
-            pendingByHandle.keys.filter { it.address == address && it !in handles }
-        }
-        handles.addAll(unboundHandles)
-        if (handles.isEmpty()) return
-        for (handle in handles) {
-            connections.setServerHandleIdentity(handle, stableId)
-            val drained = synchronized(pendingByHandleLock) {
-                pendingByHandle.remove(handle)
-            } ?: continue
-            for (fragment in drained) {
-                try {
-                    handleReceivedData(fragment.data, address)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error draining handle-keyed fragment", e)
-                }
-            }
-        }
-    }
-
-    private fun cleanupPendingByHandle() {
-        synchronized(pendingByHandleLock) {
-            val now = System.currentTimeMillis()
-            val handlesToRemove = mutableListOf<BluetoothDevice>()
-            for ((handle, queue) in pendingByHandle) {
-                while (queue.isNotEmpty() && now - queue.first().timestamp > PENDING_FRAGMENT_TIMEOUT_MS) {
-                    queue.removeFirst()
-                }
-                if (queue.isEmpty()) {
-                    handlesToRemove.add(handle)
-                }
-            }
-            handlesToRemove.forEach { pendingByHandle.remove(it) }
-        }
-    }
-
     private fun handleReceivedData(data: ByteArray, address: String) {
         try {
             // Get sender device ID
@@ -2431,10 +2316,15 @@ class BleTransportFacade(
     
     // MARK: - GATT Server Listener
     //
-    // Bridges NordicGattServer callbacks into BleManager state. The
-    // onReady / onSetupFailed / onInboundFragment / provide* hooks fire on
-    // the platform's binder thread just like the old BluetoothGattServerCallback
-    // did, so the body follows the same threading rules as before.
+    // Bridges NordicGattServer callbacks into facade state. Callbacks fire
+    // on the platform's binder thread; every handler that touches mutable
+    // transport state is reposted on [mainHandler] before running, matching
+    // the threading model used by start/stop/pause/resume.
+    //
+    // The `provide*` hooks stay on the binder thread by necessity — they
+    // must return bytes synchronously — but they only touch data that is
+    // either thread-safe (OfflineProtocol is internally Mutex-guarded) or
+    // guarded by a @Volatile marker ([cachedSignedIdentity]).
 
     private val gattServerListener = object : NordicGattServer.Listener {
         override fun onReady() {
@@ -2453,14 +2343,27 @@ class BleTransportFacade(
                 this@BleTransportFacade,
                 TransportException.StartFailed("GATT server setup failed: $reason"),
             )
+            // Tear the transport down so the caller sees a coherent stopped
+            // state. Without this the facade stays in RUNNING while the GATT
+            // server is gone, scans keep firing, and every fragment write
+            // fails silently.
+            mainHandler.post {
+                if (state == TransportState.RUNNING || state == TransportState.STARTING) {
+                    try {
+                        stopUnsafe()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error tearing down after GATT setup failure", e)
+                    }
+                }
+            }
         }
 
         override fun onCentralConnected(device: BluetoothDevice) {
-            handleCentralConnectedUnsafe(device)
+            mainHandler.post { handleCentralConnectedOnMain(device) }
         }
 
         override fun onCentralDisconnected(device: BluetoothDevice, status: Int) {
-            handleCentralDisconnectedUnsafe(device, status)
+            mainHandler.post { handleCentralDisconnectedOnMain(device, status) }
         }
 
         override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
@@ -2473,7 +2376,8 @@ class BleTransportFacade(
                     "dataSize" to bytes.size,
                 ),
             )
-            handleInboundFragmentFromCentral(device, bytes)
+            val address = device.address
+            mainHandler.post { handleReceivedData(bytes, address) }
         }
 
         override fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray? {
@@ -2494,7 +2398,7 @@ class BleTransportFacade(
         }
     }
 
-    private fun handleCentralConnectedUnsafe(device: BluetoothDevice) {
+    private fun handleCentralConnectedOnMain(device: BluetoothDevice) {
         val observation = lastSeenMeshAdvertisements[device.address]
         val decision = meshController.shouldAcceptInboundConnection(
             connections.deviceIdForAddress(device.address),
@@ -2521,27 +2425,24 @@ class BleTransportFacade(
         }
         connections.trackServerConnection(device.address)
         connections.setPendingRole(device.address, role)
-        connectedCentrals[device.address] = System.currentTimeMillis()
         Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
         emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
     }
 
-    private fun handleCentralDisconnectedUnsafe(device: BluetoothDevice, status: Int) {
+    private fun handleCentralDisconnectedOnMain(device: BluetoothDevice, status: Int) {
         val address = device.address
         connections.untrackServerConnection(address)
         connections.consumePendingRole(address)
-        connectedCentrals.remove(address)
-        // Drop the handle-keyed binding and any queued pending fragments. The
-        // BluetoothDevice reference won't be meaningful once the connection
-        // has ended, and a re-connected iOS peer will yield a fresh handle.
-        connections.removeServerHandle(device)
-        synchronized(pendingByHandleLock) { pendingByHandle.remove(device) }
-        // Don't immediately remove - connection might be re-established
-        // Only remove if it's a permanent error (status != 0)
-        if (status != 0 && status != 19) { // Not normal disconnect or connection timeout
+        // Status 0 = clean local disconnect; status 19 (0x13) =
+        // HCI_CONN_TERMINATE_PEER_USER, i.e. the remote end disconnected
+        // cleanly. Both are normal lifecycle events where the peer is
+        // likely to come back, so we keep the address→deviceId mapping and
+        // RSSI cached to speed up reconnection. Any other status is a real
+        // failure and we tear the peer state down.
+        val isCleanDisconnect = status == 0 || status == 19
+        if (!isCleanDisconnect) {
             lastSeenRssi.remove(address)
             connections.deviceIdForAddress(address)?.let { peerId ->
-                // Clean up routes through this neighbor
                 protocol.removeNeighborRoutes(peerId)
                 try {
                     protocol.blePeerLost(peerId)
@@ -2554,10 +2455,8 @@ class BleTransportFacade(
                 connections.removeIdentifiersForAddress(address)
                 deviceIdResolutionAttempts.remove(address)
                 connections.removeConnectionRole(peerId)
-                mainHandler.post {
-                    if (state == TransportState.RUNNING) {
-                        refreshAdvertising("membership_change")
-                    }
+                if (state == TransportState.RUNNING) {
+                    refreshAdvertising("membership_change")
                 }
                 maybeHandleRebalance("disconnect")
             }
@@ -2831,13 +2730,13 @@ class BleTransportFacade(
                         emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                     }
                     
-                    // Process any pending fragments for this device
+                    // Drain all pending inbound fragments keyed by this
+                    // address — the same buffer holds central-side notify
+                    // fragments and server-side write fragments, since both
+                    // paths queue under the connection-specific address.
                     processPendingFragments(gatt.device.address, deviceIdValue)
-                    // Also drain handle-keyed pending fragments for any
-                    // server-side connection(s) from this same peer (RPA-safe
-                    // path for iOS centrals).
-                    drainPendingFragmentsForAddress(gatt.device.address, deviceIdValue)
-                    
+
+
                     // Now read the identity characteristic for signature verification
                     val service = gatt.getService(SERVICE_UUID)
                     val identityChar = service?.getCharacteristic(IDENTITY_CHAR_UUID)

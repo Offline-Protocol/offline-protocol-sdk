@@ -10,15 +10,15 @@ import java.util.concurrent.ThreadLocalRandom
 
 /**
  * Wraps the platform BLE advertiser with the bookkeeping previously inlined
- * in BleManager: a `pendingAdvertiseReason` gate so start calls can be
- * deferred while the GATT service is still being registered, a cooldown /
- * jitter-based restart scheduler, and a single place for the
- * AdvertiseCallback lifecycle.
+ * in [BleTransportFacade]: a `pendingAdvertiseReason` gate so start calls
+ * can be deferred while the GATT service is still being registered, a
+ * cooldown / jitter-based restart scheduler, and a single place for the
+ * [AdvertiseCallback] lifecycle.
  *
- * This class does *not* depend on Nordic's ble library (Nordic's
- * Android-BLE-Library has no advertiser wrapper — its BleManager base class
- * is central-only). The name is consistent with the other `Nordic*`
- * peripheral-side helpers that live in this package.
+ * Note: the `Nordic*` class name prefix (and enclosing package) is a
+ * naming legacy from an earlier migration plan that considered depending
+ * on Nordic's Android-BLE-Library. This implementation does not use that
+ * library and is a pure `android.bluetooth.le` wrapper.
  */
 class NordicAdvertiser(
     private val mainHandler: Handler,

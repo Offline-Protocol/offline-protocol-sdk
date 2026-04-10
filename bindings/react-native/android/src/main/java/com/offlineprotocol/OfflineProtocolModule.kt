@@ -11,6 +11,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
+import com.offlineprotocol.ble.nordic.BleTransportFacade
+
 // Import generated UniFFI bindings
 import uniffi.offline_protocol.*
 
@@ -22,7 +24,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
-    private var bleManager: com.offlineprotocol.ble.nordic.BleTransportFacade? = null
+    private var bleManager: BleTransportFacade? = null
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
     private var reticulumManager: ReticulumManager? = null
@@ -318,7 +320,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             // Initialize BLE manager if BLE is enabled
             if (config.bleEnabled) {
-                bleManager = com.offlineprotocol.ble.nordic.BleTransportFacade(
+                bleManager = BleTransportFacade(
                     reactApplicationContext,
                     proto,
                     config.userId,
@@ -523,8 +525,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         "advertising" to true
                     ))
                     
-                    // bleStatusChanged(true) is called inside BleManager.start() after
-                    // advertising and scanning are both active — no backup timer needed.
+                    // bleStatusChanged(true) is called inside BleTransportFacade.start()
+                    // after advertising and scanning are both active — no backup timer needed.
                 } catch (e: Exception) {
                     android.util.Log.e(NAME, "❌ FAILED to start BLE Manager!", e)
                     android.util.Log.e(NAME, "Error type: ${e.javaClass.simpleName}")
@@ -1045,7 +1047,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "ble" -> {
                     // Start BLE manager if stopped
                     if (bleManager == null) {
-                        bleManager = com.offlineprotocol.ble.nordic.BleTransportFacade(
+                        bleManager = BleTransportFacade(
                             reactApplicationContext,
                             proto,
                             currentConfig?.userId ?: "unknown",
