@@ -461,8 +461,10 @@ class PeripheralGattServer(
                     }
                     listener.onInboundFragment(device, value)
                     if (responseNeeded) {
+                        // Response value is semantically ignored by centrals;
+                        // don't waste ATT bandwidth echoing the payload.
                         server.sendResponse(
-                            device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value,
+                            device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null,
                         )
                     }
                 } else {
@@ -515,7 +517,7 @@ class PeripheralGattServer(
                     }
                     if (responseNeeded) {
                         server.sendResponse(
-                            device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value,
+                            device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null,
                         )
                     }
                 } else {

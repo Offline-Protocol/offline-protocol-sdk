@@ -137,6 +137,10 @@ class BleTransportFacade(
         private const val AGGRESSIVE_DISCOVERY_PHASE_MS = 30_000L
         /** TTL for negative cache entries of verified non-mesh devices (ms) */
         private const val NON_MESH_CACHE_TTL_MS = 300_000L // 5 minutes
+        /** Initial backoff when updateSignedIdentity fails (MLS not ready etc.) */
+        private const val IDENTITY_REFRESH_MIN_BACKOFF_MS = 500L
+        /** Cap on the identity-refresh retry backoff */
+        private const val IDENTITY_REFRESH_MAX_BACKOFF_MS = 10_000L
 
         private fun uuidToLittleEndianBytes(uuid: UUID): ByteArray {
             val hexUuid = uuid.toString().uppercase().replace("-", "")
@@ -186,6 +190,11 @@ class BleTransportFacade(
     // reference is visible to binder-thread readers.
     @Volatile
     private var cachedSignedIdentity: com.offlineprotocol.mesh.SignedIdentityData? = null
+
+    // Backoff state for updateSignedIdentity retries when MLS is not yet
+    // initialized or signing fails. Main-thread only.
+    private var identityRefreshRetryScheduled: Boolean = false
+    private var identityRefreshRetryDelayMs: Long = IDENTITY_REFRESH_MIN_BACKOFF_MS
     
     // Verified peer identities (device address -> SignedIdentityData)
     private val verifiedPeerIdentities = ConcurrentHashMap<String, com.offlineprotocol.mesh.SignedIdentityData>()
@@ -442,7 +451,7 @@ class BleTransportFacade(
         }
         
         // Check permissions with detailed logging
-        Log.i(TAG, "🔐 Checking Bluetooth permissions (Android ${Build.VERSION.SDK_INT})...")
+        Log.i(TAG, "Checking Bluetooth permissions (Android ${Build.VERSION.SDK_INT})...")
         emitDiagnostic("info", "Checking Bluetooth permissions", mapOf("androidVersion" to Build.VERSION.SDK_INT))
         
         if (!checkPermissions()) {
@@ -453,38 +462,38 @@ class BleTransportFacade(
                 "Missing required Bluetooth permissions (BLUETOOTH, BLUETOOTH_ADMIN, ACCESS_FINE_LOCATION). " +
                 "Please grant permissions in app settings."
             }
-            Log.w(TAG, "❌ $errorMsg")
+            Log.w(TAG, "$errorMsg")
             emitDiagnostic("error", errorMsg)
             throw TransportException.PermissionDenied(errorMsg)
         }
         
         if (bluetoothAdapter?.isEnabled != true) {
             val errorMsg = "Bluetooth is not enabled. Please enable Bluetooth in Settings."
-            Log.w(TAG, "⚠️ $errorMsg")
+            Log.w(TAG, "$errorMsg")
             emitDiagnostic("error", errorMsg)
             throw TransportException.InvalidState(errorMsg)
         }
         
-        Log.i(TAG, "🚀 Starting BLE transport for device: $deviceId")
+        Log.i(TAG, "Starting BLE transport for device: $deviceId")
         emitDiagnostic("info", "Starting BLE transport", mapOf("deviceId" to deviceId))
         updateState(TransportState.STARTING)
         
         try {
             // Initialize scanner
-            Log.i(TAG, "📱 Initializing BLE scanner...")
+            Log.i(TAG, "Initializing BLE scanner...")
             bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
             if (bluetoothLeScanner == null) {
                 throw TransportException.InvalidState("BLE scanner is not available")
             }
             
             // Initialize advertiser
-            Log.i(TAG, "📡 Initializing BLE advertiser...")
+            Log.i(TAG, "Initializing BLE advertiser...")
             val advertiser = bluetoothAdapter.bluetoothLeAdvertiser
                 ?: throw TransportException.InvalidState("BLE advertiser is not available")
             leAdvertiser.attachAdvertiser(advertiser)
             
             // Setup GATT server
-            Log.i(TAG, "🔧 Setting up GATT server...")
+            Log.i(TAG, "Setting up GATT server...")
             setupGattServer()
 
             transportStartAt = System.currentTimeMillis()
@@ -492,11 +501,11 @@ class BleTransportFacade(
             refreshSelfMetrics()
             
             // Start advertising
-            Log.i(TAG, "📢 Starting BLE advertising...")
+            Log.i(TAG, "Starting BLE advertising...")
             startAdvertising("start")
             
             // Start scanning
-            Log.i(TAG, "🔍 Starting BLE scanning...")
+            Log.i(TAG, "Starting BLE scanning...")
             startScanning("start")
             
             // Start fragment polling
@@ -506,22 +515,22 @@ class BleTransportFacade(
             mainHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
             
             updateState(TransportState.RUNNING)
-            Log.i(TAG, "✅ BLE Manager started successfully - calling bleStatusChanged(true)")
+            Log.i(TAG, "BLE Manager started successfully - calling bleStatusChanged(true)")
             emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
             
             try {
                 protocol.bleStatusChanged(true)
-                Log.i(TAG, "✅ Successfully called protocol.bleStatusChanged(true)")
+                Log.i(TAG, "Successfully called protocol.bleStatusChanged(true)")
                 emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to call protocol.bleStatusChanged(true): ${e.message}", e)
+                Log.e(TAG, "Failed to call protocol.bleStatusChanged(true): ${e.message}", e)
                 emitDiagnostic("error", "Failed to call protocol.bleStatusChanged(true)", mapOf(
                     "error" to (e.message ?: "unknown"),
                     "exception" to e.javaClass.simpleName
                 ))
             }
             
-            Log.i(TAG, "✅ BLE transport ready - scanning and advertising active")
+            Log.i(TAG, "BLE transport ready - scanning and advertising active")
             emitDiagnostic(
                 "info",
                 "BLE manager running",
@@ -605,6 +614,11 @@ class BleTransportFacade(
         peripheralGattServer = null
         leAdvertiser.shutdown()
 
+        // Reset identity refresh backoff so a subsequent start() begins fresh.
+        identityRefreshRetryScheduled = false
+        identityRefreshRetryDelayMs = IDENTITY_REFRESH_MIN_BACKOFF_MS
+        cachedSignedIdentity = null
+
         updateState(TransportState.STOPPED)
         protocol.bleStatusChanged(false)
         
@@ -686,7 +700,7 @@ class BleTransportFacade(
         }
         
         if (missingPermissions.isNotEmpty()) {
-            Log.w(TAG, "⚠️ Missing Bluetooth permissions: ${missingPermissions.joinToString(", ")}")
+            Log.w(TAG, "Missing Bluetooth permissions: ${missingPermissions.joinToString(", ")}")
             emitDiagnostic("error", "Missing Bluetooth permissions", mapOf(
                 "missingPermissions" to missingPermissions,
                 "androidVersion" to Build.VERSION.SDK_INT
@@ -694,7 +708,7 @@ class BleTransportFacade(
             return false
         }
         
-        Log.d(TAG, "✅ All Bluetooth permissions granted (Android ${Build.VERSION.SDK_INT})")
+        Log.d(TAG, "All Bluetooth permissions granted (Android ${Build.VERSION.SDK_INT})")
         return true
     }
     
@@ -715,8 +729,12 @@ class BleTransportFacade(
 
             // Prime cached identity synchronously so the first GATT read from
             // a central can be served off the volatile cache without the
-            // binder thread ever calling back into UniFFI.
-            updateSignedIdentity()
+            // binder thread ever calling back into UniFFI. If MLS isn't up
+            // yet, queue a bounded-backoff retry so we don't leave the cache
+            // stuck null forever.
+            if (!updateSignedIdentity()) {
+                ensureIdentityRefreshScheduled()
+            }
 
             server.start(
                 serviceUuid = SERVICE_UUID,
@@ -748,12 +766,16 @@ class BleTransportFacade(
      * binder callback thread, because each call potentially blocks on the
      * protocol mutex and stalls every pending GATT operation for the
      * affected central.
+     *
+     * Returns true if the cache was successfully refreshed. Returns false
+     * if MLS is not yet initialized or signing threw — in which case the
+     * caller should arrange a retry via [ensureIdentityRefreshScheduled].
      */
-    private fun updateSignedIdentity() {
+    private fun updateSignedIdentity(): Boolean {
         try {
             if (!protocol.isMlsInitialized()) {
                 Log.d(TAG, "MLS not initialized, cannot create signed identity")
-                return
+                return false
             }
 
             val publicKey = protocol.getIdentityPublicKey()
@@ -766,11 +788,42 @@ class BleTransportFacade(
                 signature = signature.map { it.toByte() }.toByteArray(),
                 advertisementData = advertisementData
             )
+            identityRefreshRetryDelayMs = IDENTITY_REFRESH_MIN_BACKOFF_MS
             Log.d(TAG, "Updated signed identity for GATT serving")
+            return true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to create signed identity: ${e.message}", e)
             emitDiagnostic("warning", "Failed to create signed identity", mapOf("error" to (e.message ?: "unknown")))
+            return false
         }
+    }
+
+    /**
+     * Ensure the identity cache is eventually primed even when the first
+     * attempt failed (typically because MLS init hasn't landed yet).
+     * Schedules a single bounded-backoff retry on the main thread. Idempotent
+     * — calling while a retry is already queued is a no-op.
+     *
+     * Must be called from the main thread.
+     */
+    private fun ensureIdentityRefreshScheduled() {
+        if (identityRefreshRetryScheduled) return
+        if (cachedSignedIdentity != null) return
+        if (state != TransportState.RUNNING && state != TransportState.STARTING) return
+        identityRefreshRetryScheduled = true
+        val delay = identityRefreshRetryDelayMs
+        mainHandler.postDelayed({
+            identityRefreshRetryScheduled = false
+            if (state != TransportState.RUNNING && state != TransportState.STARTING) return@postDelayed
+            if (cachedSignedIdentity != null) return@postDelayed
+            if (!updateSignedIdentity()) {
+                identityRefreshRetryDelayMs = minOf(
+                    IDENTITY_REFRESH_MAX_BACKOFF_MS,
+                    identityRefreshRetryDelayMs * 2,
+                )
+                ensureIdentityRefreshScheduled()
+            }
+        }, delay)
     }
     
     private fun startScanning(reason: String = "manual") {
@@ -818,7 +871,7 @@ class BleTransportFacade(
                         SCAN_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
                         else -> "Unknown error $errorCode"
                     }
-                    Log.e(TAG, "❌ BLE scan failed: $errorMsg (code=$errorCode)")
+                    Log.e(TAG, "BLE scan failed: $errorMsg (code=$errorCode)")
                     isScanning = false
                     emitDiagnostic("error", "BLE scan failed", mapOf(
                         "errorCode" to errorCode,
@@ -1114,7 +1167,7 @@ class BleTransportFacade(
             discoveryLogTimestamps[address] = now
             val hasServiceUuid = serviceUuids?.any { it.uuid == SERVICE_UUID } == true
             val hasServiceData = serviceData != null
-            Log.d(TAG, "🔍 Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount, hasServiceUuid: $hasServiceUuid, hasServiceData: $hasServiceData)")
+            Log.d(TAG, "Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount, hasServiceUuid: $hasServiceUuid, hasServiceData: $hasServiceData)")
             emitDiagnostic(
                 "info",
                 "Discovered BLE device",
@@ -1254,7 +1307,7 @@ class BleTransportFacade(
                 // Check both full UUID and short form for cross-platform compatibility
                 if (uuid.uuid == SERVICE_UUID || uuid.toString().uppercase() == SERVICE_UUID.toString().uppercase()) {
                     if (logThrottler.shouldLog("service_uuid_match_$address", intervalMs = 30_000)) {
-                        Log.d(TAG, "✅ Device $address matches service UUID: ${uuid.uuid}")
+                        Log.d(TAG, "Device $address matches service UUID: ${uuid.uuid}")
                     }
                     return true
                 }
@@ -1267,7 +1320,7 @@ class BleTransportFacade(
         val scanRecordBytes = scanRecord?.bytes
         if (scanRecordBytes != null && containsServiceUuidInAdStructures(scanRecordBytes)) {
             if (logThrottler.shouldLog("service_uuid_bytes_match_$address", intervalMs = 30_000)) {
-                Log.d(TAG, "✅ Device $address matches service UUID in scan record AD structures")
+                Log.d(TAG, "Device $address matches service UUID in scan record AD structures")
             }
             return true
         }
@@ -1726,7 +1779,7 @@ class BleTransportFacade(
                 // But log if we have unsent fragments to help diagnose connection issues
                 if (hasUnsentFragments && logThrottler.shouldLog("unsent_fragments_no_new", intervalMs = 5000)) {
                     val recipientCount = pendingOutboundFragments.size
-                    Log.w(TAG, "⚠️ Have $recipientCount recipients with unsent fragments, but no new fragments to poll")
+                    Log.w(TAG, "Have $recipientCount recipients with unsent fragments, but no new fragments to poll")
                     emitDiagnostic("warning", "Unsent fragments blocking", mapOf(
                         "recipientCount" to recipientCount,
                         "recipients" to pendingOutboundFragments.keys.toList()
@@ -1737,7 +1790,7 @@ class BleTransportFacade(
                 return
             }
             
-            Log.i(TAG, "🚀 GOT FRAGMENT for recipient: ${fragment.recipientId}, size: ${fragment.data.size}")
+            Log.i(TAG, "GOT FRAGMENT for recipient: ${fragment.recipientId}, size: ${fragment.data.size}")
             emitDiagnostic("debug", "Polling got fragment", mapOf(
                 "recipientId" to fragment.recipientId,
                 "fragmentSize" to fragment.data.size
@@ -1792,7 +1845,7 @@ class BleTransportFacade(
             if (expired > 0) {
                 totalPendingOutboundFragments.addAndGet(-expired)
                 if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
-                    Log.w(TAG, "⚠️ Dropped $expired expired outbound fragments for $recipientId")
+                    Log.w(TAG, "Dropped $expired expired outbound fragments for $recipientId")
                     emitDiagnostic("warning", "Outbound fragments expired", mapOf(
                         "recipientId" to recipientId,
                         "expired" to expired,
@@ -1873,7 +1926,7 @@ class BleTransportFacade(
             //  Proactively try to connect if we don't have a connection
             // This helps resolve cases where fragments are queued but connection isn't established
             if (logThrottler.shouldLog("missing_gatt_$recipientId", intervalMs = 5000)) {
-                Log.w(TAG, "⚠️ No connected device for recipient: $recipientId - attempting to find and connect")
+                Log.w(TAG, "No connected device for recipient: $recipientId - attempting to find and connect")
                 emitDiagnostic("warning", "No connected device for BLE fragment - attempting connection", mapOf("recipientId" to recipientId))
             }
             
@@ -1891,7 +1944,7 @@ class BleTransportFacade(
             } else {
                 // We don't even know the address - this is a more serious issue
                 // The device ID might not be resolved yet or route might not exist
-                Log.w(TAG, "⚠️ Cannot resolve address for recipient: $recipientId")
+                Log.w(TAG, "Cannot resolve address for recipient: $recipientId")
             }
             return false
         }
@@ -2064,7 +2117,7 @@ class BleTransportFacade(
             val bytes = data.map { it.toUByte() }
             
             // Pass to protocol
-            Log.i(TAG, "📥 RECEIVED FRAGMENT from $senderId, size: ${data.size}")
+            Log.i(TAG, "RECEIVED FRAGMENT from $senderId, size: ${data.size}")
             emitDiagnostic("info", "Fragment received from BLE", mapOf(
                 "senderId" to senderId,
                 "fragmentSize" to data.size
@@ -2072,16 +2125,16 @@ class BleTransportFacade(
             
             try {
                 protocol.bleFragmentReceived(senderId, bytes)
-                Log.i(TAG, "✅ Fragment processed successfully for sender: $senderId")
+                Log.i(TAG, "Fragment processed successfully for sender: $senderId")
                 
                 // Drain all completed messages (a fragment may complete multiple messages)
                 var completedMessage = protocol.receiveMessage()
                 if (completedMessage == null) {
-                    Log.d(TAG, "📦 Fragment processed, waiting for more fragments to complete message")
+                    Log.d(TAG, "Fragment processed, waiting for more fragments to complete message")
                 }
                 while (completedMessage != null) {
-                    Log.i(TAG, "🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
-                    Log.i(TAG, "📬 Received message: $completedMessage")
+                    Log.i(TAG, "COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
+                    Log.i(TAG, "Received message: $completedMessage")
                     emitDiagnostic("info", "Complete message assembled from fragments", mapOf(
                         "senderId" to senderId,
                         "messageContent" to completedMessage
@@ -2090,7 +2143,7 @@ class BleTransportFacade(
                     completedMessage = protocol.receiveMessage()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error processing fragment from $senderId: ${e.message}", e)
+                Log.e(TAG, "Error processing fragment from $senderId: ${e.message}", e)
                 emitDiagnostic("error", "Error processing received fragment", mapOf(
                     "senderId" to senderId,
                     "fragmentSize" to data.size,
@@ -2132,7 +2185,7 @@ class BleTransportFacade(
                 // Drain all completed messages (a multi-fragment message may complete here)
                 var msg = protocol.receiveMessage()
                 while (msg != null) {
-                    Log.i(TAG, "🎉 Complete message assembled from queued fragments for $deviceId")
+                    Log.i(TAG, "Complete message assembled from queued fragments for $deviceId")
                     emitDiagnostic("info", "Complete message assembled from queued fragments", mapOf(
                         "senderId" to deviceId,
                         "messageContent" to msg
@@ -2433,7 +2486,7 @@ class BleTransportFacade(
         }
 
         override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
-            Log.i(TAG, "📥 MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
+            Log.i(TAG, "MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
             emitDiagnostic(
                 "info",
                 "GATT write request received",
@@ -2458,9 +2511,10 @@ class BleTransportFacade(
             // retry. See the comment on [updateSignedIdentity].
             val identity = cachedSignedIdentity?.encode()
             if (identity == null) {
-                // Trigger an out-of-band refresh on the main thread so the
-                // next read has something to return.
-                mainHandler.post { updateSignedIdentity() }
+                // Cache isn't primed yet — arrange a bounded-backoff refresh
+                // on the main thread so the next central read eventually
+                // succeeds instead of spinning forever on a permanent null.
+                mainHandler.post { ensureIdentityRefreshScheduled() }
                 return null
             }
             Log.d(TAG, "Sent signed identity to ${device.address}")
@@ -2548,9 +2602,9 @@ class BleTransportFacade(
                     connectionRetryCount.remove(address)
                     linkReady.remove(address)
                     try {
-                        Log.d(TAG, "🔎 Starting service discovery for $address")
+                        Log.d(TAG, "Starting service discovery for $address")
                         val discoveryStarted = gatt.discoverServices()
-                        Log.d(TAG, "🔎 Service discovery ${if (discoveryStarted) "started" else "FAILED"} for $address")
+                        Log.d(TAG, "Service discovery ${if (discoveryStarted) "started" else "FAILED"} for $address")
                         emitDiagnostic("debug", "Service discovery initiated", mapOf(
                             "address" to address,
                             "started" to discoveryStarted
@@ -2574,10 +2628,10 @@ class BleTransportFacade(
                             connections.removeGatt(address)
                         }
                     } catch (e: SecurityException) {
-                        Log.e(TAG, "❌ Permission denied discovering services", e)
+                        Log.e(TAG, "Permission denied discovering services", e)
                         emitDiagnostic("error", "Permission denied discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                     } catch (e: Exception) {
-                        Log.e(TAG, "❌ Error discovering services", e)
+                        Log.e(TAG, "Error discovering services", e)
                         emitDiagnostic("error", "Error discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                     }
                 }
@@ -2674,10 +2728,10 @@ class BleTransportFacade(
         
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             val address = gatt.device.address
-            Log.i(TAG, "🔎 onServicesDiscovered callback: $address, status=$status (${if (status == BluetoothGatt.GATT_SUCCESS) "SUCCESS" else "FAILED"})")
+            Log.i(TAG, "onServicesDiscovered callback: $address, status=$status (${if (status == BluetoothGatt.GATT_SUCCESS) "SUCCESS" else "FAILED"})")
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.e(TAG, "❌ Service discovery FAILED for $address, status=$status")
+                Log.e(TAG, "Service discovery FAILED for $address, status=$status")
                 emitDiagnostic("error", "Service discovery failed", mapOf("address" to address, "status" to status))
                 closeGattClient(gatt, "service_discovery_failed")
                 return
@@ -2685,7 +2739,7 @@ class BleTransportFacade(
 
             val service = gatt.getService(SERVICE_UUID)
             if (service == null) {
-                Log.w(TAG, "⚠️ Service UUID not found on $address. Available services: ${gatt.services.map { it.uuid }}")
+                Log.w(TAG, "Service UUID not found on $address. Available services: ${gatt.services.map { it.uuid }}")
                 emitDiagnostic("warning", "Offline protocol service not found", mapOf(
                     "address" to address,
                     "serviceCount" to gatt.services.size
@@ -2695,7 +2749,7 @@ class BleTransportFacade(
                 return
             }
 
-            Log.i(TAG, "✅ Found offline protocol service on $address")
+            Log.i(TAG, "Found offline protocol service on $address")
             emitDiagnostic("info", "GATT services discovered", mapOf("address" to address))
 
             // Kick off the first GATT operation only. Android's BLE stack
@@ -2709,22 +2763,22 @@ class BleTransportFacade(
             // connection "looks healthy" but no messages flow.
             val deviceIdChar = service.getCharacteristic(DEVICE_ID_CHAR_UUID)
             if (deviceIdChar == null) {
-                Log.w(TAG, "⚠️ Device ID characteristic NOT FOUND on $address")
+                Log.w(TAG, "Device ID characteristic NOT FOUND on $address")
                 emitDiagnostic("warning", "Device ID characteristic missing", mapOf("address" to address))
                 closeGattClient(gatt, "device_id_char_missing")
                 return
             }
 
-            Log.d(TAG, "📖 Reading device ID characteristic from $address")
+            Log.d(TAG, "Reading device ID characteristic from $address")
             try {
                 val readStarted = gatt.readCharacteristic(deviceIdChar)
                 if (!readStarted) {
-                    Log.w(TAG, "📖 readCharacteristic(deviceId) returned false for $address")
+                    Log.w(TAG, "readCharacteristic(deviceId) returned false for $address")
                     emitDiagnostic("warning", "readCharacteristic(deviceId) returned false", mapOf("address" to address))
                     closeGattClient(gatt, "device_id_read_rejected")
                 }
             } catch (e: SecurityException) {
-                Log.e(TAG, "❌ Permission denied reading characteristic", e)
+                Log.e(TAG, "Permission denied reading characteristic", e)
                 emitDiagnostic("error", "Permission denied reading device ID characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                 closeGattClient(gatt, "device_id_read_permission_denied")
             }
@@ -2732,10 +2786,10 @@ class BleTransportFacade(
         
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             val address = gatt.device.address
-            Log.i(TAG, "📖 onCharacteristicRead: $address, char=${characteristic.uuid}, status=$status")
+            Log.i(TAG, "onCharacteristicRead: $address, char=${characteristic.uuid}, status=$status")
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.w(TAG, "⚠️ Characteristic read failed for $address, char=${characteristic.uuid}, status=$status")
+                Log.w(TAG, "Characteristic read failed for $address, char=${characteristic.uuid}, status=$status")
                 emitDiagnostic("warning", "Characteristic read failed", mapOf(
                     "address" to address,
                     "char" to characteristic.uuid.toString(),
@@ -2760,16 +2814,16 @@ class BleTransportFacade(
             val address = gatt.device.address
             @Suppress("DEPRECATION")
             val deviceIdValue = characteristic.value?.toString(Charsets.UTF_8)
-            Log.i(TAG, "✅ Read device ID from $address: $deviceIdValue")
+            Log.i(TAG, "Read device ID from $address: $deviceIdValue")
 
             if (deviceIdValue.isNullOrEmpty()) {
-                Log.w(TAG, "⚠️ Empty or null device ID from $address")
+                Log.w(TAG, "Empty or null device ID from $address")
                 emitDiagnostic("warning", "Empty device ID characteristic value", mapOf("address" to address))
                 closeGattClient(gatt, "empty_device_id")
                 return
             }
 
-            Log.i(TAG, "📝 Mapping $address -> $deviceIdValue")
+            Log.i(TAG, "Mapping $address -> $deviceIdValue")
             connections.setDeviceIdentifier(address, deviceIdValue)
 
             val role = connections.consumePendingRole(address) ?: MeshRole.MEMBER
@@ -2812,7 +2866,7 @@ class BleTransportFacade(
             val service = gatt.getService(SERVICE_UUID)
             val identityChar = service?.getCharacteristic(IDENTITY_CHAR_UUID)
             if (identityChar == null) {
-                Log.w(TAG, "⚠️ Identity characteristic not found on $address, skipping to CCCD")
+                Log.w(TAG, "Identity characteristic not found on $address, skipping to CCCD")
                 enableNotificationsOnLink(gatt)
                 return
             }
@@ -2820,13 +2874,13 @@ class BleTransportFacade(
             try {
                 val started = gatt.readCharacteristic(identityChar)
                 if (!started) {
-                    Log.w(TAG, "⚠️ readCharacteristic(identity) returned false for $address; proceeding to CCCD")
+                    Log.w(TAG, "readCharacteristic(identity) returned false for $address; proceeding to CCCD")
                     emitDiagnostic("warning", "readCharacteristic(identity) returned false", mapOf("address" to address))
                     // Identity is non-blocking — skip to CCCD instead of tearing the link down.
                     enableNotificationsOnLink(gatt)
                 }
             } catch (e: SecurityException) {
-                Log.e(TAG, "❌ Permission denied reading identity characteristic", e)
+                Log.e(TAG, "Permission denied reading identity characteristic", e)
                 emitDiagnostic("error", "Permission denied reading identity characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                 enableNotificationsOnLink(gatt)
             }
@@ -2844,23 +2898,23 @@ class BleTransportFacade(
             val service = gatt.getService(SERVICE_UUID)
             val messageChar = service?.getCharacteristic(MESSAGE_CHAR_UUID)
             if (messageChar == null) {
-                Log.w(TAG, "⚠️ Message characteristic NOT FOUND on $address")
+                Log.w(TAG, "Message characteristic NOT FOUND on $address")
                 emitDiagnostic("warning", "Message characteristic missing", mapOf("address" to address))
                 closeGattClient(gatt, "message_char_missing")
                 return
             }
-            Log.d(TAG, "🔔 Enabling notifications for message characteristic on $address")
+            Log.d(TAG, "Enabling notifications for message characteristic on $address")
             try {
                 val notifyEnabled = gatt.setCharacteristicNotification(messageChar, true)
                 if (!notifyEnabled) {
-                    Log.w(TAG, "🔔 Local notification sink FAILED for $address")
+                    Log.w(TAG, "Local notification sink FAILED for $address")
                     emitDiagnostic("warning", "setCharacteristicNotification returned false", mapOf("address" to address))
                     closeGattClient(gatt, "set_notification_failed")
                     return
                 }
                 val cccd = messageChar.getDescriptor(PeripheralGattServer.CCCD_UUID)
                 if (cccd == null) {
-                    Log.w(TAG, "⚠️ CCCD descriptor missing on remote message characteristic for $address")
+                    Log.w(TAG, "CCCD descriptor missing on remote message characteristic for $address")
                     emitDiagnostic("warning", "Remote CCCD descriptor missing", mapOf("address" to address))
                     closeGattClient(gatt, "remote_cccd_missing")
                     return
@@ -2870,14 +2924,14 @@ class BleTransportFacade(
                         cccd,
                         BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
                     )
-                    Log.d(TAG, "🔔 CCCD write status=$cccdWriteStatus for $address")
+                    Log.d(TAG, "CCCD write status=$cccdWriteStatus for $address")
                     cccdWriteStatus == BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
                     cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                     @Suppress("DEPRECATION")
                     val queued = gatt.writeDescriptor(cccd)
-                    Log.d(TAG, "🔔 CCCD write ${if (queued) "queued" else "FAILED"} for $address")
+                    Log.d(TAG, "CCCD write ${if (queued) "queued" else "FAILED"} for $address")
                     queued
                 }
                 if (!cccdWriteOk) {
@@ -2886,7 +2940,7 @@ class BleTransportFacade(
                 }
                 // Success path waits for onDescriptorWrite to fire.
             } catch (e: SecurityException) {
-                Log.e(TAG, "❌ Permission denied setting notification", e)
+                Log.e(TAG, "Permission denied setting notification", e)
                 emitDiagnostic("error", "Permission denied enabling notifications", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                 closeGattClient(gatt, "set_notification_permission_denied")
             }
@@ -2898,7 +2952,7 @@ class BleTransportFacade(
                 return
             }
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.w(TAG, "⚠️ CCCD write failed for $address, status=$status; tearing link down")
+                Log.w(TAG, "CCCD write failed for $address, status=$status; tearing link down")
                 emitDiagnostic("warning", "CCCD write failed", mapOf(
                     "address" to address,
                     "status" to status,
@@ -2906,7 +2960,7 @@ class BleTransportFacade(
                 closeGattClient(gatt, "cccd_write_failed")
                 return
             }
-            Log.i(TAG, "✅ CCCD write acknowledged for $address — link ready")
+            Log.i(TAG, "CCCD write acknowledged for $address — link ready")
             emitDiagnostic("info", "BLE link ready", mapOf("address" to address))
             linkReady.add(address)
             // The link is now bidirectional: we can receive notifications and
@@ -2957,7 +3011,7 @@ class BleTransportFacade(
                     
                     // Derive the user ID from the public key
                     val derivedUserId = signedIdentity.deriveUserId()
-                    Log.i(TAG, "✅ Verified peer identity: $derivedUserId for $address")
+                    Log.i(TAG, "Verified peer identity: $derivedUserId for $address")
                     emitDiagnostic("info", "Verified peer identity", mapOf(
                         "address" to address,
                         "derivedUserId" to derivedUserId
@@ -2968,7 +3022,7 @@ class BleTransportFacade(
                     val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
                     protocol.learnRoute(derivedUserId, derivedUserId, 1.toUByte(), quality, 0u)
                 } else {
-                    Log.w(TAG, "⚠️ Invalid signature for peer $address")
+                    Log.w(TAG, "Invalid signature for peer $address")
                     emitDiagnostic("warning", "Invalid peer signature", mapOf("address" to address))
                 }
             } catch (e: Exception) {
@@ -2978,13 +3032,15 @@ class BleTransportFacade(
         }
         
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid == MESSAGE_CHAR_UUID) {
-                @Suppress("DEPRECATION")
-                val data = characteristic.value
-                if (data != null) {
-                    handleReceivedData(data, gatt.device.address)
-                }
-            }
+            if (characteristic.uuid != MESSAGE_CHAR_UUID) return
+            // Snapshot the value on the binder thread — characteristic.value
+            // is overwritten by the BLE stack on the next notification — then
+            // repost processing to the main thread so we never hold up a
+            // binder callback on the UniFFI mutex.
+            @Suppress("DEPRECATION")
+            val data = characteristic.value ?: return
+            val address = gatt.device.address
+            mainHandler.post { handleReceivedData(data, address) }
         }
     }
 }

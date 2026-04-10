@@ -132,7 +132,7 @@ class LeAdvertiser(
                         ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
                         else -> "Unknown error $errorCode"
                     }
-                    Log.e(TAG, "❌ BLE advertising failed: $errorMsg (code=$errorCode)")
+                    Log.e(TAG, "BLE advertising failed: $errorMsg (code=$errorCode)")
                     isAdvertising = false
                     // Drop the callback reference so a subsequent start() is
                     // allowed through the in-flight gate above.
@@ -216,7 +216,7 @@ class LeAdvertiser(
     fun onGattServerReady() {
         val reason = pendingAdvertiseReason ?: return
         pendingAdvertiseReason = null
-        Log.i(TAG, "📡 Starting deferred advertising after GATT service ready (reason=$reason)")
+        Log.i(TAG, "Starting deferred advertising after GATT service ready (reason=$reason)")
         // Caller is already on the main thread (the facade posts onReady
         // listener callbacks there), so start inline — no extra hop.
         start(reason)

@@ -12,7 +12,6 @@ set(RUST_LIB_PATH ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/liboffline_proto
 # Add JNI wrapper
 add_library(offline_protocol_jni SHARED
     offline_protocol_jni.cpp
-    ble_bridge.cpp
 )
 
 # Copy the Rust library to the output directory so it gets packaged in the APK
