@@ -2782,14 +2782,49 @@ class BleManager(
                         Log.w(TAG, "⚠️ Identity characteristic NOT FOUND on ${gatt.device.address}")
                     }
                     
-                    // Enable notifications for message characteristic
+                    // Enable notifications for message characteristic.
+                    //
+                    // Android's setCharacteristicNotification() only enables the
+                    // *local* receive path — it does NOT tell the remote peripheral
+                    // to start sending notifications. We must also write
+                    // ENABLE_NOTIFICATION_VALUE to the 0x2902 CCCD descriptor on
+                    // the remote peer. Without this write, the peripheral never
+                    // learns we want notifications and the notify stream is silent.
                     val messageChar = service.getCharacteristic(MESSAGE_CHAR_UUID)
                     if (messageChar != null) {
                         Log.d(TAG, "🔔 Enabling notifications for message characteristic on ${gatt.device.address}")
                         try {
                             val notifyEnabled = gatt.setCharacteristicNotification(messageChar, true)
-                            Log.d(TAG, "🔔 Notifications ${if (notifyEnabled) "enabled" else "FAILED"} for ${gatt.device.address}")
-                            emitDiagnostic("info", "Enabled notifications for message characteristic", mapOf("address" to gatt.device.address))
+                            Log.d(TAG, "🔔 Local notification sink ${if (notifyEnabled) "enabled" else "FAILED"} for ${gatt.device.address}")
+                            val cccd = messageChar.getDescriptor(NordicGattServer.CCCD_UUID)
+                            if (cccd != null) {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    @Suppress("DEPRECATION")
+                                    val cccdWriteStatus = gatt.writeDescriptor(
+                                        cccd,
+                                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
+                                    )
+                                    Log.d(TAG, "🔔 CCCD write status=$cccdWriteStatus for ${gatt.device.address}")
+                                } else {
+                                    @Suppress("DEPRECATION")
+                                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                    @Suppress("DEPRECATION")
+                                    val cccdWriteOk = gatt.writeDescriptor(cccd)
+                                    Log.d(TAG, "🔔 CCCD write ${if (cccdWriteOk) "queued" else "FAILED"} for ${gatt.device.address}")
+                                }
+                                emitDiagnostic(
+                                    "info",
+                                    "Enabled notifications for message characteristic",
+                                    mapOf("address" to gatt.device.address),
+                                )
+                            } else {
+                                Log.w(TAG, "⚠️ CCCD descriptor missing on remote message characteristic for ${gatt.device.address}")
+                                emitDiagnostic(
+                                    "warning",
+                                    "Remote CCCD descriptor missing",
+                                    mapOf("address" to gatt.device.address),
+                                )
+                            }
                         } catch (e: SecurityException) {
                             Log.e(TAG, "❌ Permission denied setting notification", e)
                             emitDiagnostic("error", "Permission denied enabling notifications", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
