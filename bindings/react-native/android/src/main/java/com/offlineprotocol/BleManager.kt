@@ -13,6 +13,7 @@ import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.offlineprotocol.ble.MeshConnectionRegistry
+import com.offlineprotocol.ble.nordic.NordicGattServer
 import com.offlineprotocol.mesh.MeshAdvertisementData
 import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.MeshController.ConnectionIntent
@@ -150,12 +151,13 @@ class BleManager(
     private var advertiseCallback: AdvertiseCallback? = null
     private var isAdvertising = false
     
-    // GATT Server (peripheral role)
-    private var gattServer: BluetoothGattServer? = null
-    private var messageCharacteristic: BluetoothGattCharacteristic? = null
-    private var deviceIdCharacteristic: BluetoothGattCharacteristic? = null
-    private var identityCharacteristic: BluetoothGattCharacteristic? = null
-    @Volatile private var isGattServiceReady = false
+    // GATT Server (peripheral role).
+    // Delegated to NordicGattServer so that:
+    //   - the NOTIFY characteristic always carries a CCCD (0x2902) descriptor
+    //   - onDescriptorWriteRequest is handled and subscribed centrals are tracked
+    //   - service registration has a 5-second watchdog with one retry
+    // The old inline setupGattServer/gattServerCallback path missed all three.
+    private var nordicGattServer: NordicGattServer? = null
     @Volatile private var pendingAdvertiseReason: String? = null
     
     // Cached signed identity data for serving via GATT
@@ -545,10 +547,9 @@ class BleManager(
         lastProactiveScanRefresh = 0L
         lastForcedBleRefresh = 0L
         
-        // Close GATT server
-        gattServer?.close()
-        gattServer = null
-        isGattServiceReady = false
+        // Close GATT server (stops service, clears subscribed centrals, drops refs).
+        nordicGattServer?.stop()
+        nordicGattServer = null
         pendingAdvertiseReason = null
         
         updateState(TransportState.STOPPED)
@@ -646,45 +647,31 @@ class BleManager(
     
     private fun setupGattServer() {
         try {
-            // Reset flag - service registration is asynchronous
-            isGattServiceReady = false
-            
-            gattServer = bluetoothManager.openGattServer(context, gattServerCallback)
-            
-            // Create message characteristic (write without response + notify)
-            messageCharacteristic = BluetoothGattCharacteristic(
-                MESSAGE_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                BluetoothGattCharacteristic.PERMISSION_WRITE
+            // Dispose any previous server before starting a new one.
+            nordicGattServer?.stop()
+
+            val server = NordicGattServer(
+                context = context,
+                mainHandler = mainHandler,
+                listener = gattServerListener,
+                diagnosticEmitter = { level, message, ctx ->
+                    emitDiagnostic(level, message, ctx)
+                },
             )
-            
-            // Create device ID characteristic (read)
-            deviceIdCharacteristic = BluetoothGattCharacteristic(
-                DEVICE_ID_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ
-            )
-            deviceIdCharacteristic?.value = deviceId.toByteArray(Charsets.UTF_8)
-            
-            // Create identity characteristic (read) - contains public key + signature
-            identityCharacteristic = BluetoothGattCharacteristic(
-                IDENTITY_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ
-            )
-            // Value is set dynamically when advertising starts via updateSignedIdentity()
-            // Note: If this fails, we still continue with service setup - identity is optional for discovery
+            nordicGattServer = server
+
+            // Seed the device-ID characteristic value immediately; identity gets
+            // populated asynchronously via updateSignedIdentity() once MLS is ready.
+            server.updateDeviceIdValue(deviceId.toByteArray(Charsets.UTF_8))
             updateSignedIdentity()
-            
-            // Create service
-            val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-            service.addCharacteristic(messageCharacteristic)
-            service.addCharacteristic(deviceIdCharacteristic)
-            service.addCharacteristic(identityCharacteristic)
-            
-            // Add service to GATT server (asynchronous - callback in onServiceAdded)
-            gattServer?.addService(service)
-            
+
+            server.start(
+                serviceUuid = SERVICE_UUID,
+                messageUuid = MESSAGE_CHAR_UUID,
+                deviceIdUuid = DEVICE_ID_CHAR_UUID,
+                identityUuid = IDENTITY_CHAR_UUID,
+            )
+
             Log.i(TAG, "GATT server setup initiated, waiting for service registration callback...")
             emitDiagnostic("info", "GATT server setup initiated")
         } catch (e: SecurityException) {
@@ -730,7 +717,7 @@ class BleManager(
             
             // Update the GATT characteristic value
             cachedSignedIdentity?.let { identity ->
-                identityCharacteristic?.value = identity.encode()
+                nordicGattServer?.updateIdentityValue(identity.encode())
                 Log.d(TAG, "Updated signed identity for GATT serving")
             }
         } catch (e: Exception) {
@@ -972,7 +959,7 @@ class BleManager(
         if (isAdvertising) return
         
         // Wait for GATT service to be ready before advertising
-        if (!isGattServiceReady) {
+        if (nordicGattServer?.isReady != true) {
             pendingAdvertiseReason = reason
             if (logThrottler.shouldLog("advert_waiting_gatt", intervalMs = 5000)) {
                 Log.i(TAG, "Waiting for GATT service to be ready before advertising (reason: $reason)")
@@ -2384,174 +2371,144 @@ class BleManager(
         connectToDevice(device)
     }
     
-    // MARK: - GATT Server Callback
-    
-    private val gattServerCallback = object : BluetoothGattServerCallback() {
-        override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "✅ GATT service added successfully: ${service?.uuid}")
-                emitDiagnostic("info", "GATT service registered successfully", mapOf(
-                    "serviceUUID" to (service?.uuid?.toString() ?: "unknown")
-                ))
-                isGattServiceReady = true
-                
-                // Start advertising now that the service is ready
-                val reason = pendingAdvertiseReason
-                if (reason != null) {
-                    pendingAdvertiseReason = null
-                    Log.i(TAG, "📡 Starting deferred advertising after GATT service ready")
-                    mainHandler.post {
-                        startAdvertising("gatt_service_ready")
-                    }
-                }
-            } else {
-                Log.e(TAG, "❌ Error adding GATT service: status=$status")
-                emitDiagnostic("error", "Error adding GATT service", mapOf(
-                    "status" to status,
-                    "serviceUUID" to (service?.uuid?.toString() ?: "unknown")
-                ))
-                isGattServiceReady = false
-            }
-        }
-        
-        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    val observation = lastSeenMeshAdvertisements[device.address]
-                    val decision = meshController.shouldAcceptInboundConnection(
-                        connections.deviceIdForAddress(device.address),
-                        observation?.advertisement,
-                        observation?.rssi
-                    )
-                    if (decision.evictPeerId != null) {
-                        evictPeer(decision.evictPeerId, "inbound_swap")
-                    }
-                    if (decision.intent == ConnectionIntent.REJECTED) {
-                        Log.w(TAG, "Rejecting inbound connection from ${device.address}: ${decision.reason}")
-                        gattServer?.cancelConnection(device)
-                        return
-                    }
-                    // Check connection capacity
-                    if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
-                        Log.w(TAG, "Rejecting inbound connection from ${device.address}: connection cap reached")
-                        gattServer?.cancelConnection(device)
-                        return
-                    }
-                    val role = when (decision.intent) {
-                        ConnectionIntent.INTER_CLUSTER -> MeshRole.BRIDGE
-                        ConnectionIntent.INTRA_CLUSTER, ConnectionIntent.REJECTED -> MeshRole.MEMBER
-                    }
-                    connections.trackServerConnection(device.address)
-                    connections.setPendingRole(device.address, role)
-                    connectedCentrals[device.address] = System.currentTimeMillis()
-                    Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
-                    emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
-                }
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    val address = device.address
-                    connections.untrackServerConnection(address)
-                    connections.consumePendingRole(address)
-                    connectedCentrals.remove(address)
-                    // Don't immediately remove - connection might be re-established
-                    // Only remove if it's a permanent error (status != 0)
-                    if (status != 0 && status != 19) { // Not normal disconnect or connection timeout
-                        lastSeenRssi.remove(address)
-                        connections.deviceIdForAddress(address)?.let { peerId ->
-                            // Clean up routes through this neighbor
-                            protocol.removeNeighborRoutes(peerId)
-                            try {
-                                protocol.blePeerLost(peerId)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error notifying peer lost", e)
-                                emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                            }
-                            meshController.registerDisconnection(peerId)
-                            refreshSelfMetrics()
-                            connections.removeIdentifiersForAddress(address)
-                            deviceIdResolutionAttempts.remove(address)
-                            connections.removeConnectionRole(peerId)
-                            mainHandler.post {
-                                if (state == TransportState.RUNNING) {
-                                    refreshAdvertising("membership_change")
-                                }
-                            }
-                            maybeHandleRebalance("disconnect")
-                        }
-                    }
+    // MARK: - GATT Server Listener
+    //
+    // Bridges NordicGattServer callbacks into BleManager state. The
+    // onReady / onSetupFailed / onInboundFragment / provide* hooks fire on
+    // the platform's binder thread just like the old BluetoothGattServerCallback
+    // did, so the body follows the same threading rules as before.
+
+    private val gattServerListener = object : NordicGattServer.Listener {
+        override fun onReady() {
+            // Drain any deferred advertise request now that the GATT service
+            // registration has landed successfully.
+            val reason = pendingAdvertiseReason
+            if (reason != null) {
+                pendingAdvertiseReason = null
+                Log.i(TAG, "📡 Starting deferred advertising after GATT service ready")
+                mainHandler.post {
+                    startAdvertising("gatt_service_ready")
                 }
             }
         }
-        
-        override fun onCharacteristicReadRequest(
-            device: BluetoothDevice,
-            requestId: Int,
-            offset: Int,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            try {
-                when (characteristic.uuid) {
-                    DEVICE_ID_CHAR_UUID -> {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, characteristic.value)
-                        Log.d(TAG, "Sent device ID to ${device.address}")
-                    }
-                    IDENTITY_CHAR_UUID -> {
-                        // Ensure we have fresh signed identity data
-                        if (identityCharacteristic?.value == null) {
-                            updateSignedIdentity()
-                        }
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, identityCharacteristic?.value)
-                        Log.d(TAG, "Sent signed identity to ${device.address}")
-                    }
-                    else -> {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
-                    }
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied in read request", e)
-                emitDiagnostic("error", "Permission denied in characteristic read", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-            }
+
+        override fun onSetupFailed(reason: String) {
+            Log.e(TAG, "GATT server setup failed: $reason")
+            emitDiagnostic(
+                "error",
+                "gatt_server_setup_failed",
+                mapOf("reason" to reason),
+            )
+            listener?.onTransportError(
+                this@BleManager,
+                TransportException.StartFailed("GATT server setup failed: $reason"),
+            )
         }
-        
-        override fun onCharacteristicWriteRequest(
-            device: BluetoothDevice,
-            requestId: Int,
-            characteristic: BluetoothGattCharacteristic,
-            preparedWrite: Boolean,
-            responseNeeded: Boolean,
-            offset: Int,
-            value: ByteArray
-        ) {
-            try {
-                Log.i(TAG, "📨 GATT WRITE REQUEST from ${device.address}, char: ${characteristic.uuid}, size: ${value.size}")
-                emitDiagnostic("info", "GATT write request received", mapOf(
+
+        override fun onCentralConnected(device: BluetoothDevice) {
+            handleCentralConnectedUnsafe(device)
+        }
+
+        override fun onCentralDisconnected(device: BluetoothDevice, status: Int) {
+            handleCentralDisconnectedUnsafe(device, status)
+        }
+
+        override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
+            Log.i(TAG, "📥 MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
+            emitDiagnostic(
+                "info",
+                "GATT write request received",
+                mapOf(
                     "deviceAddress" to device.address,
-                    "characteristicUuid" to characteristic.uuid.toString(),
-                    "dataSize" to value.size,
-                    "responseNeeded" to responseNeeded
-                ))
-                
-                if (characteristic.uuid == MESSAGE_CHAR_UUID) {
-                    Log.i(TAG, "📥 MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
-                    // Handle incoming fragment
-                    handleReceivedData(value, device.address)
-                    
-                    if (responseNeeded) {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
-                        Log.d(TAG, "✅ Sent GATT_SUCCESS response to ${device.address}")
-                    }
-                } else {
-                    Log.w(TAG, "❌ Unknown characteristic write: ${characteristic.uuid}")
-                    if (responseNeeded) {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                    "dataSize" to bytes.size,
+                ),
+            )
+            handleReceivedData(bytes, device.address)
+        }
+
+        override fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray? {
+            Log.d(TAG, "Sent device ID to ${device.address}")
+            return deviceId.toByteArray(Charsets.UTF_8)
+        }
+
+        override fun provideIdentityBytes(device: BluetoothDevice): ByteArray? {
+            val server = nordicGattServer ?: return null
+            if (!server.hasIdentityValue()) {
+                updateSignedIdentity()
+            }
+            val identity = cachedSignedIdentity?.encode()
+            if (identity != null) {
+                Log.d(TAG, "Sent signed identity to ${device.address}")
+            }
+            return identity
+        }
+    }
+
+    private fun handleCentralConnectedUnsafe(device: BluetoothDevice) {
+        val observation = lastSeenMeshAdvertisements[device.address]
+        val decision = meshController.shouldAcceptInboundConnection(
+            connections.deviceIdForAddress(device.address),
+            observation?.advertisement,
+            observation?.rssi
+        )
+        if (decision.evictPeerId != null) {
+            evictPeer(decision.evictPeerId, "inbound_swap")
+        }
+        if (decision.intent == ConnectionIntent.REJECTED) {
+            Log.w(TAG, "Rejecting inbound connection from ${device.address}: ${decision.reason}")
+            nordicGattServer?.cancelConnection(device)
+            return
+        }
+        // Check connection capacity
+        if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+            Log.w(TAG, "Rejecting inbound connection from ${device.address}: connection cap reached")
+            nordicGattServer?.cancelConnection(device)
+            return
+        }
+        val role = when (decision.intent) {
+            ConnectionIntent.INTER_CLUSTER -> MeshRole.BRIDGE
+            ConnectionIntent.INTRA_CLUSTER, ConnectionIntent.REJECTED -> MeshRole.MEMBER
+        }
+        connections.trackServerConnection(device.address)
+        connections.setPendingRole(device.address, role)
+        connectedCentrals[device.address] = System.currentTimeMillis()
+        Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
+        emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
+    }
+
+    private fun handleCentralDisconnectedUnsafe(device: BluetoothDevice, status: Int) {
+        val address = device.address
+        connections.untrackServerConnection(address)
+        connections.consumePendingRole(address)
+        connectedCentrals.remove(address)
+        // Don't immediately remove - connection might be re-established
+        // Only remove if it's a permanent error (status != 0)
+        if (status != 0 && status != 19) { // Not normal disconnect or connection timeout
+            lastSeenRssi.remove(address)
+            connections.deviceIdForAddress(address)?.let { peerId ->
+                // Clean up routes through this neighbor
+                protocol.removeNeighborRoutes(peerId)
+                try {
+                    protocol.blePeerLost(peerId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error notifying peer lost", e)
+                    emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                }
+                meshController.registerDisconnection(peerId)
+                refreshSelfMetrics()
+                connections.removeIdentifiersForAddress(address)
+                deviceIdResolutionAttempts.remove(address)
+                connections.removeConnectionRole(peerId)
+                mainHandler.post {
+                    if (state == TransportState.RUNNING) {
+                        refreshAdvertising("membership_change")
                     }
                 }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied in write request", e)
-                emitDiagnostic("error", "Permission denied in characteristic write", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                maybeHandleRebalance("disconnect")
             }
         }
     }
-    
+
     // MARK: - GATT Client Callback
     
     private val gattClientCallback = object : BluetoothGattCallback() {
