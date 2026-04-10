@@ -22,7 +22,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
-    private var bleManager: BleManager? = null
+    private var bleManager: com.offlineprotocol.ble.nordic.BleTransportFacade? = null
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
     private var reticulumManager: ReticulumManager? = null
@@ -318,7 +318,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             // Initialize BLE manager if BLE is enabled
             if (config.bleEnabled) {
-                bleManager = BleManager(reactApplicationContext, proto, config.userId) { level, message, context ->
+                bleManager = com.offlineprotocol.ble.nordic.BleTransportFacade(
+                    reactApplicationContext,
+                    proto,
+                    config.userId,
+                ) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
                     manager.listener = object : TransportManagerListener {
@@ -1041,7 +1045,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 "ble" -> {
                     // Start BLE manager if stopped
                     if (bleManager == null) {
-                        bleManager = BleManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                        bleManager = com.offlineprotocol.ble.nordic.BleTransportFacade(
+                            reactApplicationContext,
+                            proto,
+                            currentConfig?.userId ?: "unknown",
+                        ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
                         emitDiagnostic("info", "BLE manager created on demand")
