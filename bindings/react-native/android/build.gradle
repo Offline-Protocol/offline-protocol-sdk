@@ -61,15 +61,24 @@ repositories {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib"
-    
+
     // JNA required for UniFFI-generated Kotlin bindings
     implementation 'net.java.dev.jna:jna:5.13.0@aar'
-    
+
     // OkHttp for WebSocket support in InternetManager
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    
+
     // AndroidX Security Crypto for MlsSecureStorage
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+
+    // Nordic Android BLE library - battle-tested central-side GATT stack
+    // (op queue, automatic CCCD on enableNotifications, MTU, 133 retry).
+    // GATT server side is still hand-rolled in NordicGattServer.kt.
+    implementation 'no.nordicsemi.android:ble:2.11.0'
+    implementation 'no.nordicsemi.android:ble-ktx:2.11.0'
+
+    // Required transitively by ble-ktx
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     
     if (reactNativeExists) {
         implementation 'com.facebook.react:react-android'
