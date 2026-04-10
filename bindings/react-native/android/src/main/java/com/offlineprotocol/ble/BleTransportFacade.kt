@@ -1,4 +1,4 @@
-package com.offlineprotocol.ble.nordic
+package com.offlineprotocol.ble
 
 import android.Manifest
 import android.bluetooth.*
@@ -17,7 +17,6 @@ import com.offlineprotocol.TransportException
 import com.offlineprotocol.TransportManager
 import com.offlineprotocol.TransportManagerListener
 import com.offlineprotocol.TransportState
-import com.offlineprotocol.ble.MeshConnectionRegistry
 import com.offlineprotocol.optNullableString
 import com.offlineprotocol.mesh.MeshAdvertisementData
 import com.offlineprotocol.mesh.MeshController
@@ -47,16 +46,16 @@ private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
 }
 
 /**
- * BLE transport facade implementing [TransportManager] for Bluetooth Low Energy
- * communication. Ensures iOS ↔ Android cross-platform compatibility.
+ * BLE transport facade implementing [TransportManager] for Bluetooth Low
+ * Energy communication. Ensures iOS ↔ Android cross-platform compatibility.
  *
- * The peripheral GATT server is delegated to [NordicGattServer] (which
+ * The peripheral GATT server is delegated to [PeripheralGattServer] (which
  * attaches a CCCD descriptor to every notify characteristic and runs a
- * service-ready watchdog), advertising is delegated to [NordicAdvertiser],
- * and connection bookkeeping lives in [MeshConnectionRegistry]. The
- * central-role path (scanning + the GATT client callback + mesh
- * orchestration + fragment accounting) still lives in this class — it is
- * the next slice of the migration and its size is why this file is large.
+ * service-ready watchdog), advertising is delegated to [LeAdvertiser], and
+ * connection bookkeeping lives in [MeshConnectionRegistry]. The central-role
+ * path (scanning + the GATT client callback + mesh orchestration + fragment
+ * accounting) still lives in this class — it is the next slice of the
+ * migration and its size is why this file is large.
  */
 class BleTransportFacade(
     private val context: Context,
@@ -97,9 +96,6 @@ class BleTransportFacade(
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
         private const val MAX_CONNECTIONS_PER_DEVICE = 4
-        private const val ADVERTISE_RESTART_MIN_MS = 200L
-        private const val ADVERTISE_RESTART_MAX_MS = 1200L
-        private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
         private const val MIN_RECONNECT_INTERVAL_MS = 5_000L // Match iOS timing
         private const val MAX_RECONNECT_INTERVAL_MS = 60_000L
         private const val MAX_CONNECTION_RETRIES = 5
@@ -160,14 +156,14 @@ class BleTransportFacade(
     private var scanCallback: ScanCallback? = null
     private var isScanning = false
     
-    // Advertiser component (delegates to NordicAdvertiser).
-    // Lazy so its construction sees mainHandler / logThrottler / nordicGattServer
+    // Advertiser component (delegates to LeAdvertiser).
+    // Lazy so its construction sees mainHandler / logThrottler / peripheralGattServer
     // which are declared later in this file.
-    private val nordicAdvertiser: NordicAdvertiser by lazy(LazyThreadSafetyMode.NONE) {
-        NordicAdvertiser(
+    private val leAdvertiser: LeAdvertiser by lazy(LazyThreadSafetyMode.NONE) {
+        LeAdvertiser(
             mainHandler = mainHandler,
-            host = object : NordicAdvertiser.Host {
-                override fun isGattServerReady(): Boolean = nordicGattServer?.isReady == true
+            host = object : LeAdvertiser.Host {
+                override fun isGattServerReady(): Boolean = peripheralGattServer?.isReady == true
                 override fun buildAdvertiseData() = this@BleTransportFacade.buildAdvertiseData()
                 override fun buildScanResponse() = this@BleTransportFacade.buildScanResponse()
                 override fun onBeforeRefresh() { updateSignedIdentity() }
@@ -178,13 +174,11 @@ class BleTransportFacade(
         )
     }
 
-    // GATT Server (peripheral role).
-    // Delegated to NordicGattServer so that:
-    //   - the NOTIFY characteristic always carries a CCCD (0x2902) descriptor
-    //   - onDescriptorWriteRequest is handled and subscribed centrals are tracked
-    //   - service registration has a 5-second watchdog with one retry
-    // The old inline setupGattServer/gattServerCallback path missed all three.
-    private var nordicGattServer: NordicGattServer? = null
+    // GATT Server (peripheral role). Delegated to [PeripheralGattServer] so
+    // that the NOTIFY characteristic always carries a CCCD descriptor,
+    // descriptor writes are acked, service registration has a watchdog, and
+    // long reads honour offsets.
+    private var peripheralGattServer: PeripheralGattServer? = null
     
     // Cached signed identity data for serving via GATT
     // Read by provideIdentityBytes() on the binder thread; written by
@@ -391,7 +385,7 @@ class BleTransportFacade(
                 
                 // Re-initialize scanner and advertiser
                 bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
-                nordicAdvertiser.attachAdvertiser(bluetoothAdapter?.bluetoothLeAdvertiser)
+                leAdvertiser.attachAdvertiser(bluetoothAdapter?.bluetoothLeAdvertiser)
                 
                 // Restart after a brief delay
                 mainHandler.postDelayed({
@@ -487,7 +481,7 @@ class BleTransportFacade(
             Log.i(TAG, "📡 Initializing BLE advertiser...")
             val advertiser = bluetoothAdapter.bluetoothLeAdvertiser
                 ?: throw TransportException.InvalidState("BLE advertiser is not available")
-            nordicAdvertiser.attachAdvertiser(advertiser)
+            leAdvertiser.attachAdvertiser(advertiser)
             
             // Setup GATT server
             Log.i(TAG, "🔧 Setting up GATT server...")
@@ -607,9 +601,9 @@ class BleTransportFacade(
         lastForcedBleRefresh = 0L
 
         // Close GATT server (stops service, clears subscribed centrals, drops refs).
-        nordicGattServer?.stop()
-        nordicGattServer = null
-        nordicAdvertiser.shutdown()
+        peripheralGattServer?.stop()
+        peripheralGattServer = null
+        leAdvertiser.shutdown()
 
         updateState(TransportState.STOPPED)
         protocol.bleStatusChanged(false)
@@ -707,9 +701,9 @@ class BleTransportFacade(
     private fun setupGattServer() {
         try {
             // Dispose any previous server before starting a new one.
-            nordicGattServer?.stop()
+            peripheralGattServer?.stop()
 
-            val server = NordicGattServer(
+            val server = PeripheralGattServer(
                 context = context,
                 mainHandler = mainHandler,
                 listener = gattServerListener,
@@ -717,11 +711,11 @@ class BleTransportFacade(
                     emitDiagnostic(level, message, ctx)
                 },
             )
-            nordicGattServer = server
+            peripheralGattServer = server
 
-            // Seed the device-ID characteristic value immediately; identity gets
-            // populated asynchronously via updateSignedIdentity() once MLS is ready.
-            server.updateDeviceIdValue(deviceId.toByteArray(Charsets.UTF_8))
+            // Prime cached identity synchronously so the first GATT read from
+            // a central can be served off the volatile cache without the
+            // binder thread ever calling back into UniFFI.
             updateSignedIdentity()
 
             server.start(
@@ -747,8 +741,13 @@ class BleTransportFacade(
     }
     
     /**
-     * Updates the signed identity data for GATT serving.
-     * Signs the current advertisement data with the identity private key.
+     * Refresh [cachedSignedIdentity] by signing the current advertisement
+     * data with the identity private key. Must only be called from threads
+     * that are allowed to block on UniFFI (main thread and advertisement
+     * refresh callers); it must **never** be called from the GATT server's
+     * binder callback thread, because each call potentially blocks on the
+     * protocol mutex and stalls every pending GATT operation for the
+     * affected central.
      */
     private fun updateSignedIdentity() {
         try {
@@ -756,29 +755,18 @@ class BleTransportFacade(
                 Log.d(TAG, "MLS not initialized, cannot create signed identity")
                 return
             }
-            
-            // Get the public key (List<UByte> from UniFFI)
+
             val publicKey = protocol.getIdentityPublicKey()
-            
-            // Get current advertisement data
             val meshData = meshController.toAdvertisement()
             val advertisementData = meshData.encode()
-            
-            // Sign the advertisement data (convert ByteArray to List<UByte> for UniFFI)
             val signature = protocol.signData(advertisementData.map { it.toUByte() })
-            
-            // Create the signed identity (convert List<UByte> to ByteArray)
+
             cachedSignedIdentity = com.offlineprotocol.mesh.SignedIdentityData(
                 publicKey = publicKey.map { it.toByte() }.toByteArray(),
                 signature = signature.map { it.toByte() }.toByteArray(),
                 advertisementData = advertisementData
             )
-            
-            // Update the GATT characteristic value
-            cachedSignedIdentity?.let { identity ->
-                nordicGattServer?.updateIdentityValue(identity.encode())
-                Log.d(TAG, "Updated signed identity for GATT serving")
-            }
+            Log.d(TAG, "Updated signed identity for GATT serving")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to create signed identity: ${e.message}", e)
             emitDiagnostic("warning", "Failed to create signed identity", mapOf("error" to (e.message ?: "unknown")))
@@ -1014,21 +1002,21 @@ class BleTransportFacade(
         connectionMonitorRunnable = null
     }
     
-    // Advertising is owned by NordicAdvertiser. These thin wrappers preserve
+    // Advertising is owned by LeAdvertiser. These thin wrappers preserve
     // the existing call sites in this file (refreshAdvertising / stopAdvertising
     // are invoked from many places) without threading the delegate object
     // through every caller.
 
     private fun startAdvertising(reason: String = "manual") {
-        nordicAdvertiser.start(reason)
+        leAdvertiser.start(reason)
     }
 
     private fun stopAdvertising() {
-        nordicAdvertiser.stop()
+        leAdvertiser.stop()
     }
 
     private fun refreshAdvertising(reason: String) {
-        nordicAdvertiser.refresh(reason)
+        leAdvertiser.refresh(reason)
     }
 
     private fun buildAdvertiseData(): AdvertiseData {
@@ -2390,20 +2378,24 @@ class BleTransportFacade(
     
     // MARK: - GATT Server Listener
     //
-    // Bridges NordicGattServer callbacks into facade state. Callbacks fire
-    // on the platform's binder thread; every handler that touches mutable
-    // transport state is reposted on [mainHandler] before running, matching
-    // the threading model used by start/stop/pause/resume.
+    // Bridges PeripheralGattServer callbacks into facade state. Callbacks
+    // fire on the platform's binder thread; every handler that touches
+    // mutable transport state is reposted on [mainHandler] before running,
+    // matching the threading model used by start/stop/pause/resume.
     //
     // The `provide*` hooks stay on the binder thread by necessity — they
-    // must return bytes synchronously — but they only touch data that is
-    // either thread-safe (OfflineProtocol is internally Mutex-guarded) or
-    // guarded by a @Volatile marker ([cachedSignedIdentity]).
+    // must return bytes synchronously — but they are **pure reads** of
+    // @Volatile fields. They must not call into UniFFI or any other path
+    // that can block on the protocol mutex, because stalling a GATT binder
+    // callback delays every pending operation for that central and risks
+    // the system ANR watchdog. Producers (MLS init, advertisement rebuild)
+    // call [updateSignedIdentity] on the main thread to refresh the cache
+    // *before* the read lands.
 
-    private val gattServerListener = object : NordicGattServer.Listener {
+    private val gattServerListener = object : PeripheralGattServer.Listener {
         override fun onReady() {
-            // NordicAdvertiser owns its own pending-reason latch; just drain it.
-            nordicAdvertiser.onGattServerReady()
+            // LeAdvertiser owns its own pending-reason latch; just drain it.
+            leAdvertiser.onGattServerReady()
         }
 
         override fun onSetupFailed(reason: String) {
@@ -2460,14 +2452,18 @@ class BleTransportFacade(
         }
 
         override fun provideIdentityBytes(device: BluetoothDevice): ByteArray? {
-            val server = nordicGattServer ?: return null
-            if (!server.hasIdentityValue()) {
-                updateSignedIdentity()
-            }
+            // Pure volatile read. Never call updateSignedIdentity() here —
+            // it would block this binder thread on the protocol mutex.
+            // If the cache isn't primed yet, return null; the central will
+            // retry. See the comment on [updateSignedIdentity].
             val identity = cachedSignedIdentity?.encode()
-            if (identity != null) {
-                Log.d(TAG, "Sent signed identity to ${device.address}")
+            if (identity == null) {
+                // Trigger an out-of-band refresh on the main thread so the
+                // next read has something to return.
+                mainHandler.post { updateSignedIdentity() }
+                return null
             }
+            Log.d(TAG, "Sent signed identity to ${device.address}")
             return identity
         }
     }
@@ -2484,13 +2480,13 @@ class BleTransportFacade(
         }
         if (decision.intent == ConnectionIntent.REJECTED) {
             Log.w(TAG, "Rejecting inbound connection from ${device.address}: ${decision.reason}")
-            nordicGattServer?.cancelConnection(device)
+            peripheralGattServer?.cancelConnection(device)
             return
         }
         // Check connection capacity
         if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
             Log.w(TAG, "Rejecting inbound connection from ${device.address}: connection cap reached")
-            nordicGattServer?.cancelConnection(device)
+            peripheralGattServer?.cancelConnection(device)
             return
         }
         val role = when (decision.intent) {
@@ -2862,7 +2858,7 @@ class BleTransportFacade(
                     closeGattClient(gatt, "set_notification_failed")
                     return
                 }
-                val cccd = messageChar.getDescriptor(NordicGattServer.CCCD_UUID)
+                val cccd = messageChar.getDescriptor(PeripheralGattServer.CCCD_UUID)
                 if (cccd == null) {
                     Log.w(TAG, "⚠️ CCCD descriptor missing on remote message characteristic for $address")
                     emitDiagnostic("warning", "Remote CCCD descriptor missing", mapOf("address" to address))
@@ -2898,7 +2894,7 @@ class BleTransportFacade(
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             val address = gatt.device.address
-            if (descriptor.uuid != NordicGattServer.CCCD_UUID) {
+            if (descriptor.uuid != PeripheralGattServer.CCCD_UUID) {
                 return
             }
             if (status != BluetoothGatt.GATT_SUCCESS) {

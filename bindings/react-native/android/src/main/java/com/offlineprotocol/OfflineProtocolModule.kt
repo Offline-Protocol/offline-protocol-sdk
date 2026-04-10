@@ -11,7 +11,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
-import com.offlineprotocol.ble.nordic.BleTransportFacade
+import com.offlineprotocol.ble.BleTransportFacade
 
 // Import generated UniFFI bindings
 import uniffi.offline_protocol.*

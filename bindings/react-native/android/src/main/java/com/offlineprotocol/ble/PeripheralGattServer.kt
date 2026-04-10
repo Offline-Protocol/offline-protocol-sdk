@@ -1,4 +1,4 @@
-package com.offlineprotocol.ble.nordic
+package com.offlineprotocol.ble
 
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -18,28 +18,40 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
+ * Return the portion of [value] that should be sent in response to a GATT read
+ * at [offset]. Android's long-read flow issues repeated
+ * `onCharacteristicReadRequest` calls with increasing offset until the central
+ * has reassembled the whole value; the app must return the tail starting at
+ * that offset on each call. Exposed internal for unit testing.
+ */
+internal fun sliceForReadOffset(value: ByteArray, offset: Int): ByteArray = when {
+    offset <= 0 -> value
+    offset >= value.size -> ByteArray(0)
+    else -> value.copyOfRange(offset, value.size)
+}
+
+/**
  * Owns the Android peripheral-side GATT server. Wraps the raw
- * [BluetoothGattServer] and enforces three things the old inline
- * implementation in BleTransportFacade missed:
+ * [BluetoothGattServer] and enforces:
  *
  *   1. Every notify-propertied characteristic automatically gets a CCCD
  *      (0x2902) descriptor via [registerNotifyCharacteristic], so remote
  *      centrals can subscribe to notifications. The helper is the only
  *      sanctioned way to create notify characteristics on this server.
- *   2. [BluetoothGattServerCallback.onDescriptorWriteRequest] is
- *      implemented so CCCD writes from centrals are acked and a
- *      `subscribedCentrals` set is maintained.
- *   3. Service registration has a 5-second watchdog: if
- *      `onServiceAdded` never fires, we tear down, retry once, and
- *      escalate to [Listener.onSetupFailed] on a second failure — so a
- *      flaky GATT stack cannot silently leave the device invisible on the
- *      mesh.
- *
- * Note: the `Nordic*` class name prefix is a naming legacy from an
- * earlier migration plan. This implementation does not depend on Nordic's
- * Android-BLE-Library.
+ *   2. [BluetoothGattServerCallback.onDescriptorWriteRequest] is implemented
+ *      so CCCD writes from centrals are acked and a `subscribedCentrals` set
+ *      is maintained.
+ *   3. Service registration has a 5-second watchdog: if `onServiceAdded`
+ *      never fires, we tear down, retry once, and escalate to
+ *      [Listener.onSetupFailed] on a second failure — so a flaky GATT stack
+ *      cannot silently leave the device invisible on the mesh.
+ *   4. `onCharacteristicReadRequest` honours the read offset, so long-read
+ *      flows (identity payloads that exceed the default 20-byte ATT MTU
+ *      payload) return the correct tail on each follow-up read.
+ *   5. `onCharacteristicWriteRequest` enforces a hard upper bound on inbound
+ *      payload size as defence in depth against malformed/hostile centrals.
  */
-class NordicGattServer(
+class PeripheralGattServer(
     private val context: Context,
     private val mainHandler: Handler,
     private val listener: Listener,
@@ -61,11 +73,15 @@ class NordicGattServer(
     }
 
     companion object {
-        private const val TAG = "NordicGattServer"
+        private const val TAG = "PeripheralGattServer"
         val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
         private const val SERVICE_READY_TIMEOUT_MS = 5_000L
         private const val RETRY_DELAY_MS = 500L
         private const val MAX_SETUP_ATTEMPTS = 2
+        /** Hard ceiling on an inbound GATT write payload. Well above the
+         *  facade's MAX_FRAGMENT_SIZE (185 bytes) to tolerate MTU-negotiation
+         *  headroom, but bounded so a hostile central cannot balloon memory. */
+        const val MAX_INBOUND_WRITE_BYTES = 4096
     }
 
     private val bluetoothManager: BluetoothManager =
@@ -94,6 +110,7 @@ class NordicGattServer(
     private val notifyLock = Any()
 
     private var serviceReadyTimeoutRunnable: Runnable? = null
+    private var setupRetryRunnable: Runnable? = null
     private var setupAttempts = 0
     private var pendingSetup: PendingSetup? = null
 
@@ -124,6 +141,8 @@ class NordicGattServer(
     fun stop() {
         serviceReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
         serviceReadyTimeoutRunnable = null
+        setupRetryRunnable?.let { mainHandler.removeCallbacks(it) }
+        setupRetryRunnable = null
         try {
             gattServer?.close()
         } catch (e: SecurityException) {
@@ -185,23 +204,6 @@ class NordicGattServer(
 
     /** Exposed for tests and diagnostics. */
     fun isSubscribed(device: BluetoothDevice): Boolean = subscribedCentrals.contains(device)
-
-    /** Update the device-id characteristic value served on read. */
-    fun updateDeviceIdValue(bytes: ByteArray) {
-        @Suppress("DEPRECATION")
-        deviceIdCharacteristic?.value = bytes
-    }
-
-    /** Update the signed-identity characteristic value served on read. */
-    fun updateIdentityValue(bytes: ByteArray) {
-        @Suppress("DEPRECATION")
-        identityCharacteristic?.value = bytes
-    }
-
-    fun hasIdentityValue(): Boolean {
-        @Suppress("DEPRECATION")
-        return identityCharacteristic?.value != null
-    }
 
     /** Cancel an in-flight connection to a central. */
     fun cancelConnection(device: BluetoothDevice) {
@@ -296,6 +298,8 @@ class NordicGattServer(
     private fun handleSetupFailed(reason: String) {
         serviceReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
         serviceReadyTimeoutRunnable = null
+        setupRetryRunnable?.let { mainHandler.removeCallbacks(it) }
+        setupRetryRunnable = null
         try {
             gattServer?.close()
         } catch (_: SecurityException) {
@@ -322,21 +326,21 @@ class NordicGattServer(
             return
         }
 
-        mainHandler.postDelayed({
+        val retry = Runnable {
+            setupRetryRunnable = null
             if (pendingSetup != null) {
                 attemptSetup()
             }
-        }, RETRY_DELAY_MS)
+        }
+        setupRetryRunnable = retry
+        mainHandler.postDelayed(retry, RETRY_DELAY_MS)
     }
 
     /**
      * The only sanctioned path for creating a notify-propertied
      * characteristic on this server. Attaches a CCCD (0x2902) descriptor
      * unconditionally so remote centrals can subscribe via the standard
-     * GATT notification subscription flow. Callers must use this helper
-     * instead of constructing a notify-propertied [BluetoothGattCharacteristic]
-     * directly — that was the shape of the original bug where iOS centrals
-     * saw the characteristic but couldn't subscribe.
+     * GATT notification subscription flow.
      */
     private fun registerNotifyCharacteristic(uuid: UUID): BluetoothGattCharacteristic {
         val char = BluetoothGattCharacteristic(
@@ -411,7 +415,11 @@ class NordicGattServer(
                     else -> null
                 }
                 if (value != null) {
-                    server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                    // Honour offset for long reads: the central will issue
+                    // repeated reads with increasing offsets until it has
+                    // reassembled a payload larger than the ATT MTU.
+                    val slice = sliceForReadOffset(value, offset)
+                    server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, slice)
                 } else {
                     server.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
                 }
@@ -432,6 +440,25 @@ class NordicGattServer(
             val server = gattServer ?: return
             try {
                 if (characteristic.uuid == messageCharacteristic?.uuid) {
+                    // Defence in depth: drop oversized writes before handing
+                    // the payload to the upstream fragment assembler.
+                    if (value.size > MAX_INBOUND_WRITE_BYTES) {
+                        diagnosticEmitter(
+                            "warn",
+                            "gatt_inbound_write_oversize",
+                            mapOf(
+                                "address" to device.address,
+                                "size" to value.size,
+                                "max" to MAX_INBOUND_WRITE_BYTES,
+                            ),
+                        )
+                        if (responseNeeded) {
+                            server.sendResponse(
+                                device, requestId, BluetoothGatt.GATT_FAILURE, offset, null,
+                            )
+                        }
+                        return
+                    }
                     listener.onInboundFragment(device, value)
                     if (responseNeeded) {
                         server.sendResponse(

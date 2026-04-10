@@ -1,4 +1,4 @@
-package com.offlineprotocol.ble.nordic
+package com.offlineprotocol.ble
 
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -9,18 +9,13 @@ import android.util.Log
 import java.util.concurrent.ThreadLocalRandom
 
 /**
- * Wraps the platform BLE advertiser with the bookkeeping previously inlined
- * in [BleTransportFacade]: a `pendingAdvertiseReason` gate so start calls
- * can be deferred while the GATT service is still being registered, a
- * cooldown / jitter-based restart scheduler, and a single place for the
- * [AdvertiseCallback] lifecycle.
- *
- * Note: the `Nordic*` class name prefix (and enclosing package) is a
- * naming legacy from an earlier migration plan that considered depending
- * on Nordic's Android-BLE-Library. This implementation does not use that
- * library and is a pure `android.bluetooth.le` wrapper.
+ * Wraps the platform BLE advertiser with:
+ *   - a `pendingAdvertiseReason` gate so start calls can be deferred while
+ *     the GATT service is still being registered,
+ *   - a cooldown / jitter-based restart scheduler,
+ *   - a single place for the [AdvertiseCallback] lifecycle.
  */
-class NordicAdvertiser(
+class LeAdvertiser(
     private val mainHandler: Handler,
     private val host: Host,
     private val diagnosticEmitter: (level: String, message: String, context: Map<String, Any?>) -> Unit =
@@ -50,7 +45,7 @@ class NordicAdvertiser(
     }
 
     companion object {
-        private const val TAG = "NordicAdvertiser"
+        private const val TAG = "LeAdvertiser"
         private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
         private const val ADVERTISE_RESTART_MIN_MS = 200L
         private const val ADVERTISE_RESTART_MAX_MS = 1200L
@@ -80,7 +75,13 @@ class NordicAdvertiser(
      * off the actual start when the service registration lands.
      */
     fun start(reason: String) {
-        if (isAdvertising) return
+        // Gate on `advertiseCallback != null`, not `isAdvertising`. The latter
+        // is only flipped to true once the platform `onStartSuccess` callback
+        // arrives on a private Binder thread, which leaves a window where a
+        // fast stop() → start() on the main thread would submit a second
+        // startAdvertising while the first is still in flight and end up with
+        // ADVERTISE_FAILED_ALREADY_STARTED.
+        if (advertiseCallback != null) return
 
         if (!host.isGattServerReady()) {
             pendingAdvertiseReason = reason
@@ -105,9 +106,9 @@ class NordicAdvertiser(
 
             val advertiseData = host.buildAdvertiseData()
             // Include scan response with service UUID for iOS compatibility.
-            // iOS's CoreBluetooth actively queries for scan responses and has known
-            // issues recognizing 128-bit service UUIDs from Android's main
-            // advertisement packet format.
+            // iOS's CoreBluetooth actively queries for scan responses and has
+            // known issues recognizing 128-bit service UUIDs from Android's
+            // main advertisement packet format.
             val scanResponse = host.buildScanResponse()
 
             val cb = object : AdvertiseCallback() {
@@ -133,6 +134,13 @@ class NordicAdvertiser(
                     }
                     Log.e(TAG, "❌ BLE advertising failed: $errorMsg (code=$errorCode)")
                     isAdvertising = false
+                    // Drop the callback reference so a subsequent start() is
+                    // allowed through the in-flight gate above.
+                    mainHandler.post {
+                        if (advertiseCallback === this) {
+                            advertiseCallback = null
+                        }
+                    }
                     diagnosticEmitter(
                         "error",
                         "BLE advertising failed",
@@ -144,6 +152,7 @@ class NordicAdvertiser(
 
             advertiser?.startAdvertising(settings, advertiseData, scanResponse, cb)
         } catch (e: SecurityException) {
+            advertiseCallback = null
             Log.e(TAG, "Permission denied while starting advertising", e)
             diagnosticEmitter(
                 "error",
@@ -155,18 +164,16 @@ class NordicAdvertiser(
     }
 
     fun stop() {
-        if (!isAdvertising) return
+        val cb = advertiseCallback
+        advertiseCallback = null
+        isAdvertising = false
+        pendingAdvertiseRestart?.let {
+            mainHandler.removeCallbacks(it)
+            pendingAdvertiseRestart = null
+        }
+        if (cb == null) return
         try {
-            val cb = advertiseCallback
-            if (cb != null) {
-                advertiser?.stopAdvertising(cb)
-            }
-            advertiseCallback = null
-            isAdvertising = false
-            pendingAdvertiseRestart?.let {
-                mainHandler.removeCallbacks(it)
-                pendingAdvertiseRestart = null
-            }
+            advertiser?.stopAdvertising(cb)
             Log.i(TAG, "Stopped advertising")
             diagnosticEmitter("info", "Stopped BLE advertising", emptyMap())
         } catch (e: SecurityException) {
@@ -205,14 +212,14 @@ class NordicAdvertiser(
         mainHandler.postDelayed(runnable, delay)
     }
 
-    /** Call when NordicGattServer signals the service registration has completed. */
+    /** Call when [PeripheralGattServer] signals the service registration has completed. */
     fun onGattServerReady() {
-        val reason = pendingAdvertiseReason
-        if (reason != null) {
-            pendingAdvertiseReason = null
-            Log.i(TAG, "📡 Starting deferred advertising after GATT service ready")
-            mainHandler.post { start("gatt_service_ready") }
-        }
+        val reason = pendingAdvertiseReason ?: return
+        pendingAdvertiseReason = null
+        Log.i(TAG, "📡 Starting deferred advertising after GATT service ready (reason=$reason)")
+        // Caller is already on the main thread (the facade posts onReady
+        // listener callbacks there), so start inline — no extra hop.
+        start(reason)
     }
 
     fun clearPendingReason() {
