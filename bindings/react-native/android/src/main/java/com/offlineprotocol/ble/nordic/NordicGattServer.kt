@@ -81,7 +81,8 @@ class NordicGattServer(
         private set
 
     /** Centrals that have written ENABLE_NOTIFICATION_VALUE to the CCCD. */
-    private val subscribedCentrals = ConcurrentHashMap<BluetoothDevice, Long>()
+    private val subscribedCentrals: MutableSet<BluetoothDevice> =
+        ConcurrentHashMap.newKeySet()
 
     /**
      * Serializes pre-Tiramisu notification writes. On API < 33 the value
@@ -150,7 +151,7 @@ class NordicGattServer(
      * serialized under [notifyLock].
      */
     fun notifySubscribed(device: BluetoothDevice, bytes: ByteArray): Boolean {
-        if (!subscribedCentrals.containsKey(device)) return false
+        if (!subscribedCentrals.contains(device)) return false
         val char = messageCharacteristic ?: return false
         val server = gattServer ?: return false
         return try {
@@ -174,7 +175,7 @@ class NordicGattServer(
     /** Push a notification to every subscribed central. Returns the count of successful notifies. */
     fun notifyAllSubscribed(bytes: ByteArray): Int {
         var count = 0
-        for (device in subscribedCentrals.keys) {
+        for (device in subscribedCentrals) {
             if (notifySubscribed(device, bytes)) count++
         }
         return count
@@ -183,7 +184,7 @@ class NordicGattServer(
     fun subscribedCentralCount(): Int = subscribedCentrals.size
 
     /** Exposed for tests and diagnostics. */
-    fun isSubscribed(device: BluetoothDevice): Boolean = subscribedCentrals.containsKey(device)
+    fun isSubscribed(device: BluetoothDevice): Boolean = subscribedCentrals.contains(device)
 
     /** Update the device-id characteristic value served on read. */
     fun updateDeviceIdValue(bytes: ByteArray) {
@@ -197,7 +198,10 @@ class NordicGattServer(
         identityCharacteristic?.value = bytes
     }
 
-    fun hasIdentityValue(): Boolean = identityCharacteristic?.value != null
+    fun hasIdentityValue(): Boolean {
+        @Suppress("DEPRECATION")
+        return identityCharacteristic?.value != null
+    }
 
     /** Cancel an in-flight connection to a central. */
     fun cancelConnection(device: BluetoothDevice) {
@@ -376,7 +380,10 @@ class NordicGattServer(
                     ),
                 )
                 isReady = false
-                // The service-ready watchdog will fire shortly and drive retry/escalation.
+                // Kick retry/escalation immediately rather than waiting out
+                // the 5s watchdog — we already know the registration failed,
+                // so there's no point stalling app startup.
+                handleSetupFailed("service_add_status=$status")
             }
         }
 
@@ -459,7 +466,7 @@ class NordicGattServer(
                         value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
                             value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
                     if (enable) {
-                        subscribedCentrals[device] = System.currentTimeMillis()
+                        subscribedCentrals.add(device)
                         diagnosticEmitter(
                             "info",
                             "cccd_subscribe_received",

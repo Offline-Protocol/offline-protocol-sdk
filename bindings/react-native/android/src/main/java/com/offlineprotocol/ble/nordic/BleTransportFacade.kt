@@ -18,6 +18,7 @@ import com.offlineprotocol.TransportManager
 import com.offlineprotocol.TransportManagerListener
 import com.offlineprotocol.TransportState
 import com.offlineprotocol.ble.MeshConnectionRegistry
+import com.offlineprotocol.optNullableString
 import com.offlineprotocol.mesh.MeshAdvertisementData
 import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.MeshController.ConnectionIntent
@@ -28,6 +29,7 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -193,6 +195,12 @@ class BleTransportFacade(
     
     // Verified peer identities (device address -> SignedIdentityData)
     private val verifiedPeerIdentities = ConcurrentHashMap<String, com.offlineprotocol.mesh.SignedIdentityData>()
+
+    // Addresses whose CCCD subscription has been acked by the remote peer.
+    // Until the descriptor write lands we can't trust that the peripheral is
+    // actually notifying us, so the link is only considered ready to drain
+    // fragments once this set contains the address.
+    private val linkReady = ConcurrentHashMap.newKeySet<String>()
     
     // Connection registry keeps track of client/server links and desired roles.
     private val connections = MeshConnectionRegistry()
@@ -281,6 +289,17 @@ class BleTransportFacade(
 
         return outcome!!.getOrThrow()
     }
+
+    // Async variant: runs inline when already on the main thread, otherwise
+    // posts. Used by BLE callbacks that must mutate main-thread-only state.
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
+        }
+    }
+
     private val fragmentPollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendFragments()
@@ -302,12 +321,20 @@ class BleTransportFacade(
     }
     
     // Track outbound fragments with timestamps for timeout handling.
-    // Thread-safety contract: ArrayDeque values are NOT thread-safe. All mutations
-    // (enqueue/flush/drain) MUST run on mainHandler thread. ConcurrentHashMap is used
-    // only so that evictPeer() and refreshSelfMetrics() can safely remove/read keys
-    // from BLE callback threads without blocking the main-thread hot path.
+    //
+    // Thread-safety contract: ArrayDeque values are NOT thread-safe and MUST only
+    // be touched on the mainHandler thread — including `size` reads, since
+    // ArrayDeque computes it from `head`/`tail` plus a possibly-resized backing
+    // array. ConcurrentHashMap is used only so that key lookups from callback
+    // threads don't need to block.
+    //
+    // Any code that runs off the main thread (BLE callbacks, etc.) and wants to
+    // touch this map must either post to mainHandler or read the aggregate
+    // count via [totalPendingOutboundFragments], which is updated in lockstep
+    // with the deques and is safe to read from any thread.
     private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
     private val pendingOutboundFragments = ConcurrentHashMap<String, ArrayDeque<OutboundFragment>>()
+    private val totalPendingOutboundFragments = AtomicInteger(0)
     private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
     private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
@@ -566,6 +593,8 @@ class BleTransportFacade(
         lastSeenRssi.clear()
         synchronized(pendingFragmentsLock) { pendingFragments.clear() }
         pendingOutboundFragments.clear()
+        totalPendingOutboundFragments.set(0)
+        linkReady.clear()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
         unknownBootstrapAttempts.clear()
@@ -1517,10 +1546,11 @@ class BleTransportFacade(
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
         val pendingCount = synchronized(pendingFragmentsLock) { pendingFragments.values.sumOf { it.size } }
-        // Best-effort: ConcurrentHashMap iteration is weakly consistent and
-        // ArrayDeque.size is a single int-field read (atomic on JVM), so this
-        // is always safe — the sum may be slightly stale but never crashes.
-        val outboundPending = pendingOutboundFragments.values.sumOf { it.size }
+        // Read the aggregate counter instead of iterating ArrayDeques. The
+        // ArrayDeques themselves are main-thread-only; this getter is safe to
+        // call from any thread because the counter is an AtomicInteger updated
+        // in lockstep with every enqueue/dequeue/evict.
+        val outboundPending = totalPendingOutboundFragments.get()
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
         val batteryPercent = currentBatteryPercent()
@@ -1574,11 +1604,21 @@ class BleTransportFacade(
         }
 
         connections.removeGatt(address)
+        linkReady.remove(address)
         connections.removeIdentifiersForDevice(peerId)
         connections.removeConnectionRole(peerId)
         lastSeenRssi.remove(address)
         synchronized(pendingFragmentsLock) { pendingFragments.remove(address) }
-        pendingOutboundFragments.remove(peerId)
+        // Posted to main because ArrayDeque contents are main-thread-only.
+        // If we're already on main this runs inline, so the invariant holds
+        // whether eviction is triggered by scan (callback thread) or rebalance.
+        runOnMain {
+            pendingOutboundFragments.remove(peerId)?.let { removed ->
+                if (removed.isNotEmpty()) {
+                    totalPendingOutboundFragments.addAndGet(-removed.size)
+                }
+            }
+        }
         deviceIdResolutionAttempts.remove(address)
         connectionRetryCount.remove(address)
         meshController.registerDisconnection(peerId)
@@ -1748,42 +1788,50 @@ class BleTransportFacade(
         val recipients = pendingOutboundFragments.keys.toList()
         for (recipientId in recipients) {
             val queue = pendingOutboundFragments[recipientId] ?: continue
-            
-            // Remove expired fragments to prevent indefinite queuing
-            val validFragments = queue.filter { now - it.timestamp < PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS }
-            
-            if (validFragments.isEmpty()) {
-                pendingOutboundFragments.remove(recipientId)
-                if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
-                    Log.w(TAG, "⚠️ Removed expired outbound fragments for $recipientId")
-                    emitDiagnostic("warning", "Outbound fragments expired", mapOf("recipientId" to recipientId))
+
+            // Drop expired fragments in place to keep the counter consistent
+            // with the deques. `removeIf` on ArrayDeque mutates the backing
+            // storage directly, so we avoid the allocate-new-deque dance.
+            var expired = 0
+            val iter = queue.iterator()
+            while (iter.hasNext()) {
+                val fragment = iter.next()
+                if (now - fragment.timestamp >= PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS) {
+                    iter.remove()
+                    expired++
                 }
-                continue
             }
-            
-            // Update queue with only valid fragments (remove expired ones)
-            val mutableQueue = ArrayDeque(validFragments)
-            if (mutableQueue.size < queue.size) {
-                pendingOutboundFragments[recipientId] = mutableQueue
+            if (expired > 0) {
+                totalPendingOutboundFragments.addAndGet(-expired)
+                if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
+                    Log.w(TAG, "⚠️ Dropped $expired expired outbound fragments for $recipientId")
+                    emitDiagnostic("warning", "Outbound fragments expired", mapOf(
+                        "recipientId" to recipientId,
+                        "expired" to expired,
+                    ))
+                }
             }
 
-            // Try to send each fragment
-            val iterator = mutableQueue.iterator()
-            while (iterator.hasNext()) {
-                val fragment = iterator.next()
+            if (queue.isEmpty()) {
+                pendingOutboundFragments.remove(recipientId)
+                continue
+            }
+
+            // Try to send each remaining fragment in FIFO order
+            val sendIter = queue.iterator()
+            while (sendIter.hasNext()) {
+                val fragment = sendIter.next()
                 if (sendFragmentData(recipientId, fragment.data)) {
-                    iterator.remove()
+                    sendIter.remove()
+                    totalPendingOutboundFragments.decrementAndGet()
                 } else {
                     hasUnsentFragments = true
                     break
                 }
             }
-            
-            // Update the queue with remaining fragments
-            if (mutableQueue.isEmpty()) {
+
+            if (queue.isEmpty()) {
                 pendingOutboundFragments.remove(recipientId)
-            } else {
-                pendingOutboundFragments[recipientId] = mutableQueue
             }
         }
 
@@ -1793,9 +1841,11 @@ class BleTransportFacade(
     private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
         val queue = pendingOutboundFragments.getOrPut(recipientId) { ArrayDeque() }
         queue.addLast(OutboundFragment(data, System.currentTimeMillis()))
+        totalPendingOutboundFragments.incrementAndGet()
         // Drop oldest fragment if the queue exceeds the per-peer cap
         if (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
             queue.removeFirst()
+            totalPendingOutboundFragments.decrementAndGet()
             Log.w(TAG, "Pending outbound fragment queue capped for $recipientId, dropping oldest (max=$MAX_PENDING_FRAGMENTS_PER_PEER)")
         }
     }
@@ -1818,6 +1868,19 @@ class BleTransportFacade(
         val address = resolveTargetAddress(recipientId)
         val gatt = address?.let { connections.getGatt(it) }
         
+        // Until the remote has ack'd our CCCD write, the return path is not
+        // verified and the BLE stack may still be executing the setup ops
+        // (deviceId read → identity read → writeDescriptor). Issuing a write
+        // now risks either silent loss (on stacks that drop the op) or
+        // stalling the chain. Enqueue and let onDescriptorWrite trigger the
+        // drain.
+        if (address != null && !linkReady.contains(address)) {
+            if (logThrottler.shouldLog("link_not_ready_$recipientId", intervalMs = 5000)) {
+                Log.d(TAG, "Link to $recipientId not yet ready (CCCD unacked), deferring write")
+            }
+            return false
+        }
+
         if (gatt == null) {
             //  Proactively try to connect if we don't have a connection
             // This helps resolve cases where fragments are queued but connection isn't established
@@ -1864,11 +1927,16 @@ class BleTransportFacade(
             return false
         }
 
-        characteristic.value = data
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
-        // On Android API 33+ (TIRAMISU), writeCharacteristic returns a status code
-        // for WRITE_TYPE_NO_RESPONSE, so we can't rely on the return value for older APIs
+        // On API 33+ we use the value-parameter overload, which returns a
+        // BluetoothStatusCodes result. On older APIs we have to set the shared
+        // characteristic value field and call the legacy overload — its
+        // Boolean return *is* load-bearing: it reports false when the internal
+        // TX queue is full, another GATT op is in flight, or the characteristic
+        // is unwritable. Treating every pre-Tiramisu call as success silently
+        // drops fragments, which is exactly the class of bug the rest of this
+        // code is trying to defend against.
         val writeOk = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val result = gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
@@ -1883,10 +1951,16 @@ class BleTransportFacade(
                     true
                 }
             } else {
-                // On older APIs, writeCharacteristic returns Boolean but always true for WRITE_TYPE_NO_RESPONSE
-                // The actual write happens asynchronously, so we assume success and let the BLE stack handle it
-                gatt.writeCharacteristic(characteristic)
-                true
+                @Suppress("DEPRECATION")
+                characteristic.value = data
+                @Suppress("DEPRECATION")
+                val queued = gatt.writeCharacteristic(characteristic)
+                if (!queued) {
+                    emitDiagnostic("warning", "BLE writeCharacteristic returned false", mapOf(
+                        "recipientId" to recipientId,
+                    ))
+                }
+                queued
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error writing characteristic to $recipientId", e)
@@ -2469,16 +2543,40 @@ class BleTransportFacade(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "GATT client: Connected to ${gatt.device.address}")
-                    emitDiagnostic("info", "Connected to BLE device", mapOf("address" to gatt.device.address))
+                    val address = gatt.device.address
+                    Log.i(TAG, "GATT client: Connected to $address")
+                    emitDiagnostic("info", "Connected to BLE device", mapOf("address" to address))
+                    // Socket is up, so any prior backoff for this address is
+                    // obsolete. Reset here (not on deviceId read) so a rebound
+                    // link that races a subsequent disconnect still benefits.
+                    connectionRetryCount.remove(address)
+                    linkReady.remove(address)
                     try {
-                        Log.d(TAG, "🔎 Starting service discovery for ${gatt.device.address}")
+                        Log.d(TAG, "🔎 Starting service discovery for $address")
                         val discoveryStarted = gatt.discoverServices()
-                        Log.d(TAG, "🔎 Service discovery ${if (discoveryStarted) "started" else "FAILED"} for ${gatt.device.address}")
+                        Log.d(TAG, "🔎 Service discovery ${if (discoveryStarted) "started" else "FAILED"} for $address")
                         emitDiagnostic("debug", "Service discovery initiated", mapOf(
-                            "address" to gatt.device.address,
+                            "address" to address,
                             "started" to discoveryStarted
                         ))
+                        if (!discoveryStarted) {
+                            // discoverServices returns false when the stack is
+                            // busy or the client is in a bad state. The async
+                            // onServicesDiscovered callback will never fire, so
+                            // the connection would sit here forever holding a
+                            // slot. Tear it down and let the reconnect path
+                            // retry cleanly.
+                            emitDiagnostic("warning", "discoverServices returned false; closing gatt", mapOf(
+                                "address" to address,
+                            ))
+                            try {
+                                gatt.disconnect()
+                                gatt.close()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error closing gatt after discoverServices false", e)
+                            }
+                            connections.removeGatt(address)
+                        }
                     } catch (e: SecurityException) {
                         Log.e(TAG, "❌ Permission denied discovering services", e)
                         emitDiagnostic("error", "Permission denied discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
@@ -2491,6 +2589,7 @@ class BleTransportFacade(
                     val address = gatt.device.address
                     val wasConnected = connections.getGatt(address) != null
                     connections.removeGatt(address)
+                    linkReady.remove(address)
                     
                     // Don't remove from discovered list - keep trying to reconnect
                     // Only remove RSSI if it's a permanent error
@@ -2578,180 +2677,262 @@ class BleTransportFacade(
         }
         
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            Log.i(TAG, "🔎 onServicesDiscovered callback: ${gatt.device.address}, status=$status (${if (status == BluetoothGatt.GATT_SUCCESS) "SUCCESS" else "FAILED"})")
-            
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                val service = gatt.getService(SERVICE_UUID)
-                if (service != null) {
-                    Log.i(TAG, "✅ Found offline protocol service on ${gatt.device.address}")
-                    emitDiagnostic("info", "GATT services discovered", mapOf("address" to gatt.device.address))
-                    
-                    // Read device ID characteristic
-                    val deviceIdChar = service.getCharacteristic(DEVICE_ID_CHAR_UUID)
-                    if (deviceIdChar != null) {
-                        Log.d(TAG, "📖 Reading device ID characteristic from ${gatt.device.address}")
-                        try {
-                            val readStarted = gatt.readCharacteristic(deviceIdChar)
-                            Log.d(TAG, "📖 Read request ${if (readStarted) "sent" else "FAILED"} for ${gatt.device.address}")
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "❌ Permission denied reading characteristic", e)
-                            emitDiagnostic("error", "Permission denied reading device ID characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                        }
-                    } else {
-                        Log.w(TAG, "⚠️ Device ID characteristic NOT FOUND on ${gatt.device.address}")
-                    }
-                    
-                    // Read identity characteristic (public key + signature)
-                    val identityChar = service.getCharacteristic(IDENTITY_CHAR_UUID)
-                    if (identityChar != null) {
-                        Log.d(TAG, "🔐 Reading identity characteristic from ${gatt.device.address}")
-                        // Note: We read this after device ID is read (queued)
-                    } else {
-                        Log.w(TAG, "⚠️ Identity characteristic NOT FOUND on ${gatt.device.address}")
-                    }
-                    
-                    // Enable notifications for message characteristic.
-                    //
-                    // Android's setCharacteristicNotification() only enables the
-                    // *local* receive path — it does NOT tell the remote peripheral
-                    // to start sending notifications. We must also write
-                    // ENABLE_NOTIFICATION_VALUE to the 0x2902 CCCD descriptor on
-                    // the remote peer. Without this write, the peripheral never
-                    // learns we want notifications and the notify stream is silent.
-                    val messageChar = service.getCharacteristic(MESSAGE_CHAR_UUID)
-                    if (messageChar != null) {
-                        Log.d(TAG, "🔔 Enabling notifications for message characteristic on ${gatt.device.address}")
-                        try {
-                            val notifyEnabled = gatt.setCharacteristicNotification(messageChar, true)
-                            Log.d(TAG, "🔔 Local notification sink ${if (notifyEnabled) "enabled" else "FAILED"} for ${gatt.device.address}")
-                            val cccd = messageChar.getDescriptor(NordicGattServer.CCCD_UUID)
-                            if (cccd != null) {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    @Suppress("DEPRECATION")
-                                    val cccdWriteStatus = gatt.writeDescriptor(
-                                        cccd,
-                                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
-                                    )
-                                    Log.d(TAG, "🔔 CCCD write status=$cccdWriteStatus for ${gatt.device.address}")
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                                    @Suppress("DEPRECATION")
-                                    val cccdWriteOk = gatt.writeDescriptor(cccd)
-                                    Log.d(TAG, "🔔 CCCD write ${if (cccdWriteOk) "queued" else "FAILED"} for ${gatt.device.address}")
-                                }
-                                emitDiagnostic(
-                                    "info",
-                                    "Enabled notifications for message characteristic",
-                                    mapOf("address" to gatt.device.address),
-                                )
-                            } else {
-                                Log.w(TAG, "⚠️ CCCD descriptor missing on remote message characteristic for ${gatt.device.address}")
-                                emitDiagnostic(
-                                    "warning",
-                                    "Remote CCCD descriptor missing",
-                                    mapOf("address" to gatt.device.address),
-                                )
-                            }
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "❌ Permission denied setting notification", e)
-                            emitDiagnostic("error", "Permission denied enabling notifications", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                        }
-                    } else {
-                        Log.w(TAG, "⚠️ Message characteristic NOT FOUND on ${gatt.device.address}")
-                    }
-                } else {
-                    Log.w(TAG, "⚠️ Service UUID not found on ${gatt.device.address}. Available services: ${gatt.services.map { it.uuid }}")
-                    emitDiagnostic("warning", "Offline protocol service not found", mapOf(
-                        "address" to gatt.device.address,
-                        "serviceCount" to gatt.services.size
-                    ))
-                    // Disconnect non-mesh device to free the connection slot
-                    verifiedNonMeshDevices[gatt.device.address] = System.currentTimeMillis()
-                    try {
-                        gatt.disconnect()
-                        gatt.close()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error disconnecting non-mesh device ${gatt.device.address}", e)
-                    }
-                    connections.removeGatt(gatt.device.address)
+            val address = gatt.device.address
+            Log.i(TAG, "🔎 onServicesDiscovered callback: $address, status=$status (${if (status == BluetoothGatt.GATT_SUCCESS) "SUCCESS" else "FAILED"})")
+
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.e(TAG, "❌ Service discovery FAILED for $address, status=$status")
+                emitDiagnostic("error", "Service discovery failed", mapOf("address" to address, "status" to status))
+                closeGattClient(gatt, "service_discovery_failed")
+                return
+            }
+
+            val service = gatt.getService(SERVICE_UUID)
+            if (service == null) {
+                Log.w(TAG, "⚠️ Service UUID not found on $address. Available services: ${gatt.services.map { it.uuid }}")
+                emitDiagnostic("warning", "Offline protocol service not found", mapOf(
+                    "address" to address,
+                    "serviceCount" to gatt.services.size
+                ))
+                verifiedNonMeshDevices[address] = System.currentTimeMillis()
+                closeGattClient(gatt, "no_mesh_service")
+                return
+            }
+
+            Log.i(TAG, "✅ Found offline protocol service on $address")
+            emitDiagnostic("info", "GATT services discovered", mapOf("address" to address))
+
+            // Kick off the first GATT operation only. Android's BLE stack
+            // serializes one GATT op at a time, so we chain:
+            //   onServicesDiscovered → readCharacteristic(deviceId)
+            //   onCharacteristicRead(deviceId) → readCharacteristic(identity)
+            //   onCharacteristicRead(identity) → setNotification + writeDescriptor(CCCD)
+            //   onDescriptorWrite(CCCD success) → mark linkReady + drain
+            // Firing more than one op here causes the second to be silently
+            // dropped on some vendors, which is the class of bug where the
+            // connection "looks healthy" but no messages flow.
+            val deviceIdChar = service.getCharacteristic(DEVICE_ID_CHAR_UUID)
+            if (deviceIdChar == null) {
+                Log.w(TAG, "⚠️ Device ID characteristic NOT FOUND on $address")
+                emitDiagnostic("warning", "Device ID characteristic missing", mapOf("address" to address))
+                closeGattClient(gatt, "device_id_char_missing")
+                return
+            }
+
+            Log.d(TAG, "📖 Reading device ID characteristic from $address")
+            try {
+                val readStarted = gatt.readCharacteristic(deviceIdChar)
+                if (!readStarted) {
+                    Log.w(TAG, "📖 readCharacteristic(deviceId) returned false for $address")
+                    emitDiagnostic("warning", "readCharacteristic(deviceId) returned false", mapOf("address" to address))
+                    closeGattClient(gatt, "device_id_read_rejected")
                 }
-            } else {
-                Log.e(TAG, "❌ Service discovery FAILED for ${gatt.device.address}, status=$status")
-                emitDiagnostic("error", "Service discovery failed", mapOf("address" to gatt.device.address, "status" to status))
-                // Clean up failed GATT connection to free the slot
-                try {
-                    gatt.disconnect()
-                    gatt.close()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error disconnecting after failed service discovery on ${gatt.device.address}", e)
-                }
-                connections.removeGatt(gatt.device.address)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "❌ Permission denied reading characteristic", e)
+                emitDiagnostic("error", "Permission denied reading device ID characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                closeGattClient(gatt, "device_id_read_permission_denied")
             }
         }
         
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            Log.i(TAG, "📖 onCharacteristicRead: ${gatt.device.address}, char=${characteristic.uuid}, status=$status")
-            
-            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == DEVICE_ID_CHAR_UUID) {
-                val deviceIdValue = characteristic.value?.toString(Charsets.UTF_8)
-                Log.i(TAG, "✅ Read device ID from ${gatt.device.address}: $deviceIdValue")
-                
-                if (deviceIdValue != null) {
-                    Log.i(TAG, "📝 Mapping ${gatt.device.address} -> $deviceIdValue")
-                    connections.setDeviceIdentifier(gatt.device.address, deviceIdValue)
-                    connectionRetryCount.remove(gatt.device.address) // Reset retry count on successful connection
-                    
-                    val role = connections.consumePendingRole(gatt.device.address) ?: MeshRole.MEMBER
-                    meshController.registerConnection(deviceIdValue, role)
-                    connections.setConnectionRole(deviceIdValue, role)
-                    meshController.markPeerActive(deviceIdValue)
-                    meshController.markPeerActive(deviceId)
-                    refreshSelfMetrics()
-                    mainHandler.post {
-                        if (state == TransportState.RUNNING) {
-                            refreshAdvertising("membership_change")
-                        }
-                    }
-                    val rssiInt = lastSeenRssi[gatt.device.address]?.toInt()
-                    if (rssiInt != null) {
-                        meshController.updatePeerMetrics(
-                            deviceIdValue,
-                            MeshController.PeerMetrics(rssi = rssiInt)
-                        )
-                    }
-                    
-                    // Notify protocol of peer discovery
-                    val rssi = lastSeenRssi[gatt.device.address] ?: (-60).toShort()
-                    try {
-                        protocol.blePeerDiscovered(deviceIdValue, rssi)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error notifying peer discovered", e)
-                        emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                    }
-                    
-                    // Drain all pending inbound fragments keyed by this
-                    // address — the same buffer holds central-side notify
-                    // fragments and server-side write fragments, since both
-                    // paths queue under the connection-specific address.
-                    processPendingFragments(gatt.device.address, deviceIdValue)
+            val address = gatt.device.address
+            Log.i(TAG, "📖 onCharacteristicRead: $address, char=${characteristic.uuid}, status=$status")
 
-
-                    // Now read the identity characteristic for signature verification
-                    val service = gatt.getService(SERVICE_UUID)
-                    val identityChar = service?.getCharacteristic(IDENTITY_CHAR_UUID)
-                    if (identityChar != null) {
-                        try {
-                            gatt.readCharacteristic(identityChar)
-                            Log.d(TAG, "🔐 Queued identity characteristic read for ${gatt.device.address}")
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "❌ Permission denied reading identity characteristic", e)
-                        }
-                    }
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "⚠️ Characteristic read failed for $address, char=${characteristic.uuid}, status=$status")
+                emitDiagnostic("warning", "Characteristic read failed", mapOf(
+                    "address" to address,
+                    "char" to characteristic.uuid.toString(),
+                    "status" to status,
+                ))
+                // Only the device-ID read is load-bearing for link setup.
+                // An identity read failure is diagnostic and should not tear
+                // the link down — the peer is still usable, just unverified.
+                if (characteristic.uuid == DEVICE_ID_CHAR_UUID) {
+                    closeGattClient(gatt, "device_id_read_failed")
                 }
-            } else if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == IDENTITY_CHAR_UUID) {
-                handleReceivedIdentity(characteristic.value, gatt.device.address)
+                return
             }
+
+            when (characteristic.uuid) {
+                DEVICE_ID_CHAR_UUID -> handleDeviceIdRead(gatt, characteristic)
+                IDENTITY_CHAR_UUID -> handleIdentityRead(gatt, characteristic)
+            }
+        }
+
+        private fun handleDeviceIdRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            val address = gatt.device.address
+            @Suppress("DEPRECATION")
+            val deviceIdValue = characteristic.value?.toString(Charsets.UTF_8)
+            Log.i(TAG, "✅ Read device ID from $address: $deviceIdValue")
+
+            if (deviceIdValue.isNullOrEmpty()) {
+                Log.w(TAG, "⚠️ Empty or null device ID from $address")
+                emitDiagnostic("warning", "Empty device ID characteristic value", mapOf("address" to address))
+                closeGattClient(gatt, "empty_device_id")
+                return
+            }
+
+            Log.i(TAG, "📝 Mapping $address -> $deviceIdValue")
+            connections.setDeviceIdentifier(address, deviceIdValue)
+
+            val role = connections.consumePendingRole(address) ?: MeshRole.MEMBER
+            meshController.registerConnection(deviceIdValue, role)
+            connections.setConnectionRole(deviceIdValue, role)
+            meshController.markPeerActive(deviceIdValue)
+            meshController.markPeerActive(deviceId)
+            refreshSelfMetrics()
+            mainHandler.post {
+                if (state == TransportState.RUNNING) {
+                    refreshAdvertising("membership_change")
+                }
+            }
+            val rssiInt = lastSeenRssi[address]?.toInt()
+            if (rssiInt != null) {
+                meshController.updatePeerMetrics(
+                    deviceIdValue,
+                    MeshController.PeerMetrics(rssi = rssiInt)
+                )
+            }
+
+            // Notify protocol of peer discovery
+            val rssi = lastSeenRssi[address] ?: (-60).toShort()
+            try {
+                protocol.blePeerDiscovered(deviceIdValue, rssi)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying peer discovered", e)
+                emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+            }
+
+            // Drain all pending inbound fragments keyed by this address —
+            // the same buffer holds central-side notify fragments and
+            // server-side write fragments, since both paths queue under the
+            // connection-specific address.
+            processPendingFragments(address, deviceIdValue)
+
+            // Chain the next GATT op: read the identity characteristic.
+            // Only issue it now, after the deviceId read callback has fired,
+            // so the stack is idle and won't drop the request.
+            val service = gatt.getService(SERVICE_UUID)
+            val identityChar = service?.getCharacteristic(IDENTITY_CHAR_UUID)
+            if (identityChar == null) {
+                Log.w(TAG, "⚠️ Identity characteristic not found on $address, skipping to CCCD")
+                enableNotificationsOnLink(gatt)
+                return
+            }
+
+            try {
+                val started = gatt.readCharacteristic(identityChar)
+                if (!started) {
+                    Log.w(TAG, "⚠️ readCharacteristic(identity) returned false for $address; proceeding to CCCD")
+                    emitDiagnostic("warning", "readCharacteristic(identity) returned false", mapOf("address" to address))
+                    // Identity is non-blocking — skip to CCCD instead of tearing the link down.
+                    enableNotificationsOnLink(gatt)
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "❌ Permission denied reading identity characteristic", e)
+                emitDiagnostic("error", "Permission denied reading identity characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                enableNotificationsOnLink(gatt)
+            }
+        }
+
+        private fun handleIdentityRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            @Suppress("DEPRECATION")
+            handleReceivedIdentity(characteristic.value, gatt.device.address)
+            // Identity read complete → now enable notifications.
+            enableNotificationsOnLink(gatt)
+        }
+
+        private fun enableNotificationsOnLink(gatt: BluetoothGatt) {
+            val address = gatt.device.address
+            val service = gatt.getService(SERVICE_UUID)
+            val messageChar = service?.getCharacteristic(MESSAGE_CHAR_UUID)
+            if (messageChar == null) {
+                Log.w(TAG, "⚠️ Message characteristic NOT FOUND on $address")
+                emitDiagnostic("warning", "Message characteristic missing", mapOf("address" to address))
+                closeGattClient(gatt, "message_char_missing")
+                return
+            }
+            Log.d(TAG, "🔔 Enabling notifications for message characteristic on $address")
+            try {
+                val notifyEnabled = gatt.setCharacteristicNotification(messageChar, true)
+                if (!notifyEnabled) {
+                    Log.w(TAG, "🔔 Local notification sink FAILED for $address")
+                    emitDiagnostic("warning", "setCharacteristicNotification returned false", mapOf("address" to address))
+                    closeGattClient(gatt, "set_notification_failed")
+                    return
+                }
+                val cccd = messageChar.getDescriptor(NordicGattServer.CCCD_UUID)
+                if (cccd == null) {
+                    Log.w(TAG, "⚠️ CCCD descriptor missing on remote message characteristic for $address")
+                    emitDiagnostic("warning", "Remote CCCD descriptor missing", mapOf("address" to address))
+                    closeGattClient(gatt, "remote_cccd_missing")
+                    return
+                }
+                val cccdWriteOk = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val cccdWriteStatus = gatt.writeDescriptor(
+                        cccd,
+                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE,
+                    )
+                    Log.d(TAG, "🔔 CCCD write status=$cccdWriteStatus for $address")
+                    cccdWriteStatus == BluetoothStatusCodes.SUCCESS
+                } else {
+                    @Suppress("DEPRECATION")
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION")
+                    val queued = gatt.writeDescriptor(cccd)
+                    Log.d(TAG, "🔔 CCCD write ${if (queued) "queued" else "FAILED"} for $address")
+                    queued
+                }
+                if (!cccdWriteOk) {
+                    emitDiagnostic("warning", "CCCD writeDescriptor failed to initiate", mapOf("address" to address))
+                    closeGattClient(gatt, "cccd_write_rejected")
+                }
+                // Success path waits for onDescriptorWrite to fire.
+            } catch (e: SecurityException) {
+                Log.e(TAG, "❌ Permission denied setting notification", e)
+                emitDiagnostic("error", "Permission denied enabling notifications", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                closeGattClient(gatt, "set_notification_permission_denied")
+            }
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            val address = gatt.device.address
+            if (descriptor.uuid != NordicGattServer.CCCD_UUID) {
+                return
+            }
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "⚠️ CCCD write failed for $address, status=$status; tearing link down")
+                emitDiagnostic("warning", "CCCD write failed", mapOf(
+                    "address" to address,
+                    "status" to status,
+                ))
+                closeGattClient(gatt, "cccd_write_failed")
+                return
+            }
+            Log.i(TAG, "✅ CCCD write acknowledged for $address — link ready")
+            emitDiagnostic("info", "BLE link ready", mapOf("address" to address))
+            linkReady.add(address)
+            // The link is now bidirectional: we can receive notifications and
+            // any outbound fragments that were queued while waiting for this
+            // handshake should drain on the next poll / onFragmentsAvailable.
+            runOnMain {
+                if (state == TransportState.RUNNING) {
+                    drainAndSendFragments()
+                }
+            }
+        }
+
+        private fun closeGattClient(gatt: BluetoothGatt, reason: String) {
+            val address = gatt.device.address
+            try {
+                gatt.disconnect()
+                gatt.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing gatt for $address ($reason)", e)
+            }
+            connections.removeGatt(address)
+            linkReady.remove(address)
         }
         
         /**
@@ -2802,6 +2983,7 @@ class BleTransportFacade(
         
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (characteristic.uuid == MESSAGE_CHAR_UUID) {
+                @Suppress("DEPRECATION")
                 val data = characteristic.value
                 if (data != null) {
                     handleReceivedData(data, gatt.device.address)
