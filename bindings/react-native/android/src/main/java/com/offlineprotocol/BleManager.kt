@@ -13,6 +13,7 @@ import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.offlineprotocol.ble.MeshConnectionRegistry
+import com.offlineprotocol.ble.nordic.NordicAdvertiser
 import com.offlineprotocol.ble.nordic.NordicGattServer
 import com.offlineprotocol.mesh.MeshAdvertisementData
 import com.offlineprotocol.mesh.MeshController
@@ -146,11 +147,24 @@ class BleManager(
     private var scanCallback: ScanCallback? = null
     private var isScanning = false
     
-    // Advertiser components
-    private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
-    private var advertiseCallback: AdvertiseCallback? = null
-    private var isAdvertising = false
-    
+    // Advertiser component (delegates to NordicAdvertiser).
+    // Lazy so its construction sees mainHandler / logThrottler / nordicGattServer
+    // which are declared later in this file.
+    private val nordicAdvertiser: NordicAdvertiser by lazy(LazyThreadSafetyMode.NONE) {
+        NordicAdvertiser(
+            mainHandler = mainHandler,
+            host = object : NordicAdvertiser.Host {
+                override fun isGattServerReady(): Boolean = nordicGattServer?.isReady == true
+                override fun buildAdvertiseData() = this@BleManager.buildAdvertiseData()
+                override fun buildScanResponse() = this@BleManager.buildScanResponse()
+                override fun onBeforeRefresh() { updateSignedIdentity() }
+                override fun shouldLog(key: String, intervalMs: Long) =
+                    logThrottler.shouldLog(key, intervalMs = intervalMs)
+            },
+            diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
+        )
+    }
+
     // GATT Server (peripheral role).
     // Delegated to NordicGattServer so that:
     //   - the NOTIFY characteristic always carries a CCCD (0x2902) descriptor
@@ -158,7 +172,6 @@ class BleManager(
     //   - service registration has a 5-second watchdog with one retry
     // The old inline setupGattServer/gattServerCallback path missed all three.
     private var nordicGattServer: NordicGattServer? = null
-    @Volatile private var pendingAdvertiseReason: String? = null
     
     // Cached signed identity data for serving via GATT
     private var cachedSignedIdentity: com.offlineprotocol.mesh.SignedIdentityData? = null
@@ -284,8 +297,6 @@ class BleManager(
     private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
     private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
-    private var pendingAdvertiseRestart: Runnable? = null
-    private var lastAdvertiseRestartAt: Long = 0L
     private var transportStartAt: Long = 0L
 
     private val scanWatchdogRunnable = object : Runnable {
@@ -339,7 +350,7 @@ class BleManager(
                 
                 // Re-initialize scanner and advertiser
                 bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
-                bluetoothLeAdvertiser = bluetoothAdapter?.bluetoothLeAdvertiser
+                nordicAdvertiser.attachAdvertiser(bluetoothAdapter?.bluetoothLeAdvertiser)
                 
                 // Restart after a brief delay
                 mainHandler.postDelayed({
@@ -433,10 +444,9 @@ class BleManager(
             
             // Initialize advertiser
             Log.i(TAG, "📡 Initializing BLE advertiser...")
-            bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
-            if (bluetoothLeAdvertiser == null) {
-                throw TransportException.InvalidState("BLE advertiser is not available")
-            }
+            val advertiser = bluetoothAdapter.bluetoothLeAdvertiser
+                ?: throw TransportException.InvalidState("BLE advertiser is not available")
+            nordicAdvertiser.attachAdvertiser(advertiser)
             
             // Setup GATT server
             Log.i(TAG, "🔧 Setting up GATT server...")
@@ -557,7 +567,7 @@ class BleManager(
         // Close GATT server (stops service, clears subscribed centrals, drops refs).
         nordicGattServer?.stop()
         nordicGattServer = null
-        pendingAdvertiseReason = null
+        nordicAdvertiser.shutdown()
         synchronized(pendingByHandleLock) { pendingByHandle.clear() }
         
         updateState(TransportState.STOPPED)
@@ -963,108 +973,21 @@ class BleManager(
         connectionMonitorRunnable = null
     }
     
-    private fun startAdvertising(reason: String = "manual") {
-        if (isAdvertising) return
-        
-        // Wait for GATT service to be ready before advertising
-        if (nordicGattServer?.isReady != true) {
-            pendingAdvertiseReason = reason
-            if (logThrottler.shouldLog("advert_waiting_gatt", intervalMs = 5000)) {
-                Log.i(TAG, "Waiting for GATT service to be ready before advertising (reason: $reason)")
-                emitDiagnostic("info", "Waiting for GATT service registration", mapOf("reason" to reason))
-            }
-            return
-        }
-        
-        try {
-            val settings = AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                .setConnectable(true)
-                .setTimeout(0)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .build()
+    // Advertising is owned by NordicAdvertiser. These thin wrappers preserve
+    // the existing call sites (refreshAdvertising / stopAdvertising are invoked
+    // from many places in BleManager) without threading the delegate object
+    // through every caller.
 
-            val advertiseData = buildAdvertiseData()
-            
-            advertiseCallback = object : AdvertiseCallback() {
-                override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                    Log.i(TAG, "BLE advertising started successfully (reason=$reason)")
-                    isAdvertising = true
-                    lastAdvertiseRestartAt = System.currentTimeMillis()
-                    emitDiagnostic("info", "BLE advertising started", mapOf("reason" to reason))
-                }
-                
-                override fun onStartFailure(errorCode: Int) {
-                    val errorMsg = when(errorCode) {
-                        ADVERTISE_FAILED_DATA_TOO_LARGE -> "Data too large"
-                        ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Too many advertisers"
-                        ADVERTISE_FAILED_ALREADY_STARTED -> "Already started"
-                        ADVERTISE_FAILED_INTERNAL_ERROR -> "Internal error"
-                        ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
-                        else -> "Unknown error $errorCode"
-                    }
-                    Log.e(TAG, "❌ BLE advertising failed: $errorMsg (code=$errorCode)")
-                    isAdvertising = false
-                    emitDiagnostic("error", "BLE advertising failed", mapOf(
-                        "errorCode" to errorCode,
-                        "errorMessage" to errorMsg
-                    ))
-                }
-            }
-            
-            // Include scan response with service UUID for iOS compatibility
-            // iOS's CoreBluetooth actively queries for scan responses and has known issues
-            // recognizing 128-bit service UUIDs from Android's main advertisement packet
-            val scanResponse = buildScanResponse()
-            bluetoothLeAdvertiser?.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
-            
-            // Reduced logging
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Permission denied while starting advertising", e)
-            emitDiagnostic("error", "Permission denied while starting advertising", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-            throw e
-        }
+    private fun startAdvertising(reason: String = "manual") {
+        nordicAdvertiser.start(reason)
     }
-    
+
     private fun stopAdvertising() {
-        if (!isAdvertising) return
-        
-        try {
-            advertiseCallback?.let { bluetoothLeAdvertiser?.stopAdvertising(it) }
-            advertiseCallback = null
-            isAdvertising = false
-            pendingAdvertiseRestart?.let {
-                mainHandler.removeCallbacks(it)
-                pendingAdvertiseRestart = null
-            }
-            Log.i(TAG, "Stopped advertising")
-            emitDiagnostic("info", "Stopped BLE advertising")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Permission denied while stopping advertising", e)
-            emitDiagnostic("error", "Permission denied while stopping advertising", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-        }
+        nordicAdvertiser.stop()
     }
 
     private fun refreshAdvertising(reason: String) {
-        stopAdvertising()
-        // Update the signed identity to match the new advertisement data
-        updateSignedIdentity()
-        scheduleAdvertisingRestart(reason)
-    }
-
-    private fun scheduleAdvertisingRestart(reason: String) {
-        val now = System.currentTimeMillis()
-        val elapsed = now - lastAdvertiseRestartAt
-        val cooldownDelay = if (elapsed < MIN_ADVERTISE_INTERVAL_MS) MIN_ADVERTISE_INTERVAL_MS - elapsed else 0L
-        val jitter = ThreadLocalRandom.current().nextLong(ADVERTISE_RESTART_MIN_MS, ADVERTISE_RESTART_MAX_MS + 1)
-        val delay = cooldownDelay + jitter
-        pendingAdvertiseRestart?.let { mainHandler.removeCallbacks(it) }
-        val runnable = Runnable {
-            pendingAdvertiseRestart = null
-            startAdvertising(reason)
-        }
-        pendingAdvertiseRestart = runnable
-        mainHandler.postDelayed(runnable, delay)
+        nordicAdvertiser.refresh(reason)
     }
 
     private fun buildAdvertiseData(): AdvertiseData {
@@ -2501,16 +2424,8 @@ class BleManager(
 
     private val gattServerListener = object : NordicGattServer.Listener {
         override fun onReady() {
-            // Drain any deferred advertise request now that the GATT service
-            // registration has landed successfully.
-            val reason = pendingAdvertiseReason
-            if (reason != null) {
-                pendingAdvertiseReason = null
-                Log.i(TAG, "📡 Starting deferred advertising after GATT service ready")
-                mainHandler.post {
-                    startAdvertising("gatt_service_ready")
-                }
-            }
+            // NordicAdvertiser owns its own pending-reason latch; just drain it.
+            nordicAdvertiser.onGattServerReady()
         }
 
         override fun onSetupFailed(reason: String) {
