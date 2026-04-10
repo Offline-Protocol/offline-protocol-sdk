@@ -2,6 +2,7 @@ package com.offlineprotocol.ble
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -82,10 +83,14 @@ class PeripheralGattServerTest {
         // Sanity guard so the inbound size cap can't drift below the
         // facade's MAX_FRAGMENT_SIZE (185) without someone noticing.
         // A mesh fragment plus MTU-negotiation headroom must still fit.
+        // NB: use JUnit's assertTrue, not Kotlin's `assert`, because the
+        // latter is a no-op unless the JVM is started with `-ea`, which the
+        // Gradle test task does not do by default.
         val meshFragmentMax = 185
-        assert(PeripheralGattServer.MAX_INBOUND_WRITE_BYTES > meshFragmentMax) {
+        assertTrue(
             "MAX_INBOUND_WRITE_BYTES (${PeripheralGattServer.MAX_INBOUND_WRITE_BYTES}) " +
-                "must exceed mesh fragment size ($meshFragmentMax)"
-        }
+                "must exceed mesh fragment size ($meshFragmentMax)",
+            PeripheralGattServer.MAX_INBOUND_WRITE_BYTES > meshFragmentMax,
+        )
     }
 }

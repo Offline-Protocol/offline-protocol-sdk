@@ -34,11 +34,14 @@ class LeAdvertiser(
         fun buildScanResponse(): AdvertiseData
 
         /**
-         * Called before a scheduled restart runs, so the host can refresh any
-         * state that feeds the advertisement (e.g. signed identity in the GATT
-         * server's identity characteristic).
+         * Called just before a scheduled advertise restart runs so the host
+         * can refresh the signed identity that will be served via the GATT
+         * identity characteristic. This is load-bearing: centrals reading
+         * identity on the reconnect would otherwise see stale bytes.
+         * Must be safe to invoke on the main thread and must not block on
+         * network or disk.
          */
-        fun onBeforeRefresh()
+        fun refreshPublishedIdentity()
 
         /** Throttled logging hook owned by the host. */
         fun shouldLog(key: String, intervalMs: Long): Boolean
@@ -58,6 +61,18 @@ class LeAdvertiser(
     var isAdvertising: Boolean = false
         private set
 
+    /**
+     * Re-entry gate for [start]. Flipped to true synchronously on every
+     * accepted call and flipped back on [stop] or on a terminal
+     * `onStartFailure`. This used to be inferred from
+     * `advertiseCallback != null`, but that reference is cleared on a
+     * main-handler post in the failure callback, which left a window where
+     * a synchronous `start()` after a failure would be silently dropped by
+     * the gate. Separating the gate from the stop-reference closes it.
+     */
+    @Volatile
+    private var startInFlight: Boolean = false
+
     private var lastAdvertiseRestartAt: Long = 0L
     private var pendingAdvertiseRestart: Runnable? = null
     private var pendingAdvertiseReason: String? = null
@@ -75,13 +90,13 @@ class LeAdvertiser(
      * off the actual start when the service registration lands.
      */
     fun start(reason: String) {
-        // Gate on `advertiseCallback != null`, not `isAdvertising`. The latter
-        // is only flipped to true once the platform `onStartSuccess` callback
-        // arrives on a private Binder thread, which leaves a window where a
-        // fast stop() → start() on the main thread would submit a second
-        // startAdvertising while the first is still in flight and end up with
-        // ADVERTISE_FAILED_ALREADY_STARTED.
-        if (advertiseCallback != null) return
+        // Gate on a dedicated in-flight flag, not on `isAdvertising`. The
+        // latter is only flipped to true once the platform `onStartSuccess`
+        // callback arrives on a private Binder thread, which leaves a window
+        // where a fast stop() → start() on the main thread would submit a
+        // second startAdvertising while the first is still in flight and
+        // earn itself ADVERTISE_FAILED_ALREADY_STARTED.
+        if (startInFlight) return
 
         if (!host.isGattServerReady()) {
             pendingAdvertiseReason = reason
@@ -96,6 +111,7 @@ class LeAdvertiser(
             return
         }
 
+        startInFlight = true
         try {
             val settings = AdvertiseSettings.Builder()
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
@@ -134,8 +150,14 @@ class LeAdvertiser(
                     }
                     Log.e(TAG, "BLE advertising failed: $errorMsg (code=$errorCode)")
                     isAdvertising = false
-                    // Drop the callback reference so a subsequent start() is
-                    // allowed through the in-flight gate above.
+                    // Release the in-flight gate synchronously. `startInFlight`
+                    // is @Volatile so a subsequent start() on any thread
+                    // observes the clear immediately — no main-handler hop
+                    // required, which closes the retry window.
+                    startInFlight = false
+                    // Drop the stop-reference on main so a concurrent stop()
+                    // doesn't race our clear. stop() is main-thread only, so
+                    // posting here is sufficient.
                     mainHandler.post {
                         if (advertiseCallback === this) {
                             advertiseCallback = null
@@ -153,6 +175,7 @@ class LeAdvertiser(
             advertiser?.startAdvertising(settings, advertiseData, scanResponse, cb)
         } catch (e: SecurityException) {
             advertiseCallback = null
+            startInFlight = false
             Log.e(TAG, "Permission denied while starting advertising", e)
             diagnosticEmitter(
                 "error",
@@ -166,6 +189,7 @@ class LeAdvertiser(
     fun stop() {
         val cb = advertiseCallback
         advertiseCallback = null
+        startInFlight = false
         isAdvertising = false
         pendingAdvertiseRestart?.let {
             mainHandler.removeCallbacks(it)
@@ -188,7 +212,7 @@ class LeAdvertiser(
 
     fun refresh(reason: String) {
         stop()
-        host.onBeforeRefresh()
+        host.refreshPublishedIdentity()
         scheduleRestart(reason)
     }
 
@@ -232,6 +256,7 @@ class LeAdvertiser(
         pendingAdvertiseRestart = null
         pendingAdvertiseReason = null
         lastAdvertiseRestartAt = 0L
+        startInFlight = false
         advertiser = null
     }
 }

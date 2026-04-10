@@ -9,10 +9,9 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
-import android.os.Build
 import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -39,8 +38,8 @@ internal fun sliceForReadOffset(value: ByteArray, offset: Int): ByteArray = when
  *      centrals can subscribe to notifications. The helper is the only
  *      sanctioned way to create notify characteristics on this server.
  *   2. [BluetoothGattServerCallback.onDescriptorWriteRequest] is implemented
- *      so CCCD writes from centrals are acked and a `subscribedCentrals` set
- *      is maintained.
+ *      so CCCD writes from centrals are acked and a count of subscribed
+ *      centrals is maintained for observability.
  *   3. Service registration has a 5-second watchdog: if `onServiceAdded`
  *      never fires, we tear down, retry once, and escalate to
  *      [Listener.onSetupFailed] on a second failure — so a flaky GATT stack
@@ -50,6 +49,12 @@ internal fun sliceForReadOffset(value: ByteArray, offset: Int): ByteArray = when
  *      payload) return the correct tail on each follow-up read.
  *   5. `onCharacteristicWriteRequest` enforces a hard upper bound on inbound
  *      payload size as defence in depth against malformed/hostile centrals.
+ *
+ * Note: the facade currently routes outbound fragments through client-side
+ * `writeCharacteristic` calls, not server-side notifications. The CCCD
+ * bookkeeping here is kept for the day when asymmetric mesh links (we are
+ * only the peripheral for a given peer) need a notify fallback — until
+ * then it is purely diagnostic.
  */
 class PeripheralGattServer(
     private val context: Context,
@@ -96,18 +101,19 @@ class PeripheralGattServer(
     var isReady: Boolean = false
         private set
 
-    /** Centrals that have written ENABLE_NOTIFICATION_VALUE to the CCCD. */
-    private val subscribedCentrals: MutableSet<BluetoothDevice> =
-        ConcurrentHashMap.newKeySet()
-
     /**
-     * Serializes pre-Tiramisu notification writes. On API < 33 the value
-     * being notified is written to the shared [BluetoothGattCharacteristic]
-     * field before dispatch, so two threads notifying different centrals
-     * race on that field. Tiramisu+ uses the value-parameter overload and
-     * bypasses this lock entirely.
+     * Addresses of centrals that have written ENABLE_NOTIFICATION_VALUE to
+     * the CCCD. Kept purely for observability — the facade currently routes
+     * outbound fragments through client-side writes, never server-side
+     * notifications, so nothing reads this set beyond the diagnostic
+     * emissions in [onDescriptorWriteRequest]. Keyed by address (not
+     * [BluetoothDevice]) so the contract matches [MeshConnectionRegistry]'s
+     * stated "stable for the lifetime of a single LL connection" guarantee
+     * instead of relying on [BluetoothDevice.equals] delegating to the
+     * address string.
      */
-    private val notifyLock = Any()
+    private val subscribedCentralAddresses: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
 
     private var serviceReadyTimeoutRunnable: Runnable? = null
     private var setupRetryRunnable: Runnable? = null
@@ -124,6 +130,10 @@ class PeripheralGattServer(
     /**
      * Open the GATT server and register the mesh service. Idempotent: a
      * second call while already started tears down and re-attempts setup.
+     * Must be called from the main thread — the facade posts start/stop
+     * through its `runOnMainSync` helper and every callback we fire runs
+     * on the main handler, so the internal state machine assumes no
+     * concurrent entry.
      */
     fun start(
         serviceUuid: UUID,
@@ -131,6 +141,9 @@ class PeripheralGattServer(
         deviceIdUuid: UUID,
         identityUuid: UUID,
     ) {
+        check(Looper.myLooper() == Looper.getMainLooper()) {
+            "PeripheralGattServer.start must be called on the main thread"
+        }
         stop()
         setupAttempts = 0
         pendingSetup = PendingSetup(serviceUuid, messageUuid, deviceIdUuid, identityUuid)
@@ -139,6 +152,9 @@ class PeripheralGattServer(
 
     /** Close the server and drop all cached state. Safe to call repeatedly. */
     fun stop() {
+        check(Looper.myLooper() == Looper.getMainLooper()) {
+            "PeripheralGattServer.stop must be called on the main thread"
+        }
         serviceReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
         serviceReadyTimeoutRunnable = null
         setupRetryRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -152,58 +168,14 @@ class PeripheralGattServer(
         messageCharacteristic = null
         deviceIdCharacteristic = null
         identityCharacteristic = null
-        subscribedCentrals.clear()
+        subscribedCentralAddresses.clear()
         isReady = false
         pendingSetup = null
         setupAttempts = 0
     }
 
-    /**
-     * Push a notification to a specific subscribed central. Returns true on
-     * a successful platform-level submit. Silently returns false if the
-     * central is not subscribed or the server is not set up.
-     *
-     * On API 33+ this uses the value-parameter overload, which hands the
-     * payload to the platform atomically and is therefore safe to call
-     * concurrently from multiple threads. On older APIs the payload is
-     * assigned to the shared characteristic field first, so calls are
-     * serialized under [notifyLock].
-     */
-    fun notifySubscribed(device: BluetoothDevice, bytes: ByteArray): Boolean {
-        if (!subscribedCentrals.contains(device)) return false
-        val char = messageCharacteristic ?: return false
-        val server = gattServer ?: return false
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val status = server.notifyCharacteristicChanged(device, char, false, bytes)
-                status == BluetoothStatusCodes.SUCCESS
-            } else {
-                synchronized(notifyLock) {
-                    @Suppress("DEPRECATION")
-                    char.value = bytes
-                    @Suppress("DEPRECATION")
-                    server.notifyCharacteristicChanged(device, char, false)
-                }
-            }
-        } catch (e: SecurityException) {
-            Log.w(TAG, "Permission denied while notifying ${device.address}", e)
-            false
-        }
-    }
-
-    /** Push a notification to every subscribed central. Returns the count of successful notifies. */
-    fun notifyAllSubscribed(bytes: ByteArray): Int {
-        var count = 0
-        for (device in subscribedCentrals) {
-            if (notifySubscribed(device, bytes)) count++
-        }
-        return count
-    }
-
-    fun subscribedCentralCount(): Int = subscribedCentrals.size
-
-    /** Exposed for tests and diagnostics. */
-    fun isSubscribed(device: BluetoothDevice): Boolean = subscribedCentrals.contains(device)
+    /** Count of centrals currently subscribed via CCCD. Observability only. */
+    fun subscribedCentralCount(): Int = subscribedCentralAddresses.size
 
     /** Cancel an in-flight connection to a central. */
     fun cancelConnection(device: BluetoothDevice) {
@@ -395,7 +367,7 @@ class PeripheralGattServer(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> listener.onCentralConnected(device)
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    subscribedCentrals.remove(device)
+                    subscribedCentralAddresses.remove(device.address)
                     listener.onCentralDisconnected(device, status)
                 }
             }
@@ -408,12 +380,21 @@ class PeripheralGattServer(
             characteristic: BluetoothGattCharacteristic,
         ) {
             val server = gattServer ?: return
-            try {
-                val value: ByteArray? = when (characteristic.uuid) {
+            val value: ByteArray? = try {
+                when (characteristic.uuid) {
                     deviceIdCharacteristic?.uuid -> listener.provideDeviceIdBytes(device)
                     identityCharacteristic?.uuid -> listener.provideIdentityBytes(device)
                     else -> null
                 }
+            } catch (e: Exception) {
+                // A listener throwing is a programmer error, but we still
+                // need to release the central from the pending read —
+                // otherwise it sits spinning until the ATT timeout. Fall
+                // through to the failure-response branch below.
+                Log.w(TAG, "Listener threw in provide* callback", e)
+                null
+            }
+            try {
                 if (value != null) {
                     // Honour offset for long reads: the central will issue
                     // repeated reads with increasing offsets until it has
@@ -425,6 +406,15 @@ class PeripheralGattServer(
                 }
             } catch (e: SecurityException) {
                 Log.w(TAG, "Permission denied in read request", e)
+                // Best-effort: try to unblock the central with a failure
+                // response. If we've genuinely lost BLUETOOTH_CONNECT this
+                // will throw again and we just have to let the ATT timeout
+                // take over.
+                try {
+                    server.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                } catch (_: SecurityException) {
+                    // Permission already denied above; nothing more we can do.
+                }
             }
         }
 
@@ -495,23 +485,23 @@ class PeripheralGattServer(
                         value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
                             value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
                     if (enable) {
-                        subscribedCentrals.add(device)
+                        subscribedCentralAddresses.add(device.address)
                         diagnosticEmitter(
                             "info",
                             "cccd_subscribe_received",
                             mapOf(
                                 "address" to device.address,
-                                "subscribedCount" to subscribedCentrals.size,
+                                "subscribedCount" to subscribedCentralAddresses.size,
                             ),
                         )
                     } else {
-                        subscribedCentrals.remove(device)
+                        subscribedCentralAddresses.remove(device.address)
                         diagnosticEmitter(
                             "info",
                             "cccd_unsubscribe_received",
                             mapOf(
                                 "address" to device.address,
-                                "subscribedCount" to subscribedCentrals.size,
+                                "subscribedCount" to subscribedCentralAddresses.size,
                             ),
                         )
                     }

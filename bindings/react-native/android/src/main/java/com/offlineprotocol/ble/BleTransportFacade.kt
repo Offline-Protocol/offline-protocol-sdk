@@ -170,7 +170,7 @@ class BleTransportFacade(
                 override fun isGattServerReady(): Boolean = peripheralGattServer?.isReady == true
                 override fun buildAdvertiseData() = this@BleTransportFacade.buildAdvertiseData()
                 override fun buildScanResponse() = this@BleTransportFacade.buildScanResponse()
-                override fun onBeforeRefresh() { updateSignedIdentity() }
+                override fun refreshPublishedIdentity() { updateSignedIdentity() }
                 override fun shouldLog(key: String, intervalMs: Long) =
                     logThrottler.shouldLog(key, intervalMs = intervalMs)
             },
@@ -855,14 +855,21 @@ class BleTransportFacade(
             // We filter in handleScanResult using shouldProcessDiscoveredDevice().
             
             scanCallback = object : ScanCallback() {
+                // Scan callbacks arrive on a private Binder thread. Repost
+                // every result to the main handler so handleScanResult —
+                // which can synchronously reach updateSignedIdentity() via
+                // evictPeer → refreshAdvertising and which mutates
+                // LeAdvertiser state that is otherwise main-thread only —
+                // never runs off-main. Matches the threading model used by
+                // the GATT server listener callbacks.
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    handleScanResult(result)
+                    mainHandler.post { handleScanResult(result) }
                 }
-                
+
                 override fun onBatchScanResults(results: List<ScanResult>) {
-                    results.forEach { handleScanResult(it) }
+                    mainHandler.post { results.forEach { handleScanResult(it) } }
                 }
-                
+
                 override fun onScanFailed(errorCode: Int) {
                     val errorMsg = when(errorCode) {
                         SCAN_FAILED_ALREADY_STARTED -> "Scan already started"
