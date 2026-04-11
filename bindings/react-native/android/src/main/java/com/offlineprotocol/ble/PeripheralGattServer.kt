@@ -92,10 +92,34 @@ class PeripheralGattServer(
     private val bluetoothManager: BluetoothManager =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
 
+    // @Volatile because these references are mutated on the main thread
+    // (attemptSetup / handleSetupFailed / stop) but read on the GATT server's
+    // binder thread in every callback. Without the visibility barrier a
+    // binder callback can observe a stale non-null server during teardown and
+    // operate on a closed instance.
+    @Volatile
     private var gattServer: BluetoothGattServer? = null
+    @Volatile
     private var messageCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile
     private var deviceIdCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile
     private var identityCharacteristic: BluetoothGattCharacteristic? = null
+
+    /**
+     * Per-central snapshot of the identity bytes served on a long read.
+     * Android's long-read flow issues repeated reads with increasing offsets
+     * until the central has reassembled the whole value; every slice in one
+     * reassembly has to come from a *single* point-in-time snapshot or the
+     * central's signature check will fail on a torn buffer.
+     *
+     * Populated on `offset == 0` (the start of a read session) and served on
+     * every follow-up offset for the same central. Cleared when the central
+     * disconnects, when the server is stopped, or when a fresh `offset == 0`
+     * read replaces it.
+     */
+    private val identityReadSnapshots: ConcurrentHashMap<String, ByteArray> =
+        ConcurrentHashMap()
 
     @Volatile
     var isReady: Boolean = false
@@ -169,6 +193,7 @@ class PeripheralGattServer(
         deviceIdCharacteristic = null
         identityCharacteristic = null
         subscribedCentralAddresses.clear()
+        identityReadSnapshots.clear()
         isReady = false
         pendingSetup = null
         setupAttempts = 0
@@ -368,6 +393,7 @@ class PeripheralGattServer(
                 BluetoothProfile.STATE_CONNECTED -> listener.onCentralConnected(device)
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     subscribedCentralAddresses.remove(device.address)
+                    identityReadSnapshots.remove(device.address)
                     listener.onCentralDisconnected(device, status)
                 }
             }
@@ -380,10 +406,22 @@ class PeripheralGattServer(
             characteristic: BluetoothGattCharacteristic,
         ) {
             val server = gattServer ?: return
+            // Snapshot the nullable fields into locals so a concurrent
+            // teardown on the main thread can't flip them between the match
+            // and the listener call. Comparing against the stored
+            // characteristic's UUID (rather than `nullable?.uuid`) also
+            // removes the footgun where a `null == null` branch could match
+            // an unrelated characteristic if both fields were ever cleared.
+            val deviceIdChar = deviceIdCharacteristic
+            val identityChar = identityCharacteristic
+            val charUuid = characteristic.uuid
+
             val value: ByteArray? = try {
-                when (characteristic.uuid) {
-                    deviceIdCharacteristic?.uuid -> listener.provideDeviceIdBytes(device)
-                    identityCharacteristic?.uuid -> listener.provideIdentityBytes(device)
+                when {
+                    deviceIdChar != null && charUuid == deviceIdChar.uuid ->
+                        listener.provideDeviceIdBytes(device)
+                    identityChar != null && charUuid == identityChar.uuid ->
+                        resolveIdentityValue(device, offset)
                     else -> null
                 }
             } catch (e: Exception) {
@@ -416,6 +454,37 @@ class PeripheralGattServer(
                     // Permission already denied above; nothing more we can do.
                 }
             }
+        }
+
+        /**
+         * Serve the identity characteristic while keeping a long-read session
+         * coherent. On `offset == 0` we fetch fresh bytes from the listener
+         * and snapshot them per-central; on follow-up blob reads we serve
+         * from the snapshot so the central reassembles bytes that all came
+         * from the same point in time. Without this, a refresh of the
+         * signed-identity cache mid-read lets the central stitch together a
+         * torn value whose signature will fail to verify.
+         */
+        private fun resolveIdentityValue(device: BluetoothDevice, offset: Int): ByteArray? {
+            val address = device.address
+            if (offset == 0) {
+                val fresh = listener.provideIdentityBytes(device)
+                if (fresh != null) {
+                    identityReadSnapshots[address] = fresh
+                } else {
+                    identityReadSnapshots.remove(address)
+                }
+                return fresh
+            }
+            // Follow-up blob read within the same long-read session: serve
+            // from the snapshot taken on offset == 0.
+            identityReadSnapshots[address]?.let { return it }
+            // No snapshot (e.g. we missed the offset==0 read, or the central
+            // started a blob read out of the blue). Fall back to a fresh
+            // read — correctness may degrade to the pre-fix tearing behaviour
+            // for this single session, but we do not strand the central with
+            // a null response.
+            return listener.provideIdentityBytes(device)
         }
 
         override fun onCharacteristicWriteRequest(

@@ -2302,14 +2302,14 @@ class BleTransportFacade(
         }
         lastPeerCountUpdate = now
         
-        // Clean up old timestamps
+        // Clean up old timestamps and read size inside the same critical
+        // section — Collections.synchronizedList's contract requires size /
+        // iteration to happen under the same monitor that guards writes.
         val windowStart = now - ADAPTIVE_PEER_COUNT_WINDOW_MS
-        synchronized(recentDiscoveryTimestamps) {
+        val recentCount = synchronized(recentDiscoveryTimestamps) {
             recentDiscoveryTimestamps.removeAll { it < windowStart }
+            recentDiscoveryTimestamps.size
         }
-        
-        // Estimate peer count from unique discoveries in window
-        val recentCount = recentDiscoveryTimestamps.size
         val cachedCount = lastSeenMeshAdvertisements.size
         estimatedVisiblePeerCount = maxOf(recentCount, cachedCount)
     }
@@ -2343,44 +2343,46 @@ class BleTransportFacade(
         // During aggressive discovery phase, use much shorter cooldowns
         val isAggressivePhase = transportStartAt > 0 && now - transportStartAt < AGGRESSIVE_DISCOVERY_PHASE_MS
         
-        // Prune old entries
+        // Prune old entries and snapshot the count under the same monitor
+        // that guards writes — Collections.synchronizedList's contract
+        // requires size / iteration to happen inside a synchronized block.
         val oneMinuteAgo = now - 60_000L
-        synchronized(globalConnectionAttempts) {
+        val globalAttemptCount = synchronized(globalConnectionAttempts) {
             globalConnectionAttempts.removeAll { it < oneMinuteAgo }
+            globalConnectionAttempts.size
         }
-        
+
         val effectiveCooldown = if (isAggressivePhase) 5_000L else ADAPTIVE_COOLDOWN_PER_DEVICE_MS
-        deviceConnectionAttempts.entries.removeIf { 
-            now - it.value >= effectiveCooldown 
+        deviceConnectionAttempts.entries.removeIf {
+            now - it.value >= effectiveCooldown
         }
-        
+
         // Check per-device cooldown
         val lastAttempt = deviceConnectionAttempts[address]
         if (lastAttempt != null && now - lastAttempt < effectiveCooldown) {
             return true
         }
-        
+
         // During aggressive phase, allow more connection attempts
         if (isAggressivePhase) {
             // Allow up to 3x the normal rate during aggressive phase
             val maxAttempts = ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE * 3
-            if (globalConnectionAttempts.size >= maxAttempts) {
+            if (globalAttemptCount >= maxAttempts) {
                 return true
             }
             return false
         }
-        
+
         // In dense networks, apply global rate limiting
         if (estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD) {
-            val currentAttempts = globalConnectionAttempts.size
-            if (currentAttempts >= ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE) {
+            if (globalAttemptCount >= ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE) {
                 if (logThrottler.shouldLog("adaptive_rate_limit", intervalMs = 5000)) {
-                    Log.d(TAG, "Adaptive: rate limiting connections ($currentAttempts/$ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE in last minute)")
+                    Log.d(TAG, "Adaptive: rate limiting connections ($globalAttemptCount/$ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE in last minute)")
                 }
                 return true
             }
         }
-        
+
         return false
     }
     
@@ -2823,35 +2825,54 @@ class BleTransportFacade(
         }
         
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            // Snapshot the payload on the binder thread before the BLE
+            // stack reuses the buffer for the next operation, then repost
+            // the entire body to the main handler. Everything downstream
+            // from here calls into UniFFI (blePeerDiscovered,
+            // bleFragmentReceived, verifySignature, learnRoute) and must
+            // never run on the shared binder-thread pool — stalling it
+            // blocks GATT work for every client in this process. Same
+            // pattern as onCharacteristicChanged below.
+            val charUuid = characteristic.uuid
+            @Suppress("DEPRECATION")
+            val snapshot = characteristic.value?.copyOf()
+            mainHandler.post { handleCharacteristicReadOnMain(gatt, charUuid, snapshot, status) }
+        }
+
+        private fun handleCharacteristicReadOnMain(
+            gatt: BluetoothGatt,
+            charUuid: UUID,
+            value: ByteArray?,
+            status: Int,
+        ) {
             val address = gatt.device.address
-            Log.i(TAG, "onCharacteristicRead: $address, char=${characteristic.uuid}, status=$status")
+            Log.i(TAG, "onCharacteristicRead (main): $address, char=$charUuid, status=$status")
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.w(TAG, "Characteristic read failed for $address, char=${characteristic.uuid}, status=$status")
+                Log.w(TAG, "Characteristic read failed for $address, char=$charUuid, status=$status")
                 emitDiagnostic("warning", "Characteristic read failed", mapOf(
                     "address" to address,
-                    "char" to characteristic.uuid.toString(),
+                    "char" to charUuid.toString(),
                     "status" to status,
                 ))
                 // Only the device-ID read is load-bearing for link setup.
                 // An identity read failure is diagnostic and should not tear
                 // the link down — the peer is still usable, just unverified.
-                if (characteristic.uuid == DEVICE_ID_CHAR_UUID) {
+                if (charUuid == DEVICE_ID_CHAR_UUID) {
                     closeGattClient(gatt, "device_id_read_failed")
                 }
                 return
             }
 
-            when (characteristic.uuid) {
-                DEVICE_ID_CHAR_UUID -> handleDeviceIdRead(gatt, characteristic)
-                IDENTITY_CHAR_UUID -> handleIdentityRead(gatt, characteristic)
+            when (charUuid) {
+                DEVICE_ID_CHAR_UUID -> handleDeviceIdRead(gatt, value)
+                IDENTITY_CHAR_UUID -> handleIdentityRead(gatt, value)
             }
         }
 
-        private fun handleDeviceIdRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+        private fun handleDeviceIdRead(gatt: BluetoothGatt, value: ByteArray?) {
             val address = gatt.device.address
-            @Suppress("DEPRECATION")
-            val deviceIdValue = characteristic.value?.toString(Charsets.UTF_8)
+            val deviceIdValue = value?.toString(Charsets.UTF_8)
             Log.i(TAG, "Read device ID from $address: $deviceIdValue")
 
             if (deviceIdValue.isNullOrEmpty()) {
@@ -2870,10 +2891,9 @@ class BleTransportFacade(
             meshController.markPeerActive(deviceIdValue)
             meshController.markPeerActive(deviceId)
             refreshSelfMetrics()
-            mainHandler.post {
-                if (state == TransportState.RUNNING) {
-                    refreshAdvertising("membership_change")
-                }
+            // Already on main — no extra hop needed.
+            if (state == TransportState.RUNNING) {
+                refreshAdvertising("membership_change")
             }
             val rssiInt = lastSeenRssi[address]?.toInt()
             if (rssiInt != null) {
@@ -2892,41 +2912,44 @@ class BleTransportFacade(
                 emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
             }
 
-            // Drain all pending inbound fragments keyed by this address —
-            // the same buffer holds central-side notify fragments and
-            // server-side write fragments, since both paths queue under the
-            // connection-specific address.
-            processPendingFragments(address, deviceIdValue)
-
-            // Chain the next GATT op: read the identity characteristic.
-            // Only issue it now, after the deviceId read callback has fired,
-            // so the stack is idle and won't drop the request.
+            // Kick the next GATT op (identity read) BEFORE draining the
+            // pending fragment queue. Android's BLE stack runs the read on
+            // its own worker once the previous callback has returned, so
+            // issuing it now lets it proceed in parallel with the UniFFI
+            // burst that processPendingFragments is about to execute on
+            // this thread. Draining first would serialise an arbitrary
+            // number of UniFFI round-trips before the identity handshake
+            // could even start.
             val service = gatt.getService(SERVICE_UUID)
             val identityChar = service?.getCharacteristic(IDENTITY_CHAR_UUID)
             if (identityChar == null) {
                 Log.w(TAG, "Identity characteristic not found on $address, skipping to CCCD")
                 enableNotificationsOnLink(gatt)
-                return
-            }
-
-            try {
-                val started = gatt.readCharacteristic(identityChar)
-                if (!started) {
-                    Log.w(TAG, "readCharacteristic(identity) returned false for $address; proceeding to CCCD")
-                    emitDiagnostic("warning", "readCharacteristic(identity) returned false", mapOf("address" to address))
-                    // Identity is non-blocking — skip to CCCD instead of tearing the link down.
+            } else {
+                try {
+                    val started = gatt.readCharacteristic(identityChar)
+                    if (!started) {
+                        Log.w(TAG, "readCharacteristic(identity) returned false for $address; proceeding to CCCD")
+                        emitDiagnostic("warning", "readCharacteristic(identity) returned false", mapOf("address" to address))
+                        // Identity is non-blocking — skip to CCCD instead of tearing the link down.
+                        enableNotificationsOnLink(gatt)
+                    }
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "Permission denied reading identity characteristic", e)
+                    emitDiagnostic("error", "Permission denied reading identity characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                     enableNotificationsOnLink(gatt)
                 }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied reading identity characteristic", e)
-                emitDiagnostic("error", "Permission denied reading identity characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                enableNotificationsOnLink(gatt)
             }
+
+            // Drain all pending inbound fragments keyed by this address —
+            // the same buffer holds central-side notify fragments and
+            // server-side write fragments, since both paths queue under the
+            // connection-specific address.
+            processPendingFragments(address, deviceIdValue)
         }
 
-        private fun handleIdentityRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            @Suppress("DEPRECATION")
-            handleReceivedIdentity(characteristic.value, gatt.device.address)
+        private fun handleIdentityRead(gatt: BluetoothGatt, value: ByteArray?) {
+            handleReceivedIdentity(value, gatt.device.address)
             // Identity read complete → now enable notifications.
             enableNotificationsOnLink(gatt)
         }
