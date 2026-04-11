@@ -479,13 +479,40 @@ interface OfflineProtocol {
     
     [Throws=ProtocolError]
     void ble_fragment_received(string sender_id, sequence<u8> fragment);
-    
+
     BleFragment? ble_get_next_fragment();
-    
+
     void ble_return_fragment();
-    
+
     u32 ble_get_peer_count();
-    
+
+    // Per-peer MTU reporting. Platforms call ble_set_peer_mtu after BLE MTU
+    // negotiation completes for a link, passing the already-header-adjusted
+    // max fragment payload (iOS: peripheral.maximumWriteValueLength; Android:
+    // onMtuChanged's mtu - 3). ble_clear_peer_mtu is called on disconnect.
+    [Throws=ProtocolError]
+    void ble_set_peer_mtu(string peer_id, u32 max_payload);
+
+    [Throws=ProtocolError]
+    void ble_clear_peer_mtu(string peer_id);
+
+    // Monotonic lifetime counter of undersized MTU reports (< BLE_MAX_FRAGMENT_SIZE).
+    // Non-zero means at least one peer's real link capacity is below the Rust
+    // fallback floor — outbound writes to that peer are being dropped by the
+    // controller. Surface in dashboards.
+    u64 ble_undersized_mtu_reports();
+
+    // Monotonic lifetime counter of fragment_message calls that fell back
+    // to the Rust fragment-size floor because no per-peer MTU was on file
+    // AND the recipient is still a registered direct BLE peer. In healthy
+    // operation this should remain zero — both platforms push MTU before
+    // announcing the peer, so by the time a send can reach a live peer
+    // the MTU is already on file. Non-zero means either the MTU-before-
+    // discover ordering invariant regressed, or the recipient → device_id
+    // keying contract broke — every fragmenting send to live peers is
+    // then silently regressing to the 185-byte floor.
+    u64 ble_fragment_fallback_count();
+
     // Internet transport operations
     [Throws=ProtocolError]
     void internet_status_changed(boolean is_connected);

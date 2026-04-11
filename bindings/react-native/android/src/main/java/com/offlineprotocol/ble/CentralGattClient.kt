@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.os.Build
@@ -28,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap
  *
  *   - The per-address handshake state machine:
  *       `onConnectionStateChange(CONNECTED)` → `discoverServices()`
- *       `onServicesDiscovered` → `readCharacteristic(DEVICE_ID)`
+ *       `onServicesDiscovered` → `requestMtu(REQUESTED_ATT_MTU)`
+ *       `onMtuChanged` → report payload to host, `readCharacteristic(DEVICE_ID)`
  *       `onCharacteristicRead(DEVICE_ID)` → `readCharacteristic(IDENTITY)`
  *       `onCharacteristicRead(IDENTITY)` → `setCharacteristicNotification`
  *          + `writeDescriptor(CCCD)`
@@ -101,6 +103,29 @@ internal class CentralGattClient(
          *  notify or via central-side write). Called on the main thread. */
         fun handleInboundFragment(address: String, data: ByteArray)
 
+        /** Notify the facade that a remote peripheral's ATT MTU negotiation
+         *  has completed. [maxPayload] is the already header-adjusted max
+         *  fragment size (ATT MTU minus the 3-byte header). Called from the
+         *  binder GATT thread; implementations must repost to main before
+         *  touching UniFFI. */
+        fun onPeerMtuNegotiated(address: String, maxPayload: Int)
+
+        /** Notify the facade that a remote peripheral's device ID has been
+         *  resolved via a reverse GATT read. Called on the main thread,
+         *  immediately after [MeshConnectionRegistry.setDeviceIdentifier] has
+         *  been populated for [address]. Used by the facade to flush any
+         *  MTU value previously staged under [address] into the Rust
+         *  transport keyed by [deviceId]. */
+        fun onDeviceIdResolved(address: String, deviceId: String)
+
+        /** Notify the facade that a peer has been permanently given up on
+         *  (retry budget exhausted or stale callback post-teardown). Called
+         *  from [finalizeGivenUpPeer] on the main thread — the facade uses
+         *  this to drop facade-only state that is not already cleared via
+         *  [clearPeerBuffers] (the staged negotiated-MTU map, the Rust-side
+         *  per-peer MTU entry). */
+        fun onPeerGivenUp(address: String, peerId: String)
+
         /** Entry point used by the retry-on-disconnect path to re-attempt
          *  connecting to a known address. Facade enforces the per-device
          *  RSSI / capacity / cooldown gating inside connectToDevice. */
@@ -134,7 +159,43 @@ internal class CentralGattClient(
          *  pathologically chatty peer racing with the drain loop cannot
          *  pin the main thread indefinitely. */
         private const val MAX_DRAIN_ITERATIONS = 8
+        /** ATT MTU we ask for in `requestMtu`. 517 is the BLE 5 spec max;
+         *  controllers negotiate down to whatever both peers support. The
+         *  resulting payload = mtu − 3 is reported to Rust so the
+         *  fragmenter can size outbound chunks per peer. */
+        private const val REQUESTED_ATT_MTU = 517
+        /** ATT protocol overhead (opcode + attribute handle) subtracted
+         *  from the negotiated MTU to get usable Write-Without-Response
+         *  payload. */
+        private const val ATT_HEADER_BYTES = 3
+        /** Hard deadline for a `requestMtu` → `onMtuChanged` round-trip,
+         *  in milliseconds. Some Android BLE stacks are known to accept
+         *  `requestMtu` (returning true) and then never deliver the
+         *  callback on flaky peripherals, leaving the handshake chain
+         *  wedged until GATT supervision timeout (~20s). Well above the
+         *  typical 100–500ms negotiation window — a ~10× safety margin —
+         *  and short enough that a hung link surfaces quickly. If the
+         *  deadline passes, the watchdog resumes the handshake with
+         *  whatever MTU the controller auto-negotiated, and the Rust
+         *  transport falls back to its 185-byte fragment floor for that
+         *  peer. */
+        private const val MTU_WATCHDOG_MS = 3000L
     }
+
+    // Addresses with an in-flight `requestMtu` whose `onMtuChanged`
+    // callback has not yet landed. Entry is inserted just before
+    // `gatt.requestMtu`, removed atomically by whichever of {real callback,
+    // watchdog runnable} fires first — the loser sees `remove(...) == false`
+    // and bails out. Also cleared from every handshake-teardown path
+    // (service missing, permission denied, finalizeGivenUpPeer) so a stale
+    // watchdog does not fire against a gone peer.
+    private val mtuInFlight = ConcurrentHashMap<String, Boolean>()
+
+    // Pending watchdog Runnables keyed by address, so they can be cancelled
+    // via `mainHandler.removeCallbacks` when the real `onMtuChanged` lands
+    // first. Separate from [mtuInFlight] because `ConcurrentHashMap<_, Unit>`
+    // does not model "present-or-absent" cleanly.
+    private val mtuWatchdogs = ConcurrentHashMap<String, Runnable>()
 
     // Addresses whose CCCD subscription has been acked by the remote peer.
     // Until the descriptor write lands we can't trust that the peripheral
@@ -155,6 +216,7 @@ internal class CentralGattClient(
         linkReady.remove(address)
         connectionRetryCount.remove(address)
         deviceIdResolutionAttempts.remove(address)
+        cancelMtuWatchdog(address)
     }
 
     /** Drop all per-address state. Used by transport stop. */
@@ -162,6 +224,21 @@ internal class CentralGattClient(
         linkReady.clear()
         connectionRetryCount.clear()
         deviceIdResolutionAttempts.clear()
+        mtuInFlight.clear()
+        mtuWatchdogs.values.forEach { mainHandler.removeCallbacks(it) }
+        mtuWatchdogs.clear()
+    }
+
+    /**
+     * Cancels any pending MTU watchdog for [address] and drops the
+     * associated `mtuInFlight` slot. Called from every handshake
+     * teardown path so a stale watchdog cannot fire against a gone peer
+     * (which would race `closeGattClient`, re-enter the chain, and log
+     * confusing "service missing" warnings).
+     */
+    private fun cancelMtuWatchdog(address: String) {
+        mtuInFlight.remove(address)
+        mtuWatchdogs.remove(address)?.let { mainHandler.removeCallbacks(it) }
     }
 
     fun markResolutionAttempt(address: String, now: Long) {
@@ -233,13 +310,205 @@ internal class CentralGattClient(
 
             // Kick off the first GATT op only. Android's BLE stack serialises
             // one GATT op at a time, so we chain:
-            //   onServicesDiscovered → readCharacteristic(deviceId)
+            //   onServicesDiscovered → requestMtu(REQUESTED_ATT_MTU)
+            //   onMtuChanged → readCharacteristic(deviceId)
             //   onCharacteristicRead(deviceId) → readCharacteristic(identity)
             //   onCharacteristicRead(identity) → setNotification + writeDescriptor(CCCD)
             //   onDescriptorWrite(CCCD success) → mark linkReady + drain
             // Firing more than one op here causes the second to be silently
             // dropped on some vendors, which is the class of bug where the
-            // connection "looks healthy" but no messages flow.
+            // connection "looks healthy" but no messages flow. MTU negotiation
+            // runs first so that by the time we drain outbound fragments
+            // (after CCCD), the Rust fragmenter already knows the per-peer
+            // payload size and can size fragments to the real link capacity
+            // instead of the 185-byte fallback floor.
+            requestPeerMtuOrResumeChain(gatt, service, address)
+        }
+
+        /**
+         * Arms the MTU watchdog, issues `requestMtu`, and handles the
+         * synchronous-false / permission-denied fallbacks. Extracted from
+         * [onServicesDiscovered] so the handshake state machine in that
+         * callback reads as a linear chain rather than 40+ lines of
+         * watchdog arming and error branches inline. The happy path
+         * (`requestMtu` returned true, real `onMtuChanged` fires) resumes
+         * via [onMtuChanged]; the error paths resume via
+         * [readDeviceIdCharacteristicOrClose] under the controller-default
+         * MTU. Called from the GATT binder callback thread (the same
+         * thread as the rest of [onServicesDiscovered]); the watchdog
+         * Runnable it arms runs on [mainHandler] instead, and the two
+         * race to claim the `mtuInFlight` slot via ConcurrentHashMap CAS.
+         */
+        private fun requestPeerMtuOrResumeChain(
+            gatt: BluetoothGatt,
+            service: BluetoothGattService,
+            address: String,
+        ) {
+            // Arm the MTU watchdog BEFORE requestMtu so that a racing
+            // fire from `mainHandler.postDelayed` always sees an entry in
+            // [mtuInFlight]. On success this is cancelled from the top of
+            // [onMtuChanged]; on the synchronous-false / permission-denied
+            // fallbacks below we cancel explicitly before taking the
+            // alternative path.
+            mtuInFlight[address] = true
+            val watchdog = Runnable {
+                if (host.isShuttingDown()) return@Runnable
+                // CAS: watchdog only resumes the chain if no real callback
+                // has already claimed this address. `remove() != null`
+                // expresses the atomic present-or-absent semantics more
+                // clearly than the Boolean-autoboxed `== true` pattern.
+                val claimed = mtuInFlight.remove(address) != null
+                if (!claimed) return@Runnable
+                mtuWatchdogs.remove(address)
+                Log.w(TAG, "MTU watchdog fired for $address after ${MTU_WATCHDOG_MS}ms — resuming handshake without negotiated MTU")
+                diagnosticEmitter(
+                    "warning",
+                    "MTU watchdog fired",
+                    mapOf("address" to address, "timeoutMs" to MTU_WATCHDOG_MS),
+                )
+                // Re-entrancy note: this block runs on the main handler
+                // while an `onMtuChanged` callback for the same `gatt`
+                // may still be dispatched by the binder GATT thread
+                // moments later. That race is safe because:
+                //   - The `mtuInFlight.remove(...) != null` CAS above
+                //     means a concurrent onMtuChanged will observe
+                //     `claimed == false` and divert to the late-
+                //     callback branch (which re-gates on
+                //     `getGatt(address) != null`), rather than re-
+                //     entering the handshake chain under our feet.
+                //   - `closeGattClient` tolerates being called while
+                //     the binder thread holds a reference to the same
+                //     `gatt` instance — Android's BLE stack serialises
+                //     GATT operations per-client internally, and
+                //     `closeGattClient` only manipulates our own
+                //     per-address registry + calls `gatt.close()`,
+                //     which is documented as thread-safe.
+                //   - `readDeviceIdCharacteristicOrClose` issues exactly
+                //     one GATT op, which the stack queues behind any
+                //     still-in-flight op on the same gatt.
+                // Re-fetch the service — the cached local may still be
+                // valid, but going through `gatt.getService` is resilient
+                // if the stack tore it down underneath us.
+                val currentService = gatt.getService(serviceUuid)
+                if (currentService == null) {
+                    closeGattClient(gatt, "service_missing_post_mtu_watchdog")
+                } else {
+                    readDeviceIdCharacteristicOrClose(gatt, currentService, address)
+                }
+            }
+            mtuWatchdogs[address] = watchdog
+            mainHandler.postDelayed(watchdog, MTU_WATCHDOG_MS)
+
+            try {
+                val mtuRequested = gatt.requestMtu(REQUESTED_ATT_MTU)
+                if (!mtuRequested) {
+                    Log.w(TAG, "requestMtu returned false for $address; continuing with default MTU")
+                    diagnosticEmitter("warning", "requestMtu returned false", mapOf("address" to address))
+                    // Cancel the watchdog we just armed — we already know
+                    // the callback will never arrive, so fall through to
+                    // the device-id read under the controller-default MTU.
+                    cancelMtuWatchdog(address)
+                    readDeviceIdCharacteristicOrClose(gatt, service, address)
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Permission denied requesting MTU", e)
+                diagnosticEmitter("error", "Permission denied requesting MTU", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                cancelMtuWatchdog(address)
+                closeGattClient(gatt, "mtu_request_permission_denied")
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (host.isShuttingDown()) return
+            val address = gatt.device.address
+            // Claim the in-flight slot atomically. If the watchdog has
+            // already fired (and removed the entry) we're the loser of
+            // that race — the chain has already been resumed, so drop
+            // this late callback on the floor.
+            val claimed = mtuInFlight.remove(address) != null
+            if (!claimed) {
+                // Watchdog fired first and already resumed the handshake at
+                // the fallback fragment size. Don't re-enter the chain, but
+                // still forward a successful negotiation so the facade can
+                // flush the real payload size into Rust — see
+                // BleTransportFacade.onPeerMtuNegotiated, which stages the
+                // payload and, if the device id has already been resolved
+                // for this address, calls flushPeerMtu immediately.
+                // Dropping the value here would pin this link to the
+                // 185-byte floor for its remaining lifetime.
+                //
+                // Gate the forward on the gatt client still being
+                // registered for this address: if teardown has already
+                // run (closeGattClient → removeGatt, or finalizeGivenUpPeer,
+                // or stop), forwarding the stage would leak an entry in
+                // the facade's `peerMaxPayloads` map that no subsequent
+                // teardown path would clear — a reconnect on the same
+                // BLE address could then observe a stale value from the
+                // previous session. `getGatt(address) != null` is true
+                // throughout normal handshake (including the
+                // post-watchdog, pre-CCCD window) and flips false the
+                // moment `closeGattClient` runs.
+                val stillConnected = host.connections.getGatt(address) != null
+                if (status == BluetoothGatt.GATT_SUCCESS && stillConnected) {
+                    val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+                    Log.i(TAG, "Late onMtuChanged for $address after watchdog: mtu=$mtu payload=$maxPayload — forwarding to facade")
+                    diagnosticEmitter(
+                        "info",
+                        "MTU negotiated (late)",
+                        mapOf("address" to address, "mtu" to mtu, "payload" to maxPayload),
+                    )
+                    host.onPeerMtuNegotiated(address, maxPayload)
+                } else {
+                    Log.i(TAG, "Late onMtuChanged for $address after watchdog — status=$status stillConnected=$stillConnected, ignoring")
+                }
+                return
+            }
+            mtuWatchdogs.remove(address)?.let { mainHandler.removeCallbacks(it) }
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+                Log.i(TAG, "MTU negotiated for $address: mtu=$mtu payload=$maxPayload")
+                diagnosticEmitter(
+                    "info",
+                    "MTU negotiated",
+                    mapOf("address" to address, "mtu" to mtu, "payload" to maxPayload),
+                )
+                host.onPeerMtuNegotiated(address, maxPayload)
+            } else {
+                Log.w(TAG, "MTU negotiation failed for $address, status=$status — using default")
+                diagnosticEmitter(
+                    "warning",
+                    "MTU negotiation failed",
+                    mapOf("address" to address, "status" to status),
+                )
+                // Leave the peer without a stored MTU; Rust will use its
+                // fallback fragment size and outbound writes stay within
+                // the controller-default ATT MTU.
+            }
+
+            // Resume the handshake chain regardless of MTU negotiation
+            // outcome — a missing MTU is recoverable (fallback fragment
+            // size), but skipping the device-id read is not.
+            val service = gatt.getService(serviceUuid)
+            if (service == null) {
+                Log.w(TAG, "Service disappeared between discover and MTU ack for $address")
+                diagnosticEmitter("warning", "Service missing after MTU negotiation", mapOf("address" to address))
+                closeGattClient(gatt, "service_missing_post_mtu")
+                return
+            }
+            readDeviceIdCharacteristicOrClose(gatt, service, address)
+        }
+
+        /**
+         * Kicks off `readCharacteristic(deviceId)`. Extracted so both
+         * [onServicesDiscovered] (in the `requestMtu returned false` path)
+         * and [onMtuChanged] can resume the handshake chain without
+         * duplicating the error handling.
+         */
+        private fun readDeviceIdCharacteristicOrClose(
+            gatt: BluetoothGatt,
+            service: BluetoothGattService,
+            address: String,
+        ) {
             val deviceIdChar = service.getCharacteristic(deviceIdCharUuid)
             if (deviceIdChar == null) {
                 Log.w(TAG, "Device ID characteristic NOT FOUND on $address")
@@ -494,6 +763,12 @@ internal class CentralGattClient(
      */
     private fun finalizeGivenUpPeer(address: String, peerId: String) {
         if (host.isShuttingDown()) return
+        // Cancel any watchdog that may still be in flight for this
+        // address — `closeGattClient` usually handles this earlier in
+        // the teardown path, but the stale-callback branch in
+        // `onConnectionStateChange` can reach here without having gone
+        // through close first.
+        cancelMtuWatchdog(address)
         host.protocol.removeNeighborRoutes(peerId)
         try {
             host.protocol.blePeerLost(peerId)
@@ -504,6 +779,7 @@ internal class CentralGattClient(
                 "message" to (e.message ?: "unknown"),
             ))
         }
+        host.onPeerGivenUp(address, peerId)
         host.meshController.registerDisconnection(peerId)
         host.refreshSelfMetrics()
         host.connections.removeIdentifiersForAddress(address)
@@ -587,8 +863,31 @@ internal class CentralGattClient(
             )
         }
 
+        // ORDERING INVARIANT — DO NOT REORDER.
+        //
+        // `onDeviceIdResolved` (which flushes the staged MTU via
+        // `BleTransportFacade.flushPeerMtu` → `bleSetPeerMtu`) MUST
+        // run before `protocol.blePeerDiscovered` below. This is
+        // the entire point of commit ac8cce8: any fragmenting send
+        // that lands between announcing the peer to the protocol
+        // layer and flushing the MTU into the Rust transport will
+        // key-miss `peer_mtus`, fall back to the 185-byte floor,
+        // and silently waste ~60% of the negotiated BLE 5
+        // bandwidth for every fragment in that window. The Rust
+        // side pins this from its end via
+        // `test_ble_golden_path_handshake_never_falls_back` and
+        // the `ble_fragment_fallback_count` telemetry counter,
+        // which fires the moment a registered peer has to fall
+        // back.
+        //
+        // If you are refactoring this function and think these two
+        // calls should swap "for clarity", don't.
+        host.onDeviceIdResolved(address, deviceIdValue)
+
         val rssi = host.rssiFor(address) ?: (-60).toShort()
         try {
+            // ORDERING INVARIANT: this line MUST come AFTER
+            // `host.onDeviceIdResolved` above.
             host.protocol.blePeerDiscovered(deviceIdValue, rssi)
         } catch (e: Exception) {
             Log.e(TAG, "Error notifying peer discovered", e)
@@ -699,6 +998,7 @@ internal class CentralGattClient(
         }
         host.connections.removeGatt(address)
         linkReady.remove(address)
+        cancelMtuWatchdog(address)
     }
 
     /**

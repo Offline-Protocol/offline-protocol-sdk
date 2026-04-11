@@ -281,6 +281,61 @@ class BleTransportFacade(
                     this@BleTransportFacade.handleReceivedData(data, address)
                 override fun connectToDevice(device: BluetoothDevice) =
                     this@BleTransportFacade.connectToDevice(device)
+
+                override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {
+                    // Called from the binder GATT callback thread. Repost
+                    // to main so we can touch [peerMaxPayloads] and the
+                    // connection registry without racing the handshake
+                    // state machine, and so any UniFFI call made from the
+                    // already-resolved branch below lands on main.
+                    mainHandler.post {
+                        if (shuttingDown) return@post
+                        assertMainThread("onPeerMtuNegotiated.stage")
+                        // Re-check after the main-hop: by the time we
+                        // run, teardown may have completed (disconnect,
+                        // give-up, stop) and removed the gatt client
+                        // from the registry. Staging in that window
+                        // would leak an entry in [peerMaxPayloads] that
+                        // no subsequent teardown path would clear, and
+                        // a reconnect on the same BLE address could
+                        // then observe a stale value from the previous
+                        // session. Drop the stage silently.
+                        if (connections.getGatt(address) == null) {
+                            return@post
+                        }
+                        peerMaxPayloads[address] = maxPayload
+                        // If the reverse GATT read has already landed and
+                        // resolved the device id for this address, flush
+                        // immediately instead of waiting for a subsequent
+                        // onDeviceIdResolved — this covers the case where
+                        // the MTU ack arrives *after* the device-id read
+                        // (theoretically possible if a peer renegotiates
+                        // MTU mid-link, though not in the normal chain).
+                        val deviceId = connections.deviceIdForAddress(address)
+                        if (deviceId != null) {
+                            flushPeerMtu(address, deviceId)
+                        }
+                    }
+                }
+
+                override fun onDeviceIdResolved(address: String, deviceId: String) {
+                    // Already on main — handleDeviceIdRead runs on the
+                    // main thread, so no hop is needed.
+                    if (shuttingDown) return
+                    flushPeerMtu(address, deviceId)
+                }
+
+                override fun onPeerGivenUp(address: String, peerId: String) {
+                    // Called on main from finalizeGivenUpPeer, which has
+                    // already invoked `protocol.blePeerLost(peerId)` —
+                    // that drops the Rust-side per-peer MTU entry inside
+                    // `on_peer_lost`. All that remains is the facade-side
+                    // staged entry keyed by BLE address (non-empty in the
+                    // edge case where `onPeerMtuNegotiated` landed but
+                    // the device-id read never completed).
+                    if (shuttingDown) return
+                    dropStagedPeerMtu(address)
+                }
             },
             diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
         )
@@ -315,6 +370,21 @@ class BleTransportFacade(
     // Connection registry keeps track of client/server links and desired roles.
     private val connections = MeshConnectionRegistry()
     private val lastSeenRssi = ConcurrentHashMap<String, Short>()
+
+    // Per-address staging map for negotiated ATT payload sizes. Populated
+    // from [CentralGattClient.Host.onPeerMtuNegotiated] (which reposts to
+    // main before touching this map) and drained in
+    // [CentralGattClient.Host.onDeviceIdResolved] once the reverse GATT
+    // read has mapped the address to a stable device id — at that point
+    // we flush into Rust via `protocol.bleSetPeerMtu` so the fragmenter
+    // can size outbound chunks per peer instead of using the 185-byte
+    // fallback. Entries are removed on successful flush (so a reconnect
+    // cannot observe a stale value) and on disconnect alongside the
+    // matching `bleClearPeerMtu` call. Main-thread only — every access
+    // is guarded by [assertMainThread], and the type is a plain `HashMap`
+    // to make the discipline visible rather than silently tolerate cross-
+    // thread writes.
+    private val peerMaxPayloads = HashMap<String, Int>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -811,6 +881,16 @@ class BleTransportFacade(
         lastSeenRssi.clear()
         pendingInbound.clear()
         outboundQueue.clear()
+        // Drop any negotiated-MTU values staged by the prior session.
+        // Per-disconnect paths (dropStagedPeerMtu) already handle most
+        // entries, but a transport stop mid-handshake (MTU staged,
+        // device id not yet resolved) leaves an orphan keyed by BLE
+        // address that no disconnect path would clear. Android BLE
+        // addresses are stable per device, so a subsequent
+        // start+reconnect to the same address would otherwise observe
+        // a stale value from the prior session before the new
+        // handshake stages its own MTU.
+        peerMaxPayloads.clear()
         centralClient.clearAll()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
@@ -1845,6 +1925,71 @@ class BleTransportFacade(
 
     private fun currentConnectionCount(): Int = connections.connectionCount()
 
+    /**
+     * Flushes a staged negotiated-MTU value into the Rust transport keyed by
+     * [deviceId]. Called from both the MTU-first-then-deviceId path (the
+     * normal handshake order, triggered via
+     * [CentralGattClient.Host.onDeviceIdResolved]) and the
+     * deviceId-first-then-MTU path (triggered from
+     * [CentralGattClient.Host.onPeerMtuNegotiated] when the address already
+     * has a resolved identifier). Idempotent: if no staged value exists the
+     * call is a no-op and the Rust fragmenter falls back to the 185-byte
+     * floor for that peer.
+     *
+     * On successful flush the staged entry is removed so that a reconnect
+     * on the same BLE address cannot observe a stale value before the new
+     * handshake stages its own MTU. If the controller later renegotiates
+     * mid-link (rare), [CentralGattClient.Host.onPeerMtuNegotiated] re-
+     * stages and re-flushes from scratch. Main-thread only.
+     */
+    private fun flushPeerMtu(address: String, deviceId: String) {
+        assertMainThread("flushPeerMtu")
+        val staged = peerMaxPayloads[address] ?: return
+        try {
+            protocol.bleSetPeerMtu(deviceId, staged.toUInt())
+            peerMaxPayloads.remove(address)
+            emitDiagnostic(
+                "info",
+                "BLE per-peer MTU flushed to Rust",
+                mapOf("address" to address, "deviceId" to deviceId, "maxPayload" to staged),
+            )
+        } catch (e: Exception) {
+            // Leave the staged entry in place on failure so the next
+            // flush opportunity (re-entry via onPeerMtuNegotiated or
+            // onDeviceIdResolved) can retry without losing the value.
+            Log.w(TAG, "bleSetPeerMtu failed for $deviceId", e)
+            emitDiagnostic(
+                "warning",
+                "bleSetPeerMtu failed",
+                mapOf("deviceId" to deviceId, "exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")),
+            )
+        }
+    }
+
+    /**
+     * Drops the facade-side staged negotiated-MTU entry for a BLE
+     * address. The Rust-side `peer_mtus` entry is owned by the
+     * central-role link's lifecycle — it is populated by
+     * `CentralGattClient.onMtuChanged → flushPeerMtu` and cleared by
+     * `protocol.blePeerLost` via `on_peer_lost`. Facade teardown
+     * paths must never touch it directly: a peripheral-role
+     * disconnect, eviction, or give-up for a peer that still has an
+     * alive central-role link would otherwise demote that link from
+     * its negotiated BLE 5 MTU back to the 185-byte floor for the
+     * rest of the link's life. See the comment block in
+     * [handleCentralDisconnectedOnMain] for the bug this invariant
+     * exists to prevent.
+     *
+     * [address] may be null on paths where we only know the device
+     * id, in which case this is a no-op. Main-thread only.
+     */
+    private fun dropStagedPeerMtu(address: String?) {
+        assertMainThread("dropStagedPeerMtu")
+        if (address != null) {
+            peerMaxPayloads.remove(address)
+        }
+    }
+
     private fun refreshSelfMetrics() {
         val rssiValues = lastSeenRssi.values.map { it.toInt() }
         val averageRssi = if (rssiValues.isEmpty()) null else rssiValues.average().roundToInt()
@@ -1933,6 +2078,9 @@ class BleTransportFacade(
             lastSeenRssi.remove(address)
             pendingInbound.removeAll(address)
             outboundQueue.removeAll(peerId)
+            // Facade-only staged drop; the Rust-side MTU entry is cleared
+            // by `protocol.blePeerLost` below via `on_peer_lost`.
+            dropStagedPeerMtu(address)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
@@ -2780,6 +2928,30 @@ class BleTransportFacade(
         // likely to come back, so we keep the address→deviceId mapping and
         // RSSI cached to speed up reconnection. Any other status is a real
         // failure and we tear the peer state down.
+        //
+        // MTU state invariant: this handler MUST NOT touch the Rust-side
+        // `peer_mtus` entry for the peer, and MUST NOT touch the facade
+        // staging map either. This function runs on a peripheral-role
+        // disconnect (a remote central disconnected from our GATT
+        // server). The `peer_mtus[deviceId]` entry is owned by our
+        // *central-role* link to the same peer, populated via
+        // `CentralGattClient.onMtuChanged → flushPeerMtu`. A prior
+        // version of this handler called `bleClearPeerMtu` on clean
+        // disconnect under the mistaken assumption that clearing was
+        // needed to defend against a stale-MTU-on-reconnect race — but
+        // that race is owned by the central-role reconnect flow, which
+        // handles it locally by letting the next `onMtuChanged`
+        // overwrite the entry. Clearing here demoted an alive central-
+        // role link from its negotiated BLE 5 MTU back to the 185-byte
+        // floor for the rest of the link's life and made every
+        // subsequent send to that peer tick `fragment_fallback_count`.
+        // The non-clean branch below calls `blePeerLost` — a
+        // pre-existing behavior deliberately left in place, since
+        // deciding whether a peripheral-role disconnect should imply
+        // central-role peer loss is a protocol-level question outside
+        // the scope of this fix. `blePeerLost` in that branch drops
+        // `peer_mtus` via `on_peer_lost`, which is correct for a path
+        // that *also* drops the peer from the Rust `peers` map.
         val isCleanDisconnect = status == 0 || status == 19
         if (!isCleanDisconnect) {
             lastSeenRssi.remove(address)
@@ -2791,6 +2963,10 @@ class BleTransportFacade(
                     Log.e(TAG, "Error notifying peer lost", e)
                     emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                 }
+                // `blePeerLost` above already dropped the Rust-side MTU
+                // entry via `on_peer_lost`; only the facade-side staged
+                // slot (keyed by BLE address) still needs clearing here.
+                dropStagedPeerMtu(address)
                 meshController.registerDisconnection(peerId)
                 refreshSelfMetrics()
                 connections.removeIdentifiersForAddress(address)

@@ -48,7 +48,13 @@ public class BleManager: NSObject, TransportManager {
     private let DEVICE_ID_CHAR_UUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
     private let IDENTITY_CHAR_UUID = CBUUID(string: "6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
     
-    private let MAX_FRAGMENT_SIZE = 185
+    // Fragment sizing is fully owned by the Rust transport now: it stores
+    // a per-peer maximum usable payload seeded from
+    // `CBPeripheral.maximumWriteValueLength(for: .withoutResponse)` via
+    // `bleSetPeerMtu` on device-id resolution, and falls back to its
+    // internal BLE_MAX_FRAGMENT_SIZE (185) for any peer whose MTU has not
+    // been reported yet. Keeping the constant here would duplicate the
+    // floor and go stale the first time Rust changes it.
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
     private let MAX_CONNECTIONS_PER_DEVICE = 4
     private let ADVERTISE_RESTART_MIN: TimeInterval = 0.2
@@ -1261,6 +1267,30 @@ public class BleManager: NSObject, TransportManager {
         return connections.connectedPeripheralCount() + subscribedCentrals.count
     }
 
+    /// Tears down the protocol-side state for a peer that has been lost —
+    /// routing entries and the BLE peer-lost signal. Every
+    /// disconnect/eviction/give-up path funnels through here so the two
+    /// UniFFI calls stay in lockstep. Local bookkeeping (`connections`,
+    /// `meshController`, `refreshSelfMetrics`, etc.) is intentionally
+    /// left at the call site because not every path removes the same
+    /// local state — only the protocol-side teardown is uniform.
+    ///
+    /// `blePeerLost` also drops the per-peer MTU entry inside the Rust
+    /// transport, so no separate `bleClearPeerMtu` call is needed here.
+    /// For mid-link renegotiation paths that need to drop the MTU
+    /// without declaring the peer lost, call `bleClearPeerMtu` directly.
+    private func notifyBlePeerLost(deviceId: String) {
+        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
+        do {
+            try protocolInstance.blePeerLost(peerId: deviceId)
+        } catch {
+            emitDiagnostic("warning", "blePeerLost failed", context: [
+                "deviceId": deviceId,
+                "error": error.localizedDescription,
+            ])
+        }
+    }
+
     /// Refresh self metrics. When called from `fragmentQueue`, pass the counts directly
     /// to avoid a deadlock on the serial queue. Off-queue callers omit the parameters
     /// and the counts are read via `fragmentQueue.sync`.
@@ -1343,10 +1373,8 @@ public class BleManager: NSObject, TransportManager {
         connectionRetryCount.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
         refreshSelfMetrics()
-        
-        // Clean up routes through this neighbor
-        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-        try? protocolInstance.blePeerLost(peerId: deviceId)
+
+        notifyBlePeerLost(deviceId: deviceId)
         DispatchQueue.main.async {
             self.refreshAdvertising(reason: "evict_\(reason)")
         }
@@ -2388,9 +2416,7 @@ extension BleManager: CBCentralManagerDelegate {
                 if isPermanentError {
                     // Permanent error - notify peer lost
                     if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
-                        // Clean up routes through this neighbor
-                        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-                        try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                        notifyBlePeerLost(deviceId: deviceId)
                         meshController.registerDisconnection(peerId: deviceId)
                         refreshSelfMetrics()
                         connections.removeConnectionRole(for: deviceId)
@@ -2415,8 +2441,7 @@ extension BleManager: CBCentralManagerDelegate {
                 connectionRetryCount.removeValue(forKey: peripheral.identifier)
                 // Notify peer lost since we're giving up
                 if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
-                    protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-                    try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                    notifyBlePeerLost(deviceId: deviceId)
                     meshController.registerDisconnection(peerId: deviceId)
                     refreshSelfMetrics()
                     connections.removeConnectionRole(for: deviceId)
@@ -2441,9 +2466,7 @@ extension BleManager: CBCentralManagerDelegate {
         } else {
             // Wasn't connected, just notify if we had device ID
             if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
-                // Clean up routes through this neighbor
-                protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-                try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                notifyBlePeerLost(deviceId: deviceId)
                 meshController.registerDisconnection(peerId: deviceId)
                 refreshSelfMetrics()
                 connections.removeConnectionRole(for: deviceId)
@@ -2536,6 +2559,56 @@ extension BleManager: CBPeripheralDelegate {
                 connections.setCentralDeviceId(deviceId, for: peripheral.identifier)
                 connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
 
+                // ORDERING INVARIANT — DO NOT REORDER.
+                //
+                // `bleSetPeerMtu` MUST run before `blePeerDiscovered`.
+                // This is the entire point of commit ac8cce8: any
+                // fragmenting send that lands between announcing the
+                // peer to the protocol layer and flushing the MTU
+                // into the Rust transport will key-miss `peer_mtus`,
+                // fall back to the 185-byte floor, and silently
+                // waste ~60% of the negotiated BLE 5 bandwidth for
+                // every fragment in that window. The Rust side pins
+                // this from its end via
+                // `test_ble_golden_path_handshake_never_falls_back`
+                // and the `ble_fragment_fallback_count` telemetry
+                // counter, which fires the moment a registered peer
+                // has to fall back.
+                //
+                // CoreBluetooth performs MTU negotiation automatically
+                // on connect and exposes the already header-adjusted
+                // max-write length as a stable property — we just
+                // read it once at the moment we know the device id.
+                let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
+                do {
+                    try self.protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(maxPayload))
+                    emitDiagnostic("info", "BLE per-peer MTU flushed to Rust", context: [
+                        "deviceId": deviceId,
+                        "peripheral": peripheral.identifier.uuidString,
+                        "maxPayload": maxPayload,
+                    ])
+                } catch {
+                    // A UniFFI throw here (lock poisoning is the only
+                    // expected cause) is categorically different from
+                    // the ordering-invariant regression that
+                    // `ble_fragment_fallback_count` is designed to
+                    // surface: the peer will still be announced below
+                    // and, absent an MTU entry, the first fragmenting
+                    // send will tick the fallback counter. Tag the
+                    // diagnostic with `cause: "uniffi_throw"` and emit
+                    // at error level so dashboards can filter these
+                    // out of the ordering-invariant alarm.
+                    emitDiagnostic("error", "bleSetPeerMtu failed", context: [
+                        "deviceId": deviceId,
+                        "error": error.localizedDescription,
+                        "cause": "uniffi_throw",
+                    ])
+                }
+
+                // ORDERING INVARIANT: this line MUST come AFTER
+                // `bleSetPeerMtu` above. See comment block preceding
+                // the MTU flush. If you are tempted to move this
+                // earlier "for clarity", don't.
                 let rssi = peripheralRSSI[peripheral.identifier] ?? -60
                 try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
                 let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: deviceId) ?? .member

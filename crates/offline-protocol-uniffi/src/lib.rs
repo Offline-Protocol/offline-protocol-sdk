@@ -1881,6 +1881,154 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// BLE: Record the negotiated MTU (max usable fragment payload) for a peer.
+    ///
+    /// Callers pass the already header-adjusted value: iOS reads
+    /// `CBPeripheral.maximumWriteValueLength(for: .withoutResponse)`, and
+    /// Android subtracts the 3-byte ATT overhead from `onMtuChanged`'s value.
+    /// The Rust transport clamps to [BLE_MAX_FRAGMENT_SIZE, MAX_REASONABLE_BLE_PAYLOAD].
+    ///
+    /// If the BLE transport is not registered or not a `BleTransport`
+    /// (both meaning "BLE not configured on this instance"), the call is
+    /// a warn-and-drop no-op rather than an error — the platform layer
+    /// should be free to report MTUs unconditionally without having to
+    /// branch on transport configuration.
+    pub fn ble_set_peer_mtu(&self, peer_id: String, max_payload: u32) -> Result<(), ProtocolError> {
+        let protocol = self.lock_inner()?;
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc
+                .lock()
+                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble_transport.set_peer_mtu(&peer_id, max_payload as usize);
+            } else {
+                tracing::warn!(
+                    %peer_id,
+                    max_payload,
+                    "ble_set_peer_mtu: BLE transport registered but wrong type; ignoring"
+                );
+            }
+        } else {
+            tracing::warn!(
+                %peer_id,
+                max_payload,
+                "ble_set_peer_mtu: BLE transport not registered; ignoring"
+            );
+        }
+        Ok(())
+    }
+
+    /// BLE: Forget the MTU for a peer (called on disconnect).
+    ///
+    /// Mirrors [`Self::ble_set_peer_mtu`] — both "BLE not configured"
+    /// shapes warn-and-return-Ok so platform teardown paths can call
+    /// unconditionally.
+    pub fn ble_clear_peer_mtu(&self, peer_id: String) -> Result<(), ProtocolError> {
+        let protocol = self.lock_inner()?;
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc
+                .lock()
+                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble_transport.clear_peer_mtu(&peer_id);
+            } else {
+                tracing::warn!(
+                    %peer_id,
+                    "ble_clear_peer_mtu: BLE transport registered but wrong type; ignoring"
+                );
+            }
+        } else {
+            tracing::warn!(
+                %peer_id,
+                "ble_clear_peer_mtu: BLE transport not registered; ignoring"
+            );
+        }
+        Ok(())
+    }
+
+    /// BLE: Monotonic count of undersized MTU reports since transport
+    /// creation.
+    ///
+    /// A non-zero value indicates that at least one peer reported a max
+    /// usable fragment payload below the Rust transport's fallback floor
+    /// and is now being served the floor — which is *higher* than the
+    /// real link capacity, so outbound writes to that peer are dropped
+    /// by the controller. Surface in dashboards to detect controllers
+    /// that violate the target-platform assumption. Returns 0 when the
+    /// BLE transport is not registered.
+    ///
+    /// **Lock handling:** this method intentionally uses
+    /// [`recover_mutex`] rather than [`Self::lock_inner`] because it is
+    /// a pure, read-only telemetry getter with an infallible return
+    /// type. Propagating `LockPoisoned` as a `Result<u64, ProtocolError>`
+    /// would force every dashboard call site to unwrap, and telemetry
+    /// fetches are the least useful place to hide panic-producing
+    /// `unwrap()`s. Recovering the poisoned guard just to read an
+    /// atomic is safe: the atomic counter is the only state read here,
+    /// and poisoning cannot corrupt it. The setter siblings
+    /// (`ble_set_peer_mtu`, `ble_clear_peer_mtu`) still propagate
+    /// poisoning because they mutate state and the caller has a
+    /// natural error channel.
+    pub fn ble_undersized_mtu_reports(&self) -> u64 {
+        let protocol = recover_mutex(&self.inner, "inner");
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                return ble_transport.undersized_mtu_reports();
+            }
+        }
+        0
+    }
+
+    /// BLE: Monotonic count of `fragment_message` calls that fell back
+    /// to the fragment-size floor because no per-peer MTU was on file
+    /// for the recipient **and the recipient is still a registered
+    /// direct BLE peer** at the moment of fallback.
+    ///
+    /// In healthy operation this should remain zero. Both platforms
+    /// push the MTU BEFORE announcing the peer (iOS: `bleSetPeerMtu`
+    /// precedes `blePeerDiscovered`; Android: the facade flushes the
+    /// staged MTU via `onDeviceIdResolved` before `blePeerDiscovered`
+    /// fires), so by the time any fragmenting send can reach a live
+    /// peer the MTU entry is already on file. The counter
+    /// deliberately excludes the benign send / on_peer_lost race
+    /// (message enqueued while peer was live, `on_peer_lost` dropped
+    /// both maps before `get_next_fragment` popped it) because
+    /// counting that case would mask the real signal on every
+    /// disconnect with in-flight sends.
+    ///
+    /// A non-zero value therefore means either (a) the MTU-before-
+    /// discover ordering invariant regressed on one of the platforms,
+    /// or (b) the `recipient -> device_id` keying contract broke —
+    /// at which point every fragmenting send to live peers is
+    /// silently regressing to the 185-byte floor. Surface in
+    /// dashboards so production alerts fire the first time the
+    /// invariant breaks. Returns 0 when the BLE transport is not
+    /// registered. Uses `recover_mutex` for the same reason as
+    /// [`Self::ble_undersized_mtu_reports`].
+    pub fn ble_fragment_fallback_count(&self) -> u64 {
+        let protocol = recover_mutex(&self.inner, "inner");
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                return ble_transport.fragment_fallback_count();
+            }
+        }
+        0
+    }
+
     /// BLE: Fragment received
     pub fn ble_fragment_received(
         &self,
