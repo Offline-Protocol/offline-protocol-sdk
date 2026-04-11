@@ -2588,9 +2588,20 @@ extension BleManager: CBPeripheralDelegate {
                         "maxPayload": maxPayload,
                     ])
                 } catch {
-                    emitDiagnostic("warning", "bleSetPeerMtu failed", context: [
+                    // A UniFFI throw here (lock poisoning is the only
+                    // expected cause) is categorically different from
+                    // the ordering-invariant regression that
+                    // `ble_fragment_fallback_count` is designed to
+                    // surface: the peer will still be announced below
+                    // and, absent an MTU entry, the first fragmenting
+                    // send will tick the fallback counter. Tag the
+                    // diagnostic with `cause: "uniffi_throw"` and emit
+                    // at error level so dashboards can filter these
+                    // out of the ordering-invariant alarm.
+                    emitDiagnostic("error", "bleSetPeerMtu failed", context: [
                         "deviceId": deviceId,
                         "error": error.localizedDescription,
+                        "cause": "uniffi_throw",
                     ])
                 }
 

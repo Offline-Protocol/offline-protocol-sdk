@@ -555,7 +555,18 @@ impl BleTransport {
         // peer_mtus lock. With the platform-side MTU-before-discover
         // ordering (see commit ac8cce8), the miss branch should
         // effectively never execute for a live peer.
-        let mtu = match self.peer_mtus.lock().unwrap().get(recipient).copied() {
+        //
+        // **Lock-ordering note:** the peer_mtus lookup is hoisted into
+        // its own statement so the MutexGuard drops before the miss
+        // branch reaches for `peers.lock()`. Under Rust 2021 temporary-
+        // scope rules, embedding the lookup in the `match` scrutinee
+        // would keep the peer_mtus guard alive across the arm bodies
+        // and establish an implicit `peer_mtus -> peers` ordering held
+        // by a single thread — safe today (no path holds `peers` while
+        // taking `peer_mtus`) but one refactor away from an AB/BA
+        // deadlock. Keep this as two statements.
+        let cached_mtu = self.peer_mtus.lock().unwrap().get(recipient).copied();
+        let mtu = match cached_mtu {
             Some(mtu) => mtu,
             None => {
                 let is_direct_peer = self.peers.lock().unwrap().contains_key(recipient);
