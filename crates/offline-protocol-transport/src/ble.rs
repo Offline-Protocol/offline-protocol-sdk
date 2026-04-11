@@ -112,6 +112,17 @@ pub struct BleTransport {
     /// `maximumWriteValueLength(for:)` returns this directly, and the Android
     /// facade subtracts the 3-byte ATT header before calling in. Peers with
     /// no entry fall back to [`BLE_MAX_FRAGMENT_SIZE`].
+    ///
+    /// **Keying contract:** entries MUST be keyed by the same string the
+    /// platform layer passes to [`Self::on_peer_discovered`] as
+    /// `PeerDevice::device_id`, which is also the string that lands in
+    /// [`Message::recipient`] for outbound sends. Today the codebase treats
+    /// the BLE device id and the peer's `UserId` as the same opaque string,
+    /// so `fragment_message` can look up MTUs by `message.recipient`. If a
+    /// future refactor ever introduces UserId ↔ device-id translation, this
+    /// map MUST be rekeyed at the same time or `fragment_message` will
+    /// silently fall back to [`BLE_MAX_FRAGMENT_SIZE`] for every peer with
+    /// no compile-time warning.
     peer_mtus: Arc<Mutex<HashMap<String, usize>>>,
     /// Platform callback invoked when new fragments are available to send.
     /// Called from `send()` after enqueueing — the platform layer should
@@ -161,6 +172,18 @@ impl BleTransport {
     /// `onMtuChanged` followed by `mtu - 3`. Values are clamped to
     /// [`BLE_MAX_FRAGMENT_SIZE`, [`MAX_REASONABLE_BLE_PAYLOAD`]] to protect
     /// the fragmenter from buggy native layers reporting nonsensical sizes.
+    ///
+    /// **Note on the lower-bound clamp:** a peer reporting a payload below
+    /// `BLE_MAX_FRAGMENT_SIZE` is clamped *up*, not rejected. This encodes
+    /// the assumption that we will never operate on a link whose real usable
+    /// payload is smaller than the fallback floor — valid in practice
+    /// because both the iOS and Android paths request the BLE-5 maximum ATT
+    /// MTU (517), and every modern controller we target negotiates well
+    /// above 188 (185 + 3-byte ATT header). If that assumption is ever
+    /// invalidated (e.g. by supporting legacy peripherals pinned to the
+    /// 23-byte minimum ATT MTU), the clamp will cause the fragmenter to
+    /// produce chunks the controller cannot transmit — at which point the
+    /// lower bound should be removed and the fallback value revisited.
     pub fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
         let clamped = max_payload.clamp(BLE_MAX_FRAGMENT_SIZE, MAX_REASONABLE_BLE_PAYLOAD);
         tracing::debug!(
@@ -381,12 +404,10 @@ impl BleTransport {
         let message_bytes = self.serialize_message(message)?;
 
         let recipient = message.recipient.as_str();
-        let stored_mtu = self.peer_mtus.lock().unwrap().get(recipient).copied();
-        let mtu = stored_mtu.unwrap_or(BLE_MAX_FRAGMENT_SIZE);
+        let mtu = self.peer_mtu(recipient);
         tracing::debug!(
             peer = %recipient,
             mtu,
-            fallback = stored_mtu.is_none(),
             "ble: selected fragment payload size"
         );
         let message_id = message.id.as_str();
