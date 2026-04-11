@@ -522,11 +522,16 @@ impl BleTransport {
     /// undersized-reject branch already covers the common "drop to
     /// floor" case, and (c) the reliability layer retransmits any
     /// dropped fragments under the new MTU — so recovery is automatic.
+    /// Verified: `RetryEntry` at
+    /// `crates/offline-protocol-reliability/src/retry_queue.rs:45-60`
+    /// stores the full `Message`, not a cached fragment vector, so
+    /// retries re-enter `fragment_message` under the current
+    /// `peer_mtus` value rather than replaying stale chunks.
     /// If production telemetry ever shows sustained fragment loss on
     /// downward renegotiations, snapshot-then-revalidate at the pre-
     /// send boundary; do not hold `peer_mtus` across the whole loop,
     /// which would serialise every fragmenting send on a single peer.
-    pub(crate) fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
+    pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
         let message_bytes = self.serialize_message(message)?;
 
         let recipient = message.recipient.as_str();
