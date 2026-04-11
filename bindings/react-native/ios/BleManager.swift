@@ -48,7 +48,13 @@ public class BleManager: NSObject, TransportManager {
     private let DEVICE_ID_CHAR_UUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
     private let IDENTITY_CHAR_UUID = CBUUID(string: "6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
     
-    private let MAX_FRAGMENT_SIZE = 185
+    // Fragment sizing is fully owned by the Rust transport now: it stores
+    // a per-peer maximum usable payload seeded from
+    // `CBPeripheral.maximumWriteValueLength(for: .withoutResponse)` via
+    // `bleSetPeerMtu` on device-id resolution, and falls back to its
+    // internal BLE_MAX_FRAGMENT_SIZE (185) for any peer whose MTU has not
+    // been reported yet. Keeping the constant here would duplicate the
+    // floor and go stale the first time Rust changes it.
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
     private let MAX_CONNECTIONS_PER_DEVICE = 4
     private let ADVERTISE_RESTART_MIN: TimeInterval = 0.2
@@ -1347,6 +1353,7 @@ public class BleManager: NSObject, TransportManager {
         // Clean up routes through this neighbor
         protocolInstance.removeNeighborRoutes(neighborId: deviceId)
         try? protocolInstance.blePeerLost(peerId: deviceId)
+        try? protocolInstance.bleClearPeerMtu(peerId: deviceId)
         DispatchQueue.main.async {
             self.refreshAdvertising(reason: "evict_\(reason)")
         }
@@ -2391,6 +2398,7 @@ extension BleManager: CBCentralManagerDelegate {
                         // Clean up routes through this neighbor
                         protocolInstance.removeNeighborRoutes(neighborId: deviceId)
                         try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                        try? self.protocolInstance.bleClearPeerMtu(peerId: deviceId)
                         meshController.registerDisconnection(peerId: deviceId)
                         refreshSelfMetrics()
                         connections.removeConnectionRole(for: deviceId)
@@ -2417,6 +2425,7 @@ extension BleManager: CBCentralManagerDelegate {
                 if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
                     protocolInstance.removeNeighborRoutes(neighborId: deviceId)
                     try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                    try? self.protocolInstance.bleClearPeerMtu(peerId: deviceId)
                     meshController.registerDisconnection(peerId: deviceId)
                     refreshSelfMetrics()
                     connections.removeConnectionRole(for: deviceId)
@@ -2444,6 +2453,7 @@ extension BleManager: CBCentralManagerDelegate {
                 // Clean up routes through this neighbor
                 protocolInstance.removeNeighborRoutes(neighborId: deviceId)
                 try? self.protocolInstance.blePeerLost(peerId: deviceId)
+                try? self.protocolInstance.bleClearPeerMtu(peerId: deviceId)
                 meshController.registerDisconnection(peerId: deviceId)
                 refreshSelfMetrics()
                 connections.removeConnectionRole(for: deviceId)
@@ -2538,6 +2548,30 @@ extension BleManager: CBPeripheralDelegate {
 
                 let rssi = peripheralRSSI[peripheral.identifier] ?? -60
                 try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
+
+                // Push the auto-negotiated ATT payload size into the Rust
+                // transport so its fragmenter sizes outbound chunks per peer
+                // instead of using the 185-byte fallback floor. Unlike
+                // Android, CoreBluetooth performs MTU negotiation
+                // automatically on connect and exposes the already
+                // header-adjusted max-write length as a stable property — we
+                // just read it once at the moment we know the device id.
+                let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
+                do {
+                    try self.protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(maxPayload))
+                    print("[BleManager] BLE MTU reported: \(deviceId) payload=\(maxPayload)")
+                    emitDiagnostic("info", "BLE per-peer MTU flushed to Rust", context: [
+                        "deviceId": deviceId,
+                        "peripheral": peripheral.identifier.uuidString,
+                        "maxPayload": maxPayload,
+                    ])
+                } catch {
+                    print("[BleManager] bleSetPeerMtu failed for \(deviceId): \(error)")
+                    emitDiagnostic("warning", "bleSetPeerMtu failed", context: [
+                        "deviceId": deviceId,
+                        "error": error.localizedDescription,
+                    ])
+                }
                 let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: deviceId) ?? .member
                 meshController.registerConnection(peerId: deviceId, role: role)
                 connections.setConnectionRole(role, for: deviceId)

@@ -479,12 +479,22 @@ interface OfflineProtocol {
     
     [Throws=ProtocolError]
     void ble_fragment_received(string sender_id, sequence<u8> fragment);
-    
+
     BleFragment? ble_get_next_fragment();
-    
+
     void ble_return_fragment();
-    
+
     u32 ble_get_peer_count();
+
+    // Per-peer MTU reporting. Platforms call ble_set_peer_mtu after BLE MTU
+    // negotiation completes for a link, passing the already-header-adjusted
+    // max fragment payload (iOS: peripheral.maximumWriteValueLength; Android:
+    // onMtuChanged's mtu - 3). ble_clear_peer_mtu is called on disconnect.
+    [Throws=ProtocolError]
+    void ble_set_peer_mtu(string peer_id, u32 max_payload);
+
+    [Throws=ProtocolError]
+    void ble_clear_peer_mtu(string peer_id);
     
     // Internet transport operations
     [Throws=ProtocolError]

@@ -10,9 +10,19 @@ pub const BLE_MESSAGE_CHAR_UUID: &str = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E";
 /// BLE characteristic UUID for device ID.
 pub const BLE_DEVICE_ID_CHAR_UUID: &str = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
 
-/// Maximum fragment size for BLE transmission (bytes).
-/// This accounts for BLE MTU limitations and overhead.
+/// Fallback fragment size used when no MTU has been negotiated for a peer.
+///
+/// Matches the historical iOS CoreBluetooth auto-negotiated minimum ATT MTU
+/// (iPhone 5/6 era). Modern iOS and Android links negotiate higher values,
+/// which are pushed into the transport via `BleTransport::set_peer_mtu`.
 pub const BLE_MAX_FRAGMENT_SIZE: usize = 185;
+
+/// Hard upper bound on a per-peer BLE fragment payload (bytes).
+///
+/// BLE 5 negotiates an ATT MTU up to 517 bytes; subtracting the 3-byte ATT
+/// header yields 514 usable payload bytes. We clamp at 512 for a small safety
+/// margin and to keep allocations friendly.
+pub const MAX_REASONABLE_BLE_PAYLOAD: usize = 512;
 
 /// Timeout for fragment reassembly in seconds.
 /// Fragments older than this are discarded.

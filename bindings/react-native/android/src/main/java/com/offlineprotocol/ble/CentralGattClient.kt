@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.os.Build
@@ -28,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap
  *
  *   - The per-address handshake state machine:
  *       `onConnectionStateChange(CONNECTED)` → `discoverServices()`
- *       `onServicesDiscovered` → `readCharacteristic(DEVICE_ID)`
+ *       `onServicesDiscovered` → `requestMtu(REQUESTED_ATT_MTU)`
+ *       `onMtuChanged` → report payload to host, `readCharacteristic(DEVICE_ID)`
  *       `onCharacteristicRead(DEVICE_ID)` → `readCharacteristic(IDENTITY)`
  *       `onCharacteristicRead(IDENTITY)` → `setCharacteristicNotification`
  *          + `writeDescriptor(CCCD)`
@@ -101,6 +103,29 @@ internal class CentralGattClient(
          *  notify or via central-side write). Called on the main thread. */
         fun handleInboundFragment(address: String, data: ByteArray)
 
+        /** Notify the facade that a remote peripheral's ATT MTU negotiation
+         *  has completed. [maxPayload] is the already header-adjusted max
+         *  fragment size (ATT MTU minus the 3-byte header). Called from the
+         *  binder GATT thread; implementations must repost to main before
+         *  touching UniFFI. */
+        fun onPeerMtuNegotiated(address: String, maxPayload: Int)
+
+        /** Notify the facade that a remote peripheral's device ID has been
+         *  resolved via a reverse GATT read. Called on the main thread,
+         *  immediately after [MeshConnectionRegistry.setDeviceIdentifier] has
+         *  been populated for [address]. Used by the facade to flush any
+         *  MTU value previously staged under [address] into the Rust
+         *  transport keyed by [deviceId]. */
+        fun onDeviceIdResolved(address: String, deviceId: String)
+
+        /** Notify the facade that a peer has been permanently given up on
+         *  (retry budget exhausted or stale callback post-teardown). Called
+         *  from [finalizeGivenUpPeer] on the main thread — the facade uses
+         *  this to drop facade-only state that is not already cleared via
+         *  [clearPeerBuffers] (the staged negotiated-MTU map, the Rust-side
+         *  per-peer MTU entry). */
+        fun onPeerGivenUp(address: String, peerId: String)
+
         /** Entry point used by the retry-on-disconnect path to re-attempt
          *  connecting to a known address. Facade enforces the per-device
          *  RSSI / capacity / cooldown gating inside connectToDevice. */
@@ -134,6 +159,15 @@ internal class CentralGattClient(
          *  pathologically chatty peer racing with the drain loop cannot
          *  pin the main thread indefinitely. */
         private const val MAX_DRAIN_ITERATIONS = 8
+        /** ATT MTU we ask for in `requestMtu`. 517 is the BLE 5 spec max;
+         *  controllers negotiate down to whatever both peers support. The
+         *  resulting payload = mtu − 3 is reported to Rust so the
+         *  fragmenter can size outbound chunks per peer. */
+        private const val REQUESTED_ATT_MTU = 517
+        /** ATT protocol overhead (opcode + attribute handle) subtracted
+         *  from the negotiated MTU to get usable Write-Without-Response
+         *  payload. */
+        private const val ATT_HEADER_BYTES = 3
     }
 
     // Addresses whose CCCD subscription has been acked by the remote peer.
@@ -233,13 +267,82 @@ internal class CentralGattClient(
 
             // Kick off the first GATT op only. Android's BLE stack serialises
             // one GATT op at a time, so we chain:
-            //   onServicesDiscovered → readCharacteristic(deviceId)
+            //   onServicesDiscovered → requestMtu(REQUESTED_ATT_MTU)
+            //   onMtuChanged → readCharacteristic(deviceId)
             //   onCharacteristicRead(deviceId) → readCharacteristic(identity)
             //   onCharacteristicRead(identity) → setNotification + writeDescriptor(CCCD)
             //   onDescriptorWrite(CCCD success) → mark linkReady + drain
             // Firing more than one op here causes the second to be silently
             // dropped on some vendors, which is the class of bug where the
-            // connection "looks healthy" but no messages flow.
+            // connection "looks healthy" but no messages flow. MTU negotiation
+            // runs first so that by the time we drain outbound fragments
+            // (after CCCD), the Rust fragmenter already knows the per-peer
+            // payload size and can size fragments to the real link capacity
+            // instead of the 185-byte fallback floor.
+            try {
+                val mtuRequested = gatt.requestMtu(REQUESTED_ATT_MTU)
+                if (!mtuRequested) {
+                    Log.w(TAG, "requestMtu returned false for $address; continuing with default MTU")
+                    diagnosticEmitter("warning", "requestMtu returned false", mapOf("address" to address))
+                    // Fall through to device-id read below; MTU stays at
+                    // whatever the controller auto-negotiated.
+                    readDeviceIdCharacteristicOrClose(gatt, service, address)
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Permission denied requesting MTU", e)
+                diagnosticEmitter("error", "Permission denied requesting MTU", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                closeGattClient(gatt, "mtu_request_permission_denied")
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (host.isShuttingDown()) return
+            val address = gatt.device.address
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+                Log.i(TAG, "MTU negotiated for $address: mtu=$mtu payload=$maxPayload")
+                diagnosticEmitter(
+                    "info",
+                    "MTU negotiated",
+                    mapOf("address" to address, "mtu" to mtu, "payload" to maxPayload),
+                )
+                host.onPeerMtuNegotiated(address, maxPayload)
+            } else {
+                Log.w(TAG, "MTU negotiation failed for $address, status=$status — using default")
+                diagnosticEmitter(
+                    "warning",
+                    "MTU negotiation failed",
+                    mapOf("address" to address, "status" to status),
+                )
+                // Leave the peer without a stored MTU; Rust will use its
+                // fallback fragment size and outbound writes stay within
+                // the controller-default ATT MTU.
+            }
+
+            // Resume the handshake chain regardless of MTU negotiation
+            // outcome — a missing MTU is recoverable (fallback fragment
+            // size), but skipping the device-id read is not.
+            val service = gatt.getService(serviceUuid)
+            if (service == null) {
+                Log.w(TAG, "Service disappeared between discover and MTU ack for $address")
+                diagnosticEmitter("warning", "Service missing after MTU negotiation", mapOf("address" to address))
+                closeGattClient(gatt, "service_missing_post_mtu")
+                return
+            }
+            readDeviceIdCharacteristicOrClose(gatt, service, address)
+        }
+
+        /**
+         * Kicks off `readCharacteristic(deviceId)`. Extracted so both
+         * [onServicesDiscovered] (in the `requestMtu returned false` path)
+         * and [onMtuChanged] can resume the handshake chain without
+         * duplicating the error handling.
+         */
+        private fun readDeviceIdCharacteristicOrClose(
+            gatt: BluetoothGatt,
+            service: BluetoothGattService,
+            address: String,
+        ) {
             val deviceIdChar = service.getCharacteristic(deviceIdCharUuid)
             if (deviceIdChar == null) {
                 Log.w(TAG, "Device ID characteristic NOT FOUND on $address")
@@ -504,6 +607,7 @@ internal class CentralGattClient(
                 "message" to (e.message ?: "unknown"),
             ))
         }
+        host.onPeerGivenUp(address, peerId)
         host.meshController.registerDisconnection(peerId)
         host.refreshSelfMetrics()
         host.connections.removeIdentifiersForAddress(address)
@@ -594,6 +698,13 @@ internal class CentralGattClient(
             Log.e(TAG, "Error notifying peer discovered", e)
             diagnosticEmitter("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
+
+        // Flush any MTU that arrived before we knew the peer's device id.
+        // The facade stages values from [onPeerMtuNegotiated] keyed by
+        // address; this is the point at which we have the identifier Rust
+        // needs to key its per-peer map, so the facade can call
+        // bleSetPeerMtu safely.
+        host.onDeviceIdResolved(address, deviceIdValue)
 
         // Kick the next GATT op (identity read) BEFORE draining the pending
         // fragment queue. Android's BLE stack runs the read on its own

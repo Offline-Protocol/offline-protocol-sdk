@@ -796,6 +796,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregis
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment(
@@ -807,6 +809,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed(
 ): Short
@@ -1146,6 +1150,8 @@ external fun uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(`
 ): Long
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`accepterName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`fragment`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_next_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1157,6 +1163,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_d
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,`maxPayload`: Int,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_status_changed(`ptr`: Long,`isAvailable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1575,6 +1583,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 60227.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 44733.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1591,6 +1602,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 4155.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() != 19690.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 19618.toShort()) {
@@ -2835,6 +2849,8 @@ public interface OfflineProtocolInterface {
     
     fun `acceptConnectionRequest`(`recipient`: kotlin.String, `accepterName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
     
+    fun `bleClearPeerMtu`(`peerId`: kotlin.String)
+    
     fun `bleFragmentReceived`(`senderId`: kotlin.String, `fragment`: List<kotlin.UByte>)
     
     fun `bleGetNextFragment`(): BleFragment?
@@ -2846,6 +2862,8 @@ public interface OfflineProtocolInterface {
     fun `blePeerLost`(`peerId`: kotlin.String)
     
     fun `bleReturnFragment`()
+    
+    fun `bleSetPeerMtu`(`peerId`: kotlin.String, `maxPayload`: kotlin.UInt)
     
     fun `bleStatusChanged`(`isAvailable`: kotlin.Boolean)
     
@@ -3237,6 +3255,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `bleClearPeerMtu`(`peerId`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(
+        it,
+        FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(ProtocolException::class)override fun `bleFragmentReceived`(`senderId`: kotlin.String, `fragment`: List<kotlin.UByte>)
         = 
     callWithHandle {
@@ -3308,6 +3339,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return_fragment(
         it,
         _status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `bleSetPeerMtu`(`peerId`: kotlin.String, `maxPayload`: kotlin.UInt)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(
+        it,
+        FfiConverterString.lower(`peerId`),FfiConverterUInt.lower(`maxPayload`),_status)
 }
     }
     
@@ -6056,15 +6100,15 @@ public object FfiConverterTypeNetworkTopology: FfiConverterRustBuffer<NetworkTop
 
 data class NostrMessage (
     var `messageId`: kotlin.String
-    ,
+    , 
     var `eventId`: kotlin.String
-    ,
+    , 
     var `eventJson`: kotlin.String
-
+    
 ){
+    
 
-
-
+    
     companion object
 }
 

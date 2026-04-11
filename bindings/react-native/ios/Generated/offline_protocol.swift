@@ -746,6 +746,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: [UInt8]?) throws  -> String
     
+    func bleClearPeerMtu(peerId: String) throws 
+    
     func bleFragmentReceived(senderId: String, fragment: [UInt8]) throws 
     
     func bleGetNextFragment()  -> BleFragment?
@@ -757,6 +759,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func blePeerLost(peerId: String) throws 
     
     func bleReturnFragment() 
+    
+    func bleSetPeerMtu(peerId: String, maxPayload: UInt32) throws 
     
     func bleStatusChanged(isAvailable: Bool) throws 
     
@@ -1094,6 +1098,14 @@ open func acceptConnectionRequest(recipient: String, accepterName: String, keyPa
 })
 }
     
+open func bleClearPeerMtu(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),$0
+    )
+}
+}
+    
 open func bleFragmentReceived(senderId: String, fragment: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(
             self.uniffiCloneHandle(),
@@ -1139,6 +1151,15 @@ open func blePeerLost(peerId: String)throws   {try rustCallWithError(FfiConverte
 open func bleReturnFragment()  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return_fragment(
             self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
+open func bleSetPeerMtu(peerId: String, maxPayload: UInt32)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(peerId),
+        FfiConverterUInt32.lower(maxPayload),$0
     )
 }
 }
@@ -3559,7 +3580,7 @@ public struct NostrMessage: Equatable, Hashable {
         self.eventJson = eventJson
     }
 
-
+    
 }
 
 #if compiler(>=6)
@@ -3573,8 +3594,8 @@ public struct FfiConverterTypeNostrMessage: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NostrMessage {
         return
             try NostrMessage(
-                messageId: FfiConverterString.read(from: &buf),
-                eventId: FfiConverterString.read(from: &buf),
+                messageId: FfiConverterString.read(from: &buf), 
+                eventId: FfiConverterString.read(from: &buf), 
                 eventJson: FfiConverterString.read(from: &buf)
         )
     }
@@ -6901,6 +6922,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 60227) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 44733) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6917,6 +6941,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 4155) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() != 19690) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 19618) {

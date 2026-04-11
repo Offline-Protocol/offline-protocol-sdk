@@ -1881,6 +1881,53 @@ impl OfflineProtocol {
         Ok(())
     }
 
+    /// BLE: Record the negotiated MTU (max usable fragment payload) for a peer.
+    ///
+    /// Callers pass the already header-adjusted value: iOS reads
+    /// `CBPeripheral.maximumWriteValueLength(for: .withoutResponse)`, and
+    /// Android subtracts the 3-byte ATT overhead from `onMtuChanged`'s value.
+    /// The Rust transport clamps to [BLE_MAX_FRAGMENT_SIZE, MAX_REASONABLE_BLE_PAYLOAD].
+    pub fn ble_set_peer_mtu(&self, peer_id: String, max_payload: u32) -> Result<(), ProtocolError> {
+        let protocol = self.lock_inner()?;
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc
+                .lock()
+                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble_transport.set_peer_mtu(&peer_id, max_payload as usize);
+            } else {
+                return Err(ProtocolError::Other(
+                    "BLE transport not available or wrong type".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// BLE: Forget the MTU for a peer (called on disconnect).
+    pub fn ble_clear_peer_mtu(&self, peer_id: String) -> Result<(), ProtocolError> {
+        let protocol = self.lock_inner()?;
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = transport_arc
+                .lock()
+                .map_err(|e| ProtocolError::LockPoisoned(format!("transport: {}", e)))?;
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                ble_transport.clear_peer_mtu(&peer_id);
+            } else {
+                return Err(ProtocolError::Other(
+                    "BLE transport not available or wrong type".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// BLE: Fragment received
     pub fn ble_fragment_received(
         &self,

@@ -281,6 +281,45 @@ class BleTransportFacade(
                     this@BleTransportFacade.handleReceivedData(data, address)
                 override fun connectToDevice(device: BluetoothDevice) =
                     this@BleTransportFacade.connectToDevice(device)
+
+                override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {
+                    // Called from the binder GATT callback thread. Repost
+                    // to main so we can touch [peerMaxPayloads] and the
+                    // connection registry without racing the handshake
+                    // state machine, and so any UniFFI call made from the
+                    // already-resolved branch below lands on main.
+                    mainHandler.post {
+                        if (shuttingDown) return@post
+                        peerMaxPayloads[address] = maxPayload
+                        // If the reverse GATT read has already landed and
+                        // resolved the device id for this address, flush
+                        // immediately instead of waiting for a subsequent
+                        // onDeviceIdResolved — this covers the case where
+                        // the MTU ack arrives *after* the device-id read
+                        // (theoretically possible if a peer renegotiates
+                        // MTU mid-link, though not in the normal chain).
+                        val deviceId = connections.deviceIdForAddress(address)
+                        if (deviceId != null) {
+                            flushPeerMtu(address, deviceId)
+                        }
+                    }
+                }
+
+                override fun onDeviceIdResolved(address: String, deviceId: String) {
+                    // Already on main — handleDeviceIdRead runs on the
+                    // main thread, so no hop is needed.
+                    if (shuttingDown) return
+                    flushPeerMtu(address, deviceId)
+                }
+
+                override fun onPeerGivenUp(address: String, peerId: String) {
+                    // Called on main from finalizeGivenUpPeer. Drop both
+                    // the staged MTU (keyed by BLE address, in case MTU
+                    // arrived but the device-id read never landed) and
+                    // the Rust-side per-peer MTU entry.
+                    if (shuttingDown) return
+                    clearPeerMtu(address, peerId)
+                }
             },
             diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
         )
@@ -315,6 +354,17 @@ class BleTransportFacade(
     // Connection registry keeps track of client/server links and desired roles.
     private val connections = MeshConnectionRegistry()
     private val lastSeenRssi = ConcurrentHashMap<String, Short>()
+
+    // Per-address staging map for negotiated ATT payload sizes. Populated
+    // from [CentralGattClient.Host.onPeerMtuNegotiated] when the controller
+    // acks a `requestMtu`, and drained in [CentralGattClient.Host.onDeviceIdResolved]
+    // once the reverse GATT read has mapped the address to a stable device
+    // id — at that point we flush into Rust via `protocol.bleSetPeerMtu` so
+    // the fragmenter can size outbound chunks per peer instead of using the
+    // 185-byte fallback. Entries are removed on disconnect alongside the
+    // matching `bleClearPeerMtu` call. Main-thread-only; the concurrent map
+    // type is inherited from the neighbouring [lastSeenRssi] pattern.
+    private val peerMaxPayloads = ConcurrentHashMap<String, Int>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -1845,6 +1895,56 @@ class BleTransportFacade(
 
     private fun currentConnectionCount(): Int = connections.connectionCount()
 
+    /**
+     * Flushes a staged negotiated-MTU value into the Rust transport keyed by
+     * [deviceId]. Called from both the MTU-first-then-deviceId path (the
+     * normal handshake order, triggered via
+     * [CentralGattClient.Host.onDeviceIdResolved]) and the
+     * deviceId-first-then-MTU path (triggered from
+     * [CentralGattClient.Host.onPeerMtuNegotiated] when the address already
+     * has a resolved identifier). Idempotent: if no staged value exists the
+     * call is a no-op and the Rust fragmenter falls back to the 185-byte
+     * floor for that peer. Main-thread only.
+     */
+    private fun flushPeerMtu(address: String, deviceId: String) {
+        assertMainThread("flushPeerMtu")
+        val staged = peerMaxPayloads[address] ?: return
+        try {
+            protocol.bleSetPeerMtu(deviceId, staged.toUInt())
+            emitDiagnostic(
+                "info",
+                "BLE per-peer MTU flushed to Rust",
+                mapOf("address" to address, "deviceId" to deviceId, "maxPayload" to staged),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "bleSetPeerMtu failed for $deviceId", e)
+            emitDiagnostic(
+                "warning",
+                "bleSetPeerMtu failed",
+                mapOf("deviceId" to deviceId, "exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")),
+            )
+        }
+    }
+
+    /**
+     * Drops both the staged (by address) and Rust-side (by device id)
+     * negotiated-MTU entries for a peer. Called from every disconnect
+     * branch so a reconnect with a different negotiated MTU starts from a
+     * clean slate. Main-thread only.
+     */
+    private fun clearPeerMtu(address: String?, deviceId: String?) {
+        if (address != null) {
+            peerMaxPayloads.remove(address)
+        }
+        if (deviceId != null) {
+            try {
+                protocol.bleClearPeerMtu(deviceId)
+            } catch (e: Exception) {
+                Log.w(TAG, "bleClearPeerMtu failed for $deviceId", e)
+            }
+        }
+    }
+
     private fun refreshSelfMetrics() {
         val rssiValues = lastSeenRssi.values.map { it.toInt() }
         val averageRssi = if (rssiValues.isEmpty()) null else rssiValues.average().roundToInt()
@@ -1933,6 +2033,7 @@ class BleTransportFacade(
             lastSeenRssi.remove(address)
             pendingInbound.removeAll(address)
             outboundQueue.removeAll(peerId)
+            clearPeerMtu(address, peerId)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
@@ -2791,6 +2892,7 @@ class BleTransportFacade(
                     Log.e(TAG, "Error notifying peer lost", e)
                     emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                 }
+                clearPeerMtu(address, peerId)
                 meshController.registerDisconnection(peerId)
                 refreshSelfMetrics()
                 connections.removeIdentifiersForAddress(address)
