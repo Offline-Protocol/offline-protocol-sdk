@@ -30,6 +30,42 @@ internal fun sliceForReadOffset(value: ByteArray, offset: Int): ByteArray = when
 }
 
 /**
+ * Outcome of a CCCD (0x2902) descriptor write, per the spec:
+ *
+ *   - `0x0001` little-endian → enable notifications
+ *   - `0x0002` little-endian → enable indications
+ *   - anything else → disable (including the explicit `0x0000`)
+ *
+ * Both `enable` cases collapse to [ENABLE] because the facade treats
+ * subscribed-central bookkeeping identically for notify and indicate
+ * delivery modes.
+ */
+internal enum class CccdAction { ENABLE, DISABLE }
+
+// Duplicated from [BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE] /
+// ENABLE_INDICATION_VALUE so the classifier stays a pure function that
+// can be exercised in plain JVM unit tests. The Android framework stub
+// jar throws on static-field access under the Gradle `test` task, so
+// referencing those constants directly would take this helper out of
+// reach of the existing test harness.
+internal val CCCD_ENABLE_NOTIFICATION_BYTES: ByteArray = byteArrayOf(0x01, 0x00)
+internal val CCCD_ENABLE_INDICATION_BYTES: ByteArray = byteArrayOf(0x02, 0x00)
+
+/**
+ * Classify a CCCD descriptor write value as a subscribe or unsubscribe.
+ * Unknown / malformed payloads are treated as [CccdAction.DISABLE] so a
+ * garbage write can only ever narrow the subscriber set, never widen it.
+ */
+internal fun classifyCccdWrite(value: ByteArray): CccdAction =
+    if (value.contentEquals(CCCD_ENABLE_NOTIFICATION_BYTES) ||
+        value.contentEquals(CCCD_ENABLE_INDICATION_BYTES)
+    ) {
+        CccdAction.ENABLE
+    } else {
+        CccdAction.DISABLE
+    }
+
+/**
  * Owns the Android peripheral-side GATT server. Wraps the raw
  * [BluetoothGattServer] and enforces:
  *
@@ -550,29 +586,29 @@ class PeripheralGattServer(
             val server = gattServer ?: return
             try {
                 if (descriptor.uuid == CCCD_UUID) {
-                    val enable =
-                        value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
-                            value.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
-                    if (enable) {
-                        subscribedCentralAddresses.add(device.address)
-                        diagnosticEmitter(
-                            "info",
-                            "cccd_subscribe_received",
-                            mapOf(
-                                "address" to device.address,
-                                "subscribedCount" to subscribedCentralAddresses.size,
-                            ),
-                        )
-                    } else {
-                        subscribedCentralAddresses.remove(device.address)
-                        diagnosticEmitter(
-                            "info",
-                            "cccd_unsubscribe_received",
-                            mapOf(
-                                "address" to device.address,
-                                "subscribedCount" to subscribedCentralAddresses.size,
-                            ),
-                        )
+                    when (classifyCccdWrite(value)) {
+                        CccdAction.ENABLE -> {
+                            subscribedCentralAddresses.add(device.address)
+                            diagnosticEmitter(
+                                "info",
+                                "cccd_subscribe_received",
+                                mapOf(
+                                    "address" to device.address,
+                                    "subscribedCount" to subscribedCentralAddresses.size,
+                                ),
+                            )
+                        }
+                        CccdAction.DISABLE -> {
+                            subscribedCentralAddresses.remove(device.address)
+                            diagnosticEmitter(
+                                "info",
+                                "cccd_unsubscribe_received",
+                                mapOf(
+                                    "address" to device.address,
+                                    "subscribedCount" to subscribedCentralAddresses.size,
+                                ),
+                            )
+                        }
                     }
                     if (responseNeeded) {
                         server.sendResponse(

@@ -2,6 +2,7 @@ package com.offlineprotocol.ble
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -92,5 +93,74 @@ class PeripheralGattServerTest {
                 "must exceed mesh fragment size ($meshFragmentMax)",
             PeripheralGattServer.MAX_INBOUND_WRITE_BYTES > meshFragmentMax,
         )
+    }
+
+    // --- classifyCccdWrite ---
+    //
+    // CCCD writes flip subscribed-central bookkeeping. Three properties
+    // must hold, and they are the ones a future change would most plausibly
+    // break by accident: the spec-exact notify/indicate bytes map to ENABLE,
+    // the zero value maps to DISABLE, and any malformed payload also maps
+    // to DISABLE (so a garbage write can only narrow the subscriber set,
+    // never widen it).
+
+    @Test
+    fun `classifyCccdWrite maps notify-enable bytes to ENABLE`() {
+        assertSame(
+            CccdAction.ENABLE,
+            classifyCccdWrite(byteArrayOf(0x01, 0x00)),
+        )
+    }
+
+    @Test
+    fun `classifyCccdWrite maps indicate-enable bytes to ENABLE`() {
+        assertSame(
+            CccdAction.ENABLE,
+            classifyCccdWrite(byteArrayOf(0x02, 0x00)),
+        )
+    }
+
+    @Test
+    fun `classifyCccdWrite maps explicit disable bytes to DISABLE`() {
+        assertSame(
+            CccdAction.DISABLE,
+            classifyCccdWrite(byteArrayOf(0x00, 0x00)),
+        )
+    }
+
+    @Test
+    fun `classifyCccdWrite maps empty payload to DISABLE`() {
+        assertSame(CccdAction.DISABLE, classifyCccdWrite(ByteArray(0)))
+    }
+
+    @Test
+    fun `classifyCccdWrite maps malformed payload to DISABLE`() {
+        // A hostile central could write unexpected bytes to the CCCD. The
+        // subscriber set must only ever narrow in response, never widen.
+        assertSame(CccdAction.DISABLE, classifyCccdWrite(byteArrayOf(0x03, 0x00)))
+        assertSame(CccdAction.DISABLE, classifyCccdWrite(byteArrayOf(0xFF.toByte())))
+        assertSame(
+            CccdAction.DISABLE,
+            classifyCccdWrite(byteArrayOf(0x01, 0x00, 0x00)),
+        )
+    }
+
+    @Test
+    fun `classifyCccdWrite rejects byte-swapped notify value`() {
+        // The wire format is little-endian 0x0001 → [0x01, 0x00]. A
+        // big-endian encoding must not be accepted; a central that sends
+        // one is out of spec and should not be counted as subscribed.
+        assertSame(
+            CccdAction.DISABLE,
+            classifyCccdWrite(byteArrayOf(0x00, 0x01)),
+        )
+    }
+
+    @Test
+    fun `CCCD enable byte constants match BT spec`() {
+        // Guard against a refactor quietly changing the exported
+        // byte-pattern constants that back [classifyCccdWrite].
+        assertArrayEquals(byteArrayOf(0x01, 0x00), CCCD_ENABLE_NOTIFICATION_BYTES)
+        assertArrayEquals(byteArrayOf(0x02, 0x00), CCCD_ENABLE_INDICATION_BYTES)
     }
 }

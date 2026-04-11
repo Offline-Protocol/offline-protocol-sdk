@@ -28,7 +28,6 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ThreadLocalRandom
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -51,11 +50,35 @@ private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
  *
  * The peripheral GATT server is delegated to [PeripheralGattServer] (which
  * attaches a CCCD descriptor to every notify characteristic and runs a
- * service-ready watchdog), advertising is delegated to [LeAdvertiser], and
- * connection bookkeeping lives in [MeshConnectionRegistry]. The central-role
- * path (scanning + the GATT client callback + mesh orchestration + fragment
- * accounting) still lives in this class — it is the next slice of the
+ * service-ready watchdog), advertising is delegated to [LeAdvertiser],
+ * the outbound fragment backpressure queue lives in [OutboundFragmentQueue],
+ * and connection bookkeeping lives in [MeshConnectionRegistry]. The
+ * central-role path (scanning + the GATT client callback + mesh
+ * orchestration) still lives in this class — it is the next slice of the
  * migration and its size is why this file is large.
+ *
+ * ### Why the central role is hand-rolled
+ *
+ * An earlier attempt on this branch depended on the Nordic Android-BLE-Library
+ * (`no.nordicsemi.android:ble`) for op-queue serialisation and automatic CCCD
+ * writes. That dependency was dropped before merge and central-role stayed
+ * hand-rolled because:
+ *
+ *   1. The mesh's connection semantics (per-address link rather than
+ *      per-peer, role flips via [MeshConnectionRegistry], provisional
+ *      bootstrap connects before a device ID is known) did not map cleanly
+ *      onto Nordic's per-peer `BleManager` lifecycle — wrapping it would
+ *      have required as much glue code as writing the callback directly.
+ *   2. Nordic's queue pulls in a coroutine runtime and a logging transitive
+ *      that we otherwise don't ship, which both hurt APK size and complicated
+ *      the React Native build.
+ *   3. The correctness bugs Nordic would have eliminated (CCCD write on
+ *      subscribe, long-read offset, binder-thread isolation) are now fixed
+ *      in the hand-rolled path and enforced by unit tests.
+ *
+ * If/when we need op queueing for a feature Nordic *does* provide cleanly
+ * (e.g. MTU negotiation retries, indication handling), revisit this and
+ * extract a per-peer client abstraction first.
  */
 class BleTransportFacade(
     private val context: Context,
@@ -229,6 +252,10 @@ class BleTransportFacade(
     private val pendingFragments = HashMap<String, MutableList<PendingFragment>>()
     private val pendingFragmentsLock = Any()
     private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
+    // Per-peer cap on the inbound pending-fragment buffer (fragments held
+    // until a device ID is resolved via reverse GATT read). The outbound
+    // queue has its own cap baked into [OutboundFragmentQueue.DEFAULT_MAX_PER_PEER].
+    private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
     private val LOAD_SATURATION_COUNT = 20
     private val MESH_OBSERVATION_TTL_MS = 120_000L
@@ -305,6 +332,18 @@ class BleTransportFacade(
         }
     }
 
+    // Runtime contract check. Used at the top of every function that reads
+    // or mutates state with a documented "main thread only" invariant. The
+    // invariants used to live only in comments and leaked multiple times on
+    // this branch; promoting them to runtime checks makes the next drift
+    // fail loud instead of silent. [reason] is included in the message so
+    // crash reports can identify the offending call site.
+    private fun assertMainThread(reason: String) {
+        check(Looper.myLooper() == Looper.getMainLooper()) {
+            "$reason must run on the main thread (was ${Thread.currentThread().name})"
+        }
+    }
+
     private val fragmentPollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendFragments()
@@ -331,23 +370,36 @@ class BleTransportFacade(
         }
     }
     
-    // Track outbound fragments with timestamps for timeout handling.
-    //
-    // Thread-safety contract: ArrayDeque values are NOT thread-safe and MUST only
-    // be touched on the mainHandler thread — including `size` reads, since
-    // ArrayDeque computes it from `head`/`tail` plus a possibly-resized backing
-    // array. ConcurrentHashMap is used only so that key lookups from callback
-    // threads don't need to block.
-    //
-    // Any code that runs off the main thread (BLE callbacks, etc.) and wants to
-    // touch this map must either post to mainHandler or read the aggregate
-    // count via [totalPendingOutboundFragments], which is updated in lockstep
-    // with the deques and is safe to read from any thread.
-    private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
-    private val pendingOutboundFragments = ConcurrentHashMap<String, ArrayDeque<OutboundFragment>>()
-    private val totalPendingOutboundFragments = AtomicInteger(0)
-    private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
-    private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
+    // Outbound fragment backpressure queue. All mutating calls must run on
+    // the main thread; the queue enforces this at runtime so the invariant
+    // cannot silently drift. `totalCount` / `recipientIds` / `recipientCount`
+    // are safe from any thread and are used by off-thread diagnostic paths.
+    private val outboundQueue = OutboundFragmentQueue(
+        onDropped = { recipientId, reason, count ->
+            when (reason) {
+                OutboundFragmentQueue.DropReason.CAPPED -> {
+                    Log.w(
+                        TAG,
+                        "Pending outbound fragment queue capped for $recipientId, dropping oldest " +
+                            "(max=${OutboundFragmentQueue.DEFAULT_MAX_PER_PEER})",
+                    )
+                }
+                OutboundFragmentQueue.DropReason.EXPIRED -> {
+                    if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
+                        Log.w(TAG, "Dropped $count expired outbound fragments for $recipientId")
+                        emitDiagnostic(
+                            "warning",
+                            "Outbound fragments expired",
+                            mapOf(
+                                "recipientId" to recipientId,
+                                "expired" to count,
+                            ),
+                        )
+                    }
+                }
+            }
+        },
+    )
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
     private var transportStartAt: Long = 0L
 
@@ -603,8 +655,7 @@ class BleTransportFacade(
         connections.clear()
         lastSeenRssi.clear()
         synchronized(pendingFragmentsLock) { pendingFragments.clear() }
-        pendingOutboundFragments.clear()
-        totalPendingOutboundFragments.set(0)
+        outboundQueue.clear()
         linkReady.clear()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
@@ -815,6 +866,7 @@ class BleTransportFacade(
      * Must be called from the main thread.
      */
     private fun ensureIdentityRefreshScheduled() {
+        assertMainThread("ensureIdentityRefreshScheduled")
         if (identityRefreshRetryScheduled) return
         if (cachedSignedIdentity != null) return
         if (state != TransportState.RUNNING && state != TransportState.STARTING) return
@@ -1611,11 +1663,10 @@ class BleTransportFacade(
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
         val pendingCount = synchronized(pendingFragmentsLock) { pendingFragments.values.sumOf { it.size } }
-        // Read the aggregate counter instead of iterating ArrayDeques. The
-        // ArrayDeques themselves are main-thread-only; this getter is safe to
-        // call from any thread because the counter is an AtomicInteger updated
-        // in lockstep with every enqueue/dequeue/evict.
-        val outboundPending = totalPendingOutboundFragments.get()
+        // OutboundFragmentQueue.totalCount is an AtomicInteger read — safe to
+        // call from any thread even though the per-recipient deques are main-
+        // thread only.
+        val outboundPending = outboundQueue.totalCount()
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
         val batteryPercent = currentBatteryPercent()
@@ -1674,16 +1725,11 @@ class BleTransportFacade(
         connections.removeConnectionRole(peerId)
         lastSeenRssi.remove(address)
         synchronized(pendingFragmentsLock) { pendingFragments.remove(address) }
-        // Posted to main because ArrayDeque contents are main-thread-only.
-        // If we're already on main this runs inline, so the invariant holds
-        // whether eviction is triggered by scan (callback thread) or rebalance.
-        runOnMain {
-            pendingOutboundFragments.remove(peerId)?.let { removed ->
-                if (removed.isNotEmpty()) {
-                    totalPendingOutboundFragments.addAndGet(-removed.size)
-                }
-            }
-        }
+        // Posted to main because the outbound queue's per-recipient deques
+        // are main-thread-only. If we're already on main this runs inline,
+        // so the invariant holds whether eviction is triggered by scan
+        // (callback thread) or rebalance.
+        runOnMain { outboundQueue.removeAll(peerId) }
         deviceIdResolutionAttempts.remove(address)
         connectionRetryCount.remove(address)
         meshController.registerDisconnection(peerId)
@@ -1717,10 +1763,11 @@ class BleTransportFacade(
      * Called from onFragmentsAvailable() and from the fallback polling timer.
      */
     private fun drainAndSendFragments() {
+        assertMainThread("drainAndSendFragments")
         if (state != TransportState.RUNNING) return
 
         try {
-            flushPendingOutboundFragments()
+            outboundQueue.flush(::sendFragmentData)
 
             var consecutiveSkips = 0
             val maxConsecutiveSkips = 5
@@ -1740,7 +1787,7 @@ class BleTransportFacade(
                 val address = resolveTargetAddress(recipientId)
                 val hasConnection = address?.let { connections.getGatt(it) } != null
                 if (!hasConnection) {
-                    enqueuePendingOutboundFragment(recipientId, data)
+                    outboundQueue.enqueue(recipientId, data)
                     // Proactively attempt reconnection if we know the address (once per peer per drain)
                     if (address != null && reconnectAttempted.add(address)) {
                         bluetoothAdapter?.let { adapter ->
@@ -1759,17 +1806,16 @@ class BleTransportFacade(
                     continue
                 }
 
-                // Maintain FIFO ordering: if this recipient has pending fragments,
-                // enqueue instead of sending directly.
-                if (pendingOutboundFragments[recipientId]?.isNotEmpty() == true) {
-                    enqueuePendingOutboundFragment(recipientId, data)
+                // Maintain FIFO ordering: if this recipient already has
+                // fragments waiting, enqueue instead of sending directly.
+                if (outboundQueue.enqueueIfBlocked(recipientId, data)) {
                     continue
                 }
 
                 consecutiveSkips = 0
 
                 if (!sendFragmentData(recipientId, data)) {
-                    enqueuePendingOutboundFragment(recipientId, data)
+                    outboundQueue.enqueue(recipientId, data)
                     break
                 }
             }
@@ -1779,11 +1825,12 @@ class BleTransportFacade(
     }
 
     private fun pollAndSendFragments() {
+        assertMainThread("pollAndSendFragments")
         try {
             // The old logic would return early if there were unsent fragments, preventing new fragments
             // from being polled. This caused messages to get stuck when connections weren't ready.
-            val hasUnsentFragments = flushPendingOutboundFragments()
-            
+            val hasUnsentFragments = outboundQueue.flush(::sendFragmentData)
+
             // Still poll for new fragments even if there are unsent pending ones
             // This prevents deadlock where old fragments block new ones
             // Poll for next fragment from protocol
@@ -1797,45 +1844,44 @@ class BleTransportFacade(
                 ))
                 return
             }
-            
+
             if (fragment == null) {
                 // No fragment available - this is normal most of the time
                 // But log if we have unsent fragments to help diagnose connection issues
                 if (hasUnsentFragments && logThrottler.shouldLog("unsent_fragments_no_new", intervalMs = 5000)) {
-                    val recipientCount = pendingOutboundFragments.size
+                    val recipientCount = outboundQueue.recipientCount()
                     Log.w(TAG, "Have $recipientCount recipients with unsent fragments, but no new fragments to poll")
                     emitDiagnostic("warning", "Unsent fragments blocking", mapOf(
                         "recipientCount" to recipientCount,
-                        "recipients" to pendingOutboundFragments.keys.toList()
+                        "recipients" to outboundQueue.recipientIds()
                     ))
                 } else if (logThrottler.shouldLog("no_fragments", intervalMs = 10000)) {
                     Log.d(TAG, "No fragments available from protocol")
                 }
                 return
             }
-            
+
             Log.i(TAG, "GOT FRAGMENT for recipient: ${fragment.recipientId}, size: ${fragment.data.size}")
             emitDiagnostic("debug", "Polling got fragment", mapOf(
                 "recipientId" to fragment.recipientId,
                 "fragmentSize" to fragment.data.size
             ))
-            
+
             val recipientId = fragment.recipientId
             val data = fragment.data.map { it.toByte() }.toByteArray()
 
-            // Maintain FIFO ordering: if this recipient has pending fragments,
-            // enqueue instead of sending directly.
-            if (pendingOutboundFragments[recipientId]?.isNotEmpty() == true) {
-                enqueuePendingOutboundFragment(recipientId, data)
+            // Maintain FIFO ordering: if this recipient already has
+            // fragments waiting, enqueue instead of sending directly.
+            if (outboundQueue.enqueueIfBlocked(recipientId, data)) {
                 return
             }
 
             val sendResult = sendFragmentData(recipientId, data)
             Log.d(TAG, "Fragment send result for $recipientId: $sendResult")
-            
+
             if (!sendResult) {
                 Log.w(TAG, "Failed to send fragment immediately, queuing for retry")
-                enqueuePendingOutboundFragment(recipientId, data)
+                outboundQueue.enqueue(recipientId, data)
             } else {
                 Log.d(TAG, "Fragment sent successfully to $recipientId")
                 emitDiagnostic("debug", "Fragment sent successfully", mapOf("recipientId" to recipientId))
@@ -1843,75 +1889,6 @@ class BleTransportFacade(
         } catch (e: Exception) {
             Log.e(TAG, "Error polling/sending fragments", e)
             emitDiagnostic("error", "Error sending BLE fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-        }
-    }
-
-    private fun flushPendingOutboundFragments(): Boolean {
-        var hasUnsentFragments = false
-        val now = System.currentTimeMillis()
-
-        val recipients = pendingOutboundFragments.keys.toList()
-        for (recipientId in recipients) {
-            val queue = pendingOutboundFragments[recipientId] ?: continue
-
-            // Drop expired fragments in place to keep the counter consistent
-            // with the deques. `removeIf` on ArrayDeque mutates the backing
-            // storage directly, so we avoid the allocate-new-deque dance.
-            var expired = 0
-            val iter = queue.iterator()
-            while (iter.hasNext()) {
-                val fragment = iter.next()
-                if (now - fragment.timestamp >= PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS) {
-                    iter.remove()
-                    expired++
-                }
-            }
-            if (expired > 0) {
-                totalPendingOutboundFragments.addAndGet(-expired)
-                if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
-                    Log.w(TAG, "Dropped $expired expired outbound fragments for $recipientId")
-                    emitDiagnostic("warning", "Outbound fragments expired", mapOf(
-                        "recipientId" to recipientId,
-                        "expired" to expired,
-                    ))
-                }
-            }
-
-            if (queue.isEmpty()) {
-                pendingOutboundFragments.remove(recipientId)
-                continue
-            }
-
-            // Try to send each remaining fragment in FIFO order
-            val sendIter = queue.iterator()
-            while (sendIter.hasNext()) {
-                val fragment = sendIter.next()
-                if (sendFragmentData(recipientId, fragment.data)) {
-                    sendIter.remove()
-                    totalPendingOutboundFragments.decrementAndGet()
-                } else {
-                    hasUnsentFragments = true
-                    break
-                }
-            }
-
-            if (queue.isEmpty()) {
-                pendingOutboundFragments.remove(recipientId)
-            }
-        }
-
-        return hasUnsentFragments
-    }
-
-    private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
-        val queue = pendingOutboundFragments.getOrPut(recipientId) { ArrayDeque() }
-        queue.addLast(OutboundFragment(data, System.currentTimeMillis()))
-        totalPendingOutboundFragments.incrementAndGet()
-        // Drop oldest fragment if the queue exceeds the per-peer cap
-        if (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
-            queue.removeFirst()
-            totalPendingOutboundFragments.decrementAndGet()
-            Log.w(TAG, "Pending outbound fragment queue capped for $recipientId, dropping oldest (max=$MAX_PENDING_FRAGMENTS_PER_PEER)")
         }
     }
 
@@ -2705,14 +2682,8 @@ class BleTransportFacade(
                                 // fired, so these bytes can never deliver;
                                 // leaving them in the map orphans them until
                                 // the 30s eviction timer. Posted to main
-                                // because ArrayDeque contents are main-only.
-                                runOnMain {
-                                    pendingOutboundFragments.remove(peerId)?.let { removed ->
-                                        if (removed.isNotEmpty()) {
-                                            totalPendingOutboundFragments.addAndGet(-removed.size)
-                                        }
-                                    }
-                                }
+                                // because the queue is main-thread-only.
+                                runOnMain { outboundQueue.removeAll(peerId) }
                                 mainHandler.post {
                                     if (state == TransportState.RUNNING) {
                                         refreshAdvertising("disconnect_max_retries")
