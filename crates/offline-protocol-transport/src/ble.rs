@@ -1585,6 +1585,76 @@ mod tests {
     }
 
     #[test]
+    fn test_ble_peripheral_role_disconnect_must_not_clear_central_mtu() {
+        // Regression pin for the bug fixed in commit c0ff33e (see
+        // BleTransportFacade.handleCentralDisconnectedOnMain).
+        //
+        // The Rust transport has no concept of central vs. peripheral
+        // role — there is one peer, one MTU. The platform layers own
+        // which role "populated" a given entry. Before the fix, the
+        // Android facade's peripheral-role disconnect handler was
+        // calling `bleClearPeerMtu` under the mistaken belief that the
+        // peripheral-role disconnect owned MTU teardown. It did not:
+        // `peer_mtus[deviceId]` is populated by the central-role link
+        // via `CentralGattClient.onMtuChanged → flushPeerMtu`, and
+        // clearing it on a peripheral-role disconnect demoted an alive
+        // central-role link from its negotiated BLE 5 MTU back to the
+        // 185-byte floor for the rest of the link's life.
+        //
+        // This test pins the Rust-side contract that the platform fix
+        // depends on: the *only* valid signals that affect
+        // `peer_mtus[X]` are `set_peer_mtu(X, ...)`,
+        // `clear_peer_mtu(X)`, `on_peer_lost(X)`, and the full-state
+        // drains on `stop()`. A peripheral-role disconnect that
+        // (correctly) calls none of those must leave fragment sizing
+        // untouched. If a future refactor causes `fragment_message`
+        // to re-read state in a way that is not idempotent across
+        // "no-op" calls, this test catches it.
+        let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 400);
+
+        let msg = Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("app").unwrap(),
+        )
+        .content("x".repeat(1024))
+        .build();
+
+        let pre_frags = transport.fragment_message(&msg).unwrap();
+        let pre_max = pre_frags.iter().map(|f| f.len()).max().unwrap();
+        assert!(
+            pre_max > BLE_MAX_FRAGMENT_SIZE,
+            "pre-disconnect fragments must size against the negotiated 400-byte MTU"
+        );
+
+        // Simulated peripheral-role disconnect: the fix requires the
+        // platform layer to call *none* of `on_peer_lost`,
+        // `clear_peer_mtu`, `set_peer_mtu`. Anything else here would
+        // either clobber the central-role MTU state or declare the
+        // peer universally lost.
+
+        let post_frags = transport.fragment_message(&msg).unwrap();
+        let post_max = post_frags.iter().map(|f| f.len()).max().unwrap();
+        assert_eq!(
+            pre_max, post_max,
+            "peripheral-role disconnect must not change fragment sizing for an alive central-role link"
+        );
+        assert_eq!(pre_frags.len(), post_frags.len());
+        assert_eq!(
+            transport.fragment_fallback_count(),
+            0,
+            "a no-op peripheral-role disconnect must not tick the keying-contract counter"
+        );
+        assert_eq!(
+            transport.peer_mtu("bob"),
+            400,
+            "peer MTU must survive a peripheral-role disconnect at the Rust layer"
+        );
+    }
+
+    #[test]
     fn test_ble_platform_handle() {
         let transport = BleTransport::new("test-device");
         assert_eq!(transport.platform_handle(), None);
