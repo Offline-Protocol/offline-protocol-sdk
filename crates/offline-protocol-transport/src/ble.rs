@@ -473,18 +473,26 @@ impl BleTransport {
         // the same device-id string. If a future refactor ever calls
         // `fragment_message` with a recipient that is not a direct peer
         // (e.g., a multi-hop BLE relay where `recipient` is the final
-        // destination), the MTU lookup silently falls back to the 185-byte
-        // floor and every fragment is sized against the wrong link. Warn
-        // (rather than assert) so a disconnect race between `send()`'s
-        // peer check and this lookup does not panic test builds; the
-        // fallback path is already correct in production.
-        if !self.peers.lock().unwrap().contains_key(recipient) {
-            tracing::warn!(
-                peer = %recipient,
-                "ble: fragment_message called with recipient that is not a direct BLE peer — \
-                 falling back to BLE_MAX_FRAGMENT_SIZE. The per-peer MTU keying contract \
-                 assumes recipient == direct peer device_id."
-            );
+        // destination), the MTU lookup silently falls back to the
+        // [`BLE_MAX_FRAGMENT_SIZE`] floor and every fragment is sized
+        // against the wrong link. We check in debug builds only: the warn
+        // is pure telemetry against a contract `send()` already enforces,
+        // and taking `self.peers.lock()` on every fragmenting send just to
+        // emit it would put an avoidable mutex on the hot path. A
+        // disconnect race between `send()`'s peer check and this lookup
+        // cannot trip the debug check either, since the debug check runs
+        // in the same address space as the tests and the fallback path is
+        // already correct.
+        #[cfg(debug_assertions)]
+        {
+            if !self.peers.lock().unwrap().contains_key(recipient) {
+                tracing::warn!(
+                    peer = %recipient,
+                    "ble: fragment_message called with recipient that is not a direct BLE peer — \
+                     falling back to BLE_MAX_FRAGMENT_SIZE. The per-peer MTU keying contract \
+                     assumes recipient == direct peer device_id."
+                );
+            }
         }
         let mtu = self.peer_mtu(recipient);
         tracing::trace!(
@@ -934,6 +942,13 @@ impl Transport for BleTransport {
     }
 
     fn stop(&mut self) -> Result<()> {
+        // **Caller contract:** the platform callback pump must already
+        // be quiesced before `stop()` returns. Every `set_peer_mtu` /
+        // `on_peer_discovered` / `on_fragment_received` entry takes
+        // `&self`, so a late callback landing after the drains below
+        // will re-seed state into what is supposed to be an at-rest
+        // transport. Android/iOS bindings enforce this by draining
+        // their own GATT state before calling into the Rust stop path.
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
         // Drain every per-session cache on teardown so a subsequent
         // start() observes no state from the prior session. Every
@@ -1229,6 +1244,94 @@ mod tests {
         for fragment in &fragments {
             assert!(fragment.len() <= BLE_MAX_FRAGMENT_SIZE);
         }
+    }
+
+    #[test]
+    fn test_ble_upward_renegotiation_overwrites_stored_mtu() {
+        // Mid-link upward renegotiation: a peer starts at 400, the
+        // controller later renegotiates up to 500. The stored entry must
+        // track the latest value so subsequent fragments size against the
+        // real capacity rather than remaining pinned at the first
+        // negotiated value.
+        let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("alice"));
+
+        transport.set_peer_mtu("alice", 400);
+        assert_eq!(transport.peer_mtu("alice"), 400);
+
+        transport.set_peer_mtu("alice", 500);
+        assert_eq!(transport.peer_mtu("alice"), 500);
+
+        // And the fragmenter actually picks up the new size — emit the
+        // same payload before and after and observe that the post-
+        // renegotiation batch has larger individual fragments.
+        let msg = Message::builder(
+            UserId::new("sender").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("app").unwrap(),
+        )
+        .content("x".repeat(1024))
+        .build();
+
+        transport.set_peer_mtu("alice", 300);
+        let small_frags = transport.fragment_message(&msg).unwrap();
+        transport.set_peer_mtu("alice", 500);
+        let big_frags = transport.fragment_message(&msg).unwrap();
+
+        let max_small = small_frags.iter().map(|f| f.len()).max().unwrap();
+        let max_big = big_frags.iter().map(|f| f.len()).max().unwrap();
+        assert!(
+            max_big > max_small,
+            "upward reneg must produce larger fragments: {} vs {}",
+            max_big,
+            max_small
+        );
+        assert!(big_frags.len() < small_frags.len());
+    }
+
+    #[test]
+    fn test_ble_stop_start_round_trip_is_fresh() {
+        // stop() must leave the transport in a state where a subsequent
+        // start() observes no carry-over from the prior session: no
+        // stored MTUs, no peers, no queued fragments. Round-trip through
+        // a full start → seed → stop → start → verify cycle.
+        // `small_message()` has recipient "bob", so the seeded peer must
+        // also be "bob" for the send() precondition to pass. Keying the
+        // test to match the real send-path invariant (recipient ==
+        // device_id) catches any regression where stop/start leaks a
+        // ghost peer under a different key.
+        let mut transport = BleTransport::new("test-device");
+
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 400);
+        transport.send(&small_message()).unwrap();
+        assert_eq!(transport.peer_mtu("bob"), 400);
+
+        transport.stop().unwrap();
+        transport.start().unwrap();
+
+        // Peer map, MTU map, and send queue must all be empty — a fresh
+        // start observes no residue from the prior session.
+        assert!(transport.get_peer("bob").is_none());
+        assert_eq!(transport.peer_mtu("bob"), BLE_MAX_FRAGMENT_SIZE);
+
+        // After re-start, `send()` must fail because there are no peers
+        // — which is exactly the "at-rest" precondition start() must
+        // satisfy. If any per-session state had leaked, `send()` would
+        // succeed against a ghost peer.
+        let result = transport.send(&small_message());
+        assert!(
+            matches!(result, Err(crate::Error::PeerNotReachable(_))),
+            "send after stop/start must report no reachable peer, got {:?}",
+            result
+        );
+
+        // Re-seeding the same peer with a different MTU works as
+        // expected — no stale entry shadowing the new value.
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 250);
+        assert_eq!(transport.peer_mtu("bob"), 250);
     }
 
     #[test]

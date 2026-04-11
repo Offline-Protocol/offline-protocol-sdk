@@ -2567,14 +2567,12 @@ extension BleManager: CBPeripheralDelegate {
                 let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
                 do {
                     try self.protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(maxPayload))
-                    print("[BleManager] BLE MTU reported: \(deviceId) payload=\(maxPayload)")
                     emitDiagnostic("info", "BLE per-peer MTU flushed to Rust", context: [
                         "deviceId": deviceId,
                         "peripheral": peripheral.identifier.uuidString,
                         "maxPayload": maxPayload,
                     ])
                 } catch {
-                    print("[BleManager] bleSetPeerMtu failed for \(deviceId): \(error)")
                     emitDiagnostic("warning", "bleSetPeerMtu failed", context: [
                         "deviceId": deviceId,
                         "error": error.localizedDescription,

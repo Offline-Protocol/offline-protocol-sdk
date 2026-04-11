@@ -326,12 +326,15 @@ class BleTransportFacade(
                 }
 
                 override fun onPeerGivenUp(address: String, peerId: String) {
-                    // Called on main from finalizeGivenUpPeer. Drop both
-                    // the staged MTU (keyed by BLE address, in case MTU
-                    // arrived but the device-id read never landed) and
-                    // the Rust-side per-peer MTU entry.
+                    // Called on main from finalizeGivenUpPeer, which has
+                    // already invoked `protocol.blePeerLost(peerId)` —
+                    // that drops the Rust-side per-peer MTU entry inside
+                    // `on_peer_lost`. All that remains is the facade-side
+                    // staged entry keyed by BLE address (non-empty in the
+                    // edge case where `onPeerMtuNegotiated` landed but
+                    // the device-id read never completed).
                     if (shuttingDown) return
-                    clearPeerMtu(address, peerId)
+                    dropStagedMtu(address)
                 }
             },
             diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
@@ -878,6 +881,15 @@ class BleTransportFacade(
         lastSeenRssi.clear()
         pendingInbound.clear()
         outboundQueue.clear()
+        // Drop any negotiated-MTU values staged by the prior session.
+        // Per-disconnect paths (clearPeerMtu) already handle most entries,
+        // but a transport stop mid-handshake (MTU staged, device id not
+        // yet resolved) leaves an orphan keyed by BLE address that no
+        // disconnect path would clear. Android BLE addresses are stable
+        // per device, so a subsequent start+reconnect to the same
+        // address would otherwise observe a stale value from the prior
+        // session before the new handshake stages its own MTU.
+        peerMaxPayloads.clear()
         centralClient.clearAll()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
@@ -1955,9 +1967,13 @@ class BleTransportFacade(
 
     /**
      * Drops both the staged (by address) and Rust-side (by device id)
-     * negotiated-MTU entries for a peer. Called from every disconnect
-     * branch so a reconnect with a different negotiated MTU starts from a
-     * clean slate. Main-thread only.
+     * negotiated-MTU entries for a peer. Only called from disconnect
+     * paths that do *not* already invoke `protocol.blePeerLost` — that
+     * entry point clears the Rust-side MTU internally via `on_peer_lost`,
+     * so paths which already call it should use [dropStagedMtu] instead
+     * to avoid a redundant FFI round trip.
+     *
+     * Main-thread only.
      */
     private fun clearPeerMtu(address: String?, deviceId: String?) {
         assertMainThread("clearPeerMtu")
@@ -1970,6 +1986,20 @@ class BleTransportFacade(
             } catch (e: Exception) {
                 Log.w(TAG, "bleClearPeerMtu failed for $deviceId", e)
             }
+        }
+    }
+
+    /**
+     * Drops only the facade-side staged entry for [address]. Used by
+     * disconnect paths that already call `protocol.blePeerLost`, which
+     * internally clears the Rust-side MTU via `on_peer_lost` — issuing a
+     * second `bleClearPeerMtu` from those sites would be a wasted FFI
+     * round trip on every teardown. Main-thread only.
+     */
+    private fun dropStagedMtu(address: String?) {
+        assertMainThread("dropStagedMtu")
+        if (address != null) {
+            peerMaxPayloads.remove(address)
         }
     }
 
@@ -2061,7 +2091,9 @@ class BleTransportFacade(
             lastSeenRssi.remove(address)
             pendingInbound.removeAll(address)
             outboundQueue.removeAll(peerId)
-            clearPeerMtu(address, peerId)
+            // Facade-only staged drop; the Rust-side MTU entry is cleared
+            // by `protocol.blePeerLost` below via `on_peer_lost`.
+            dropStagedMtu(address)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
@@ -2934,7 +2966,10 @@ class BleTransportFacade(
                     Log.e(TAG, "Error notifying peer lost", e)
                     emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                 }
-                clearPeerMtu(address, peerId)
+                // `blePeerLost` above already dropped the Rust-side MTU
+                // entry via `on_peer_lost`; only the facade-side staged
+                // slot (keyed by BLE address) still needs clearing here.
+                dropStagedMtu(address)
                 meshController.registerDisconnection(peerId)
                 refreshSelfMetrics()
                 connections.removeIdentifiersForAddress(address)
