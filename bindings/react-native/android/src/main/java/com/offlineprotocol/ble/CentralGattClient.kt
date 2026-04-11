@@ -322,6 +322,26 @@ internal class CentralGattClient(
             // (after CCCD), the Rust fragmenter already knows the per-peer
             // payload size and can size fragments to the real link capacity
             // instead of the 185-byte fallback floor.
+            requestPeerMtuOrResumeChain(gatt, service, address)
+        }
+
+        /**
+         * Arms the MTU watchdog, issues `requestMtu`, and handles the
+         * synchronous-false / permission-denied fallbacks. Extracted from
+         * [onServicesDiscovered] so the handshake state machine in that
+         * callback reads as a linear chain rather than 40+ lines of
+         * watchdog arming and error branches inline. The happy path
+         * (`requestMtu` returned true, real `onMtuChanged` fires) resumes
+         * via [onMtuChanged]; the error paths resume via
+         * [readDeviceIdCharacteristicOrClose] under the controller-default
+         * MTU. Main-thread only; safe to call only from the GATT callback
+         * thread the rest of `onServicesDiscovered` runs on.
+         */
+        private fun requestPeerMtuOrResumeChain(
+            gatt: BluetoothGatt,
+            service: BluetoothGattService,
+            address: String,
+        ) {
             // Arm the MTU watchdog BEFORE requestMtu so that a racing
             // fire from `mainHandler.postDelayed` always sees an entry in
             // [mtuInFlight]. On success this is cancelled from the top of

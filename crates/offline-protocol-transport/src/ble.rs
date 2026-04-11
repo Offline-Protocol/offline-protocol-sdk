@@ -380,7 +380,15 @@ impl BleTransport {
     pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
         let message_bytes = self.serialize_message(message)?;
 
-        let mtu = self.peer_mtu(message.recipient.as_str());
+        let recipient = message.recipient.as_str();
+        let stored_mtu = self.peer_mtus.lock().unwrap().get(recipient).copied();
+        let mtu = stored_mtu.unwrap_or(BLE_MAX_FRAGMENT_SIZE);
+        tracing::debug!(
+            peer = %recipient,
+            mtu,
+            fallback = stored_mtu.is_none(),
+            "ble: selected fragment payload size"
+        );
         let message_id = message.id.as_str();
         let message_id_bytes = message_id.as_bytes();
         if message_id_bytes.len() > u8::MAX as usize {
