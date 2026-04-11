@@ -511,6 +511,14 @@ class PeripheralGattServer(
          * from the same point in time. Without this, a refresh of the
          * signed-identity cache mid-read lets the central stitch together a
          * torn value whose signature will fail to verify.
+         *
+         * Follow-up reads (`offset > 0`) without a matching snapshot fail
+         * with `null`. That is deliberate: serving fresh bytes into the
+         * middle of a long-read session stitches two different identity
+         * values together and the central silently fails signature
+         * verification on the reassembled buffer. Returning null forces the
+         * central to restart the long-read at `offset == 0`, which gives
+         * the next attempt a coherent snapshot to read from.
          */
         private fun resolveIdentityValue(device: BluetoothDevice, offset: Int): ByteArray? {
             val address = device.address
@@ -525,19 +533,29 @@ class PeripheralGattServer(
                 }
                 return fresh
             }
-            // Follow-up blob read within the same long-read session: serve
-            // from the snapshot taken on offset == 0.
+            // Follow-up blob read within the same long-read session: must
+            // serve from the snapshot taken on offset == 0.
             val cached = identityReadSnapshots[address]
             if (cached != null && now - cached.timestamp <= IDENTITY_SNAPSHOT_TTL_MS) {
                 return cached.bytes
             }
-            // No fresh snapshot (either none was ever stored, or it aged out).
-            // Fall back to a fresh read — correctness may degrade to the pre-
-            // fix tearing behaviour for this single session, but we do not
-            // strand the central with a null response, and we evict the stale
-            // snapshot so future reads start coherent.
-            if (cached != null) identityReadSnapshots.remove(address)
-            return listener.provideIdentityBytes(device)
+            // No valid snapshot. Evict any stale entry and fail the read so
+            // the central restarts the long-read cleanly on its next attempt.
+            if (cached != null) {
+                identityReadSnapshots.remove(address)
+                diagnosticEmitter(
+                    "warn",
+                    "identity_long_read_snapshot_stale",
+                    mapOf("address" to address, "offset" to offset),
+                )
+            } else {
+                diagnosticEmitter(
+                    "warn",
+                    "identity_long_read_missing_snapshot",
+                    mapOf("address" to address, "offset" to offset),
+                )
+            }
+            return null
         }
 
         private fun pruneStaleIdentitySnapshots(now: Long) {
