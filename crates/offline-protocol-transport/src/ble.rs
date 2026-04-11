@@ -137,6 +137,23 @@ pub struct BleTransport {
     /// via [`Self::undersized_mtu_reports`] so fleet telemetry can
     /// surface it.
     undersized_mtu_reports: Arc<AtomicU64>,
+    /// Count of [`Self::fragment_message`] calls that fell back to the
+    /// [`BLE_MAX_FRAGMENT_SIZE`] floor because the recipient had no
+    /// stored per-peer MTU.
+    ///
+    /// A small steady-state value is normal — every new peer sends at
+    /// least one fragmenting message in the window between
+    /// `blePeerDiscovered` and `bleSetPeerMtu` — but a sustained non-
+    /// trivial rate signals that the keying contract between
+    /// `message.recipient` and the per-peer MTU map is broken. The
+    /// classic way this breaks is a future refactor introducing
+    /// `UserId ↔ device_id` translation (e.g., multi-hop BLE relay
+    /// where `recipient` is the final destination); at that point
+    /// every fragmenting send would silently regress to 185 bytes
+    /// with no compile-time error. Surface via
+    /// [`Self::fragment_fallback_count`] so production alerts fire
+    /// the first time the invariant breaks.
+    fragment_fallback_count: Arc<AtomicU64>,
     /// Platform callback invoked when new fragments are available to send.
     /// Called from `send()` after enqueueing — the platform layer should
     /// respond by calling `get_next_fragment()` and performing the BLE write.
@@ -158,6 +175,7 @@ impl BleTransport {
             fragment_buffers: Arc::new(Mutex::new(HashMap::new())),
             peer_mtus: Arc::new(Mutex::new(HashMap::new())),
             undersized_mtu_reports: Arc::new(AtomicU64::new(0)),
+            fragment_fallback_count: Arc::new(AtomicU64::new(0)),
             on_fragments_available: Arc::new(Mutex::new(None)),
         }
     }
@@ -203,6 +221,24 @@ impl BleTransport {
     /// maximum ATT MTU and every modern controller negotiates well
     /// above 188).
     pub fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
+        // Symmetric with the debug warn in `fragment_message`: neither
+        // platform ever calls `set_peer_mtu` for a peer it has not
+        // already announced via `blePeerDiscovered`, so a store with
+        // no matching `peers` entry is either a buggy platform layer
+        // or a broken keying contract. Debug-only to keep the hot
+        // path free of an extra mutex acquisition in release builds.
+        #[cfg(debug_assertions)]
+        {
+            if !self.peers.lock().unwrap().contains_key(peer_id) {
+                tracing::warn!(
+                    peer = %peer_id,
+                    max_payload,
+                    "ble: set_peer_mtu for unregistered peer — platform must call \
+                     on_peer_discovered before reporting MTU, otherwise the stored \
+                     entry will not be cleared on peer loss"
+                );
+            }
+        }
         if max_payload < BLE_MAX_FRAGMENT_SIZE {
             self.undersized_mtu_reports.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
@@ -255,6 +291,20 @@ impl BleTransport {
     /// violate the target-platform assumption.
     pub fn undersized_mtu_reports(&self) -> u64 {
         self.undersized_mtu_reports.load(Ordering::Relaxed)
+    }
+
+    /// Monotonic count of [`Self::fragment_message`] calls that sized
+    /// against [`BLE_MAX_FRAGMENT_SIZE`] because no per-peer MTU had
+    /// been recorded for the recipient.
+    ///
+    /// A small steady-state value is normal (one-shot window between
+    /// `blePeerDiscovered` and `bleSetPeerMtu` for each new peer). A
+    /// sustained non-trivial rate indicates the keying contract
+    /// between `message.recipient` and the per-peer MTU map has
+    /// broken — at which point every fragmenting send is silently
+    /// regressing to the 185-byte floor. Surface in dashboards.
+    pub fn fragment_fallback_count(&self) -> u64 {
+        self.fragment_fallback_count.load(Ordering::Relaxed)
     }
 
     /// Sets the platform-specific handle.
@@ -468,33 +518,38 @@ impl BleTransport {
         let message_bytes = self.serialize_message(message)?;
 
         let recipient = message.recipient.as_str();
-        // Invariant: `send()` only enqueues messages whose `recipient` is a
-        // directly-connected BLE peer, and the per-peer MTU map is keyed by
-        // the same device-id string. If a future refactor ever calls
-        // `fragment_message` with a recipient that is not a direct peer
-        // (e.g., a multi-hop BLE relay where `recipient` is the final
-        // destination), the MTU lookup silently falls back to the
-        // [`BLE_MAX_FRAGMENT_SIZE`] floor and every fragment is sized
-        // against the wrong link. We check in debug builds only: the warn
-        // is pure telemetry against a contract `send()` already enforces,
-        // and taking `self.peers.lock()` on every fragmenting send just to
-        // emit it would put an avoidable mutex on the hot path. A
-        // disconnect race between `send()`'s peer check and this lookup
-        // cannot trip the debug check either, since the debug check runs
-        // in the same address space as the tests and the fallback path is
-        // already correct.
+        // Look up the per-peer MTU and observe the miss branch via a
+        // lifetime counter so production alerts fire when the keying
+        // contract between `message.recipient` and the per-peer MTU
+        // map breaks — e.g., a future refactor introducing
+        // `UserId ↔ device_id` translation where `recipient` is the
+        // final destination rather than the direct peer. In that
+        // world every fragmenting send silently regresses to the
+        // 185-byte floor with no compile-time error; the counter is
+        // the cheapest way to make that visible. A small steady-state
+        // value is expected (one-shot window between
+        // `blePeerDiscovered` and `bleSetPeerMtu` for each new peer).
+        let mtu = match self.peer_mtus.lock().unwrap().get(recipient).copied() {
+            Some(mtu) => mtu,
+            None => {
+                self.fragment_fallback_count.fetch_add(1, Ordering::Relaxed);
+                BLE_MAX_FRAGMENT_SIZE
+            }
+        };
+        // Debug-only keying-contract warn. `send()` already enforces
+        // that recipient is a registered direct peer, so this check is
+        // pure telemetry; we skip it in release builds to keep the
+        // hot path free of an extra mutex acquisition.
         #[cfg(debug_assertions)]
         {
             if !self.peers.lock().unwrap().contains_key(recipient) {
                 tracing::warn!(
                     peer = %recipient,
                     "ble: fragment_message called with recipient that is not a direct BLE peer — \
-                     falling back to BLE_MAX_FRAGMENT_SIZE. The per-peer MTU keying contract \
-                     assumes recipient == direct peer device_id."
+                     the per-peer MTU keying contract assumes recipient == direct peer device_id."
                 );
             }
         }
-        let mtu = self.peer_mtu(recipient);
         tracing::trace!(
             peer = %recipient,
             mtu,
@@ -1332,6 +1387,80 @@ mod tests {
         transport.on_peer_discovered(peer_device("bob"));
         transport.set_peer_mtu("bob", 250);
         assert_eq!(transport.peer_mtu("bob"), 250);
+    }
+
+    #[test]
+    fn test_ble_undersized_mtu_reports_counter() {
+        // The counter must:
+        //   - start at zero
+        //   - increment exactly once per undersized report
+        //   - NOT increment on accepted values (including exact floor)
+        //   - NOT increment on clamped-down oversized values
+        //   - survive the clear_peer_mtu path (monotonic lifetime counter,
+        //     never reset)
+        let transport = BleTransport::new("test-device");
+        assert_eq!(transport.undersized_mtu_reports(), 0);
+
+        transport.set_peer_mtu("alice", 20);
+        assert_eq!(transport.undersized_mtu_reports(), 1);
+
+        // Accepted value — no increment.
+        transport.set_peer_mtu("bob", 400);
+        assert_eq!(transport.undersized_mtu_reports(), 1);
+
+        // Exact floor — accepted, no increment.
+        transport.set_peer_mtu("carol", BLE_MAX_FRAGMENT_SIZE);
+        assert_eq!(transport.undersized_mtu_reports(), 1);
+
+        // Oversized — clamped down, no increment.
+        transport.set_peer_mtu("dave", 9999);
+        assert_eq!(transport.undersized_mtu_reports(), 1);
+
+        // Another undersized report — increment to 2.
+        transport.set_peer_mtu("eve", 10);
+        assert_eq!(transport.undersized_mtu_reports(), 2);
+
+        // Monotonic across clear_peer_mtu — this is a lifetime counter,
+        // not a per-peer state.
+        transport.clear_peer_mtu("bob");
+        assert_eq!(transport.undersized_mtu_reports(), 2);
+
+        // Undersized renegotiation of an existing peer still counts.
+        transport.set_peer_mtu("alice", 15);
+        assert_eq!(transport.undersized_mtu_reports(), 3);
+    }
+
+    #[test]
+    fn test_ble_fragment_fallback_count_increments_on_unknown_peer() {
+        // The keying-contract telemetry counter must:
+        //   - start at zero
+        //   - increment exactly once per fragment_message call that
+        //     falls back to BLE_MAX_FRAGMENT_SIZE because the recipient
+        //     has no stored per-peer MTU
+        //   - NOT increment once an MTU has been recorded for that peer
+        let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("bob"));
+        assert_eq!(transport.fragment_fallback_count(), 0);
+
+        // No MTU stored for "bob" — must fall back and increment.
+        let msg = small_message();
+        transport.fragment_message(&msg).unwrap();
+        assert_eq!(transport.fragment_fallback_count(), 1);
+
+        // Another send in the same pre-flush window — increment again.
+        transport.fragment_message(&msg).unwrap();
+        assert_eq!(transport.fragment_fallback_count(), 2);
+
+        // Record an MTU; subsequent sends must NOT increment.
+        transport.set_peer_mtu("bob", 400);
+        transport.fragment_message(&msg).unwrap();
+        transport.fragment_message(&msg).unwrap();
+        assert_eq!(transport.fragment_fallback_count(), 2);
+
+        // Clearing the MTU re-opens the fallback window.
+        transport.clear_peer_mtu("bob");
+        transport.fragment_message(&msg).unwrap();
+        assert_eq!(transport.fragment_fallback_count(), 3);
     }
 
     #[test]

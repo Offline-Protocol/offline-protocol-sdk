@@ -334,7 +334,7 @@ class BleTransportFacade(
                     // edge case where `onPeerMtuNegotiated` landed but
                     // the device-id read never completed).
                     if (shuttingDown) return
-                    dropStagedMtu(address)
+                    forgetPeerMtu(address, peerId, MtuClearScope.StagedOnly)
                 }
             },
             diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
@@ -882,13 +882,14 @@ class BleTransportFacade(
         pendingInbound.clear()
         outboundQueue.clear()
         // Drop any negotiated-MTU values staged by the prior session.
-        // Per-disconnect paths (clearPeerMtu) already handle most entries,
-        // but a transport stop mid-handshake (MTU staged, device id not
-        // yet resolved) leaves an orphan keyed by BLE address that no
-        // disconnect path would clear. Android BLE addresses are stable
-        // per device, so a subsequent start+reconnect to the same
-        // address would otherwise observe a stale value from the prior
-        // session before the new handshake stages its own MTU.
+        // Per-disconnect paths (forgetPeerMtu) already handle most
+        // entries, but a transport stop mid-handshake (MTU staged,
+        // device id not yet resolved) leaves an orphan keyed by BLE
+        // address that no disconnect path would clear. Android BLE
+        // addresses are stable per device, so a subsequent
+        // start+reconnect to the same address would otherwise observe
+        // a stale value from the prior session before the new
+        // handshake stages its own MTU.
         peerMaxPayloads.clear()
         centralClient.clearAll()
         lastSeenMeshAdvertisements.clear()
@@ -1966,40 +1967,59 @@ class BleTransportFacade(
     }
 
     /**
-     * Drops both the staged (by address) and Rust-side (by device id)
-     * negotiated-MTU entries for a peer. Only called from disconnect
-     * paths that do *not* already invoke `protocol.blePeerLost` — that
-     * entry point clears the Rust-side MTU internally via `on_peer_lost`,
-     * so paths which already call it should use [dropStagedMtu] instead
-     * to avoid a redundant FFI round trip.
-     *
-     * Main-thread only.
+     * Scope argument for [forgetPeerMtu]. Named (rather than a Boolean)
+     * so every call site has to state *which* part of the two-layer
+     * MTU cache to clear, which in turn forces the author to think
+     * through whether `protocol.blePeerLost` is also being called on
+     * the same path. Getting this wrong silently leaves a stale Rust-
+     * side entry that the next handshake will shadow the new
+     * negotiated value with — or does a redundant FFI round trip on
+     * every teardown.
      */
-    private fun clearPeerMtu(address: String?, deviceId: String?) {
-        assertMainThread("clearPeerMtu")
+    private enum class MtuClearScope {
+        /**
+         * Facade staging map only. Use when `protocol.blePeerLost` is
+         * also being called for this peer on the same teardown path —
+         * that entry point clears the Rust-side `peer_mtus` entry
+         * internally via `on_peer_lost`, so a sibling `bleClearPeerMtu`
+         * would be a wasted FFI round trip on every teardown.
+         */
+        StagedOnly,
+
+        /**
+         * Facade staging AND the Rust-side per-peer MTU entry. Use on
+         * disconnect paths that do NOT call `protocol.blePeerLost`
+         * — most notably the clean-disconnect path which deliberately
+         * preserves the address → deviceId cache for fast reconnect
+         * but must still drop the stored MTU so a lower renegotiation
+         * on reconnect cannot race against a stale high value.
+         */
+        FacadeAndRust,
+    }
+
+    /**
+     * Drops staged and/or Rust-side negotiated-MTU entries for a peer.
+     * Replaces the earlier split between `clearPeerMtu` (full clear)
+     * and `dropStagedMtu` (facade only) — the split made it too easy
+     * for a new teardown path to pick the wrong helper. The [scope]
+     * argument forces every call site to state which half of the
+     * two-layer cache to clear.
+     *
+     * [address] may be null on paths where we only know the device id;
+     * [deviceId] may be null on paths where we only know the BLE
+     * address. Both-null is a no-op. Main-thread only.
+     */
+    private fun forgetPeerMtu(address: String?, deviceId: String?, scope: MtuClearScope) {
+        assertMainThread("forgetPeerMtu")
         if (address != null) {
             peerMaxPayloads.remove(address)
         }
-        if (deviceId != null) {
+        if (scope == MtuClearScope.FacadeAndRust && deviceId != null) {
             try {
                 protocol.bleClearPeerMtu(deviceId)
             } catch (e: Exception) {
                 Log.w(TAG, "bleClearPeerMtu failed for $deviceId", e)
             }
-        }
-    }
-
-    /**
-     * Drops only the facade-side staged entry for [address]. Used by
-     * disconnect paths that already call `protocol.blePeerLost`, which
-     * internally clears the Rust-side MTU via `on_peer_lost` — issuing a
-     * second `bleClearPeerMtu` from those sites would be a wasted FFI
-     * round trip on every teardown. Main-thread only.
-     */
-    private fun dropStagedMtu(address: String?) {
-        assertMainThread("dropStagedMtu")
-        if (address != null) {
-            peerMaxPayloads.remove(address)
         }
     }
 
@@ -2093,7 +2113,7 @@ class BleTransportFacade(
             outboundQueue.removeAll(peerId)
             // Facade-only staged drop; the Rust-side MTU entry is cleared
             // by `protocol.blePeerLost` below via `on_peer_lost`.
-            dropStagedMtu(address)
+            forgetPeerMtu(address, peerId, MtuClearScope.StagedOnly)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
@@ -2954,7 +2974,10 @@ class BleTransportFacade(
         val isCleanDisconnect = status == 0 || status == 19
         if (isCleanDisconnect) {
             connections.deviceIdForAddress(address)?.let { peerId ->
-                clearPeerMtu(address, peerId)
+                // Clean disconnect deliberately skips `blePeerLost` to
+                // keep the address→deviceId cache warm for reconnect,
+                // so the Rust-side MTU entry must be cleared here.
+                forgetPeerMtu(address, peerId, MtuClearScope.FacadeAndRust)
             }
         } else {
             lastSeenRssi.remove(address)
@@ -2969,7 +2992,7 @@ class BleTransportFacade(
                 // `blePeerLost` above already dropped the Rust-side MTU
                 // entry via `on_peer_lost`; only the facade-side staged
                 // slot (keyed by BLE address) still needs clearing here.
-                dropStagedMtu(address)
+                forgetPeerMtu(address, peerId, MtuClearScope.StagedOnly)
                 meshController.registerDisconnection(peerId)
                 refreshSelfMetrics()
                 connections.removeIdentifiersForAddress(address)

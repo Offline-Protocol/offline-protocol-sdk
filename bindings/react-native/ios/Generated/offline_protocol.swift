@@ -748,6 +748,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func bleClearPeerMtu(peerId: String) throws 
     
+    func bleFragmentFallbackCount()  -> UInt64
+    
     func bleFragmentReceived(senderId: String, fragment: [UInt8]) throws 
     
     func bleGetNextFragment()  -> BleFragment?
@@ -763,6 +765,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func bleSetPeerMtu(peerId: String, maxPayload: UInt32) throws 
     
     func bleStatusChanged(isAvailable: Bool) throws 
+    
+    func bleUndersizedMtuReports()  -> UInt64
     
     func blockUser(userId: String) throws 
     
@@ -1106,6 +1110,14 @@ open func bleClearPeerMtu(peerId: String)throws   {try rustCallWithError(FfiConv
 }
 }
     
+open func bleFragmentFallbackCount() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_fallback_count(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
 open func bleFragmentReceived(senderId: String, fragment: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(
             self.uniffiCloneHandle(),
@@ -1170,6 +1182,14 @@ open func bleStatusChanged(isAvailable: Bool)throws   {try rustCallWithError(Ffi
         FfiConverterBool.lower(isAvailable),$0
     )
 }
+}
+    
+open func bleUndersizedMtuReports() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_undersized_mtu_reports(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
     
 open func blockUser(userId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
@@ -6925,6 +6945,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 60227) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() != 52135) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 44733) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6947,6 +6970,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 19618) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports() != 62201) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 26742) {

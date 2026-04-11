@@ -1962,6 +1962,19 @@ impl OfflineProtocol {
     /// by the controller. Surface in dashboards to detect controllers
     /// that violate the target-platform assumption. Returns 0 when the
     /// BLE transport is not registered.
+    ///
+    /// **Lock handling:** this method intentionally uses
+    /// [`recover_mutex`] rather than [`Self::lock_inner`] because it is
+    /// a pure, read-only telemetry getter with an infallible return
+    /// type. Propagating `LockPoisoned` as a `Result<u64, ProtocolError>`
+    /// would force every dashboard call site to unwrap, and telemetry
+    /// fetches are the least useful place to hide panic-producing
+    /// `unwrap()`s. Recovering the poisoned guard just to read an
+    /// atomic is safe: the atomic counter is the only state read here,
+    /// and poisoning cannot corrupt it. The setter siblings
+    /// (`ble_set_peer_mtu`, `ble_clear_peer_mtu`) still propagate
+    /// poisoning because they mutate state and the caller has a
+    /// natural error channel.
     pub fn ble_undersized_mtu_reports(&self) -> u64 {
         let protocol = recover_mutex(&self.inner, "inner");
         if let Some(transport_arc) = protocol
@@ -1971,6 +1984,35 @@ impl OfflineProtocol {
             let transport = recover_mutex(&transport_arc, "transport");
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 return ble_transport.undersized_mtu_reports();
+            }
+        }
+        0
+    }
+
+    /// BLE: Monotonic count of `fragment_message` calls that fell back
+    /// to the fragment-size floor because no per-peer MTU was on file
+    /// for the recipient.
+    ///
+    /// A small steady-state value is normal — every new peer has a
+    /// one-shot window between `blePeerDiscovered` and
+    /// `bleSetPeerMtu` during which the first fragmenting send falls
+    /// back. A sustained non-trivial rate means the keying contract
+    /// between `message.recipient` and the Rust transport's per-peer
+    /// MTU map has broken and every fragmenting send is silently
+    /// regressing to the 185-byte floor. Surface in dashboards so
+    /// production alerts fire the first time the invariant breaks.
+    /// Returns 0 when the BLE transport is not registered. Uses
+    /// `recover_mutex` for the same reason as
+    /// [`Self::ble_undersized_mtu_reports`].
+    pub fn ble_fragment_fallback_count(&self) -> u64 {
+        let protocol = recover_mutex(&self.inner, "inner");
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                return ble_transport.fragment_fallback_count();
             }
         }
         0

@@ -502,6 +502,13 @@ interface OfflineProtocol {
     // controller. Surface in dashboards.
     u64 ble_undersized_mtu_reports();
 
+    // Monotonic lifetime counter of fragment_message calls that fell back
+    // to the Rust fragment-size floor because no per-peer MTU was on file.
+    // A small steady-state value is normal; a sustained non-trivial rate
+    // signals the recipient → device_id keying contract is broken and
+    // every fragmenting send is silently regressing to the 185-byte floor.
+    u64 ble_fragment_fallback_count();
+
     // Internet transport operations
     [Throws=ProtocolError]
     void internet_status_changed(boolean is_connected);
