@@ -9,7 +9,15 @@ import java.util.concurrent.ConcurrentHashMap
  * Centralised registry for client and server-side BLE connections together with
  * auxiliary metadata (desired roles, resolved identifiers).
  *
- * Extracted from BleManager to keep the manager focused on orchestration.
+ * Extracted from [BleTransportFacade] to keep the facade focused on
+ * orchestration.
+ *
+ * All connection-indexed state is keyed by the peer's BLE address string as
+ * observed at the time of that specific connection. For the GATT-server
+ * (peripheral) side that is the remote central's address from
+ * `BluetoothGattServerCallback`; for the GATT-client (central) side it's the
+ * address we passed into `connectGatt`. Both are stable for the lifetime of
+ * a single LL connection, which is the only window these maps need to cover.
  */
 class MeshConnectionRegistry {
     private val gattClients = ConcurrentHashMap<String, BluetoothGatt>()
@@ -78,13 +86,15 @@ class MeshConnectionRegistry {
 
     fun connectionRoleEntries(): List<Map.Entry<String, MeshRole>> = connectionRoles.entries.toList()
 
-    fun trackServerConnection(deviceId: String) {
-        serverConnections.add(deviceId)
+    fun trackServerConnection(address: String) {
+        serverConnections.add(address)
     }
 
-    fun untrackServerConnection(deviceId: String) {
-        serverConnections.remove(deviceId)
+    fun untrackServerConnection(address: String) {
+        serverConnections.remove(address)
     }
+
+    fun serverConnectionCount(): Int = serverConnections.size
 
     fun connectionCount(): Int = gattClients.size + serverConnections.size
 
@@ -97,5 +107,3 @@ class MeshConnectionRegistry {
         serverConnections.clear()
     }
 }
-
-

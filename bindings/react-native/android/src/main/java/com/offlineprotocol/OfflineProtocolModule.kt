@@ -11,6 +11,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
+import com.offlineprotocol.ble.BleTransportFacade
+
 // Import generated UniFFI bindings
 import uniffi.offline_protocol.*
 
@@ -22,7 +24,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
-    private var bleManager: BleManager? = null
+    private var bleTransport: BleTransportFacade? = null
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
     private var reticulumManager: ReticulumManager? = null
@@ -64,8 +66,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     override fun invalidate() {
         super.invalidate()
         stopProcessScheduler()
-        bleManager?.stop()
-        bleManager = null
+        bleTransport?.stop()
+        bleTransport = null
         internetManager?.stop()
         internetManager = null
         wifiDirectManager?.stop()
@@ -318,7 +320,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             // Initialize BLE manager if BLE is enabled
             if (config.bleEnabled) {
-                bleManager = BleManager(reactApplicationContext, proto, config.userId) { level, message, context ->
+                bleTransport = BleTransportFacade(
+                    reactApplicationContext,
+                    proto,
+                    config.userId,
+                ) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
                     manager.listener = object : TransportManagerListener {
@@ -505,7 +511,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             
             //  Start BLE manager if available - BLE should work independently
             // BLE peer discovery and messaging must work even when Internet/WiFi are disabled
-            bleManager?.let { manager ->
+            bleTransport?.let { manager ->
                 try {
                     android.util.Log.i(NAME, "Starting BLE manager (BLE should work independently of other transports)...")
                     emitDiagnostic("info", "Starting BLE manager", mapOf(
@@ -513,16 +519,16 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         "wifiDirectEnabled" to (currentConfig?.wifiDirectEnabled ?: false)
                     ))
                     manager.start()
-                    android.util.Log.i(NAME, "✅ BLE Manager started successfully - scanning and advertising should be active")
+                    android.util.Log.i(NAME, "BLE Manager started successfully - scanning and advertising should be active")
                     emitDiagnostic("info", "BLE manager started - peer discovery active", mapOf(
                         "scanning" to true,
                         "advertising" to true
                     ))
                     
-                    // bleStatusChanged(true) is called inside BleManager.start() after
-                    // advertising and scanning are both active — no backup timer needed.
+                    // bleStatusChanged(true) is called inside BleTransportFacade.start()
+                    // after advertising and scanning are both active — no backup timer needed.
                 } catch (e: Exception) {
-                    android.util.Log.e(NAME, "❌ FAILED to start BLE Manager!", e)
+                    android.util.Log.e(NAME, "FAILED to start BLE Manager!", e)
                     android.util.Log.e(NAME, "Error type: ${e.javaClass.simpleName}")
                     android.util.Log.e(NAME, "Error message: ${e.message}")
                     android.util.Log.e(NAME, "Stack trace: ", e)
@@ -532,10 +538,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         "stackTrace" to e.stackTraceToString()
                     ))
                     // Don't fail the entire start if BLE fails, but log the error clearly
-                    android.util.Log.w(NAME, "⚠️ Protocol will continue without BLE, but peer discovery and BLE messaging will not work")
+                    android.util.Log.w(NAME, "Protocol will continue without BLE, but peer discovery and BLE messaging will not work")
                 }
             } ?: run {
-                android.util.Log.w(NAME, "⚠️ BLE manager is null - BLE was not initialized. Check if bleEnabled=true in config.")
+                android.util.Log.w(NAME, "BLE manager is null - BLE was not initialized. Check if bleEnabled=true in config.")
                 emitDiagnostic("warning", "BLE manager is null - BLE not initialized", mapOf(
                     "bleEnabled" to (currentConfig?.bleEnabled ?: false)
                 ))
@@ -566,7 +572,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         stopProcessScheduler()
         
         // Stop BLE manager first
-        bleManager?.stop()
+        bleTransport?.stop()
         android.util.Log.i(NAME, "BLE Manager stopped")
         emitDiagnostic("info", "BLE manager stopped")
         
@@ -613,7 +619,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             stopProcessScheduler()
 
             // Pause all transports consistently
-            bleManager?.pause()
+            bleTransport?.pause()
             internetManager?.pause()
             wifiDirectManager?.pause()
             reticulumManager?.pause()
@@ -632,7 +638,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             protocol?.resume()
             
             // Resume all transports consistently
-            bleManager?.resume()
+            bleTransport?.resume()
             internetManager?.resume()
             wifiDirectManager?.resume()
             reticulumManager?.resume()
@@ -960,8 +966,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     fun destroy(promise: Promise) {
         try {
             stopProcessScheduler()
-            bleManager?.stop()
-            bleManager = null
+            bleTransport?.stop()
+            bleTransport = null
             internetManager?.stop()
             internetManager = null
             wifiDirectManager?.stop()
@@ -1040,14 +1046,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 }
                 "ble" -> {
                     // Start BLE manager if stopped
-                    if (bleManager == null) {
-                        bleManager = BleManager(reactApplicationContext, proto, currentConfig?.userId ?: "unknown") { level, message, context ->
+                    if (bleTransport == null) {
+                        bleTransport = BleTransportFacade(
+                            reactApplicationContext,
+                            proto,
+                            currentConfig?.userId ?: "unknown",
+                        ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
                         emitDiagnostic("info", "BLE manager created on demand")
                     }
 
-                    val manager = bleManager
+                    val manager = bleTransport
                         ?: throw IllegalStateException("Failed to create BLE manager")
 
                     if (manager.state != TransportState.RUNNING) {
@@ -1325,7 +1335,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     emitDiagnostic("info", "WiFi Direct transport disabled (manager stopped)")
                 }
                 "ble" -> {
-                    bleManager?.stop()
+                    bleTransport?.stop()
                     try {
                         proto.bleStatusChanged(false)
                     } catch (e: Exception) {
@@ -3003,7 +3013,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private fun wireTransportCallbacks(proto: OfflineProtocol) {
         // BLE callback
-        bleManager?.let { manager ->
+        bleTransport?.let { manager ->
             try {
                 proto.setBleTransportCallback(object : uniffi.offline_protocol.BleTransportCallback {
                     override fun onFragmentsAvailable() {
@@ -3125,7 +3135,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val instance = protocol ?: return
             
             if (System.currentTimeMillis() % Constants.LOG_INTERVAL_MS < Constants.LOG_INTERVAL_THRESHOLD_MS) {
-                android.util.Log.d(NAME, "🔄 Processing protocol...")
+                android.util.Log.d(NAME, "Processing protocol...")
             }
             
             instance.process()
@@ -3134,7 +3144,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 val message = instance.receiveMessage() ?: break
                 drained++
                 if (System.currentTimeMillis() % Constants.LOG_INTERVAL_MS < Constants.LOG_INTERVAL_THRESHOLD_MS) {
-                    android.util.Log.d(NAME, "📬 Drained protocol message #$drained: $message")
+                    android.util.Log.d(NAME, "Drained protocol message #$drained: $message")
                 }
             }
             if (drained >= Constants.MAX_RECEIVE_DRAIN_PER_TICK) {

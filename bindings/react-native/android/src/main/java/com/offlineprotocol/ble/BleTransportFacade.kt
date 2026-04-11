@@ -1,4 +1,4 @@
-package com.offlineprotocol
+package com.offlineprotocol.ble
 
 import android.Manifest
 import android.bluetooth.*
@@ -12,7 +12,12 @@ import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.offlineprotocol.ble.MeshConnectionRegistry
+import com.offlineprotocol.BleDiscoveryBootstrapPolicy
+import com.offlineprotocol.TransportException
+import com.offlineprotocol.TransportManager
+import com.offlineprotocol.TransportManagerListener
+import com.offlineprotocol.TransportState
+import com.offlineprotocol.optNullableString
 import com.offlineprotocol.mesh.MeshAdvertisementData
 import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.MeshController.ConnectionIntent
@@ -40,10 +45,51 @@ private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
 }
 
 /**
- * BLE Manager implementing TransportManager for Bluetooth Low Energy communication
- * Ensures iOS ↔ Android cross-platform compatibility
+ * BLE transport facade implementing [TransportManager] for Bluetooth Low
+ * Energy communication. Ensures iOS ↔ Android cross-platform compatibility.
+ *
+ * The peripheral GATT server is delegated to [PeripheralGattServer] (which
+ * attaches a CCCD descriptor to every notify characteristic and runs a
+ * service-ready watchdog), advertising is delegated to [LeAdvertiser],
+ * the outbound fragment backpressure queue lives in [OutboundFragmentQueue],
+ * and connection bookkeeping lives in [MeshConnectionRegistry]. The
+ * central-role path (scanning + the GATT client callback + mesh
+ * orchestration) still lives in this class — it is the next slice of the
+ * migration and its size is why this file is large.
+ *
+ * ### Why the central role is hand-rolled
+ *
+ * An earlier attempt on this branch depended on the Nordic Android-BLE-Library
+ * (`no.nordicsemi.android:ble`) for op-queue serialisation and automatic CCCD
+ * writes. That dependency was dropped before merge and central-role stayed
+ * hand-rolled because:
+ *
+ *   1. The mesh's connection semantics — per-address link rather than
+ *      per-peer, role flips via [MeshConnectionRegistry], provisional
+ *      bootstrap connects issued before a device ID is known — did not
+ *      map cleanly onto Nordic's per-peer `BleManager` lifecycle. A
+ *      skeleton on this branch (`dea8138`) measured the wrapping cost
+ *      and found it comparable to writing the callback directly, at
+ *      which point the library stops paying for itself.
+ *   2. The queue transitive pulls in a coroutine runtime and a logging
+ *      transitive that we otherwise don't ship. This is a minor cost
+ *      rather than a load-bearing argument, but it is not zero.
+ *
+ * The tradeoff we're accepting: Nordic has absorbed years of OEM-specific
+ * Android BLE quirks that a hand-rolled callback will rediscover over
+ * time. The known holes (CCCD write on subscribe, long-read offset,
+ * binder-thread isolation, fragment keying) are now closed, but the
+ * long-tail surface for stack-specific bugs on unseen devices is larger
+ * here than it would be with Nordic. That is the cost of owning the
+ * state machine; the upside is that every future fix lands in this
+ * repo rather than behind a library version bump.
+ *
+ * If a future feature needs something Nordic provides cleanly (MTU
+ * negotiation retries, indication handling, bonding-state serialisation),
+ * revisit this — and extract a per-peer client abstraction first so the
+ * glue surface is contained before the library comes back in.
  */
-class BleManager(
+class BleTransportFacade(
     private val context: Context,
     // Thread-safe: OfflineProtocol uses Mutex/RwLock internally (see offline-protocol-uniffi)
     private val protocol: OfflineProtocol,
@@ -62,7 +108,7 @@ class BleManager(
     // MARK: - BLE Constants (matching Rust core and iOS)
     
     companion object {
-        private const val TAG = "BleManager"
+        private const val TAG = "BleTransportFacade"
         
         // UUIDs must match iOS and Rust core exactly
         private val SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -78,16 +124,22 @@ class BleManager(
         // via onFragmentsAvailable(); this timer only catches edge cases.
         private const val FRAGMENT_POLL_INTERVAL_MS = 2000L
         private const val MAX_FRAGMENT_SIZE = 185
+        /**
+         * Hard cap on the number of fragments [drainAndSendFragments] will
+         * pull from the Rust side in one main-thread tick. Above this we
+         * yield via `mainHandler.post` and resume on the next loop iteration
+         * so a backlog burst cannot starve other main-thread work and
+         * trigger an ANR.
+         */
+        private const val MAX_DRAIN_ITERATIONS_PER_CALL = 32
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
         private const val MAX_CONNECTIONS_PER_DEVICE = 4
-        private const val ADVERTISE_RESTART_MIN_MS = 200L
-        private const val ADVERTISE_RESTART_MAX_MS = 1200L
-        private const val MIN_ADVERTISE_INTERVAL_MS = 1500L
-        private const val MIN_RECONNECT_INTERVAL_MS = 5_000L // Match iOS timing
-        private const val MAX_RECONNECT_INTERVAL_MS = 60_000L
-        private const val MAX_CONNECTION_RETRIES = 5
+        /** Min interval between connection-monitor reconnect attempts per
+         *  device. Reconnect backoff on disconnect is owned by
+         *  [CentralGattClient] and lives there too. */
+        private const val MIN_RECONNECT_INTERVAL_MS = 5_000L
         
         // Adaptive Scan Configuration
         /** Minimum RSSI to consider for connection (filter weak signals early) - matches iOS */
@@ -126,6 +178,20 @@ class BleManager(
         private const val AGGRESSIVE_DISCOVERY_PHASE_MS = 30_000L
         /** TTL for negative cache entries of verified non-mesh devices (ms) */
         private const val NON_MESH_CACHE_TTL_MS = 300_000L // 5 minutes
+        /** Initial backoff when updateSignedIdentity fails (MLS not ready etc.) */
+        private const val IDENTITY_REFRESH_MIN_BACKOFF_MS = 500L
+        /** Cap on the identity-refresh retry backoff */
+        private const val IDENTITY_REFRESH_MAX_BACKOFF_MS = 10_000L
+        /**
+         * Hard cap on consecutive identity refresh retries before we declare
+         * the identity cache permanently broken and stop rescheduling. With
+         * the 500ms → 10s backoff, the schedule sums to roughly five minutes
+         * of recovery time before we surface a terminal diagnostic. Without
+         * the cap a permanently broken MLS init silently retries forever and
+         * every central read of the identity characteristic returns
+         * GATT_FAILURE with no observability.
+         */
+        private const val MAX_IDENTITY_REFRESH_ATTEMPTS = 30
 
         private fun uuidToLittleEndianBytes(uuid: UUID): ByteArray {
             val hexUuid = uuid.toString().uppercase().replace("-", "")
@@ -143,26 +209,108 @@ class BleManager(
     // Scanner components
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var scanCallback: ScanCallback? = null
+    // @Volatile because onScanFailed (binder thread) clears it while the
+    // scan watchdog and stopScanning read it on the main thread. Without
+    // this, a JMM visibility gap can leave the watchdog polling against a
+    // dead scanner.
+    @Volatile
     private var isScanning = false
     
-    // Advertiser components
-    private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
-    private var advertiseCallback: AdvertiseCallback? = null
-    private var isAdvertising = false
-    
-    // GATT Server (peripheral role)
-    private var gattServer: BluetoothGattServer? = null
-    private var messageCharacteristic: BluetoothGattCharacteristic? = null
-    private var deviceIdCharacteristic: BluetoothGattCharacteristic? = null
-    private var identityCharacteristic: BluetoothGattCharacteristic? = null
-    @Volatile private var isGattServiceReady = false
-    @Volatile private var pendingAdvertiseReason: String? = null
+    // Advertiser component (delegates to LeAdvertiser).
+    // Lazy so its construction sees mainHandler / logThrottler / peripheralGattServer
+    // which are declared later in this file.
+    private val leAdvertiser: LeAdvertiser by lazy(LazyThreadSafetyMode.NONE) {
+        LeAdvertiser(
+            mainHandler = mainHandler,
+            host = object : LeAdvertiser.Host {
+                override fun isGattServerReady(): Boolean = peripheralGattServer?.isReady == true
+                override fun buildAdvertiseData() = this@BleTransportFacade.buildAdvertiseData()
+                override fun buildScanResponse() = this@BleTransportFacade.buildScanResponse()
+                override fun refreshPublishedIdentity() { updateSignedIdentity() }
+                override fun shouldLog(key: String, intervalMs: Long) =
+                    logThrottler.shouldLog(key, intervalMs = intervalMs)
+            },
+            diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
+        )
+    }
+
+    // Central-role GATT client callback + per-address handshake state.
+    // Lazy so construction sees mainHandler / connections / pendingInbound /
+    // meshController, all declared lower in this file. The Host
+    // implementation below is the narrow, explicit re-entry surface the
+    // client uses to call back into the facade.
+    private val centralClient: CentralGattClient by lazy(LazyThreadSafetyMode.NONE) {
+        CentralGattClient(
+            mainHandler = mainHandler,
+            serviceUuid = SERVICE_UUID,
+            messageCharUuid = MESSAGE_CHAR_UUID,
+            deviceIdCharUuid = DEVICE_ID_CHAR_UUID,
+            identityCharUuid = IDENTITY_CHAR_UUID,
+            host = object : CentralGattClient.Host {
+                override val protocol: OfflineProtocol get() = this@BleTransportFacade.protocol
+                override val connections: MeshConnectionRegistry get() = this@BleTransportFacade.connections
+                override val pendingInbound: InboundFragmentBuffer get() = this@BleTransportFacade.pendingInbound
+                override val outboundQueue: OutboundFragmentQueue get() = this@BleTransportFacade.outboundQueue
+                override val meshController: MeshController get() = this@BleTransportFacade.meshController
+                override val bluetoothAdapter: BluetoothAdapter? get() = this@BleTransportFacade.bluetoothAdapter
+                override val selfDeviceId: String get() = deviceId
+
+                override fun isShuttingDown(): Boolean = shuttingDown
+                override fun isRunning(): Boolean = state == TransportState.RUNNING
+
+                override fun rssiFor(address: String): Short? = lastSeenRssi[address]
+                override fun clearRssi(address: String) { lastSeenRssi.remove(address) }
+                override fun markNonMeshDevice(address: String) {
+                    verifiedNonMeshDevices[address] = System.currentTimeMillis()
+                }
+
+                override fun refreshAdvertising(reason: String) =
+                    this@BleTransportFacade.refreshAdvertising(reason)
+                override fun refreshSelfMetrics() =
+                    this@BleTransportFacade.refreshSelfMetrics()
+                override fun maybeHandleRebalance(trigger: String) =
+                    this@BleTransportFacade.maybeHandleRebalance(trigger)
+                override fun learnRouteFromMessage(
+                    messageJson: String,
+                    neighborId: String,
+                    neighborAddress: String?,
+                ) = this@BleTransportFacade.learnRouteFromMessage(messageJson, neighborId, neighborAddress)
+                override fun drainAndSendFragments() =
+                    this@BleTransportFacade.drainAndSendFragments()
+                override fun handleInboundFragment(address: String, data: ByteArray) =
+                    this@BleTransportFacade.handleReceivedData(data, address)
+                override fun connectToDevice(device: BluetoothDevice) =
+                    this@BleTransportFacade.connectToDevice(device)
+            },
+            diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
+        )
+    }
+
+    // GATT Server (peripheral role). Delegated to [PeripheralGattServer] so
+    // that the NOTIFY characteristic always carries a CCCD descriptor,
+    // descriptor writes are acked, service registration has a watchdog, and
+    // long reads honour offsets.
+    private var peripheralGattServer: PeripheralGattServer? = null
     
     // Cached signed identity data for serving via GATT
+    // Read by provideIdentityBytes() on the binder thread; written by
+    // updateSignedIdentity() on main / binder. @Volatile so the latest
+    // reference is visible to binder-thread readers.
+    @Volatile
     private var cachedSignedIdentity: com.offlineprotocol.mesh.SignedIdentityData? = null
-    
-    // Verified peer identities (device address -> SignedIdentityData)
-    private val verifiedPeerIdentities = ConcurrentHashMap<String, com.offlineprotocol.mesh.SignedIdentityData>()
+
+    // Backoff state for updateSignedIdentity retries when MLS is not yet
+    // initialized or signing fails. Main-thread only.
+    private var identityRefreshRetryScheduled: Boolean = false
+    private var identityRefreshRetryDelayMs: Long = IDENTITY_REFRESH_MIN_BACKOFF_MS
+    private var identityRefreshAttempts: Int = 0
+    /**
+     * Latched once the retry budget is exhausted. While set, every call to
+     * [ensureIdentityRefreshScheduled] is a no-op so the GATT-server binder
+     * thread can't keep posting refresh requests on every central read.
+     * Cleared on [stop] so a fresh [start] gets a fresh budget.
+     */
+    private var identityRefreshGivenUp: Boolean = false
     
     // Connection registry keeps track of client/server links and desired roles.
     private val connections = MeshConnectionRegistry()
@@ -170,18 +318,88 @@ class BleManager(
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
+    // Barrier that gates binder-thread GATT callbacks from mutating shared
+    // state during teardown. Raised synchronously on the main thread at the
+    // top of [stopUnsafe] before any `clear()` call, and left raised until
+    // a subsequent [startUnsafe] explicitly lowers it. Callbacks on other
+    // threads read this via [CentralGattClient.Host.isShuttingDown] before
+    // touching `connections`, the link-ready set, or `pendingInbound`, so a
+    // late delivery can no longer observe half-cleared state.
+    @Volatile private var shuttingDown: Boolean = false
+
     private val logThrottler = LogThrottler()
     
-    // Pending fragments waiting for device ID
-    private data class PendingFragment(val data: ByteArray, val timestamp: Long)
     private data class MeshObservation(val advertisement: MeshAdvertisementData, val rssi: Int?, val timestamp: Long)
-    private val pendingFragments = HashMap<String, MutableList<PendingFragment>>()
-    private val pendingFragmentsLock = Any()
-    private val PENDING_FRAGMENT_TIMEOUT_MS = 5000L
-    private val connectionRetryCount = ConcurrentHashMap<String, Int>()
+    // Single address-keyed inbound buffer used by both the GATT-client path
+    // (the central-side notify callback inside [CentralGattClient]) and the
+    // GATT-server path (central → peripheral writes delivered through
+    // [PeripheralGattServer.Listener.onInboundFragment]). Entries are queued
+    // while a peer's stable device ID is still being resolved via a reverse
+    // GATT read, and drained by the client's device-id-read handler once
+    // that read lands. Using the connection-specific address as the key is
+    // RPA-safe: the address is stable for the lifetime of a single LL
+    // connection on both sides, even if the peer's advertised MAC rotates
+    // outside of it.
+    //
+    // All mutating access is main-thread only; the contract is enforced at
+    // runtime inside [InboundFragmentBuffer] via the same pattern used by
+    // [OutboundFragmentQueue]. Earlier revisions of this branch held an
+    // explicit `synchronized(pendingFragmentsLock)` block around HashMap
+    // mutations, but every call site now runs on the main thread (binder
+    // callbacks post here via mainHandler), so a single-threaded dispatcher
+    // makes the lock unnecessary — the runtime main-thread check replaces it.
+    private val pendingInbound = InboundFragmentBuffer(
+        onDropped = { address, reason, count ->
+            when (reason) {
+                InboundFragmentBuffer.DropReason.CAPPED_PER_PEER -> {
+                    if (logThrottler.shouldLog("pending_inbound_capped_$address", intervalMs = 10_000)) {
+                        Log.w(
+                            TAG,
+                            "Pending inbound fragment buffer capped for $address, dropped whole queue (count=$count)",
+                        )
+                        emitDiagnostic(
+                            "warning",
+                            "Pending inbound fragment buffer capped",
+                            mapOf(
+                                "address" to address,
+                                "dropped" to count,
+                                "max" to InboundFragmentBuffer.DEFAULT_MAX_PER_PEER,
+                            ),
+                        )
+                    }
+                }
+                InboundFragmentBuffer.DropReason.CAPPED_PEERS -> {
+                    if (logThrottler.shouldLog("pending_inbound_peer_cap_evict", intervalMs = 10_000)) {
+                        Log.w(
+                            TAG,
+                            "Pending-fragment peer cap hit; evicting $address (count=$count)",
+                        )
+                        emitDiagnostic(
+                            "warning",
+                            "Pending-fragment peer cap evicted buffer",
+                            mapOf(
+                                "victim" to address,
+                                "dropped" to count,
+                                "cap" to InboundFragmentBuffer.DEFAULT_MAX_PEERS,
+                            ),
+                        )
+                    }
+                }
+                InboundFragmentBuffer.DropReason.EXPIRED -> {
+                    if (logThrottler.shouldLog("pending_inbound_expired_$address", intervalMs = 10_000)) {
+                        Log.w(TAG, "Dropped $count expired pending inbound fragments for $address")
+                        emitDiagnostic(
+                            "warning",
+                            "Pending inbound fragments expired",
+                            mapOf("address" to address, "expired" to count),
+                        )
+                    }
+                }
+            }
+        },
+    )
     private val LOAD_SATURATION_COUNT = 20
     private val MESH_OBSERVATION_TTL_MS = 120_000L
-    private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
 
     private val meshController = MeshController(deviceId)
     
@@ -206,8 +424,6 @@ class BleManager(
     /** Tracks recently seen advertisements to avoid duplicate processing (hash, timestamp) */
     private data class AdvertisementCacheEntry(val hash: Int, val timestamp: Long)
     private val recentAdvertisementHashes = ConcurrentHashMap<String, AdvertisementCacheEntry>()
-    /** Tracks connected centrals (devices that connected to our GATT server) for connection count */
-    private val connectedCentrals = ConcurrentHashMap<String, Long>()
     /** Negative cache: devices verified via GATT as non-mesh (address -> timestamp) */
     private val verifiedNonMeshDevices = ConcurrentHashMap<String, Long>()
     /** Counter for consecutive scan restarts without discoveries */
@@ -245,6 +461,29 @@ class BleManager(
 
         return outcome!!.getOrThrow()
     }
+
+    // Async variant: runs inline when already on the main thread, otherwise
+    // posts. Used by BLE callbacks that must mutate main-thread-only state.
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
+        }
+    }
+
+    // Runtime contract check. Used at the top of every function that reads
+    // or mutates state with a documented "main thread only" invariant. The
+    // invariants used to live only in comments and leaked multiple times on
+    // this branch; promoting them to runtime checks makes the next drift
+    // fail loud instead of silent. [reason] is included in the message so
+    // crash reports can identify the offending call site.
+    private fun assertMainThread(reason: String) {
+        check(Looper.myLooper() == Looper.getMainLooper()) {
+            "$reason must run on the main thread (was ${Thread.currentThread().name})"
+        }
+    }
+
     private val fragmentPollingRunnable = object : Runnable {
         override fun run() {
             pollAndSendFragments()
@@ -259,24 +498,49 @@ class BleManager(
     private val routingCleanupRunnable = object : Runnable {
         override fun run() {
             protocol.cleanupExpiredRoutes()
+            // Evict stale inbound pending fragments independent of traffic.
+            // Without this, a peer that connects, queues fragments while its
+            // device ID is being resolved, then goes silent will leak those
+            // fragments until another peer's fragment triggers the eviction
+            // sweep inside handleReceivedData.
+            pendingInbound.evictExpired()
             if (state == TransportState.RUNNING) {
                 mainHandler.postDelayed(this, ROUTING_CLEANUP_INTERVAL_MS)
             }
         }
     }
     
-    // Track outbound fragments with timestamps for timeout handling.
-    // Thread-safety contract: ArrayDeque values are NOT thread-safe. All mutations
-    // (enqueue/flush/drain) MUST run on mainHandler thread. ConcurrentHashMap is used
-    // only so that evictPeer() and refreshSelfMetrics() can safely remove/read keys
-    // from BLE callback threads without blocking the main-thread hot path.
-    private data class OutboundFragment(val data: ByteArray, val timestamp: Long)
-    private val pendingOutboundFragments = ConcurrentHashMap<String, ArrayDeque<OutboundFragment>>()
-    private val PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS = 30_000L // 30 seconds
-    private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
+    // Outbound fragment backpressure queue. All mutating calls must run on
+    // the main thread; the queue enforces this at runtime so the invariant
+    // cannot silently drift. `totalCount` / `recipientIds` / `recipientCount`
+    // are safe from any thread and are used by off-thread diagnostic paths.
+    private val outboundQueue = OutboundFragmentQueue(
+        onDropped = { recipientId, reason, count ->
+            when (reason) {
+                OutboundFragmentQueue.DropReason.CAPPED -> {
+                    Log.w(
+                        TAG,
+                        "Pending outbound fragment queue capped for $recipientId, dropping oldest " +
+                            "(max=${OutboundFragmentQueue.DEFAULT_MAX_PER_PEER})",
+                    )
+                }
+                OutboundFragmentQueue.DropReason.EXPIRED -> {
+                    if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
+                        Log.w(TAG, "Dropped $count expired outbound fragments for $recipientId")
+                        emitDiagnostic(
+                            "warning",
+                            "Outbound fragments expired",
+                            mapOf(
+                                "recipientId" to recipientId,
+                                "expired" to count,
+                            ),
+                        )
+                    }
+                }
+            }
+        },
+    )
     private val lastSeenMeshAdvertisements = ConcurrentHashMap<String, MeshObservation>()
-    private var pendingAdvertiseRestart: Runnable? = null
-    private var lastAdvertiseRestartAt: Long = 0L
     private var transportStartAt: Long = 0L
 
     private val scanWatchdogRunnable = object : Runnable {
@@ -330,7 +594,7 @@ class BleManager(
                 
                 // Re-initialize scanner and advertiser
                 bluetoothLeScanner = bluetoothAdapter?.bluetoothLeScanner
-                bluetoothLeAdvertiser = bluetoothAdapter?.bluetoothLeAdvertiser
+                leAdvertiser.attachAdvertiser(bluetoothAdapter?.bluetoothLeAdvertiser)
                 
                 // Restart after a brief delay
                 mainHandler.postDelayed({
@@ -381,13 +645,18 @@ class BleManager(
         if (state == TransportState.RUNNING) {
             throw TransportException.AlreadyRunning()
         }
-        
+
         if (!isAvailable()) {
             throw TransportException.NotAvailable("BLE not available on this device")
         }
+
+        // Lower the shutdown barrier for this new session. stopUnsafe leaves
+        // it raised so late binder callbacks from the previous session keep
+        // early-returning; a fresh start must explicitly re-open the gate.
+        shuttingDown = false
         
         // Check permissions with detailed logging
-        Log.i(TAG, "🔐 Checking Bluetooth permissions (Android ${Build.VERSION.SDK_INT})...")
+        Log.i(TAG, "Checking Bluetooth permissions (Android ${Build.VERSION.SDK_INT})...")
         emitDiagnostic("info", "Checking Bluetooth permissions", mapOf("androidVersion" to Build.VERSION.SDK_INT))
         
         if (!checkPermissions()) {
@@ -398,39 +667,38 @@ class BleManager(
                 "Missing required Bluetooth permissions (BLUETOOTH, BLUETOOTH_ADMIN, ACCESS_FINE_LOCATION). " +
                 "Please grant permissions in app settings."
             }
-            Log.w(TAG, "❌ $errorMsg")
+            Log.w(TAG, "$errorMsg")
             emitDiagnostic("error", errorMsg)
             throw TransportException.PermissionDenied(errorMsg)
         }
         
         if (bluetoothAdapter?.isEnabled != true) {
             val errorMsg = "Bluetooth is not enabled. Please enable Bluetooth in Settings."
-            Log.w(TAG, "⚠️ $errorMsg")
+            Log.w(TAG, "$errorMsg")
             emitDiagnostic("error", errorMsg)
             throw TransportException.InvalidState(errorMsg)
         }
         
-        Log.i(TAG, "🚀 Starting BLE transport for device: $deviceId")
+        Log.i(TAG, "Starting BLE transport for device: $deviceId")
         emitDiagnostic("info", "Starting BLE transport", mapOf("deviceId" to deviceId))
         updateState(TransportState.STARTING)
         
         try {
             // Initialize scanner
-            Log.i(TAG, "📱 Initializing BLE scanner...")
+            Log.i(TAG, "Initializing BLE scanner...")
             bluetoothLeScanner = bluetoothAdapter.bluetoothLeScanner
             if (bluetoothLeScanner == null) {
                 throw TransportException.InvalidState("BLE scanner is not available")
             }
             
             // Initialize advertiser
-            Log.i(TAG, "📡 Initializing BLE advertiser...")
-            bluetoothLeAdvertiser = bluetoothAdapter.bluetoothLeAdvertiser
-            if (bluetoothLeAdvertiser == null) {
-                throw TransportException.InvalidState("BLE advertiser is not available")
-            }
+            Log.i(TAG, "Initializing BLE advertiser...")
+            val advertiser = bluetoothAdapter.bluetoothLeAdvertiser
+                ?: throw TransportException.InvalidState("BLE advertiser is not available")
+            leAdvertiser.attachAdvertiser(advertiser)
             
             // Setup GATT server
-            Log.i(TAG, "🔧 Setting up GATT server...")
+            Log.i(TAG, "Setting up GATT server...")
             setupGattServer()
 
             transportStartAt = System.currentTimeMillis()
@@ -438,11 +706,11 @@ class BleManager(
             refreshSelfMetrics()
             
             // Start advertising
-            Log.i(TAG, "📢 Starting BLE advertising...")
+            Log.i(TAG, "Starting BLE advertising...")
             startAdvertising("start")
             
             // Start scanning
-            Log.i(TAG, "🔍 Starting BLE scanning...")
+            Log.i(TAG, "Starting BLE scanning...")
             startScanning("start")
             
             // Start fragment polling
@@ -452,22 +720,22 @@ class BleManager(
             mainHandler.postDelayed(routingCleanupRunnable, ROUTING_CLEANUP_INTERVAL_MS)
             
             updateState(TransportState.RUNNING)
-            Log.i(TAG, "✅ BLE Manager started successfully - calling bleStatusChanged(true)")
+            Log.i(TAG, "BLE Manager started successfully - calling bleStatusChanged(true)")
             emitDiagnostic("info", "About to call protocol.bleStatusChanged(true)")
             
             try {
                 protocol.bleStatusChanged(true)
-                Log.i(TAG, "✅ Successfully called protocol.bleStatusChanged(true)")
+                Log.i(TAG, "Successfully called protocol.bleStatusChanged(true)")
                 emitDiagnostic("info", "Successfully called protocol.bleStatusChanged(true)")
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to call protocol.bleStatusChanged(true): ${e.message}", e)
+                Log.e(TAG, "Failed to call protocol.bleStatusChanged(true): ${e.message}", e)
                 emitDiagnostic("error", "Failed to call protocol.bleStatusChanged(true)", mapOf(
                     "error" to (e.message ?: "unknown"),
                     "exception" to e.javaClass.simpleName
                 ))
             }
             
-            Log.i(TAG, "✅ BLE transport ready - scanning and advertising active")
+            Log.i(TAG, "BLE transport ready - scanning and advertising active")
             emitDiagnostic(
                 "info",
                 "BLE manager running",
@@ -508,19 +776,29 @@ class BleManager(
 
         updateState(TransportState.STOPPING)
 
+        // Raise the shutdown barrier BEFORE clearing any shared state.
+        // Binder-thread GATT callbacks (`handleReceivedData`, connection
+        // state changes, CCCD writes) check this flag and early-return, so
+        // anything arriving after this point cannot observe half-cleared
+        // maps. The flag is @Volatile, which is sufficient because every
+        // reader is a callback that races with a single main-thread writer.
+        shuttingDown = true
+
         // Stop fragment polling — must happen before clearing queues
         mainHandler.removeCallbacks(fragmentPollingRunnable)
 
         // Stop routing cleanup
         mainHandler.removeCallbacks(routingCleanupRunnable)
-        
+
         // Stop scanning
         stopScanning("stop")
-        
+
         // Stop advertising
         stopAdvertising()
-        
-        // Disconnect all GATT clients
+
+        // Disconnect all GATT clients. `disconnect`+`close` are idempotent
+        // and late binder callbacks from still-draining operations are
+        // absorbed by the [shuttingDown] gate above.
         connections.forEachGatt { gatt ->
             try {
                 gatt.disconnect()
@@ -531,29 +809,39 @@ class BleManager(
         }
         connections.clear()
         lastSeenRssi.clear()
-        synchronized(pendingFragmentsLock) { pendingFragments.clear() }
-        pendingOutboundFragments.clear()
+        pendingInbound.clear()
+        outboundQueue.clear()
+        centralClient.clearAll()
         lastSeenMeshAdvertisements.clear()
         verifiedNonMeshDevices.clear()
         unknownBootstrapAttempts.clear()
         recentAdvertisementHashes.clear()
-        connectionRetryCount.clear()
-        connectedCentrals.clear()
         scanRestartCount = 0
         lastAdapterReset = 0L
         transportStartAt = 0L
         lastProactiveScanRefresh = 0L
         lastForcedBleRefresh = 0L
-        
-        // Close GATT server
-        gattServer?.close()
-        gattServer = null
-        isGattServiceReady = false
-        pendingAdvertiseReason = null
-        
+
+        // Close GATT server (stops service, clears subscribed centrals, drops refs).
+        peripheralGattServer?.stop()
+        peripheralGattServer = null
+        leAdvertiser.shutdown()
+
+        // Reset identity refresh backoff so a subsequent start() begins fresh.
+        identityRefreshRetryScheduled = false
+        identityRefreshRetryDelayMs = IDENTITY_REFRESH_MIN_BACKOFF_MS
+        identityRefreshAttempts = 0
+        identityRefreshGivenUp = false
+        cachedSignedIdentity = null
+
         updateState(TransportState.STOPPED)
         protocol.bleStatusChanged(false)
-        
+
+        // Leave [shuttingDown] raised until [startUnsafe] explicitly lowers
+        // it. Any late binder callbacks from the previous session that
+        // arrive between stop and a future start must no-op — lowering the
+        // gate here would re-admit them into cleared state.
+
         Log.i(TAG, "BLE Manager stopped")
         emitDiagnostic("info", "BLE transport stopped")
     }
@@ -632,7 +920,7 @@ class BleManager(
         }
         
         if (missingPermissions.isNotEmpty()) {
-            Log.w(TAG, "⚠️ Missing Bluetooth permissions: ${missingPermissions.joinToString(", ")}")
+            Log.w(TAG, "Missing Bluetooth permissions: ${missingPermissions.joinToString(", ")}")
             emitDiagnostic("error", "Missing Bluetooth permissions", mapOf(
                 "missingPermissions" to missingPermissions,
                 "androidVersion" to Build.VERSION.SDK_INT
@@ -640,51 +928,41 @@ class BleManager(
             return false
         }
         
-        Log.d(TAG, "✅ All Bluetooth permissions granted (Android ${Build.VERSION.SDK_INT})")
+        Log.d(TAG, "All Bluetooth permissions granted (Android ${Build.VERSION.SDK_INT})")
         return true
     }
     
     private fun setupGattServer() {
         try {
-            // Reset flag - service registration is asynchronous
-            isGattServiceReady = false
-            
-            gattServer = bluetoothManager.openGattServer(context, gattServerCallback)
-            
-            // Create message characteristic (write without response + notify)
-            messageCharacteristic = BluetoothGattCharacteristic(
-                MESSAGE_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                BluetoothGattCharacteristic.PERMISSION_WRITE
+            // Dispose any previous server before starting a new one.
+            peripheralGattServer?.stop()
+
+            val server = PeripheralGattServer(
+                context = context,
+                mainHandler = mainHandler,
+                listener = gattServerListener,
+                diagnosticEmitter = { level, message, ctx ->
+                    emitDiagnostic(level, message, ctx)
+                },
             )
-            
-            // Create device ID characteristic (read)
-            deviceIdCharacteristic = BluetoothGattCharacteristic(
-                DEVICE_ID_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ
+            peripheralGattServer = server
+
+            // Prime cached identity synchronously so the first GATT read from
+            // a central can be served off the volatile cache without the
+            // binder thread ever calling back into UniFFI. If MLS isn't up
+            // yet, queue a bounded-backoff retry so we don't leave the cache
+            // stuck null forever.
+            if (!updateSignedIdentity()) {
+                ensureIdentityRefreshScheduled()
+            }
+
+            server.start(
+                serviceUuid = SERVICE_UUID,
+                messageUuid = MESSAGE_CHAR_UUID,
+                deviceIdUuid = DEVICE_ID_CHAR_UUID,
+                identityUuid = IDENTITY_CHAR_UUID,
             )
-            deviceIdCharacteristic?.value = deviceId.toByteArray(Charsets.UTF_8)
-            
-            // Create identity characteristic (read) - contains public key + signature
-            identityCharacteristic = BluetoothGattCharacteristic(
-                IDENTITY_CHAR_UUID,
-                BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ
-            )
-            // Value is set dynamically when advertising starts via updateSignedIdentity()
-            // Note: If this fails, we still continue with service setup - identity is optional for discovery
-            updateSignedIdentity()
-            
-            // Create service
-            val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-            service.addCharacteristic(messageCharacteristic)
-            service.addCharacteristic(deviceIdCharacteristic)
-            service.addCharacteristic(identityCharacteristic)
-            
-            // Add service to GATT server (asynchronous - callback in onServiceAdded)
-            gattServer?.addService(service)
-            
+
             Log.i(TAG, "GATT server setup initiated, waiting for service registration callback...")
             emitDiagnostic("info", "GATT server setup initiated")
         } catch (e: SecurityException) {
@@ -701,42 +979,100 @@ class BleManager(
     }
     
     /**
-     * Updates the signed identity data for GATT serving.
-     * Signs the current advertisement data with the identity private key.
+     * Refresh [cachedSignedIdentity] by signing the current advertisement
+     * data with the identity private key. Must only be called from threads
+     * that are allowed to block on UniFFI (main thread and advertisement
+     * refresh callers); it must **never** be called from the GATT server's
+     * binder callback thread, because each call potentially blocks on the
+     * protocol mutex and stalls every pending GATT operation for the
+     * affected central.
+     *
+     * Returns true if the cache was successfully refreshed. Returns false
+     * if MLS is not yet initialized or signing threw — in which case the
+     * caller should arrange a retry via [ensureIdentityRefreshScheduled].
      */
-    private fun updateSignedIdentity() {
+    private fun updateSignedIdentity(): Boolean {
         try {
             if (!protocol.isMlsInitialized()) {
                 Log.d(TAG, "MLS not initialized, cannot create signed identity")
-                return
+                return false
             }
-            
-            // Get the public key (List<UByte> from UniFFI)
+
             val publicKey = protocol.getIdentityPublicKey()
-            
-            // Get current advertisement data
             val meshData = meshController.toAdvertisement()
             val advertisementData = meshData.encode()
-            
-            // Sign the advertisement data (convert ByteArray to List<UByte> for UniFFI)
             val signature = protocol.signData(advertisementData.map { it.toUByte() })
-            
-            // Create the signed identity (convert List<UByte> to ByteArray)
+
             cachedSignedIdentity = com.offlineprotocol.mesh.SignedIdentityData(
                 publicKey = publicKey.map { it.toByte() }.toByteArray(),
                 signature = signature.map { it.toByte() }.toByteArray(),
                 advertisementData = advertisementData
             )
-            
-            // Update the GATT characteristic value
-            cachedSignedIdentity?.let { identity ->
-                identityCharacteristic?.value = identity.encode()
-                Log.d(TAG, "Updated signed identity for GATT serving")
-            }
+            identityRefreshRetryDelayMs = IDENTITY_REFRESH_MIN_BACKOFF_MS
+            identityRefreshAttempts = 0
+            identityRefreshGivenUp = false
+            Log.d(TAG, "Updated signed identity for GATT serving")
+            return true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to create signed identity: ${e.message}", e)
             emitDiagnostic("warning", "Failed to create signed identity", mapOf("error" to (e.message ?: "unknown")))
+            return false
         }
+    }
+
+    /**
+     * Ensure the identity cache is eventually primed even when the first
+     * attempt failed (typically because MLS init hasn't landed yet).
+     * Schedules a single bounded-backoff retry on the main thread. Idempotent
+     * — calling while a retry is already queued is a no-op.
+     *
+     * Bounded by [MAX_IDENTITY_REFRESH_ATTEMPTS]: once the budget is exhausted
+     * the [identityRefreshGivenUp] latch is set, a terminal diagnostic is
+     * emitted, and further calls become no-ops until [stop] clears the latch.
+     * This protects against an infinite retry loop when MLS is permanently
+     * broken (e.g. corrupted keychain) and the GATT-server binder thread is
+     * posting refresh requests on every central read.
+     *
+     * Must be called from the main thread.
+     */
+    private fun ensureIdentityRefreshScheduled() {
+        assertMainThread("ensureIdentityRefreshScheduled")
+        if (identityRefreshGivenUp) return
+        if (identityRefreshRetryScheduled) return
+        if (cachedSignedIdentity != null) return
+        if (state != TransportState.RUNNING && state != TransportState.STARTING) return
+        identityRefreshRetryScheduled = true
+        val delay = identityRefreshRetryDelayMs
+        mainHandler.postDelayed({
+            identityRefreshRetryScheduled = false
+            if (state != TransportState.RUNNING && state != TransportState.STARTING) return@postDelayed
+            if (cachedSignedIdentity != null) return@postDelayed
+            identityRefreshAttempts++
+            if (!updateSignedIdentity()) {
+                if (identityRefreshAttempts >= MAX_IDENTITY_REFRESH_ATTEMPTS) {
+                    identityRefreshGivenUp = true
+                    Log.e(
+                        TAG,
+                        "Identity refresh exhausted after $identityRefreshAttempts attempts; " +
+                            "GATT identity reads will fail until the transport is restarted",
+                    )
+                    emitDiagnostic(
+                        "error",
+                        "Identity refresh exhausted",
+                        mapOf(
+                            "attempts" to identityRefreshAttempts,
+                            "maxAttempts" to MAX_IDENTITY_REFRESH_ATTEMPTS,
+                        ),
+                    )
+                    return@postDelayed
+                }
+                identityRefreshRetryDelayMs = minOf(
+                    IDENTITY_REFRESH_MAX_BACKOFF_MS,
+                    identityRefreshRetryDelayMs * 2,
+                )
+                ensureIdentityRefreshScheduled()
+            }
+        }, delay)
     }
     
     private fun startScanning(reason: String = "manual") {
@@ -768,14 +1104,21 @@ class BleManager(
             // We filter in handleScanResult using shouldProcessDiscoveredDevice().
             
             scanCallback = object : ScanCallback() {
+                // Scan callbacks arrive on a private Binder thread. Repost
+                // every result to the main handler so handleScanResult —
+                // which can synchronously reach updateSignedIdentity() via
+                // evictPeer → refreshAdvertising and which mutates
+                // LeAdvertiser state that is otherwise main-thread only —
+                // never runs off-main. Matches the threading model used by
+                // the GATT server listener callbacks.
                 override fun onScanResult(callbackType: Int, result: ScanResult) {
-                    handleScanResult(result)
+                    mainHandler.post { handleScanResult(result) }
                 }
-                
+
                 override fun onBatchScanResults(results: List<ScanResult>) {
-                    results.forEach { handleScanResult(it) }
+                    mainHandler.post { results.forEach { handleScanResult(it) } }
                 }
-                
+
                 override fun onScanFailed(errorCode: Int) {
                     val errorMsg = when(errorCode) {
                         SCAN_FAILED_ALREADY_STARTED -> "Scan already started"
@@ -784,12 +1127,21 @@ class BleManager(
                         SCAN_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
                         else -> "Unknown error $errorCode"
                     }
-                    Log.e(TAG, "❌ BLE scan failed: $errorMsg (code=$errorCode)")
-                    isScanning = false
-                    emitDiagnostic("error", "BLE scan failed", mapOf(
-                        "errorCode" to errorCode,
-                        "errorMessage" to errorMsg
-                    ))
+                    Log.e(TAG, "BLE scan failed: $errorMsg (code=$errorCode)")
+                    // Repost to main so the state mutation and the runnable
+                    // teardown match the threading contract the rest of the
+                    // facade follows. Without cancelling the watchdog and
+                    // connection monitor here, they keep firing against a
+                    // dead scanner.
+                    mainHandler.post {
+                        isScanning = false
+                        cancelScanWatchdog()
+                        cancelConnectionMonitor()
+                        emitDiagnostic("error", "BLE scan failed", mapOf(
+                            "errorCode" to errorCode,
+                            "errorMessage" to errorMsg
+                        ))
+                    }
                 }
             }
             
@@ -934,18 +1286,18 @@ class BleManager(
                 }
                 
                 // Also check for pending fragments that need device ID resolution
-                val pendingAddresses = synchronized(pendingFragmentsLock) { pendingFragments.keys.toList() }
+                val pendingAddresses = pendingInbound.pendingAddresses()
                 for (address in pendingAddresses) {
                     if (connections.deviceIdForAddress(address) != null) {
                         continue
                     }
                     
-                    val lastAttempt = deviceIdResolutionAttempts[address]
+                    val lastAttempt = centralClient.lastResolutionAttempt(address)
                     if (lastAttempt != null && now - lastAttempt < MIN_RECONNECT_INTERVAL_MS) {
                         continue
                     }
-                    
-                    deviceIdResolutionAttempts[address] = now
+
+                    centralClient.markResolutionAttempt(address, now)
                     try {
                         val device = bluetoothAdapter?.getRemoteDevice(address)
                         if (device != null && connections.getGatt(address) == null) {
@@ -968,108 +1320,21 @@ class BleManager(
         connectionMonitorRunnable = null
     }
     
-    private fun startAdvertising(reason: String = "manual") {
-        if (isAdvertising) return
-        
-        // Wait for GATT service to be ready before advertising
-        if (!isGattServiceReady) {
-            pendingAdvertiseReason = reason
-            if (logThrottler.shouldLog("advert_waiting_gatt", intervalMs = 5000)) {
-                Log.i(TAG, "Waiting for GATT service to be ready before advertising (reason: $reason)")
-                emitDiagnostic("info", "Waiting for GATT service registration", mapOf("reason" to reason))
-            }
-            return
-        }
-        
-        try {
-            val settings = AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-                .setConnectable(true)
-                .setTimeout(0)
-                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-                .build()
+    // Advertising is owned by LeAdvertiser. These thin wrappers preserve
+    // the existing call sites in this file (refreshAdvertising / stopAdvertising
+    // are invoked from many places) without threading the delegate object
+    // through every caller.
 
-            val advertiseData = buildAdvertiseData()
-            
-            advertiseCallback = object : AdvertiseCallback() {
-                override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                    Log.i(TAG, "BLE advertising started successfully (reason=$reason)")
-                    isAdvertising = true
-                    lastAdvertiseRestartAt = System.currentTimeMillis()
-                    emitDiagnostic("info", "BLE advertising started", mapOf("reason" to reason))
-                }
-                
-                override fun onStartFailure(errorCode: Int) {
-                    val errorMsg = when(errorCode) {
-                        ADVERTISE_FAILED_DATA_TOO_LARGE -> "Data too large"
-                        ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Too many advertisers"
-                        ADVERTISE_FAILED_ALREADY_STARTED -> "Already started"
-                        ADVERTISE_FAILED_INTERNAL_ERROR -> "Internal error"
-                        ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
-                        else -> "Unknown error $errorCode"
-                    }
-                    Log.e(TAG, "❌ BLE advertising failed: $errorMsg (code=$errorCode)")
-                    isAdvertising = false
-                    emitDiagnostic("error", "BLE advertising failed", mapOf(
-                        "errorCode" to errorCode,
-                        "errorMessage" to errorMsg
-                    ))
-                }
-            }
-            
-            // Include scan response with service UUID for iOS compatibility
-            // iOS's CoreBluetooth actively queries for scan responses and has known issues
-            // recognizing 128-bit service UUIDs from Android's main advertisement packet
-            val scanResponse = buildScanResponse()
-            bluetoothLeAdvertiser?.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
-            
-            // Reduced logging
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Permission denied while starting advertising", e)
-            emitDiagnostic("error", "Permission denied while starting advertising", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-            throw e
-        }
+    private fun startAdvertising(reason: String = "manual") {
+        leAdvertiser.start(reason)
     }
-    
+
     private fun stopAdvertising() {
-        if (!isAdvertising) return
-        
-        try {
-            advertiseCallback?.let { bluetoothLeAdvertiser?.stopAdvertising(it) }
-            advertiseCallback = null
-            isAdvertising = false
-            pendingAdvertiseRestart?.let {
-                mainHandler.removeCallbacks(it)
-                pendingAdvertiseRestart = null
-            }
-            Log.i(TAG, "Stopped advertising")
-            emitDiagnostic("info", "Stopped BLE advertising")
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Permission denied while stopping advertising", e)
-            emitDiagnostic("error", "Permission denied while stopping advertising", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-        }
+        leAdvertiser.stop()
     }
 
     private fun refreshAdvertising(reason: String) {
-        stopAdvertising()
-        // Update the signed identity to match the new advertisement data
-        updateSignedIdentity()
-        scheduleAdvertisingRestart(reason)
-    }
-
-    private fun scheduleAdvertisingRestart(reason: String) {
-        val now = System.currentTimeMillis()
-        val elapsed = now - lastAdvertiseRestartAt
-        val cooldownDelay = if (elapsed < MIN_ADVERTISE_INTERVAL_MS) MIN_ADVERTISE_INTERVAL_MS - elapsed else 0L
-        val jitter = ThreadLocalRandom.current().nextLong(ADVERTISE_RESTART_MIN_MS, ADVERTISE_RESTART_MAX_MS + 1)
-        val delay = cooldownDelay + jitter
-        pendingAdvertiseRestart?.let { mainHandler.removeCallbacks(it) }
-        val runnable = Runnable {
-            pendingAdvertiseRestart = null
-            startAdvertising(reason)
-        }
-        pendingAdvertiseRestart = runnable
-        mainHandler.postDelayed(runnable, delay)
+        leAdvertiser.refresh(reason)
     }
 
     private fun buildAdvertiseData(): AdvertiseData {
@@ -1167,7 +1432,7 @@ class BleManager(
             discoveryLogTimestamps[address] = now
             val hasServiceUuid = serviceUuids?.any { it.uuid == SERVICE_UUID } == true
             val hasServiceData = serviceData != null
-            Log.d(TAG, "🔍 Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount, hasServiceUuid: $hasServiceUuid, hasServiceData: $hasServiceData)")
+            Log.d(TAG, "Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount, hasServiceUuid: $hasServiceUuid, hasServiceData: $hasServiceData)")
             emitDiagnostic(
                 "info",
                 "Discovered BLE device",
@@ -1307,7 +1572,7 @@ class BleManager(
                 // Check both full UUID and short form for cross-platform compatibility
                 if (uuid.uuid == SERVICE_UUID || uuid.toString().uppercase() == SERVICE_UUID.toString().uppercase()) {
                     if (logThrottler.shouldLog("service_uuid_match_$address", intervalMs = 30_000)) {
-                        Log.d(TAG, "✅ Device $address matches service UUID: ${uuid.uuid}")
+                        Log.d(TAG, "Device $address matches service UUID: ${uuid.uuid}")
                     }
                     return true
                 }
@@ -1320,7 +1585,7 @@ class BleManager(
         val scanRecordBytes = scanRecord?.bytes
         if (scanRecordBytes != null && containsServiceUuidInAdStructures(scanRecordBytes)) {
             if (logThrottler.shouldLog("service_uuid_bytes_match_$address", intervalMs = 30_000)) {
-                Log.d(TAG, "✅ Device $address matches service UUID in scan record AD structures")
+                Log.d(TAG, "Device $address matches service UUID in scan record AD structures")
             }
             return true
         }
@@ -1565,7 +1830,7 @@ class BleManager(
                     return
                 }
                 
-                val gatt = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
+                val gatt = device.connectGatt(context, false, centralClient.callback, BluetoothDevice.TRANSPORT_LE)
                 connections.registerGatt(device.address, gatt)
             }
             
@@ -1578,7 +1843,7 @@ class BleManager(
         }
     }
 
-    private fun currentConnectionCount(): Int = connections.connectionCount() + connectedCentrals.size
+    private fun currentConnectionCount(): Int = connections.connectionCount()
 
     private fun refreshSelfMetrics() {
         val rssiValues = lastSeenRssi.values.map { it.toInt() }
@@ -1586,11 +1851,13 @@ class BleManager(
         val signalQuality = averageRssi?.let { rssi ->
             (((rssi + 100).coerceIn(-100, -20) + 100) / 80.0 * 100).roundToInt().coerceIn(0, 100)
         }
-        val pendingCount = synchronized(pendingFragmentsLock) { pendingFragments.values.sumOf { it.size } }
-        // Best-effort: ConcurrentHashMap iteration is weakly consistent and
-        // ArrayDeque.size is a single int-field read (atomic on JVM), so this
-        // is always safe — the sum may be slightly stale but never crashes.
-        val outboundPending = pendingOutboundFragments.values.sumOf { it.size }
+        // Both total-count reads are AtomicInteger snapshots and therefore
+        // safe from any thread even though the underlying per-peer buffers
+        // are main-thread only. refreshSelfMetrics is itself called from
+        // main so this is belt-and-suspenders, but the AtomicInteger is what
+        // lets the diagnostic assembly path stay lock-free.
+        val pendingCount = pendingInbound.totalCount()
+        val outboundPending = outboundQueue.totalCount()
         val totalPending = pendingCount + outboundPending
         val stability = 1.0 - min(1.0, pendingCount / 10.0)
         val batteryPercent = currentBatteryPercent()
@@ -1622,49 +1889,65 @@ class BleManager(
     }
 
     private fun evictPeer(peerId: String, reason: String) {
-        val address = connections.addressForDevice(peerId)
-        if (address == null) {
-            if (logThrottler.shouldLog("mesh_evict_missing_$peerId")) {
-                Log.w(TAG, "Cannot evict $peerId: no known address")
+        // Run the entire eviction body on the main thread as one atomic step.
+        // The previous shape posted only `outboundQueue.removeAll` to main and
+        // ran the connection bookkeeping inline; that left a window where
+        // `drainAndSendFragments` (which runs on main) could observe the
+        // already-removed GATT entry, fall through the `hasConnection == false`
+        // branch, and enqueue fresh fragments to a peer that was about to have
+        // its outbound queue cleared. Those fragments would orphan in the
+        // queue until the per-peer cap or 30s expiry pruned them.
+        //
+        // Since the queue + linkReady + outboundQueue contracts are all
+        // main-thread-only anyway, doing the whole sequence on main is the
+        // simplest way to make eviction atomic against the drain pump. If
+        // we're already on main this runs inline; otherwise we block the
+        // caller's thread until main has processed the eviction. Eviction is
+        // not on the hot path so the latch hop is acceptable.
+        runOnMainSync {
+            val address = connections.addressForDevice(peerId)
+            if (address == null) {
+                if (logThrottler.shouldLog("mesh_evict_missing_$peerId")) {
+                    Log.w(TAG, "Cannot evict $peerId: no known address")
+                }
+                return@runOnMainSync
             }
-            return
-        }
 
-        if (logThrottler.shouldLog("mesh_evict_$peerId", intervalMs = 5000)) {
-            Log.i(TAG, "Evicting peer $peerId to reclaim capacity (reason=$reason)")
-        }
+            if (logThrottler.shouldLog("mesh_evict_$peerId", intervalMs = 5000)) {
+                Log.i(TAG, "Evicting peer $peerId to reclaim capacity (reason=$reason)")
+            }
 
-        connections.getGatt(address)?.let { gatt ->
+            connections.getGatt(address)?.let { gatt ->
+                try {
+                    gatt.disconnect()
+                    gatt.close()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error while evicting $peerId", e)
+                }
+            }
+
+            connections.removeGatt(address)
+            centralClient.forgetLink(address)
+            connections.removeIdentifiersForDevice(peerId)
+            connections.removeConnectionRole(peerId)
+            lastSeenRssi.remove(address)
+            pendingInbound.removeAll(address)
+            outboundQueue.removeAll(peerId)
+            meshController.registerDisconnection(peerId)
+            refreshSelfMetrics()
+
+            // Clean up routes through this neighbor
+            protocol.removeNeighborRoutes(peerId)
+
             try {
-                gatt.disconnect()
-                gatt.close()
+                protocol.blePeerLost(peerId)
             } catch (e: Exception) {
-                Log.w(TAG, "Error while evicting $peerId", e)
+                Log.e(TAG, "Failed to notify protocol of peer eviction", e)
             }
+
+            refreshAdvertising("evict_$reason")
+            maybeHandleRebalance("evict")
         }
-
-        connections.removeGatt(address)
-        connections.removeIdentifiersForDevice(peerId)
-        connections.removeConnectionRole(peerId)
-        lastSeenRssi.remove(address)
-        synchronized(pendingFragmentsLock) { pendingFragments.remove(address) }
-        pendingOutboundFragments.remove(peerId)
-        deviceIdResolutionAttempts.remove(address)
-        connectionRetryCount.remove(address)
-        meshController.registerDisconnection(peerId)
-        refreshSelfMetrics()
-
-        // Clean up routes through this neighbor
-        protocol.removeNeighborRoutes(peerId)
-        
-        try {
-            protocol.blePeerLost(peerId)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to notify protocol of peer eviction", e)
-        }
-
-        refreshAdvertising("evict_$reason")
-        maybeHandleRebalance("evict")
     }
     
     /**
@@ -1678,20 +1961,52 @@ class BleManager(
 
     /**
      * Drains the Rust fragment queue and sends each fragment over BLE.
-     * Stops when the queue is empty or all target peers are flow-controlled.
+     * Stops when the queue is empty, all target peers are flow-controlled,
+     * or [MAX_DRAIN_ITERATIONS_PER_CALL] is hit. In the cap-hit case the
+     * remaining work is rescheduled via [mainHandler] so we yield the main
+     * thread between batches; without that, a Rust-side fragment burst can
+     * hold the main thread long enough to trigger ANR.
+     *
      * Called from onFragmentsAvailable() and from the fallback polling timer.
      */
     private fun drainAndSendFragments() {
+        assertMainThread("drainAndSendFragments")
         if (state != TransportState.RUNNING) return
 
+        var hitIterationCap = false
         try {
-            flushPendingOutboundFragments()
+            val stalledAfterFlush = outboundQueue.flush(::sendFragmentData)
+            if (stalledAfterFlush &&
+                logThrottler.shouldLog("drain_flush_stalled", intervalMs = 5000)
+            ) {
+                val recipientCount = outboundQueue.recipientCount()
+                Log.w(
+                    TAG,
+                    "drainAndSendFragments: outbound flush left $recipientCount " +
+                        "recipient(s) with unsent fragments",
+                )
+                emitDiagnostic(
+                    "warning",
+                    "Outbound drain flush stalled",
+                    mapOf(
+                        "recipientCount" to recipientCount,
+                        "pending" to outboundQueue.totalCount(),
+                    ),
+                )
+            }
 
             var consecutiveSkips = 0
             val maxConsecutiveSkips = 5
             val reconnectAttempted = mutableSetOf<String>()
+            var iterations = 0
 
             while (true) {
+                if (iterations >= MAX_DRAIN_ITERATIONS_PER_CALL) {
+                    hitIterationCap = true
+                    break
+                }
+                iterations++
+
                 val fragment = try {
                     protocol.bleGetNextFragment()
                 } catch (e: Exception) {
@@ -1705,7 +2020,7 @@ class BleManager(
                 val address = resolveTargetAddress(recipientId)
                 val hasConnection = address?.let { connections.getGatt(it) } != null
                 if (!hasConnection) {
-                    enqueuePendingOutboundFragment(recipientId, data)
+                    outboundQueue.enqueue(recipientId, data)
                     // Proactively attempt reconnection if we know the address (once per peer per drain)
                     if (address != null && reconnectAttempted.add(address)) {
                         bluetoothAdapter?.let { adapter ->
@@ -1724,31 +2039,39 @@ class BleManager(
                     continue
                 }
 
-                // Maintain FIFO ordering: if this recipient has pending fragments,
-                // enqueue instead of sending directly.
-                if (pendingOutboundFragments[recipientId]?.isNotEmpty() == true) {
-                    enqueuePendingOutboundFragment(recipientId, data)
+                // Maintain FIFO ordering: if this recipient already has
+                // fragments waiting, enqueue instead of sending directly.
+                if (outboundQueue.enqueueIfBlocked(recipientId, data)) {
                     continue
                 }
 
                 consecutiveSkips = 0
 
                 if (!sendFragmentData(recipientId, data)) {
-                    enqueuePendingOutboundFragment(recipientId, data)
+                    outboundQueue.enqueue(recipientId, data)
                     break
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in drainAndSendFragments", e)
         }
+
+        if (hitIterationCap && state == TransportState.RUNNING) {
+            // Yield to other main-thread work (BLE callbacks, UI, the fragment
+            // poll timer) before resuming the drain. The post is unconditional
+            // because we know there is at least one more fragment available
+            // and we want it serviced as soon as the handler is free.
+            mainHandler.post { drainAndSendFragments() }
+        }
     }
 
     private fun pollAndSendFragments() {
+        assertMainThread("pollAndSendFragments")
         try {
             // The old logic would return early if there were unsent fragments, preventing new fragments
             // from being polled. This caused messages to get stuck when connections weren't ready.
-            val hasUnsentFragments = flushPendingOutboundFragments()
-            
+            val hasUnsentFragments = outboundQueue.flush(::sendFragmentData)
+
             // Still poll for new fragments even if there are unsent pending ones
             // This prevents deadlock where old fragments block new ones
             // Poll for next fragment from protocol
@@ -1762,45 +2085,44 @@ class BleManager(
                 ))
                 return
             }
-            
+
             if (fragment == null) {
                 // No fragment available - this is normal most of the time
                 // But log if we have unsent fragments to help diagnose connection issues
                 if (hasUnsentFragments && logThrottler.shouldLog("unsent_fragments_no_new", intervalMs = 5000)) {
-                    val recipientCount = pendingOutboundFragments.size
-                    Log.w(TAG, "⚠️ Have $recipientCount recipients with unsent fragments, but no new fragments to poll")
+                    val recipientCount = outboundQueue.recipientCount()
+                    Log.w(TAG, "Have $recipientCount recipients with unsent fragments, but no new fragments to poll")
                     emitDiagnostic("warning", "Unsent fragments blocking", mapOf(
                         "recipientCount" to recipientCount,
-                        "recipients" to pendingOutboundFragments.keys.toList()
+                        "recipients" to outboundQueue.recipientIds()
                     ))
                 } else if (logThrottler.shouldLog("no_fragments", intervalMs = 10000)) {
                     Log.d(TAG, "No fragments available from protocol")
                 }
                 return
             }
-            
-            Log.i(TAG, "🚀 GOT FRAGMENT for recipient: ${fragment.recipientId}, size: ${fragment.data.size}")
+
+            Log.i(TAG, "GOT FRAGMENT for recipient: ${fragment.recipientId}, size: ${fragment.data.size}")
             emitDiagnostic("debug", "Polling got fragment", mapOf(
                 "recipientId" to fragment.recipientId,
                 "fragmentSize" to fragment.data.size
             ))
-            
+
             val recipientId = fragment.recipientId
             val data = fragment.data.map { it.toByte() }.toByteArray()
 
-            // Maintain FIFO ordering: if this recipient has pending fragments,
-            // enqueue instead of sending directly.
-            if (pendingOutboundFragments[recipientId]?.isNotEmpty() == true) {
-                enqueuePendingOutboundFragment(recipientId, data)
+            // Maintain FIFO ordering: if this recipient already has
+            // fragments waiting, enqueue instead of sending directly.
+            if (outboundQueue.enqueueIfBlocked(recipientId, data)) {
                 return
             }
 
             val sendResult = sendFragmentData(recipientId, data)
             Log.d(TAG, "Fragment send result for $recipientId: $sendResult")
-            
+
             if (!sendResult) {
                 Log.w(TAG, "Failed to send fragment immediately, queuing for retry")
-                enqueuePendingOutboundFragment(recipientId, data)
+                outboundQueue.enqueue(recipientId, data)
             } else {
                 Log.d(TAG, "Fragment sent successfully to $recipientId")
                 emitDiagnostic("debug", "Fragment sent successfully", mapOf("recipientId" to recipientId))
@@ -1808,65 +2130,6 @@ class BleManager(
         } catch (e: Exception) {
             Log.e(TAG, "Error polling/sending fragments", e)
             emitDiagnostic("error", "Error sending BLE fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-        }
-    }
-
-    private fun flushPendingOutboundFragments(): Boolean {
-        var hasUnsentFragments = false
-        val now = System.currentTimeMillis()
-
-        val recipients = pendingOutboundFragments.keys.toList()
-        for (recipientId in recipients) {
-            val queue = pendingOutboundFragments[recipientId] ?: continue
-            
-            // Remove expired fragments to prevent indefinite queuing
-            val validFragments = queue.filter { now - it.timestamp < PENDING_OUTBOUND_FRAGMENT_TIMEOUT_MS }
-            
-            if (validFragments.isEmpty()) {
-                pendingOutboundFragments.remove(recipientId)
-                if (logThrottler.shouldLog("fragments_expired_$recipientId", intervalMs = 10000)) {
-                    Log.w(TAG, "⚠️ Removed expired outbound fragments for $recipientId")
-                    emitDiagnostic("warning", "Outbound fragments expired", mapOf("recipientId" to recipientId))
-                }
-                continue
-            }
-            
-            // Update queue with only valid fragments (remove expired ones)
-            val mutableQueue = ArrayDeque(validFragments)
-            if (mutableQueue.size < queue.size) {
-                pendingOutboundFragments[recipientId] = mutableQueue
-            }
-
-            // Try to send each fragment
-            val iterator = mutableQueue.iterator()
-            while (iterator.hasNext()) {
-                val fragment = iterator.next()
-                if (sendFragmentData(recipientId, fragment.data)) {
-                    iterator.remove()
-                } else {
-                    hasUnsentFragments = true
-                    break
-                }
-            }
-            
-            // Update the queue with remaining fragments
-            if (mutableQueue.isEmpty()) {
-                pendingOutboundFragments.remove(recipientId)
-            } else {
-                pendingOutboundFragments[recipientId] = mutableQueue
-            }
-        }
-
-        return hasUnsentFragments
-    }
-
-    private fun enqueuePendingOutboundFragment(recipientId: String, data: ByteArray) {
-        val queue = pendingOutboundFragments.getOrPut(recipientId) { ArrayDeque() }
-        queue.addLast(OutboundFragment(data, System.currentTimeMillis()))
-        // Drop oldest fragment if the queue exceeds the per-peer cap
-        if (queue.size > MAX_PENDING_FRAGMENTS_PER_PEER) {
-            queue.removeFirst()
-            Log.w(TAG, "Pending outbound fragment queue capped for $recipientId, dropping oldest (max=$MAX_PENDING_FRAGMENTS_PER_PEER)")
         }
     }
 
@@ -1884,15 +2147,38 @@ class BleManager(
     }
 
     private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
+        // Every call site (drainAndSendFragments, pollAndSendFragments, the
+        // OutboundFragmentQueue.flush callback) runs on main already, but
+        // the function mutates main-only state (bytesSent, fragmentsSent),
+        // calls into MeshController, and issues gatt.writeCharacteristic —
+        // which the Android BLE stack serialises one op at a time per
+        // client. A future caller that forgets this contract would
+        // silently corrupt counters and interleave writes, so pin it to
+        // the runtime check that the rest of the facade's main-thread
+        // invariants already use.
+        assertMainThread("sendFragmentData")
         // Find GATT client for recipient
         val address = resolveTargetAddress(recipientId)
         val gatt = address?.let { connections.getGatt(it) }
         
+        // Until the remote has ack'd our CCCD write, the return path is not
+        // verified and the BLE stack may still be executing the setup ops
+        // (deviceId read → identity read → writeDescriptor). Issuing a write
+        // now risks either silent loss (on stacks that drop the op) or
+        // stalling the chain. Enqueue and let onDescriptorWrite trigger the
+        // drain.
+        if (address != null && !centralClient.isLinkReady(address)) {
+            if (logThrottler.shouldLog("link_not_ready_$recipientId", intervalMs = 5000)) {
+                Log.d(TAG, "Link to $recipientId not yet ready (CCCD unacked), deferring write")
+            }
+            return false
+        }
+
         if (gatt == null) {
             //  Proactively try to connect if we don't have a connection
             // This helps resolve cases where fragments are queued but connection isn't established
             if (logThrottler.shouldLog("missing_gatt_$recipientId", intervalMs = 5000)) {
-                Log.w(TAG, "⚠️ No connected device for recipient: $recipientId - attempting to find and connect")
+                Log.w(TAG, "No connected device for recipient: $recipientId - attempting to find and connect")
                 emitDiagnostic("warning", "No connected device for BLE fragment - attempting connection", mapOf("recipientId" to recipientId))
             }
             
@@ -1910,7 +2196,7 @@ class BleManager(
             } else {
                 // We don't even know the address - this is a more serious issue
                 // The device ID might not be resolved yet or route might not exist
-                Log.w(TAG, "⚠️ Cannot resolve address for recipient: $recipientId")
+                Log.w(TAG, "Cannot resolve address for recipient: $recipientId")
             }
             return false
         }
@@ -1934,11 +2220,16 @@ class BleManager(
             return false
         }
 
-        characteristic.value = data
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
-        // On Android API 33+ (TIRAMISU), writeCharacteristic returns a status code
-        // for WRITE_TYPE_NO_RESPONSE, so we can't rely on the return value for older APIs
+        // On API 33+ we use the value-parameter overload, which returns a
+        // BluetoothStatusCodes result. On older APIs we have to set the shared
+        // characteristic value field and call the legacy overload — its
+        // Boolean return *is* load-bearing: it reports false when the internal
+        // TX queue is full, another GATT op is in flight, or the characteristic
+        // is unwritable. Treating every pre-Tiramisu call as success silently
+        // drops fragments, which is exactly the class of bug the rest of this
+        // code is trying to defend against.
         val writeOk = try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val result = gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
@@ -1953,10 +2244,16 @@ class BleManager(
                     true
                 }
             } else {
-                // On older APIs, writeCharacteristic returns Boolean but always true for WRITE_TYPE_NO_RESPONSE
-                // The actual write happens asynchronously, so we assume success and let the BLE stack handle it
-                gatt.writeCharacteristic(characteristic)
-                true
+                @Suppress("DEPRECATION")
+                characteristic.value = data
+                @Suppress("DEPRECATION")
+                val queued = gatt.writeCharacteristic(characteristic)
+                if (!queued) {
+                    emitDiagnostic("warning", "BLE writeCharacteristic returned false", mapOf(
+                        "recipientId" to recipientId,
+                    ))
+                }
+                queued
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error writing characteristic to $recipientId", e)
@@ -1986,38 +2283,46 @@ class BleManager(
     
     private fun handleReceivedData(data: ByteArray, address: String) {
         try {
-            // Get sender device ID
-            val senderId = connections.deviceIdForAddress(address)
-            if (senderId == null) {
-                // Queue fragment to process later when device ID is available
-                synchronized(pendingFragmentsLock) {
-                    val pendingList = pendingFragments.getOrPut(address) { mutableListOf() }
-                    if (pendingList.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
-                        pendingList.removeFirst()
+            if (shuttingDown) return
+            assertMainThread("handleReceivedData")
+            // Decide queue-vs-direct: if the device ID isn't resolved yet, or
+            // if earlier fragments for this address are still buffered waiting
+            // on that resolution, we must buffer this fragment too to keep
+            // FIFO order per peer. Both this helper and the
+            // [CentralGattClient] drain path run on the main thread (the
+            // binder callbacks above post here via mainHandler), so a
+            // single-threaded decision is race-free — no lock is required.
+            val resolvedSender = connections.deviceIdForAddress(address)
+            val hasPendingForAddress = pendingInbound.hasPending(address)
+            val queued = resolvedSender == null || hasPendingForAddress
+            if (queued) {
+                pendingInbound.enqueue(address, data)
+                val senderId: String? = resolvedSender
+                if (senderId == null) {
+                    if (logThrottler.shouldLog("queue_pending_$address")) {
+                        Log.d(TAG, "Queued fragment while awaiting device ID for $address")
+                        emitDiagnostic(
+                            "info",
+                            "Queued BLE fragment pending device ID",
+                            mapOf("address" to address, "length" to data.size)
+                        )
                     }
-                    pendingList.add(PendingFragment(data, System.currentTimeMillis()))
-                }
-                if (logThrottler.shouldLog("queue_pending_$address")) {
-                    Log.d(TAG, "Queued fragment while awaiting device ID for $address")
-                    emitDiagnostic(
-                        "info",
-                        "Queued BLE fragment pending device ID",
-                        mapOf("address" to address, "length" to data.size)
-                    )
-                }
-                
-                // Proactively attempt to resolve the device ID by initiating a client connection
-                bluetoothAdapter?.let { adapter ->
-                    try {
-                        val device = adapter.getRemoteDevice(address)
-                        mainHandler.post {
+
+                    // Proactively attempt to resolve the device ID by initiating a client connection.
+                    // We're already on a caller-controlled thread (usually a binder GATT callback);
+                    // [connectToDevice] is safe to invoke from any thread, so there is no reason to
+                    // pay an extra main-handler hop here — the old `mainHandler.post` widened the
+                    // queue-vs-drain race window above.
+                    bluetoothAdapter?.let { adapter ->
+                        try {
+                            val device = adapter.getRemoteDevice(address)
                             val hasGattClient = connections.getGatt(device.address) != null
                             val mappedId = connections.deviceIdForAddress(device.address)
                             val now = System.currentTimeMillis()
-                            val lastAttempt = deviceIdResolutionAttempts[address] ?: 0L
-                            val shouldAttempt = now - lastAttempt > PENDING_FRAGMENT_TIMEOUT_MS
+                            val lastAttempt = centralClient.lastResolutionAttempt(address) ?: 0L
+                            val shouldAttempt = now - lastAttempt > InboundFragmentBuffer.DEFAULT_TIMEOUT_MS
                             if ((!hasGattClient || mappedId.isNullOrEmpty()) && shouldAttempt) {
-                                deviceIdResolutionAttempts[address] = now
+                                centralClient.markResolutionAttempt(address, now)
                                 if (logThrottler.shouldLog("resolve_device_$address", intervalMs = 5000)) {
                                     Log.d(TAG, "Attempting to resolve device ID for $address via client connection")
                                     emitDiagnostic(
@@ -2028,79 +2333,73 @@ class BleManager(
                                 }
                                 connectToDevice(device)
                             }
-                        }
-                    } catch (e: IllegalArgumentException) {
-                        if (logThrottler.shouldLog("resolve_device_error_$address", intervalMs = 10000)) {
-                            Log.w(TAG, "Failed to obtain remote device for address $address", e)
-                            emitDiagnostic(
-                                "warning",
-                                "Failed to resolve BLE device for pending fragment",
-                                mapOf("address" to address, "message" to (e.message ?: "unknown"))
-                            )
+                        } catch (e: IllegalArgumentException) {
+                            if (logThrottler.shouldLog("resolve_device_error_$address", intervalMs = 10000)) {
+                                Log.w(TAG, "Failed to obtain remote device for address $address", e)
+                                emitDiagnostic(
+                                    "warning",
+                                    "Failed to resolve BLE device for pending fragment",
+                                    mapOf("address" to address, "message" to (e.message ?: "unknown"))
+                                )
+                            }
                         }
                     }
                 }
 
-                // Clean up old pending fragments
-                cleanupPendingFragments()
+                // Clean up stale pending fragments across all peers while
+                // we're on the main thread; this is the same eviction sweep
+                // the routing cleanup ticker runs on its own cadence.
+                pendingInbound.evictExpired()
                 return
             }
 
-            // If pending fragments exist for this address, append to maintain FIFO ordering.
-            // processPendingFragments() will handle them all in order.
-            synchronized(pendingFragmentsLock) {
-                val list = pendingFragments[address]
-                if (list != null && list.isNotEmpty()) {
-                    if (list.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
-                        list.removeFirst()
-                    }
-                    list.add(PendingFragment(data, System.currentTimeMillis()))
-                    return
-                }
-            }
+            // Device ID is already resolved and no earlier bytes are waiting
+            // — process directly. Kotlin smart-casts `resolvedSender` to
+            // non-null here because the `queued` branch above returns.
+            val resolvedSenderId: String = resolvedSender
 
             lastSeenRssi[address]?.toInt()?.let { observedRssi ->
                 meshController.updatePeerMetrics(
-                    senderId,
+                    resolvedSenderId,
                     MeshController.PeerMetrics(rssi = observedRssi)
                 )
             }
-            meshController.markPeerActive(senderId)
+            meshController.markPeerActive(resolvedSenderId)
             meshController.markPeerActive(deviceId)
 
             // Convert to UByte list
             val bytes = data.map { it.toUByte() }
-            
+
             // Pass to protocol
-            Log.i(TAG, "📥 RECEIVED FRAGMENT from $senderId, size: ${data.size}")
+            Log.i(TAG, "RECEIVED FRAGMENT from $resolvedSenderId, size: ${data.size}")
             emitDiagnostic("info", "Fragment received from BLE", mapOf(
-                "senderId" to senderId,
+                "senderId" to resolvedSenderId,
                 "fragmentSize" to data.size
             ))
-            
+
             try {
-                protocol.bleFragmentReceived(senderId, bytes)
-                Log.i(TAG, "✅ Fragment processed successfully for sender: $senderId")
-                
+                protocol.bleFragmentReceived(resolvedSenderId, bytes)
+                Log.i(TAG, "Fragment processed successfully for sender: $resolvedSenderId")
+
                 // Drain all completed messages (a fragment may complete multiple messages)
                 var completedMessage = protocol.receiveMessage()
                 if (completedMessage == null) {
-                    Log.d(TAG, "📦 Fragment processed, waiting for more fragments to complete message")
+                    Log.d(TAG, "Fragment processed, waiting for more fragments to complete message")
                 }
                 while (completedMessage != null) {
-                    Log.i(TAG, "🎉 COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
-                    Log.i(TAG, "📬 Received message: $completedMessage")
+                    Log.i(TAG, "COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
+                    Log.i(TAG, "Received message: $completedMessage")
                     emitDiagnostic("info", "Complete message assembled from fragments", mapOf(
-                        "senderId" to senderId,
+                        "senderId" to resolvedSenderId,
                         "messageContent" to completedMessage
                     ))
-                    learnRouteFromMessage(completedMessage, senderId, address)
+                    learnRouteFromMessage(completedMessage, resolvedSenderId, address)
                     completedMessage = protocol.receiveMessage()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error processing fragment from $senderId: ${e.message}", e)
+                Log.e(TAG, "Error processing fragment from $resolvedSenderId: ${e.message}", e)
                 emitDiagnostic("error", "Error processing received fragment", mapOf(
-                    "senderId" to senderId,
+                    "senderId" to resolvedSenderId,
                     "fragmentSize" to data.size,
                     "error" to (e.message ?: "unknown"),
                     "exception" to e.javaClass.simpleName
@@ -2115,59 +2414,6 @@ class BleManager(
         }
     }
     
-    private fun processPendingFragments(address: String, deviceId: String) {
-        deviceIdResolutionAttempts.remove(address)
-        val fragments = synchronized(pendingFragmentsLock) { pendingFragments.remove(address) } ?: return
-        val role = connections.consumePendingRole(address) ?: MeshRole.MEMBER
-        meshController.registerConnection(deviceId, role)
-        connections.setConnectionRole(deviceId, role)
-        meshController.markPeerActive(deviceId)
-        meshController.markPeerActive(this.deviceId)
-        refreshSelfMetrics()
-        mainHandler.post {
-            if (state == TransportState.RUNNING) {
-                refreshAdvertising("membership_change")
-            }
-        }
-        
-        for (fragment in fragments) {
-            try {
-                val bytes = fragment.data.map { it.toUByte() }
-                protocol.bleFragmentReceived(deviceId, bytes)
-                bytesReceived += fragment.data.size
-                fragmentsReceived++
-
-                // Drain all completed messages (a multi-fragment message may complete here)
-                var msg = protocol.receiveMessage()
-                while (msg != null) {
-                    Log.i(TAG, "🎉 Complete message assembled from queued fragments for $deviceId")
-                    emitDiagnostic("info", "Complete message assembled from queued fragments", mapOf(
-                        "senderId" to deviceId,
-                        "messageContent" to msg
-                    ))
-                    learnRouteFromMessage(msg, deviceId, address)
-                    msg = protocol.receiveMessage()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error processing pending fragment", e)
-            }
-        }
-    }
-    
-    private fun cleanupPendingFragments() {
-        synchronized(pendingFragmentsLock) {
-            val now = System.currentTimeMillis()
-            val addressesToRemove = mutableListOf<String>()
-            for ((address, fragments) in pendingFragments) {
-                fragments.removeAll { now - it.timestamp > PENDING_FRAGMENT_TIMEOUT_MS }
-                if (fragments.isEmpty()) {
-                    addressesToRemove.add(address)
-                }
-            }
-            addressesToRemove.forEach { pendingFragments.remove(it) }
-        }
-    }
-
     private fun pruneMeshObservations(now: Long) {
         val iterator = lastSeenMeshAdvertisements.entries.iterator()
         while (iterator.hasNext()) {
@@ -2233,14 +2479,14 @@ class BleManager(
         }
         lastPeerCountUpdate = now
         
-        // Clean up old timestamps
+        // Clean up old timestamps and read size inside the same critical
+        // section — Collections.synchronizedList's contract requires size /
+        // iteration to happen under the same monitor that guards writes.
         val windowStart = now - ADAPTIVE_PEER_COUNT_WINDOW_MS
-        synchronized(recentDiscoveryTimestamps) {
+        val recentCount = synchronized(recentDiscoveryTimestamps) {
             recentDiscoveryTimestamps.removeAll { it < windowStart }
+            recentDiscoveryTimestamps.size
         }
-        
-        // Estimate peer count from unique discoveries in window
-        val recentCount = recentDiscoveryTimestamps.size
         val cachedCount = lastSeenMeshAdvertisements.size
         estimatedVisiblePeerCount = maxOf(recentCount, cachedCount)
     }
@@ -2274,44 +2520,46 @@ class BleManager(
         // During aggressive discovery phase, use much shorter cooldowns
         val isAggressivePhase = transportStartAt > 0 && now - transportStartAt < AGGRESSIVE_DISCOVERY_PHASE_MS
         
-        // Prune old entries
+        // Prune old entries and snapshot the count under the same monitor
+        // that guards writes — Collections.synchronizedList's contract
+        // requires size / iteration to happen inside a synchronized block.
         val oneMinuteAgo = now - 60_000L
-        synchronized(globalConnectionAttempts) {
+        val globalAttemptCount = synchronized(globalConnectionAttempts) {
             globalConnectionAttempts.removeAll { it < oneMinuteAgo }
+            globalConnectionAttempts.size
         }
-        
+
         val effectiveCooldown = if (isAggressivePhase) 5_000L else ADAPTIVE_COOLDOWN_PER_DEVICE_MS
-        deviceConnectionAttempts.entries.removeIf { 
-            now - it.value >= effectiveCooldown 
+        deviceConnectionAttempts.entries.removeIf {
+            now - it.value >= effectiveCooldown
         }
-        
+
         // Check per-device cooldown
         val lastAttempt = deviceConnectionAttempts[address]
         if (lastAttempt != null && now - lastAttempt < effectiveCooldown) {
             return true
         }
-        
+
         // During aggressive phase, allow more connection attempts
         if (isAggressivePhase) {
             // Allow up to 3x the normal rate during aggressive phase
             val maxAttempts = ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE * 3
-            if (globalConnectionAttempts.size >= maxAttempts) {
+            if (globalAttemptCount >= maxAttempts) {
                 return true
             }
             return false
         }
-        
+
         // In dense networks, apply global rate limiting
         if (estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD) {
-            val currentAttempts = globalConnectionAttempts.size
-            if (currentAttempts >= ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE) {
+            if (globalAttemptCount >= ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE) {
                 if (logThrottler.shouldLog("adaptive_rate_limit", intervalMs = 5000)) {
-                    Log.d(TAG, "Adaptive: rate limiting connections ($currentAttempts/$ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE in last minute)")
+                    Log.d(TAG, "Adaptive: rate limiting connections ($globalAttemptCount/$ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE in last minute)")
                 }
                 return true
             }
         }
-        
+
         return false
     }
     
@@ -2384,480 +2632,177 @@ class BleManager(
         connectToDevice(device)
     }
     
-    // MARK: - GATT Server Callback
-    
-    private val gattServerCallback = object : BluetoothGattServerCallback() {
-        override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.i(TAG, "✅ GATT service added successfully: ${service?.uuid}")
-                emitDiagnostic("info", "GATT service registered successfully", mapOf(
-                    "serviceUUID" to (service?.uuid?.toString() ?: "unknown")
-                ))
-                isGattServiceReady = true
-                
-                // Start advertising now that the service is ready
-                val reason = pendingAdvertiseReason
-                if (reason != null) {
-                    pendingAdvertiseReason = null
-                    Log.i(TAG, "📡 Starting deferred advertising after GATT service ready")
-                    mainHandler.post {
-                        startAdvertising("gatt_service_ready")
-                    }
-                }
-            } else {
-                Log.e(TAG, "❌ Error adding GATT service: status=$status")
-                emitDiagnostic("error", "Error adding GATT service", mapOf(
-                    "status" to status,
-                    "serviceUUID" to (service?.uuid?.toString() ?: "unknown")
-                ))
-                isGattServiceReady = false
-            }
+    // MARK: - GATT Server Listener
+    //
+    // Bridges PeripheralGattServer callbacks into facade state. Callbacks
+    // fire on the platform's binder thread; every handler that touches
+    // mutable transport state is reposted on [mainHandler] before running,
+    // matching the threading model used by start/stop/pause/resume.
+    //
+    // The `provide*` hooks stay on the binder thread by necessity — they
+    // must return bytes synchronously — but they are **pure reads** of
+    // @Volatile fields. They must not call into UniFFI or any other path
+    // that can block on the protocol mutex, because stalling a GATT binder
+    // callback delays every pending operation for that central and risks
+    // the system ANR watchdog. Producers (MLS init, advertisement rebuild)
+    // call [updateSignedIdentity] on the main thread to refresh the cache
+    // *before* the read lands.
+
+    private val gattServerListener = object : PeripheralGattServer.Listener {
+        override fun onReady() {
+            // LeAdvertiser owns its own pending-reason latch; just drain it.
+            leAdvertiser.onGattServerReady()
         }
-        
-        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    val observation = lastSeenMeshAdvertisements[device.address]
-                    val decision = meshController.shouldAcceptInboundConnection(
-                        connections.deviceIdForAddress(device.address),
-                        observation?.advertisement,
-                        observation?.rssi
-                    )
-                    if (decision.evictPeerId != null) {
-                        evictPeer(decision.evictPeerId, "inbound_swap")
-                    }
-                    if (decision.intent == ConnectionIntent.REJECTED) {
-                        Log.w(TAG, "Rejecting inbound connection from ${device.address}: ${decision.reason}")
-                        gattServer?.cancelConnection(device)
-                        return
-                    }
-                    // Check connection capacity
-                    if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
-                        Log.w(TAG, "Rejecting inbound connection from ${device.address}: connection cap reached")
-                        gattServer?.cancelConnection(device)
-                        return
-                    }
-                    val role = when (decision.intent) {
-                        ConnectionIntent.INTER_CLUSTER -> MeshRole.BRIDGE
-                        ConnectionIntent.INTRA_CLUSTER, ConnectionIntent.REJECTED -> MeshRole.MEMBER
-                    }
-                    connections.trackServerConnection(device.address)
-                    connections.setPendingRole(device.address, role)
-                    connectedCentrals[device.address] = System.currentTimeMillis()
-                    Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
-                    emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
-                }
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    val address = device.address
-                    connections.untrackServerConnection(address)
-                    connections.consumePendingRole(address)
-                    connectedCentrals.remove(address)
-                    // Don't immediately remove - connection might be re-established
-                    // Only remove if it's a permanent error (status != 0)
-                    if (status != 0 && status != 19) { // Not normal disconnect or connection timeout
-                        lastSeenRssi.remove(address)
-                        connections.deviceIdForAddress(address)?.let { peerId ->
-                            // Clean up routes through this neighbor
-                            protocol.removeNeighborRoutes(peerId)
-                            try {
-                                protocol.blePeerLost(peerId)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error notifying peer lost", e)
-                                emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                            }
-                            meshController.registerDisconnection(peerId)
-                            refreshSelfMetrics()
-                            connections.removeIdentifiersForAddress(address)
-                            deviceIdResolutionAttempts.remove(address)
-                            connections.removeConnectionRole(peerId)
-                            mainHandler.post {
-                                if (state == TransportState.RUNNING) {
-                                    refreshAdvertising("membership_change")
-                                }
-                            }
-                            maybeHandleRebalance("disconnect")
-                        }
+
+        override fun onSetupFailed(reason: String) {
+            Log.e(TAG, "GATT server setup failed: $reason")
+            emitDiagnostic(
+                "error",
+                "gatt_server_setup_failed",
+                mapOf("reason" to reason),
+            )
+            listener?.onTransportError(
+                this@BleTransportFacade,
+                TransportException.StartFailed("GATT server setup failed: $reason"),
+            )
+            // Tear the transport down so the caller sees a coherent stopped
+            // state. Without this the facade stays in RUNNING while the GATT
+            // server is gone, scans keep firing, and every fragment write
+            // fails silently.
+            mainHandler.post {
+                if (state == TransportState.RUNNING || state == TransportState.STARTING) {
+                    try {
+                        stopUnsafe()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error tearing down after GATT setup failure", e)
                     }
                 }
             }
         }
-        
-        override fun onCharacteristicReadRequest(
-            device: BluetoothDevice,
-            requestId: Int,
-            offset: Int,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            try {
-                when (characteristic.uuid) {
-                    DEVICE_ID_CHAR_UUID -> {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, characteristic.value)
-                        Log.d(TAG, "Sent device ID to ${device.address}")
-                    }
-                    IDENTITY_CHAR_UUID -> {
-                        // Ensure we have fresh signed identity data
-                        if (identityCharacteristic?.value == null) {
-                            updateSignedIdentity()
-                        }
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, identityCharacteristic?.value)
-                        Log.d(TAG, "Sent signed identity to ${device.address}")
-                    }
-                    else -> {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
-                    }
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied in read request", e)
-                emitDiagnostic("error", "Permission denied in characteristic read", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+
+        override fun onCentralConnected(device: BluetoothDevice) {
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleCentralConnectedOnMain(device)
             }
         }
-        
-        override fun onCharacteristicWriteRequest(
-            device: BluetoothDevice,
-            requestId: Int,
-            characteristic: BluetoothGattCharacteristic,
-            preparedWrite: Boolean,
-            responseNeeded: Boolean,
-            offset: Int,
-            value: ByteArray
-        ) {
-            try {
-                Log.i(TAG, "📨 GATT WRITE REQUEST from ${device.address}, char: ${characteristic.uuid}, size: ${value.size}")
-                emitDiagnostic("info", "GATT write request received", mapOf(
+
+        override fun onCentralDisconnected(device: BluetoothDevice, status: Int) {
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleCentralDisconnectedOnMain(device, status)
+            }
+        }
+
+        override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
+            if (shuttingDown) return
+            Log.i(TAG, "MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
+            emitDiagnostic(
+                "info",
+                "GATT write request received",
+                mapOf(
                     "deviceAddress" to device.address,
-                    "characteristicUuid" to characteristic.uuid.toString(),
-                    "dataSize" to value.size,
-                    "responseNeeded" to responseNeeded
-                ))
-                
-                if (characteristic.uuid == MESSAGE_CHAR_UUID) {
-                    Log.i(TAG, "📥 MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
-                    // Handle incoming fragment
-                    handleReceivedData(value, device.address)
-                    
-                    if (responseNeeded) {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
-                        Log.d(TAG, "✅ Sent GATT_SUCCESS response to ${device.address}")
-                    }
-                } else {
-                    Log.w(TAG, "❌ Unknown characteristic write: ${characteristic.uuid}")
-                    if (responseNeeded) {
-                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
-                    }
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Permission denied in write request", e)
-                emitDiagnostic("error", "Permission denied in characteristic write", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                    "dataSize" to bytes.size,
+                ),
+            )
+            val address = device.address
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleReceivedData(bytes, address)
             }
+        }
+
+        override fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray? {
+            if (shuttingDown) return null
+            Log.d(TAG, "Sent device ID to ${device.address}")
+            return deviceId.toByteArray(Charsets.UTF_8)
+        }
+
+        override fun provideIdentityBytes(device: BluetoothDevice): ByteArray? {
+            if (shuttingDown) return null
+            // Pure volatile read. Never call updateSignedIdentity() here —
+            // it would block this binder thread on the protocol mutex.
+            // If the cache isn't primed yet, return null; the central will
+            // retry. See the comment on [updateSignedIdentity].
+            val identity = cachedSignedIdentity?.encode()
+            if (identity == null) {
+                // Cache isn't primed yet — arrange a bounded-backoff refresh
+                // on the main thread so the next central read eventually
+                // succeeds instead of spinning forever on a permanent null.
+                mainHandler.post { ensureIdentityRefreshScheduled() }
+                return null
+            }
+            Log.d(TAG, "Sent signed identity to ${device.address}")
+            return identity
         }
     }
-    
-    // MARK: - GATT Client Callback
-    
-    private val gattClientCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "GATT client: Connected to ${gatt.device.address}")
-                    emitDiagnostic("info", "Connected to BLE device", mapOf("address" to gatt.device.address))
-                    try {
-                        Log.d(TAG, "🔎 Starting service discovery for ${gatt.device.address}")
-                        val discoveryStarted = gatt.discoverServices()
-                        Log.d(TAG, "🔎 Service discovery ${if (discoveryStarted) "started" else "FAILED"} for ${gatt.device.address}")
-                        emitDiagnostic("debug", "Service discovery initiated", mapOf(
-                            "address" to gatt.device.address,
-                            "started" to discoveryStarted
-                        ))
-                    } catch (e: SecurityException) {
-                        Log.e(TAG, "❌ Permission denied discovering services", e)
-                        emitDiagnostic("error", "Permission denied discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                    } catch (e: Exception) {
-                        Log.e(TAG, "❌ Error discovering services", e)
-                        emitDiagnostic("error", "Error discovering services", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                    }
-                }
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    val address = gatt.device.address
-                    val wasConnected = connections.getGatt(address) != null
-                    connections.removeGatt(address)
-                    
-                    // Don't remove from discovered list - keep trying to reconnect
-                    // Only remove RSSI if it's a permanent error
-                    if (status == 133) { // Connection timeout
-                        lastSeenRssi.remove(address)
-                    }
-                    
-                    // Try to reconnect if we were connected and state is still running
-                    if (wasConnected && state == TransportState.RUNNING) {
-                        // Increment retry count and calculate backoff
-                        val retryCount = (connectionRetryCount[address] ?: 0) + 1
-                        connectionRetryCount[address] = retryCount
-                        
-                        // Give up after max retries
-                        if (retryCount > MAX_CONNECTION_RETRIES) {
-                            Log.w(TAG, "Max retries ($MAX_CONNECTION_RETRIES) exceeded for $address on disconnect, giving up")
-                            emitDiagnostic("warning", "Max connection retries exceeded", mapOf(
-                                "address" to address,
-                                "retryCount" to retryCount
-                            ))
-                            connectionRetryCount.remove(address)
-                            // Notify peer lost since we're giving up
-                            connections.deviceIdForAddress(address)?.let { peerId ->
-                                protocol.removeNeighborRoutes(peerId)
-                                try {
-                                    protocol.blePeerLost(peerId)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error notifying peer lost", e)
-                                }
-                                meshController.registerDisconnection(peerId)
-                                refreshSelfMetrics()
-                                connections.removeIdentifiersForAddress(address)
-                                connections.removeConnectionRole(peerId)
-                                mainHandler.post {
-                                    if (state == TransportState.RUNNING) {
-                                        refreshAdvertising("disconnect_max_retries")
-                                    }
-                                }
-                                maybeHandleRebalance("disconnect_max_retries")
-                            }
-                            return@onConnectionStateChange
-                        }
-                        
-                        // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped)
-                        val backoffInterval = minOf(MAX_RECONNECT_INTERVAL_MS, MIN_RECONNECT_INTERVAL_MS * (1L shl (retryCount - 1)))
-                        
-                        mainHandler.postDelayed({
-                            if (state == TransportState.RUNNING && connections.hasDeviceForAddress(address)) {
-                                try {
-                                    val device = bluetoothAdapter?.getRemoteDevice(address)
-                                    if (device != null) {
-                                        connectToDevice(device)
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error reconnecting to device", e)
-                                }
-                            }
-                        }, backoffInterval)
-                    } else {
-                        // Notify protocol of peer loss only if we're not reconnecting
-                        connections.deviceIdForAddress(address)?.let { deviceId ->
-                            // Clean up routes through this neighbor
-                            protocol.removeNeighborRoutes(deviceId)
-                            try {
-                                protocol.blePeerLost(deviceId)
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error notifying peer lost", e)
-                                emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                            }
-                            meshController.registerDisconnection(deviceId)
-                            refreshSelfMetrics()
-                            connections.removeIdentifiersForAddress(address)
-                            deviceIdResolutionAttempts.remove(address)
-                            connections.removeConnectionRole(deviceId)
-                            mainHandler.post {
-                                if (state == TransportState.RUNNING) {
-                                    refreshAdvertising("membership_change")
-                                }
-                            }
-                            maybeHandleRebalance("disconnect")
-                        }
-                    }
-                }
-            }
+
+    private fun handleCentralConnectedOnMain(device: BluetoothDevice) {
+        val observation = lastSeenMeshAdvertisements[device.address]
+        val decision = meshController.shouldAcceptInboundConnection(
+            connections.deviceIdForAddress(device.address),
+            observation?.advertisement,
+            observation?.rssi
+        )
+        if (decision.evictPeerId != null) {
+            evictPeer(decision.evictPeerId, "inbound_swap")
         }
-        
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            Log.i(TAG, "🔎 onServicesDiscovered callback: ${gatt.device.address}, status=$status (${if (status == BluetoothGatt.GATT_SUCCESS) "SUCCESS" else "FAILED"})")
-            
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                val service = gatt.getService(SERVICE_UUID)
-                if (service != null) {
-                    Log.i(TAG, "✅ Found offline protocol service on ${gatt.device.address}")
-                    emitDiagnostic("info", "GATT services discovered", mapOf("address" to gatt.device.address))
-                    
-                    // Read device ID characteristic
-                    val deviceIdChar = service.getCharacteristic(DEVICE_ID_CHAR_UUID)
-                    if (deviceIdChar != null) {
-                        Log.d(TAG, "📖 Reading device ID characteristic from ${gatt.device.address}")
-                        try {
-                            val readStarted = gatt.readCharacteristic(deviceIdChar)
-                            Log.d(TAG, "📖 Read request ${if (readStarted) "sent" else "FAILED"} for ${gatt.device.address}")
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "❌ Permission denied reading characteristic", e)
-                            emitDiagnostic("error", "Permission denied reading device ID characteristic", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                        }
-                    } else {
-                        Log.w(TAG, "⚠️ Device ID characteristic NOT FOUND on ${gatt.device.address}")
-                    }
-                    
-                    // Read identity characteristic (public key + signature)
-                    val identityChar = service.getCharacteristic(IDENTITY_CHAR_UUID)
-                    if (identityChar != null) {
-                        Log.d(TAG, "🔐 Reading identity characteristic from ${gatt.device.address}")
-                        // Note: We read this after device ID is read (queued)
-                    } else {
-                        Log.w(TAG, "⚠️ Identity characteristic NOT FOUND on ${gatt.device.address}")
-                    }
-                    
-                    // Enable notifications for message characteristic
-                    val messageChar = service.getCharacteristic(MESSAGE_CHAR_UUID)
-                    if (messageChar != null) {
-                        Log.d(TAG, "🔔 Enabling notifications for message characteristic on ${gatt.device.address}")
-                        try {
-                            val notifyEnabled = gatt.setCharacteristicNotification(messageChar, true)
-                            Log.d(TAG, "🔔 Notifications ${if (notifyEnabled) "enabled" else "FAILED"} for ${gatt.device.address}")
-                            emitDiagnostic("info", "Enabled notifications for message characteristic", mapOf("address" to gatt.device.address))
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "❌ Permission denied setting notification", e)
-                            emitDiagnostic("error", "Permission denied enabling notifications", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                        }
-                    } else {
-                        Log.w(TAG, "⚠️ Message characteristic NOT FOUND on ${gatt.device.address}")
-                    }
-                } else {
-                    Log.w(TAG, "⚠️ Service UUID not found on ${gatt.device.address}. Available services: ${gatt.services.map { it.uuid }}")
-                    emitDiagnostic("warning", "Offline protocol service not found", mapOf(
-                        "address" to gatt.device.address,
-                        "serviceCount" to gatt.services.size
-                    ))
-                    // Disconnect non-mesh device to free the connection slot
-                    verifiedNonMeshDevices[gatt.device.address] = System.currentTimeMillis()
-                    try {
-                        gatt.disconnect()
-                        gatt.close()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error disconnecting non-mesh device ${gatt.device.address}", e)
-                    }
-                    connections.removeGatt(gatt.device.address)
-                }
-            } else {
-                Log.e(TAG, "❌ Service discovery FAILED for ${gatt.device.address}, status=$status")
-                emitDiagnostic("error", "Service discovery failed", mapOf("address" to gatt.device.address, "status" to status))
-                // Clean up failed GATT connection to free the slot
+        if (decision.intent == ConnectionIntent.REJECTED) {
+            Log.w(TAG, "Rejecting inbound connection from ${device.address}: ${decision.reason}")
+            peripheralGattServer?.cancelConnection(device)
+            return
+        }
+        // Check connection capacity
+        if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+            Log.w(TAG, "Rejecting inbound connection from ${device.address}: connection cap reached")
+            peripheralGattServer?.cancelConnection(device)
+            return
+        }
+        val role = when (decision.intent) {
+            ConnectionIntent.INTER_CLUSTER -> MeshRole.BRIDGE
+            ConnectionIntent.INTRA_CLUSTER, ConnectionIntent.REJECTED -> MeshRole.MEMBER
+        }
+        connections.trackServerConnection(device.address)
+        connections.setPendingRole(device.address, role)
+        Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
+        emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
+    }
+
+    private fun handleCentralDisconnectedOnMain(device: BluetoothDevice, status: Int) {
+        val address = device.address
+        connections.untrackServerConnection(address)
+        connections.consumePendingRole(address)
+        // Status 0 = clean local disconnect; status 19 (0x13) =
+        // HCI_CONN_TERMINATE_PEER_USER, i.e. the remote end disconnected
+        // cleanly. Both are normal lifecycle events where the peer is
+        // likely to come back, so we keep the address→deviceId mapping and
+        // RSSI cached to speed up reconnection. Any other status is a real
+        // failure and we tear the peer state down.
+        val isCleanDisconnect = status == 0 || status == 19
+        if (!isCleanDisconnect) {
+            lastSeenRssi.remove(address)
+            connections.deviceIdForAddress(address)?.let { peerId ->
+                protocol.removeNeighborRoutes(peerId)
                 try {
-                    gatt.disconnect()
-                    gatt.close()
+                    protocol.blePeerLost(peerId)
                 } catch (e: Exception) {
-                    Log.w(TAG, "Error disconnecting after failed service discovery on ${gatt.device.address}", e)
+                    Log.e(TAG, "Error notifying peer lost", e)
+                    emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
                 }
-                connections.removeGatt(gatt.device.address)
-            }
-        }
-        
-        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            Log.i(TAG, "📖 onCharacteristicRead: ${gatt.device.address}, char=${characteristic.uuid}, status=$status")
-            
-            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == DEVICE_ID_CHAR_UUID) {
-                val deviceIdValue = characteristic.value?.toString(Charsets.UTF_8)
-                Log.i(TAG, "✅ Read device ID from ${gatt.device.address}: $deviceIdValue")
-                
-                if (deviceIdValue != null) {
-                    Log.i(TAG, "📝 Mapping ${gatt.device.address} -> $deviceIdValue")
-                    connections.setDeviceIdentifier(gatt.device.address, deviceIdValue)
-                    connectionRetryCount.remove(gatt.device.address) // Reset retry count on successful connection
-                    
-                    val role = connections.consumePendingRole(gatt.device.address) ?: MeshRole.MEMBER
-                    meshController.registerConnection(deviceIdValue, role)
-                    connections.setConnectionRole(deviceIdValue, role)
-                    meshController.markPeerActive(deviceIdValue)
-                    meshController.markPeerActive(deviceId)
-                    refreshSelfMetrics()
-                    mainHandler.post {
-                        if (state == TransportState.RUNNING) {
-                            refreshAdvertising("membership_change")
-                        }
-                    }
-                    val rssiInt = lastSeenRssi[gatt.device.address]?.toInt()
-                    if (rssiInt != null) {
-                        meshController.updatePeerMetrics(
-                            deviceIdValue,
-                            MeshController.PeerMetrics(rssi = rssiInt)
-                        )
-                    }
-                    
-                    // Notify protocol of peer discovery
-                    val rssi = lastSeenRssi[gatt.device.address] ?: (-60).toShort()
-                    try {
-                        protocol.blePeerDiscovered(deviceIdValue, rssi)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error notifying peer discovered", e)
-                        emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                    }
-                    
-                    // Process any pending fragments for this device
-                    processPendingFragments(gatt.device.address, deviceIdValue)
-                    
-                    // Now read the identity characteristic for signature verification
-                    val service = gatt.getService(SERVICE_UUID)
-                    val identityChar = service?.getCharacteristic(IDENTITY_CHAR_UUID)
-                    if (identityChar != null) {
-                        try {
-                            gatt.readCharacteristic(identityChar)
-                            Log.d(TAG, "🔐 Queued identity characteristic read for ${gatt.device.address}")
-                        } catch (e: SecurityException) {
-                            Log.e(TAG, "❌ Permission denied reading identity characteristic", e)
-                        }
-                    }
+                meshController.registerDisconnection(peerId)
+                refreshSelfMetrics()
+                connections.removeIdentifiersForAddress(address)
+                centralClient.clearResolutionAttempt(address)
+                connections.removeConnectionRole(peerId)
+                if (state == TransportState.RUNNING) {
+                    refreshAdvertising("membership_change")
                 }
-            } else if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == IDENTITY_CHAR_UUID) {
-                handleReceivedIdentity(characteristic.value, gatt.device.address)
-            }
-        }
-        
-        /**
-         * Handles received identity data from a peer.
-         * Verifies the signature and stores the verified identity.
-         */
-        private fun handleReceivedIdentity(data: ByteArray?, address: String) {
-            val signedIdentity = com.offlineprotocol.mesh.SignedIdentityData.decode(data)
-            if (signedIdentity == null) {
-                Log.w(TAG, "Failed to decode identity data from $address")
-                emitDiagnostic("warning", "Failed to decode peer identity", mapOf("address" to address))
-                return
-            }
-            
-            try {
-                // Convert ByteArray to List<UByte> for UniFFI bindings
-                val isValid = protocol.verifySignature(
-                    signedIdentity.publicKey.map { it.toUByte() },
-                    signedIdentity.advertisementData.map { it.toUByte() },
-                    signedIdentity.signature.map { it.toUByte() }
-                )
-                
-                if (isValid) {
-                    // Store the verified identity
-                    verifiedPeerIdentities[address] = signedIdentity
-                    
-                    // Derive the user ID from the public key
-                    val derivedUserId = signedIdentity.deriveUserId()
-                    Log.i(TAG, "✅ Verified peer identity: $derivedUserId for $address")
-                    emitDiagnostic("info", "Verified peer identity", mapOf(
-                        "address" to address,
-                        "derivedUserId" to derivedUserId
-                    ))
-                    
-                    // Update routing with the cryptographically derived user ID
-                    val rssi = lastSeenRssi[address] ?: (-60).toShort()
-                    val quality = minOf(1.0f, maxOf(0.0f, (rssi.toFloat() + 100f) / 80f))
-                    protocol.learnRoute(derivedUserId, derivedUserId, 1.toUByte(), quality, 0u)
-                } else {
-                    Log.w(TAG, "⚠️ Invalid signature for peer $address")
-                    emitDiagnostic("warning", "Invalid peer signature", mapOf("address" to address))
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to verify signature: ${e.message}", e)
-                emitDiagnostic("error", "Signature verification failed", mapOf("error" to (e.message ?: "unknown")))
-            }
-        }
-        
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid == MESSAGE_CHAR_UUID) {
-                val data = characteristic.value
-                if (data != null) {
-                    handleReceivedData(data, gatt.device.address)
-                }
+                maybeHandleRebalance("disconnect")
             }
         }
     }
+
 }
 

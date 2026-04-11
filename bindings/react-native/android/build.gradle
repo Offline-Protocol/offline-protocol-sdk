@@ -61,21 +61,23 @@ repositories {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib"
-    
+
     // JNA required for UniFFI-generated Kotlin bindings
     implementation 'net.java.dev.jna:jna:5.13.0@aar'
-    
+
     // OkHttp for WebSocket support in InternetManager
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    
+
     // AndroidX Security Crypto for MlsSecureStorage
     implementation 'androidx.security:security-crypto:1.1.0-alpha06'
-    
+
     if (reactNativeExists) {
         implementation 'com.facebook.react:react-android'
     } else {
         // For standalone build or testing
         compileOnly 'com.facebook.react:react-android:0.76.0'
     }
+
+    testImplementation 'junit:junit:4.13.2'
 }
 
