@@ -115,6 +115,22 @@ class BleTransportFacade(
         // via onFragmentsAvailable(); this timer only catches edge cases.
         private const val FRAGMENT_POLL_INTERVAL_MS = 2000L
         private const val MAX_FRAGMENT_SIZE = 185
+        /**
+         * Hard ceiling on a single inbound BLE notification we accept from a
+         * remote peripheral. Mirrors [PeripheralGattServer.MAX_INBOUND_WRITE_BYTES]
+         * — well above [MAX_FRAGMENT_SIZE] for MTU-negotiation headroom, but
+         * bounded so a hostile peripheral cannot balloon memory through the
+         * notify path.
+         */
+        private const val MAX_INBOUND_NOTIFICATION_BYTES = 4096
+        /**
+         * Hard cap on the number of fragments [drainAndSendFragments] will
+         * pull from the Rust side in one main-thread tick. Above this we
+         * yield via `mainHandler.post` and resume on the next loop iteration
+         * so a backlog burst cannot starve other main-thread work and
+         * trigger an ANR.
+         */
+        private const val MAX_DRAIN_ITERATIONS_PER_CALL = 32
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
@@ -164,6 +180,16 @@ class BleTransportFacade(
         private const val IDENTITY_REFRESH_MIN_BACKOFF_MS = 500L
         /** Cap on the identity-refresh retry backoff */
         private const val IDENTITY_REFRESH_MAX_BACKOFF_MS = 10_000L
+        /**
+         * Hard cap on consecutive identity refresh retries before we declare
+         * the identity cache permanently broken and stop rescheduling. With
+         * the 500ms → 10s backoff, the schedule sums to roughly five minutes
+         * of recovery time before we surface a terminal diagnostic. Without
+         * the cap a permanently broken MLS init silently retries forever and
+         * every central read of the identity characteristic returns
+         * GATT_FAILURE with no observability.
+         */
+        private const val MAX_IDENTITY_REFRESH_ATTEMPTS = 30
 
         private fun uuidToLittleEndianBytes(uuid: UUID): ByteArray {
             val hexUuid = uuid.toString().uppercase().replace("-", "")
@@ -223,6 +249,14 @@ class BleTransportFacade(
     // initialized or signing fails. Main-thread only.
     private var identityRefreshRetryScheduled: Boolean = false
     private var identityRefreshRetryDelayMs: Long = IDENTITY_REFRESH_MIN_BACKOFF_MS
+    private var identityRefreshAttempts: Int = 0
+    /**
+     * Latched once the retry budget is exhausted. While set, every call to
+     * [ensureIdentityRefreshScheduled] is a no-op so the GATT-server binder
+     * thread can't keep posting refresh requests on every central read.
+     * Cleared on [stop] so a fresh [start] gets a fresh budget.
+     */
+    private var identityRefreshGivenUp: Boolean = false
     
     // Addresses whose CCCD subscription has been acked by the remote peer.
     // Until the descriptor write lands we can't trust that the peripheral is
@@ -676,6 +710,8 @@ class BleTransportFacade(
         // Reset identity refresh backoff so a subsequent start() begins fresh.
         identityRefreshRetryScheduled = false
         identityRefreshRetryDelayMs = IDENTITY_REFRESH_MIN_BACKOFF_MS
+        identityRefreshAttempts = 0
+        identityRefreshGivenUp = false
         cachedSignedIdentity = null
 
         updateState(TransportState.STOPPED)
@@ -848,6 +884,8 @@ class BleTransportFacade(
                 advertisementData = advertisementData
             )
             identityRefreshRetryDelayMs = IDENTITY_REFRESH_MIN_BACKOFF_MS
+            identityRefreshAttempts = 0
+            identityRefreshGivenUp = false
             Log.d(TAG, "Updated signed identity for GATT serving")
             return true
         } catch (e: Exception) {
@@ -863,10 +901,18 @@ class BleTransportFacade(
      * Schedules a single bounded-backoff retry on the main thread. Idempotent
      * — calling while a retry is already queued is a no-op.
      *
+     * Bounded by [MAX_IDENTITY_REFRESH_ATTEMPTS]: once the budget is exhausted
+     * the [identityRefreshGivenUp] latch is set, a terminal diagnostic is
+     * emitted, and further calls become no-ops until [stop] clears the latch.
+     * This protects against an infinite retry loop when MLS is permanently
+     * broken (e.g. corrupted keychain) and the GATT-server binder thread is
+     * posting refresh requests on every central read.
+     *
      * Must be called from the main thread.
      */
     private fun ensureIdentityRefreshScheduled() {
         assertMainThread("ensureIdentityRefreshScheduled")
+        if (identityRefreshGivenUp) return
         if (identityRefreshRetryScheduled) return
         if (cachedSignedIdentity != null) return
         if (state != TransportState.RUNNING && state != TransportState.STARTING) return
@@ -876,7 +922,25 @@ class BleTransportFacade(
             identityRefreshRetryScheduled = false
             if (state != TransportState.RUNNING && state != TransportState.STARTING) return@postDelayed
             if (cachedSignedIdentity != null) return@postDelayed
+            identityRefreshAttempts++
             if (!updateSignedIdentity()) {
+                if (identityRefreshAttempts >= MAX_IDENTITY_REFRESH_ATTEMPTS) {
+                    identityRefreshGivenUp = true
+                    Log.e(
+                        TAG,
+                        "Identity refresh exhausted after $identityRefreshAttempts attempts; " +
+                            "GATT identity reads will fail until the transport is restarted",
+                    )
+                    emitDiagnostic(
+                        "error",
+                        "Identity refresh exhausted",
+                        mapOf(
+                            "attempts" to identityRefreshAttempts,
+                            "maxAttempts" to MAX_IDENTITY_REFRESH_ATTEMPTS,
+                        ),
+                    )
+                    return@postDelayed
+                }
                 identityRefreshRetryDelayMs = minOf(
                     IDENTITY_REFRESH_MAX_BACKOFF_MS,
                     identityRefreshRetryDelayMs * 2,
@@ -1698,54 +1762,67 @@ class BleTransportFacade(
     }
 
     private fun evictPeer(peerId: String, reason: String) {
-        val address = connections.addressForDevice(peerId)
-        if (address == null) {
-            if (logThrottler.shouldLog("mesh_evict_missing_$peerId")) {
-                Log.w(TAG, "Cannot evict $peerId: no known address")
+        // Run the entire eviction body on the main thread as one atomic step.
+        // The previous shape posted only `outboundQueue.removeAll` to main and
+        // ran the connection bookkeeping inline; that left a window where
+        // `drainAndSendFragments` (which runs on main) could observe the
+        // already-removed GATT entry, fall through the `hasConnection == false`
+        // branch, and enqueue fresh fragments to a peer that was about to have
+        // its outbound queue cleared. Those fragments would orphan in the
+        // queue until the per-peer cap or 30s expiry pruned them.
+        //
+        // Since the queue + linkReady + outboundQueue contracts are all
+        // main-thread-only anyway, doing the whole sequence on main is the
+        // simplest way to make eviction atomic against the drain pump. If
+        // we're already on main this runs inline; otherwise we block the
+        // caller's thread until main has processed the eviction. Eviction is
+        // not on the hot path so the latch hop is acceptable.
+        runOnMainSync {
+            val address = connections.addressForDevice(peerId)
+            if (address == null) {
+                if (logThrottler.shouldLog("mesh_evict_missing_$peerId")) {
+                    Log.w(TAG, "Cannot evict $peerId: no known address")
+                }
+                return@runOnMainSync
             }
-            return
-        }
 
-        if (logThrottler.shouldLog("mesh_evict_$peerId", intervalMs = 5000)) {
-            Log.i(TAG, "Evicting peer $peerId to reclaim capacity (reason=$reason)")
-        }
+            if (logThrottler.shouldLog("mesh_evict_$peerId", intervalMs = 5000)) {
+                Log.i(TAG, "Evicting peer $peerId to reclaim capacity (reason=$reason)")
+            }
 
-        connections.getGatt(address)?.let { gatt ->
+            connections.getGatt(address)?.let { gatt ->
+                try {
+                    gatt.disconnect()
+                    gatt.close()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error while evicting $peerId", e)
+                }
+            }
+
+            connections.removeGatt(address)
+            linkReady.remove(address)
+            connections.removeIdentifiersForDevice(peerId)
+            connections.removeConnectionRole(peerId)
+            lastSeenRssi.remove(address)
+            synchronized(pendingFragmentsLock) { pendingFragments.remove(address) }
+            outboundQueue.removeAll(peerId)
+            deviceIdResolutionAttempts.remove(address)
+            connectionRetryCount.remove(address)
+            meshController.registerDisconnection(peerId)
+            refreshSelfMetrics()
+
+            // Clean up routes through this neighbor
+            protocol.removeNeighborRoutes(peerId)
+
             try {
-                gatt.disconnect()
-                gatt.close()
+                protocol.blePeerLost(peerId)
             } catch (e: Exception) {
-                Log.w(TAG, "Error while evicting $peerId", e)
+                Log.e(TAG, "Failed to notify protocol of peer eviction", e)
             }
+
+            refreshAdvertising("evict_$reason")
+            maybeHandleRebalance("evict")
         }
-
-        connections.removeGatt(address)
-        linkReady.remove(address)
-        connections.removeIdentifiersForDevice(peerId)
-        connections.removeConnectionRole(peerId)
-        lastSeenRssi.remove(address)
-        synchronized(pendingFragmentsLock) { pendingFragments.remove(address) }
-        // Posted to main because the outbound queue's per-recipient deques
-        // are main-thread-only. If we're already on main this runs inline,
-        // so the invariant holds whether eviction is triggered by scan
-        // (callback thread) or rebalance.
-        runOnMain { outboundQueue.removeAll(peerId) }
-        deviceIdResolutionAttempts.remove(address)
-        connectionRetryCount.remove(address)
-        meshController.registerDisconnection(peerId)
-        refreshSelfMetrics()
-
-        // Clean up routes through this neighbor
-        protocol.removeNeighborRoutes(peerId)
-        
-        try {
-            protocol.blePeerLost(peerId)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to notify protocol of peer eviction", e)
-        }
-
-        refreshAdvertising("evict_$reason")
-        maybeHandleRebalance("evict")
     }
     
     /**
@@ -1759,21 +1836,34 @@ class BleTransportFacade(
 
     /**
      * Drains the Rust fragment queue and sends each fragment over BLE.
-     * Stops when the queue is empty or all target peers are flow-controlled.
+     * Stops when the queue is empty, all target peers are flow-controlled,
+     * or [MAX_DRAIN_ITERATIONS_PER_CALL] is hit. In the cap-hit case the
+     * remaining work is rescheduled via [mainHandler] so we yield the main
+     * thread between batches; without that, a Rust-side fragment burst can
+     * hold the main thread long enough to trigger ANR.
+     *
      * Called from onFragmentsAvailable() and from the fallback polling timer.
      */
     private fun drainAndSendFragments() {
         assertMainThread("drainAndSendFragments")
         if (state != TransportState.RUNNING) return
 
+        var hitIterationCap = false
         try {
             outboundQueue.flush(::sendFragmentData)
 
             var consecutiveSkips = 0
             val maxConsecutiveSkips = 5
             val reconnectAttempted = mutableSetOf<String>()
+            var iterations = 0
 
             while (true) {
+                if (iterations >= MAX_DRAIN_ITERATIONS_PER_CALL) {
+                    hitIterationCap = true
+                    break
+                }
+                iterations++
+
                 val fragment = try {
                     protocol.bleGetNextFragment()
                 } catch (e: Exception) {
@@ -1821,6 +1911,14 @@ class BleTransportFacade(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in drainAndSendFragments", e)
+        }
+
+        if (hitIterationCap && state == TransportState.RUNNING) {
+            // Yield to other main-thread work (BLE callbacks, UI, the fragment
+            // poll timer) before resuming the drain. The post is unconditional
+            // because we know there is at least one more fragment available
+            // and we want it serviced as soon as the handler is free.
+            mainHandler.post { drainAndSendFragments() }
         }
     }
 
@@ -2665,31 +2763,33 @@ class BleTransportFacade(
                                 "retryCount" to retryCount
                             ))
                             connectionRetryCount.remove(address)
-                            // Notify peer lost since we're giving up
+                            // Notify peer lost since we're giving up. The
+                            // entire body runs on main via runOnMainSync so
+                            // the connection bookkeeping, queue clear, and
+                            // peer-loss notification land as one atomic step
+                            // against drainAndSendFragments. The previous
+                            // shape ran the bookkeeping on the binder thread
+                            // and posted only the queue clear, leaving a
+                            // window where the main-thread drain could
+                            // enqueue fresh fragments to the dead peer.
                             connections.deviceIdForAddress(address)?.let { peerId ->
-                                protocol.removeNeighborRoutes(peerId)
-                                try {
-                                    protocol.blePeerLost(peerId)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error notifying peer lost", e)
-                                }
-                                meshController.registerDisconnection(peerId)
-                                refreshSelfMetrics()
-                                connections.removeIdentifiersForAddress(address)
-                                connections.removeConnectionRole(peerId)
-                                // Drop any queued outbound fragments for the
-                                // exhausted peer. blePeerLost has already been
-                                // fired, so these bytes can never deliver;
-                                // leaving them in the map orphans them until
-                                // the 30s eviction timer. Posted to main
-                                // because the queue is main-thread-only.
-                                runOnMain { outboundQueue.removeAll(peerId) }
-                                mainHandler.post {
+                                runOnMainSync {
+                                    protocol.removeNeighborRoutes(peerId)
+                                    try {
+                                        protocol.blePeerLost(peerId)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Error notifying peer lost", e)
+                                    }
+                                    meshController.registerDisconnection(peerId)
+                                    refreshSelfMetrics()
+                                    connections.removeIdentifiersForAddress(address)
+                                    connections.removeConnectionRole(peerId)
+                                    outboundQueue.removeAll(peerId)
                                     if (state == TransportState.RUNNING) {
                                         refreshAdvertising("disconnect_max_retries")
                                     }
+                                    maybeHandleRebalance("disconnect_max_retries")
                                 }
-                                maybeHandleRebalance("disconnect_max_retries")
                             }
                             return@onConnectionStateChange
                         }
@@ -3065,9 +3165,28 @@ class BleTransportFacade(
             // Snapshot the value on the binder thread — characteristic.value
             // is overwritten by the BLE stack on the next notification — then
             // repost processing to the main thread so we never hold up a
-            // binder callback on the UniFFI mutex.
+            // binder callback on the UniFFI mutex. The .copyOf() is load-bearing:
+            // without it the main-thread handler reads whatever bytes happen to
+            // be in the framework buffer when it eventually runs, which is the
+            // *next* notification under burst load.
             @Suppress("DEPRECATION")
-            val data = characteristic.value ?: return
+            val raw = characteristic.value ?: return
+            if (raw.size > MAX_INBOUND_NOTIFICATION_BYTES) {
+                // Defence in depth against a hostile peripheral. Mirrors the
+                // peripheral-side cap in PeripheralGattServer.MAX_INBOUND_WRITE_BYTES.
+                Log.w(TAG, "Dropping oversized inbound notification: ${raw.size} bytes from ${gatt.device.address}")
+                emitDiagnostic(
+                    "warning",
+                    "Dropped oversized inbound BLE notification",
+                    mapOf(
+                        "address" to gatt.device.address,
+                        "size" to raw.size,
+                        "max" to MAX_INBOUND_NOTIFICATION_BYTES,
+                    ),
+                )
+                return
+            }
+            val data = raw.copyOf()
             val address = gatt.device.address
             mainHandler.post { handleReceivedData(data, address) }
         }
