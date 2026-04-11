@@ -79,6 +79,7 @@ internal class CentralGattClient(
         val protocol: OfflineProtocol
         val connections: MeshConnectionRegistry
         val pendingInbound: InboundFragmentBuffer
+        val outboundQueue: OutboundFragmentQueue
         val meshController: MeshController
         val bluetoothAdapter: BluetoothAdapter?
         val selfDeviceId: String
@@ -111,6 +112,18 @@ internal class CentralGattClient(
         private const val MAX_CONNECTION_RETRIES = 5
         private const val MIN_RECONNECT_INTERVAL_MS = 5_000L
         private const val MAX_RECONNECT_INTERVAL_MS = 60_000L
+        /**
+         * Android's catch-all GATT failure status (0x85). The BLE stack
+         * reports it for a grab-bag of low-level failures — LL timeout,
+         * controller reset, failed bonding, resource starvation — without
+         * distinguishing them. We treat it as "something about this
+         * address's signal quality is currently unreliable" and clear the
+         * cached RSSI so the adaptive-scan gate has to re-learn the peer
+         * from a fresh advertisement before we try again. Other status
+         * codes (e.g. 8 = CONNECTION_TIMEOUT, 19 = REMOTE_USER_TERMINATED)
+         * leave RSSI intact because they do not imply a quality problem.
+         */
+        private const val GATT_GENERIC_ERROR = 133
         /** Hard ceiling on a single inbound BLE notification we accept from
          *  a remote peripheral. Mirrors [PeripheralGattServer.MAX_INBOUND_WRITE_BYTES]
          *  — well above mesh fragment size for MTU-negotiation headroom, but
@@ -279,7 +292,8 @@ internal class CentralGattClient(
             if (descriptor.uuid != PeripheralGattServer.CCCD_UUID) {
                 return
             }
-            if (status != BluetoothGatt.GATT_SUCCESS) {
+            val success = status == BluetoothGatt.GATT_SUCCESS
+            if (!success) {
                 Log.w(TAG, "CCCD write failed for $address, status=$status; tearing link down")
                 diagnosticEmitter("warning", "CCCD write failed", mapOf(
                     "address" to address,
@@ -288,14 +302,20 @@ internal class CentralGattClient(
                 closeGattClient(gatt, "cccd_write_failed")
                 return
             }
-            Log.i(TAG, "CCCD write acknowledged for $address — link ready")
-            diagnosticEmitter("info", "BLE link ready", mapOf("address" to address))
-            linkReady.add(address)
-            // The link is now bidirectional: we can receive notifications
-            // and any outbound fragments that were queued while waiting
-            // for this handshake should drain on the next poll /
-            // onFragmentsAvailable.
-            runOnMain {
+            // Ack arrives on the binder thread. The previous shape added
+            // `address` to [linkReady] here and only then posted the drain
+            // to main — that opened a race where a concurrent
+            // `evictPeer → forgetLink(address)` running on main could
+            // remove the address *before* this binder-thread `add`
+            // reinstated it, leaving a zombie linkReady entry pointing at
+            // a gatt the facade has already torn down. Moving both the
+            // mutation and the drain into the same main-thread post makes
+            // evict and CCCD-ack mutually serialisable on the looper.
+            mainHandler.post {
+                if (host.isShuttingDown()) return@post
+                Log.i(TAG, "CCCD write acknowledged for $address — link ready")
+                diagnosticEmitter("info", "BLE link ready", mapOf("address" to address))
+                linkReady.add(address)
                 if (host.isRunning()) {
                     host.drainAndSendFragments()
                 }
@@ -391,8 +411,9 @@ internal class CentralGattClient(
         linkReady.remove(address)
 
         // Don't remove from discovered list - keep trying to reconnect.
-        // Only remove RSSI if it's a permanent error.
-        if (status == 133) { // Connection timeout
+        // Only clear cached RSSI on Android's catch-all 0x85 GATT_ERROR —
+        // see [GATT_GENERIC_ERROR] for why this status is special.
+        if (status == GATT_GENERIC_ERROR) {
             host.clearRssi(address)
         }
 
@@ -417,24 +438,7 @@ internal class CentralGattClient(
                 // latch.
                 val peerId = host.connections.deviceIdForAddress(address)
                 if (peerId != null) {
-                    mainHandler.post {
-                        if (host.isShuttingDown()) return@post
-                        host.protocol.removeNeighborRoutes(peerId)
-                        try {
-                            host.protocol.blePeerLost(peerId)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error notifying peer lost", e)
-                        }
-                        host.meshController.registerDisconnection(peerId)
-                        host.refreshSelfMetrics()
-                        host.connections.removeIdentifiersForAddress(address)
-                        host.connections.removeConnectionRole(peerId)
-                        host.pendingInbound.removeAll(address)
-                        if (host.isRunning()) {
-                            host.refreshAdvertising("disconnect_max_retries")
-                        }
-                        host.maybeHandleRebalance("disconnect_max_retries")
-                    }
+                    mainHandler.post { finalizeGivenUpPeer(address, peerId) }
                 }
                 return
             }
@@ -458,29 +462,63 @@ internal class CentralGattClient(
                 }
             }, backoffInterval)
         } else {
-            // Notify protocol of peer loss only if we're not reconnecting.
+            // Stale callback (wasConnected=false) or transport stopped
+            // mid-flight (!isRunning). We have to notify the protocol of
+            // peer loss, but the prior shape of this branch called UniFFI
+            // (removeNeighborRoutes, blePeerLost) directly from the
+            // Bluetooth binder thread. That is exactly the pattern the
+            // rest of this file is built to avoid — it blocks GATT work
+            // for every client in this process while the UniFFI mutex is
+            // held. Post the whole body to main and reuse the
+            // give-up-cleanup helper so the queue/state clear stays
+            // consistent with the max-retries path.
             val peerId = host.connections.deviceIdForAddress(address)
             if (peerId != null) {
-                host.protocol.removeNeighborRoutes(peerId)
-                try {
-                    host.protocol.blePeerLost(peerId)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error notifying peer lost", e)
-                    diagnosticEmitter("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
-                }
-                host.meshController.registerDisconnection(peerId)
-                host.refreshSelfMetrics()
-                host.connections.removeIdentifiersForAddress(address)
-                deviceIdResolutionAttempts.remove(address)
-                host.connections.removeConnectionRole(peerId)
-                mainHandler.post {
-                    if (host.isRunning()) {
-                        host.refreshAdvertising("membership_change")
-                    }
-                }
-                host.maybeHandleRebalance("disconnect")
+                mainHandler.post { finalizeGivenUpPeer(address, peerId) }
             }
         }
+    }
+
+    /**
+     * Tear down every scrap of main-thread state held for a peer we are
+     * giving up on — both the max-retries-exhausted branch and the
+     * stale-callback/!isRunning branch funnel through here so the cleanup
+     * sequence stays single-sourced.
+     *
+     * Must run on the main thread. Drops the outbound queue for this
+     * peer alongside the inbound buffer — without that, fragments
+     * destined for an address that has been permanently lost sit in the
+     * outbound queue until either the 30s per-entry TTL or capacity
+     * eviction fires, wasting memory and (worse) potentially delivering
+     * stale fragments if the peer comes back on a new session.
+     */
+    private fun finalizeGivenUpPeer(address: String, peerId: String) {
+        if (host.isShuttingDown()) return
+        host.protocol.removeNeighborRoutes(peerId)
+        try {
+            host.protocol.blePeerLost(peerId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying peer lost", e)
+            diagnosticEmitter("error", "Error notifying peer lost", mapOf(
+                "exception" to e.javaClass.simpleName,
+                "message" to (e.message ?: "unknown"),
+            ))
+        }
+        host.meshController.registerDisconnection(peerId)
+        host.refreshSelfMetrics()
+        host.connections.removeIdentifiersForAddress(address)
+        host.connections.removeConnectionRole(peerId)
+        clearPeerBuffers(
+            address = address,
+            peerId = peerId,
+            pendingInbound = host.pendingInbound,
+            outboundQueue = host.outboundQueue,
+            resolutionAttempts = deviceIdResolutionAttempts,
+        )
+        if (host.isRunning()) {
+            host.refreshAdvertising("disconnect_give_up")
+        }
+        host.maybeHandleRebalance("disconnect_give_up")
     }
 
     // --- Read handlers (main-thread) ---
@@ -750,4 +788,30 @@ internal class CentralGattClient(
         }
     }
 
+}
+
+/**
+ * Drop every piece of main-thread-only buffer state the central client
+ * holds for a peer we are giving up on — the inbound fragment buffer
+ * keyed by BLE address, the outbound fragment queue keyed by device id,
+ * and the device-id resolution throttle map.
+ *
+ * Extracted as a file-level helper so it can be exercised directly in a
+ * plain JVM test. Before this helper existed, the give-up path cleared
+ * `pendingInbound` but forgot to clear `outboundQueue`, causing fragments
+ * destined for a peer we had just abandoned to sit in the queue until the
+ * per-entry 30s TTL or a capacity eviction fired — wasting memory and
+ * risking stale delivery if the peer came back on a fresh session. The
+ * test that guards this regression lives in `CentralGattClientTest`.
+ */
+internal fun clearPeerBuffers(
+    address: String,
+    peerId: String,
+    pendingInbound: InboundFragmentBuffer,
+    outboundQueue: OutboundFragmentQueue,
+    resolutionAttempts: MutableMap<String, Long>,
+) {
+    pendingInbound.removeAll(address)
+    outboundQueue.removeAll(peerId)
+    resolutionAttempts.remove(address)
 }

@@ -64,21 +64,30 @@ private class LogThrottler(private val defaultIntervalMs: Long = 5000L) {
  * writes. That dependency was dropped before merge and central-role stayed
  * hand-rolled because:
  *
- *   1. The mesh's connection semantics (per-address link rather than
+ *   1. The mesh's connection semantics — per-address link rather than
  *      per-peer, role flips via [MeshConnectionRegistry], provisional
- *      bootstrap connects before a device ID is known) did not map cleanly
- *      onto Nordic's per-peer `BleManager` lifecycle — wrapping it would
- *      have required as much glue code as writing the callback directly.
- *   2. Nordic's queue pulls in a coroutine runtime and a logging transitive
- *      that we otherwise don't ship, which both hurt APK size and complicated
- *      the React Native build.
- *   3. The correctness bugs Nordic would have eliminated (CCCD write on
- *      subscribe, long-read offset, binder-thread isolation) are now fixed
- *      in the hand-rolled path and enforced by unit tests.
+ *      bootstrap connects issued before a device ID is known — did not
+ *      map cleanly onto Nordic's per-peer `BleManager` lifecycle. A
+ *      skeleton on this branch (`dea8138`) measured the wrapping cost
+ *      and found it comparable to writing the callback directly, at
+ *      which point the library stops paying for itself.
+ *   2. The queue transitive pulls in a coroutine runtime and a logging
+ *      transitive that we otherwise don't ship. This is a minor cost
+ *      rather than a load-bearing argument, but it is not zero.
  *
- * If/when we need op queueing for a feature Nordic *does* provide cleanly
- * (e.g. MTU negotiation retries, indication handling), revisit this and
- * extract a per-peer client abstraction first.
+ * The tradeoff we're accepting: Nordic has absorbed years of OEM-specific
+ * Android BLE quirks that a hand-rolled callback will rediscover over
+ * time. The known holes (CCCD write on subscribe, long-read offset,
+ * binder-thread isolation, fragment keying) are now closed, but the
+ * long-tail surface for stack-specific bugs on unseen devices is larger
+ * here than it would be with Nordic. That is the cost of owning the
+ * state machine; the upside is that every future fix lands in this
+ * repo rather than behind a library version bump.
+ *
+ * If a future feature needs something Nordic provides cleanly (MTU
+ * negotiation retries, indication handling, bonding-state serialisation),
+ * revisit this — and extract a per-peer client abstraction first so the
+ * glue surface is contained before the library comes back in.
  */
 class BleTransportFacade(
     private val context: Context,
@@ -241,6 +250,7 @@ class BleTransportFacade(
                 override val protocol: OfflineProtocol get() = this@BleTransportFacade.protocol
                 override val connections: MeshConnectionRegistry get() = this@BleTransportFacade.connections
                 override val pendingInbound: InboundFragmentBuffer get() = this@BleTransportFacade.pendingInbound
+                override val outboundQueue: OutboundFragmentQueue get() = this@BleTransportFacade.outboundQueue
                 override val meshController: MeshController get() = this@BleTransportFacade.meshController
                 override val bluetoothAdapter: BluetoothAdapter? get() = this@BleTransportFacade.bluetoothAdapter
                 override val selfDeviceId: String get() = deviceId
@@ -2137,6 +2147,16 @@ class BleTransportFacade(
     }
 
     private fun sendFragmentData(recipientId: String, data: ByteArray): Boolean {
+        // Every call site (drainAndSendFragments, pollAndSendFragments, the
+        // OutboundFragmentQueue.flush callback) runs on main already, but
+        // the function mutates main-only state (bytesSent, fragmentsSent),
+        // calls into MeshController, and issues gatt.writeCharacteristic —
+        // which the Android BLE stack serialises one op at a time per
+        // client. A future caller that forgets this contract would
+        // silently corrupt counters and interleave writes, so pin it to
+        // the runtime check that the rest of the facade's main-thread
+        // invariants already use.
+        assertMainThread("sendFragmentData")
         // Find GATT client for recipient
         val address = resolveTargetAddress(recipientId)
         val gatt = address?.let { connections.getGatt(it) }
