@@ -1903,6 +1903,12 @@ impl OfflineProtocol {
                     "BLE transport not available or wrong type".to_string(),
                 ));
             }
+        } else {
+            tracing::warn!(
+                %peer_id,
+                max_payload,
+                "ble_set_peer_mtu: BLE transport not registered; ignoring"
+            );
         }
         Ok(())
     }
@@ -1924,6 +1930,11 @@ impl OfflineProtocol {
                     "BLE transport not available or wrong type".to_string(),
                 ));
             }
+        } else {
+            tracing::warn!(
+                %peer_id,
+                "ble_clear_peer_mtu: BLE transport not registered; ignoring"
+            );
         }
         Ok(())
     }

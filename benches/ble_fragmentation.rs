@@ -22,7 +22,7 @@ fn bench_message_fragmentation(c: &mut Criterion) {
             let message = create_large_message(size);
 
             b.iter(|| {
-                black_box(transport.fragment_message("bob", &message).unwrap());
+                black_box(transport.fragment_message(&message).unwrap());
             });
         });
     }
@@ -39,7 +39,7 @@ fn bench_fragment_reassembly(c: &mut Criterion) {
             let message = create_large_message(size);
 
             // Pre-fragment the message
-            let fragments = transport.fragment_message("bob", &message).unwrap();
+            let fragments = transport.fragment_message(&message).unwrap();
 
             b.iter(|| {
                 for fragment in &fragments {

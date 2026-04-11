@@ -290,6 +290,7 @@ class BleTransportFacade(
                     // already-resolved branch below lands on main.
                     mainHandler.post {
                         if (shuttingDown) return@post
+                        assertMainThread("onPeerMtuNegotiated.stage")
                         peerMaxPayloads[address] = maxPayload
                         // If the reverse GATT read has already landed and
                         // resolved the device id for this address, flush
@@ -356,15 +357,19 @@ class BleTransportFacade(
     private val lastSeenRssi = ConcurrentHashMap<String, Short>()
 
     // Per-address staging map for negotiated ATT payload sizes. Populated
-    // from [CentralGattClient.Host.onPeerMtuNegotiated] when the controller
-    // acks a `requestMtu`, and drained in [CentralGattClient.Host.onDeviceIdResolved]
-    // once the reverse GATT read has mapped the address to a stable device
-    // id — at that point we flush into Rust via `protocol.bleSetPeerMtu` so
-    // the fragmenter can size outbound chunks per peer instead of using the
-    // 185-byte fallback. Entries are removed on disconnect alongside the
-    // matching `bleClearPeerMtu` call. Main-thread-only; the concurrent map
-    // type is inherited from the neighbouring [lastSeenRssi] pattern.
-    private val peerMaxPayloads = ConcurrentHashMap<String, Int>()
+    // from [CentralGattClient.Host.onPeerMtuNegotiated] (which reposts to
+    // main before touching this map) and drained in
+    // [CentralGattClient.Host.onDeviceIdResolved] once the reverse GATT
+    // read has mapped the address to a stable device id — at that point
+    // we flush into Rust via `protocol.bleSetPeerMtu` so the fragmenter
+    // can size outbound chunks per peer instead of using the 185-byte
+    // fallback. Entries are removed on successful flush (so a reconnect
+    // cannot observe a stale value) and on disconnect alongside the
+    // matching `bleClearPeerMtu` call. Main-thread only — every access
+    // is guarded by [assertMainThread], and the type is a plain `HashMap`
+    // to make the discipline visible rather than silently tolerate cross-
+    // thread writes.
+    private val peerMaxPayloads = HashMap<String, Int>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -1904,19 +1909,29 @@ class BleTransportFacade(
      * [CentralGattClient.Host.onPeerMtuNegotiated] when the address already
      * has a resolved identifier). Idempotent: if no staged value exists the
      * call is a no-op and the Rust fragmenter falls back to the 185-byte
-     * floor for that peer. Main-thread only.
+     * floor for that peer.
+     *
+     * On successful flush the staged entry is removed so that a reconnect
+     * on the same BLE address cannot observe a stale value before the new
+     * handshake stages its own MTU. If the controller later renegotiates
+     * mid-link (rare), [CentralGattClient.Host.onPeerMtuNegotiated] re-
+     * stages and re-flushes from scratch. Main-thread only.
      */
     private fun flushPeerMtu(address: String, deviceId: String) {
         assertMainThread("flushPeerMtu")
         val staged = peerMaxPayloads[address] ?: return
         try {
             protocol.bleSetPeerMtu(deviceId, staged.toUInt())
+            peerMaxPayloads.remove(address)
             emitDiagnostic(
                 "info",
                 "BLE per-peer MTU flushed to Rust",
                 mapOf("address" to address, "deviceId" to deviceId, "maxPayload" to staged),
             )
         } catch (e: Exception) {
+            // Leave the staged entry in place on failure so the next
+            // flush opportunity (re-entry via onPeerMtuNegotiated or
+            // onDeviceIdResolved) can retry without losing the value.
             Log.w(TAG, "bleSetPeerMtu failed for $deviceId", e)
             emitDiagnostic(
                 "warning",
@@ -1933,6 +1948,7 @@ class BleTransportFacade(
      * clean slate. Main-thread only.
      */
     private fun clearPeerMtu(address: String?, deviceId: String?) {
+        assertMainThread("clearPeerMtu")
         if (address != null) {
             peerMaxPayloads.remove(address)
         }

@@ -168,7 +168,34 @@ internal class CentralGattClient(
          *  from the negotiated MTU to get usable Write-Without-Response
          *  payload. */
         private const val ATT_HEADER_BYTES = 3
+        /** Hard deadline for a `requestMtu` → `onMtuChanged` round-trip,
+         *  in milliseconds. Some Android BLE stacks are known to accept
+         *  `requestMtu` (returning true) and then never deliver the
+         *  callback on flaky peripherals, leaving the handshake chain
+         *  wedged until GATT supervision timeout (~20s). Well above the
+         *  typical 100–500ms negotiation window — a ~10× safety margin —
+         *  and short enough that a hung link surfaces quickly. If the
+         *  deadline passes, the watchdog resumes the handshake with
+         *  whatever MTU the controller auto-negotiated, and the Rust
+         *  transport falls back to its 185-byte fragment floor for that
+         *  peer. */
+        private const val MTU_WATCHDOG_MS = 3000L
     }
+
+    // Addresses with an in-flight `requestMtu` whose `onMtuChanged`
+    // callback has not yet landed. Entry is inserted just before
+    // `gatt.requestMtu`, removed atomically by whichever of {real callback,
+    // watchdog runnable} fires first — the loser sees `remove(...) == false`
+    // and bails out. Also cleared from every handshake-teardown path
+    // (service missing, permission denied, finalizeGivenUpPeer) so a stale
+    // watchdog does not fire against a gone peer.
+    private val mtuInFlight = ConcurrentHashMap<String, Boolean>()
+
+    // Pending watchdog Runnables keyed by address, so they can be cancelled
+    // via `mainHandler.removeCallbacks` when the real `onMtuChanged` lands
+    // first. Separate from [mtuInFlight] because `ConcurrentHashMap<_, Unit>`
+    // does not model "present-or-absent" cleanly.
+    private val mtuWatchdogs = ConcurrentHashMap<String, Runnable>()
 
     // Addresses whose CCCD subscription has been acked by the remote peer.
     // Until the descriptor write lands we can't trust that the peripheral
@@ -189,6 +216,7 @@ internal class CentralGattClient(
         linkReady.remove(address)
         connectionRetryCount.remove(address)
         deviceIdResolutionAttempts.remove(address)
+        cancelMtuWatchdog(address)
     }
 
     /** Drop all per-address state. Used by transport stop. */
@@ -196,6 +224,21 @@ internal class CentralGattClient(
         linkReady.clear()
         connectionRetryCount.clear()
         deviceIdResolutionAttempts.clear()
+        mtuInFlight.clear()
+        mtuWatchdogs.values.forEach { mainHandler.removeCallbacks(it) }
+        mtuWatchdogs.clear()
+    }
+
+    /**
+     * Cancels any pending MTU watchdog for [address] and drops the
+     * associated `mtuInFlight` slot. Called from every handshake
+     * teardown path so a stale watchdog cannot fire against a gone peer
+     * (which would race `closeGattClient`, re-enter the chain, and log
+     * confusing "service missing" warnings).
+     */
+    private fun cancelMtuWatchdog(address: String) {
+        mtuInFlight.remove(address)
+        mtuWatchdogs.remove(address)?.let { mainHandler.removeCallbacks(it) }
     }
 
     fun markResolutionAttempt(address: String, now: Long) {
@@ -279,18 +322,54 @@ internal class CentralGattClient(
             // (after CCCD), the Rust fragmenter already knows the per-peer
             // payload size and can size fragments to the real link capacity
             // instead of the 185-byte fallback floor.
+            // Arm the MTU watchdog BEFORE requestMtu so that a racing
+            // fire from `mainHandler.postDelayed` always sees an entry in
+            // [mtuInFlight]. On success this is cancelled from the top of
+            // [onMtuChanged]; on the synchronous-false / permission-denied
+            // fallbacks below we cancel explicitly before taking the
+            // alternative path.
+            mtuInFlight[address] = true
+            val watchdog = Runnable {
+                if (host.isShuttingDown()) return@Runnable
+                // CAS: watchdog only resumes the chain if no real callback
+                // has already claimed this address.
+                val claimed = mtuInFlight.remove(address) == true
+                if (!claimed) return@Runnable
+                mtuWatchdogs.remove(address)
+                Log.w(TAG, "MTU watchdog fired for $address after ${MTU_WATCHDOG_MS}ms — resuming handshake without negotiated MTU")
+                diagnosticEmitter(
+                    "warning",
+                    "MTU watchdog fired",
+                    mapOf("address" to address, "timeoutMs" to MTU_WATCHDOG_MS),
+                )
+                // Re-fetch the service — the cached local may still be
+                // valid, but going through `gatt.getService` is resilient
+                // if the stack tore it down underneath us.
+                val currentService = gatt.getService(serviceUuid)
+                if (currentService == null) {
+                    closeGattClient(gatt, "service_missing_post_mtu_watchdog")
+                } else {
+                    readDeviceIdCharacteristicOrClose(gatt, currentService, address)
+                }
+            }
+            mtuWatchdogs[address] = watchdog
+            mainHandler.postDelayed(watchdog, MTU_WATCHDOG_MS)
+
             try {
                 val mtuRequested = gatt.requestMtu(REQUESTED_ATT_MTU)
                 if (!mtuRequested) {
                     Log.w(TAG, "requestMtu returned false for $address; continuing with default MTU")
                     diagnosticEmitter("warning", "requestMtu returned false", mapOf("address" to address))
-                    // Fall through to device-id read below; MTU stays at
-                    // whatever the controller auto-negotiated.
+                    // Cancel the watchdog we just armed — we already know
+                    // the callback will never arrive, so fall through to
+                    // the device-id read under the controller-default MTU.
+                    cancelMtuWatchdog(address)
                     readDeviceIdCharacteristicOrClose(gatt, service, address)
                 }
             } catch (e: SecurityException) {
                 Log.e(TAG, "Permission denied requesting MTU", e)
                 diagnosticEmitter("error", "Permission denied requesting MTU", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+                cancelMtuWatchdog(address)
                 closeGattClient(gatt, "mtu_request_permission_denied")
             }
         }
@@ -298,6 +377,16 @@ internal class CentralGattClient(
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (host.isShuttingDown()) return
             val address = gatt.device.address
+            // Claim the in-flight slot atomically. If the watchdog has
+            // already fired (and removed the entry) we're the loser of
+            // that race — the chain has already been resumed, so drop
+            // this late callback on the floor.
+            val claimed = mtuInFlight.remove(address) == true
+            if (!claimed) {
+                Log.i(TAG, "onMtuChanged arrived for $address after watchdog already resumed — ignoring")
+                return
+            }
+            mtuWatchdogs.remove(address)?.let { mainHandler.removeCallbacks(it) }
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
                 Log.i(TAG, "MTU negotiated for $address: mtu=$mtu payload=$maxPayload")
@@ -597,6 +686,12 @@ internal class CentralGattClient(
      */
     private fun finalizeGivenUpPeer(address: String, peerId: String) {
         if (host.isShuttingDown()) return
+        // Cancel any watchdog that may still be in flight for this
+        // address — `closeGattClient` usually handles this earlier in
+        // the teardown path, but the stale-callback branch in
+        // `onConnectionStateChange` can reach here without having gone
+        // through close first.
+        cancelMtuWatchdog(address)
         host.protocol.removeNeighborRoutes(peerId)
         try {
             host.protocol.blePeerLost(peerId)
@@ -810,6 +905,7 @@ internal class CentralGattClient(
         }
         host.connections.removeGatt(address)
         linkReady.remove(address)
+        cancelMtuWatchdog(address)
     }
 
     /**

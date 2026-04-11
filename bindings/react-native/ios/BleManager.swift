@@ -1267,6 +1267,27 @@ public class BleManager: NSObject, TransportManager {
         return connections.connectedPeripheralCount() + subscribedCentrals.count
     }
 
+    /// Tears down the protocol-side state for a peer that has been lost —
+    /// routing entries, the BLE peer-lost signal, and the negotiated MTU
+    /// slot. Every disconnect/eviction/give-up path funnels through here
+    /// so the three UniFFI calls stay in lockstep. Local bookkeeping
+    /// (`connections`, `meshController`, `refreshSelfMetrics`, etc.) is
+    /// intentionally left at the call site because not every path removes
+    /// the same local state — only the protocol-side teardown is uniform.
+    private func notifyBlePeerLost(deviceId: String) {
+        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
+        do {
+            try protocolInstance.blePeerLost(peerId: deviceId)
+        } catch {
+            print("[BleManager] blePeerLost failed for \(deviceId): \(error)")
+        }
+        do {
+            try protocolInstance.bleClearPeerMtu(peerId: deviceId)
+        } catch {
+            print("[BleManager] bleClearPeerMtu failed for \(deviceId): \(error)")
+        }
+    }
+
     /// Refresh self metrics. When called from `fragmentQueue`, pass the counts directly
     /// to avoid a deadlock on the serial queue. Off-queue callers omit the parameters
     /// and the counts are read via `fragmentQueue.sync`.
@@ -1349,11 +1370,8 @@ public class BleManager: NSObject, TransportManager {
         connectionRetryCount.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
         refreshSelfMetrics()
-        
-        // Clean up routes through this neighbor
-        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-        try? protocolInstance.blePeerLost(peerId: deviceId)
-        try? protocolInstance.bleClearPeerMtu(peerId: deviceId)
+
+        notifyBlePeerLost(deviceId: deviceId)
         DispatchQueue.main.async {
             self.refreshAdvertising(reason: "evict_\(reason)")
         }
@@ -2395,10 +2413,7 @@ extension BleManager: CBCentralManagerDelegate {
                 if isPermanentError {
                     // Permanent error - notify peer lost
                     if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
-                        // Clean up routes through this neighbor
-                        protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-                        try? self.protocolInstance.blePeerLost(peerId: deviceId)
-                        try? self.protocolInstance.bleClearPeerMtu(peerId: deviceId)
+                        notifyBlePeerLost(deviceId: deviceId)
                         meshController.registerDisconnection(peerId: deviceId)
                         refreshSelfMetrics()
                         connections.removeConnectionRole(for: deviceId)
@@ -2423,9 +2438,7 @@ extension BleManager: CBCentralManagerDelegate {
                 connectionRetryCount.removeValue(forKey: peripheral.identifier)
                 // Notify peer lost since we're giving up
                 if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
-                    protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-                    try? self.protocolInstance.blePeerLost(peerId: deviceId)
-                    try? self.protocolInstance.bleClearPeerMtu(peerId: deviceId)
+                    notifyBlePeerLost(deviceId: deviceId)
                     meshController.registerDisconnection(peerId: deviceId)
                     refreshSelfMetrics()
                     connections.removeConnectionRole(for: deviceId)
@@ -2450,10 +2463,7 @@ extension BleManager: CBCentralManagerDelegate {
         } else {
             // Wasn't connected, just notify if we had device ID
             if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
-                // Clean up routes through this neighbor
-                protocolInstance.removeNeighborRoutes(neighborId: deviceId)
-                try? self.protocolInstance.blePeerLost(peerId: deviceId)
-                try? self.protocolInstance.bleClearPeerMtu(peerId: deviceId)
+                notifyBlePeerLost(deviceId: deviceId)
                 meshController.registerDisconnection(peerId: deviceId)
                 refreshSelfMetrics()
                 connections.removeConnectionRole(for: deviceId)

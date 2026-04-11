@@ -163,6 +163,12 @@ impl BleTransport {
     /// the fragmenter from buggy native layers reporting nonsensical sizes.
     pub fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
         let clamped = max_payload.clamp(BLE_MAX_FRAGMENT_SIZE, MAX_REASONABLE_BLE_PAYLOAD);
+        tracing::debug!(
+            peer = %peer_id,
+            raw = max_payload,
+            clamped,
+            "ble: stored per-peer MTU"
+        );
         self.peer_mtus
             .lock()
             .unwrap()
@@ -172,6 +178,7 @@ impl BleTransport {
     /// Removes any stored MTU for a peer (called on disconnect or before
     /// renegotiation).
     pub fn clear_peer_mtu(&self, peer_id: &str) {
+        tracing::debug!(peer = %peer_id, "ble: cleared per-peer MTU");
         self.peer_mtus.lock().unwrap().remove(peer_id);
     }
 
@@ -363,16 +370,17 @@ impl BleTransport {
         crate::common::deserialize_message(data)
     }
 
-    /// Fragments a message into chunks suitable for BLE transmission to a
-    /// specific recipient.
+    /// Fragments a message into chunks suitable for BLE transmission.
     ///
     /// The fragment payload size is chosen from the recipient's negotiated
-    /// MTU (see [`Self::set_peer_mtu`]), falling back to
-    /// [`BLE_MAX_FRAGMENT_SIZE`] when no MTU has been reported yet.
-    pub fn fragment_message(&self, recipient: &str, message: &Message) -> Result<Vec<Vec<u8>>> {
+    /// MTU — derived from `message.recipient`, which matches the key the
+    /// platform layer uses when reporting negotiated values via
+    /// [`Self::set_peer_mtu`]. Falls back to [`BLE_MAX_FRAGMENT_SIZE`] when
+    /// no MTU has been reported yet.
+    pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
         let message_bytes = self.serialize_message(message)?;
 
-        let mtu = self.peer_mtu(recipient);
+        let mtu = self.peer_mtu(message.recipient.as_str());
         let message_id = message.id.as_str();
         let message_id_bytes = message_id.as_bytes();
         if message_id_bytes.len() > u8::MAX as usize {
@@ -622,7 +630,7 @@ impl BleTransport {
             return Ok(None);
         };
 
-        let fragments = self.fragment_message(&recipient, &message)?;
+        let fragments = self.fragment_message(&message)?;
 
         if fragments.is_empty() {
             self.update_queue_metric();
@@ -939,18 +947,27 @@ mod tests {
     fn test_ble_fragment_size_differs_per_peer() {
         let transport = BleTransport::new("test-device");
         let sender = UserId::new("alice").unwrap();
-        let recipient = UserId::new("bob").unwrap();
         let app_id = AppId::new("app").unwrap();
         let content = "y".repeat(1024);
-        let msg = Message::builder(sender, recipient, app_id)
+
+        // Two messages with identical content but different recipients so
+        // the fragmenter keys into different per-peer MTU slots.
+        let msg_small = Message::builder(
+            sender.clone(),
+            UserId::new("small-peer").unwrap(),
+            app_id.clone(),
+        )
+        .content(content.clone())
+        .build();
+        let msg_big = Message::builder(sender, UserId::new("big-peer").unwrap(), app_id)
             .content(content)
             .build();
 
         transport.set_peer_mtu("small-peer", BLE_MAX_FRAGMENT_SIZE);
         transport.set_peer_mtu("big-peer", 500);
 
-        let small_frags = transport.fragment_message("small-peer", &msg).unwrap();
-        let big_frags = transport.fragment_message("big-peer", &msg).unwrap();
+        let small_frags = transport.fragment_message(&msg_small).unwrap();
+        let big_frags = transport.fragment_message(&msg_big).unwrap();
 
         // Larger MTU ⇒ fewer fragments, each individual fragment larger.
         assert!(big_frags.len() < small_frags.len());
@@ -964,8 +981,10 @@ mod tests {
     #[test]
     fn test_ble_fragment_unknown_peer_uses_fallback() {
         let transport = BleTransport::new("test-device");
+        // small_message() has recipient "bob" — no MTU stored for it, so the
+        // fragmenter must fall back to BLE_MAX_FRAGMENT_SIZE.
         let msg = small_message();
-        let fragments = transport.fragment_message("never-seen", &msg).unwrap();
+        let fragments = transport.fragment_message(&msg).unwrap();
         for fragment in &fragments {
             assert!(fragment.len() <= BLE_MAX_FRAGMENT_SIZE);
         }
@@ -1060,7 +1079,7 @@ mod tests {
         let transport = BleTransport::new("test-device");
         transport.set_peer_mtu("bob", 512);
         let msg = small_message();
-        let fragments = transport.fragment_message("bob", &msg).unwrap();
+        let fragments = transport.fragment_message(&msg).unwrap();
         assert_eq!(
             fragments.len(),
             1,
@@ -1085,7 +1104,7 @@ mod tests {
             .ttl(TTL::new(8).unwrap())
             .build();
 
-        let fragments = transport.fragment_message("bob", &message).unwrap();
+        let fragments = transport.fragment_message(&message).unwrap();
         assert!(fragments.len() > 1);
         for fragment in &fragments {
             assert!(fragment.len() <= BLE_MAX_FRAGMENT_SIZE);
@@ -1137,7 +1156,7 @@ mod tests {
         let transport = BleTransport::new("test-device");
         transport.set_peer_mtu("bob", 512);
         let msg = small_message();
-        let fragments = transport.fragment_message("bob", &msg).unwrap();
+        let fragments = transport.fragment_message(&msg).unwrap();
         for fragment in &fragments {
             transport.on_fragment_received(fragment.clone()).unwrap();
         }
