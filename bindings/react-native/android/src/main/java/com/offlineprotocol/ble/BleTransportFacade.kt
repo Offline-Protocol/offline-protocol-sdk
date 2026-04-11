@@ -2898,16 +2898,21 @@ class BleTransportFacade(
         // RSSI cached to speed up reconnection. Any other status is a real
         // failure and we tear the peer state down.
         //
-        // Note: the Rust-side `peer_mtus` entry is also intentionally left
-        // in place on a clean disconnect. On reconnect the new handshake
-        // overwrites it via `bleSetPeerMtu`. If the peer never returns, the
-        // entry leaks until process exit — acceptable given entries are
-        // <64 bytes and the facade `peer_mtus` map is only touched on
-        // connect/disconnect/fragment_message paths. Revisit if a
-        // long-running node ever accumulates tens of thousands of unique
-        // transient peers.
+        // The Rust-side `peer_mtus` entry is always cleared, even on a
+        // clean disconnect that preserves the address→deviceId cache. On
+        // reconnect the new handshake renegotiates from scratch, and a
+        // renegotiation that lands on a *lower* value (firmware change,
+        // different radio, vendor downgrade) would otherwise race the
+        // new `bleSetPeerMtu`: outbound fragments written between the
+        // new `blePeerDiscovered` and the new `onMtuChanged` would size
+        // against the stale high value and exceed the new link's real
+        // capacity. Clearing is cheap and removes the hazard.
         val isCleanDisconnect = status == 0 || status == 19
-        if (!isCleanDisconnect) {
+        if (isCleanDisconnect) {
+            connections.deviceIdForAddress(address)?.let { peerId ->
+                clearPeerMtu(address, peerId)
+            }
+        } else {
             lastSeenRssi.remove(address)
             connections.deviceIdForAddress(address)?.let { peerId ->
                 protocol.removeNeighborRoutes(peerId)

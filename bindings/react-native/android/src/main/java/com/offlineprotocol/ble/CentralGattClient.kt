@@ -405,7 +405,26 @@ internal class CentralGattClient(
             // this late callback on the floor.
             val claimed = mtuInFlight.remove(address) == true
             if (!claimed) {
-                Log.i(TAG, "onMtuChanged arrived for $address after watchdog already resumed — ignoring")
+                // Watchdog fired first and already resumed the handshake at
+                // the fallback fragment size. Don't re-enter the chain, but
+                // still forward a successful negotiation so the facade can
+                // flush the real payload size into Rust — the facade's
+                // onPeerMtuNegotiated handles the already-announced-peer
+                // case by flushing immediately. Dropping the value here
+                // would pin this link to the 185-byte floor for its
+                // remaining lifetime.
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+                    Log.i(TAG, "Late onMtuChanged for $address after watchdog: mtu=$mtu payload=$maxPayload — forwarding to facade")
+                    diagnosticEmitter(
+                        "info",
+                        "MTU negotiated (late)",
+                        mapOf("address" to address, "mtu" to mtu, "payload" to maxPayload),
+                    )
+                    host.onPeerMtuNegotiated(address, maxPayload)
+                } else {
+                    Log.i(TAG, "Late onMtuChanged for $address after watchdog — status=$status, ignoring")
+                }
                 return
             }
             mtuWatchdogs.remove(address)?.let { mainHandler.removeCallbacks(it) }
