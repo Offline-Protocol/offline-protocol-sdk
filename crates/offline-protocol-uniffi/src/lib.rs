@@ -1991,18 +1991,29 @@ impl OfflineProtocol {
 
     /// BLE: Monotonic count of `fragment_message` calls that fell back
     /// to the fragment-size floor because no per-peer MTU was on file
-    /// for the recipient.
+    /// for the recipient **and the recipient is still a registered
+    /// direct BLE peer** at the moment of fallback.
     ///
-    /// A small steady-state value is normal — every new peer has a
-    /// one-shot window between `blePeerDiscovered` and
-    /// `bleSetPeerMtu` during which the first fragmenting send falls
-    /// back. A sustained non-trivial rate means the keying contract
-    /// between `message.recipient` and the Rust transport's per-peer
-    /// MTU map has broken and every fragmenting send is silently
-    /// regressing to the 185-byte floor. Surface in dashboards so
-    /// production alerts fire the first time the invariant breaks.
-    /// Returns 0 when the BLE transport is not registered. Uses
-    /// `recover_mutex` for the same reason as
+    /// In healthy operation this should remain zero. Both platforms
+    /// push the MTU BEFORE announcing the peer (iOS: `bleSetPeerMtu`
+    /// precedes `blePeerDiscovered`; Android: the facade flushes the
+    /// staged MTU via `onDeviceIdResolved` before `blePeerDiscovered`
+    /// fires), so by the time any fragmenting send can reach a live
+    /// peer the MTU entry is already on file. The counter
+    /// deliberately excludes the benign send / on_peer_lost race
+    /// (message enqueued while peer was live, `on_peer_lost` dropped
+    /// both maps before `get_next_fragment` popped it) because
+    /// counting that case would mask the real signal on every
+    /// disconnect with in-flight sends.
+    ///
+    /// A non-zero value therefore means either (a) the MTU-before-
+    /// discover ordering invariant regressed on one of the platforms,
+    /// or (b) the `recipient -> device_id` keying contract broke —
+    /// at which point every fragmenting send to live peers is
+    /// silently regressing to the 185-byte floor. Surface in
+    /// dashboards so production alerts fire the first time the
+    /// invariant breaks. Returns 0 when the BLE transport is not
+    /// registered. Uses `recover_mutex` for the same reason as
     /// [`Self::ble_undersized_mtu_reports`].
     pub fn ble_fragment_fallback_count(&self) -> u64 {
         let protocol = recover_mutex(&self.inner, "inner");

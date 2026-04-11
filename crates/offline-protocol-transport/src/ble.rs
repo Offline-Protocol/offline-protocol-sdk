@@ -138,21 +138,33 @@ pub struct BleTransport {
     /// surface it.
     undersized_mtu_reports: Arc<AtomicU64>,
     /// Count of [`Self::fragment_message`] calls that fell back to the
-    /// [`BLE_MAX_FRAGMENT_SIZE`] floor because the recipient had no
-    /// stored per-peer MTU.
+    /// [`BLE_MAX_FRAGMENT_SIZE`] floor **and whose recipient is still a
+    /// registered direct BLE peer** at the moment of fallback.
     ///
-    /// A small steady-state value is normal — every new peer sends at
-    /// least one fragmenting message in the window between
-    /// `blePeerDiscovered` and `bleSetPeerMtu` — but a sustained non-
-    /// trivial rate signals that the keying contract between
-    /// `message.recipient` and the per-peer MTU map is broken. The
-    /// classic way this breaks is a future refactor introducing
-    /// `UserId ↔ device_id` translation (e.g., multi-hop BLE relay
-    /// where `recipient` is the final destination); at that point
-    /// every fragmenting send would silently regress to 185 bytes
-    /// with no compile-time error. Surface via
-    /// [`Self::fragment_fallback_count`] so production alerts fire
-    /// the first time the invariant breaks.
+    /// In healthy operation this should remain **zero**. Both platforms
+    /// push the MTU BEFORE announcing the peer to the protocol layer
+    /// (iOS: `bleSetPeerMtu` precedes `blePeerDiscovered` in the
+    /// DEVICE_ID read handler; Android: the facade flushes the staged
+    /// MTU via `onDeviceIdResolved` before `blePeerDiscovered` fires),
+    /// so by the time any fragmenting send can reach a peer the MTU
+    /// entry is already on file. The `peers.contains_key` gate on the
+    /// increment deliberately excludes the benign TOCTOU where
+    /// `send()` enqueues while the peer is live and a concurrent
+    /// `on_peer_lost` drops both maps before `get_next_fragment` pops
+    /// the queued message — that race produces fragments to a dead
+    /// link, not a broken invariant, and counting it would drown out
+    /// the real signal every time a peer disconnects with in-flight
+    /// sends.
+    ///
+    /// A non-zero value therefore means one of two things: the
+    /// MTU-before-discover ordering invariant regressed on one of the
+    /// platforms, or the `recipient → device_id` keying contract
+    /// broke (e.g. a future multi-hop refactor where
+    /// `message.recipient` is the final destination rather than the
+    /// direct peer). Either way: every fragmenting send to live peers
+    /// is silently regressing to 185 bytes with no compile-time
+    /// error. Surface via [`Self::fragment_fallback_count`] so
+    /// production alerts fire the first time the invariant breaks.
     fragment_fallback_count: Arc<AtomicU64>,
     /// Platform callback invoked when new fragments are available to send.
     /// Called from `send()` after enqueueing — the platform layer should
@@ -518,38 +530,61 @@ impl BleTransport {
         let message_bytes = self.serialize_message(message)?;
 
         let recipient = message.recipient.as_str();
-        // Look up the per-peer MTU and observe the miss branch via a
-        // lifetime counter so production alerts fire when the keying
-        // contract between `message.recipient` and the per-peer MTU
-        // map breaks — e.g., a future refactor introducing
-        // `UserId ↔ device_id` translation where `recipient` is the
-        // final destination rather than the direct peer. In that
-        // world every fragmenting send silently regresses to the
-        // 185-byte floor with no compile-time error; the counter is
-        // the cheapest way to make that visible. A small steady-state
-        // value is expected (one-shot window between
-        // `blePeerDiscovered` and `bleSetPeerMtu` for each new peer).
+        // Look up the per-peer MTU. On a miss, the `peers` map tells
+        // us whether this is a keying-contract break (recipient is
+        // still a registered direct peer but has no MTU on file — the
+        // platform ordering invariant must have regressed, or
+        // `recipient` no longer matches the direct-peer device_id
+        // used to key `peer_mtus`) or the benign send/on_peer_lost
+        // race (recipient was live when `send()` validated and
+        // enqueued, but `on_peer_lost` dropped both maps in lockstep
+        // before `get_next_fragment` popped the queued message —
+        // fragments in that race go to a dead link, not a broken
+        // invariant). Only the first case increments
+        // `fragment_fallback_count`; counting the second would drown
+        // out the real signal on every disconnect with in-flight
+        // sends.
+        //
+        // The peers-lock acquisition happens only on the miss branch,
+        // so the healthy hot path (MTU on file) pays just the
+        // peer_mtus lock. With the platform-side MTU-before-discover
+        // ordering (see commit ac8cce8), the miss branch should
+        // effectively never execute for a live peer.
         let mtu = match self.peer_mtus.lock().unwrap().get(recipient).copied() {
             Some(mtu) => mtu,
             None => {
-                self.fragment_fallback_count.fetch_add(1, Ordering::Relaxed);
+                let is_direct_peer = self.peers.lock().unwrap().contains_key(recipient);
+                if is_direct_peer {
+                    self.fragment_fallback_count.fetch_add(1, Ordering::Relaxed);
+                    // Debug-only: surface the contract break with a
+                    // warn in development builds so a refactor that
+                    // regresses the ordering trips immediately. Release
+                    // builds rely on the counter + dashboard alert.
+                    #[cfg(debug_assertions)]
+                    tracing::warn!(
+                        peer = %recipient,
+                        "ble: fragment_message found no MTU for a registered direct peer — \
+                         MTU-before-discover ordering invariant regressed, or the \
+                         recipient -> device_id keying contract broke"
+                    );
+                } else {
+                    // Benign teardown race: `send()` enqueued while
+                    // the peer was live, `on_peer_lost` dropped both
+                    // maps before `get_next_fragment` got here. The
+                    // fragments will be produced under the floor and
+                    // routed to a now-absent peer — the reliability
+                    // layer will retry under whatever transport is
+                    // available next. Not a contract break.
+                    #[cfg(debug_assertions)]
+                    tracing::debug!(
+                        peer = %recipient,
+                        "ble: fragment_message for recipient no longer in direct-peer map — \
+                         benign send/on_peer_lost race, not counted"
+                    );
+                }
                 BLE_MAX_FRAGMENT_SIZE
             }
         };
-        // Debug-only keying-contract warn. `send()` already enforces
-        // that recipient is a registered direct peer, so this check is
-        // pure telemetry; we skip it in release builds to keep the
-        // hot path free of an extra mutex acquisition.
-        #[cfg(debug_assertions)]
-        {
-            if !self.peers.lock().unwrap().contains_key(recipient) {
-                tracing::warn!(
-                    peer = %recipient,
-                    "ble: fragment_message called with recipient that is not a direct BLE peer — \
-                     the per-peer MTU keying contract assumes recipient == direct peer device_id."
-                );
-            }
-        }
         tracing::trace!(
             peer = %recipient,
             mtu,
@@ -1431,18 +1466,23 @@ mod tests {
     }
 
     #[test]
-    fn test_ble_fragment_fallback_count_increments_on_unknown_peer() {
+    fn test_ble_fragment_fallback_count_increments_on_registered_peer_without_mtu() {
         // The keying-contract telemetry counter must:
         //   - start at zero
         //   - increment exactly once per fragment_message call that
         //     falls back to BLE_MAX_FRAGMENT_SIZE because the recipient
-        //     has no stored per-peer MTU
+        //     is a registered direct peer with no stored per-peer MTU
+        //     (the contract-break case)
         //   - NOT increment once an MTU has been recorded for that peer
+        //   - NOT increment when the recipient is not a registered
+        //     direct peer (the benign send/on_peer_lost race — see
+        //     `test_ble_fragment_fallback_count_ignores_teardown_race`)
         let transport = BleTransport::new("test-device");
         transport.on_peer_discovered(peer_device("bob"));
         assert_eq!(transport.fragment_fallback_count(), 0);
 
-        // No MTU stored for "bob" — must fall back and increment.
+        // No MTU stored for "bob" but it IS a registered direct peer —
+        // this is the contract-break shape and must increment.
         let msg = small_message();
         transport.fragment_message(&msg).unwrap();
         assert_eq!(transport.fragment_fallback_count(), 1);
@@ -1457,10 +1497,86 @@ mod tests {
         transport.fragment_message(&msg).unwrap();
         assert_eq!(transport.fragment_fallback_count(), 2);
 
-        // Clearing the MTU re-opens the fallback window.
+        // Clearing the MTU re-opens the fallback window for a still-
+        // registered peer — increment again.
         transport.clear_peer_mtu("bob");
         transport.fragment_message(&msg).unwrap();
         assert_eq!(transport.fragment_fallback_count(), 3);
+    }
+
+    #[test]
+    fn test_ble_fragment_fallback_count_ignores_teardown_race() {
+        // Benign send/on_peer_lost race: `send()` validates and
+        // enqueues while the peer is live, then `on_peer_lost` drops
+        // both `peers` and `peer_mtus` in lockstep, then
+        // `get_next_fragment` pops the queued message and calls
+        // `fragment_message`. The miss branch must NOT increment
+        // `fragment_fallback_count` in this shape, because the
+        // invariant (MTU-before-discover) was not violated — the
+        // peer simply evaporated mid-send. Counting this case would
+        // drown the real signal out on every disconnect with
+        // in-flight sends.
+        let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 400);
+        assert_eq!(transport.fragment_fallback_count(), 0);
+
+        // Simulate the peer disappearing between `send()` enqueue and
+        // `get_next_fragment` fragmentation. `fragment_message` is
+        // called directly (mirroring the code path inside
+        // `get_next_fragment`) for a recipient that is neither in
+        // `peers` nor in `peer_mtus`.
+        transport.on_peer_lost("bob");
+        let msg = small_message();
+        transport.fragment_message(&msg).unwrap();
+
+        assert_eq!(
+            transport.fragment_fallback_count(),
+            0,
+            "teardown race must not tick the contract-break counter"
+        );
+    }
+
+    #[test]
+    fn test_ble_golden_path_handshake_never_falls_back() {
+        // Pins the MTU-before-discover ordering invariant from the
+        // Rust side. Both platform layers MUST call
+        // `set_peer_mtu` before `on_peer_discovered` so that by the
+        // time any fragmenting send can reach a live peer the MTU
+        // is already on file — see `BleManager.swift`
+        // (`didUpdateValueFor` DEVICE_ID branch: `bleSetPeerMtu`
+        // precedes `blePeerDiscovered`) and
+        // `BleTransportFacade.kt` (`handleDeviceIdRead` flushes
+        // staged MTU via `onDeviceIdResolved` before
+        // `blePeerDiscovered`). A regression that swaps the order
+        // on either platform would let the first send fall back,
+        // and with `peers.contains_key` now gating the counter,
+        // that exact shape (registered direct peer + no MTU on
+        // file) is what this test pins.
+        //
+        // If this test starts failing, either a platform layer
+        // reordered its handshake OR a refactor introduced a
+        // recipient -> device_id translation that breaks the
+        // keying contract. Do NOT "fix" by registering an MTU
+        // inside this test — go find the regression.
+        let transport = BleTransport::new("test-device");
+
+        // Golden ordering: MTU first, then peer-discovered — same
+        // as the platforms.
+        transport.set_peer_mtu("bob", 400);
+        transport.on_peer_discovered(peer_device("bob"));
+
+        let msg = small_message();
+        let fragments = transport.fragment_message(&msg).unwrap();
+        assert!(!fragments.is_empty());
+
+        assert_eq!(
+            transport.fragment_fallback_count(),
+            0,
+            "golden-path handshake must not fall back — the \
+             platform-side MTU-before-discover invariant regressed, \
+             or the recipient -> device_id keying contract broke"
+        );
     }
 
     #[test]

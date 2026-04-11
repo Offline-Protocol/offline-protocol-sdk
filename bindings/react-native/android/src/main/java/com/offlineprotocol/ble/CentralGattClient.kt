@@ -366,6 +366,26 @@ internal class CentralGattClient(
                     "MTU watchdog fired",
                     mapOf("address" to address, "timeoutMs" to MTU_WATCHDOG_MS),
                 )
+                // Re-entrancy note: this block runs on the main handler
+                // while an `onMtuChanged` callback for the same `gatt`
+                // may still be dispatched by the binder GATT thread
+                // moments later. That race is safe because:
+                //   - The `mtuInFlight.remove(...) != null` CAS above
+                //     means a concurrent onMtuChanged will observe
+                //     `claimed == false` and divert to the late-
+                //     callback branch (which re-gates on
+                //     `getGatt(address) != null`), rather than re-
+                //     entering the handshake chain under our feet.
+                //   - `closeGattClient` tolerates being called while
+                //     the binder thread holds a reference to the same
+                //     `gatt` instance — Android's BLE stack serialises
+                //     GATT operations per-client internally, and
+                //     `closeGattClient` only manipulates our own
+                //     per-address registry + calls `gatt.close()`,
+                //     which is documented as thread-safe.
+                //   - `readDeviceIdCharacteristicOrClose` issues exactly
+                //     one GATT op, which the stack queues behind any
+                //     still-in-flight op on the same gatt.
                 // Re-fetch the service — the cached local may still be
                 // valid, but going through `gatt.getService` is resilient
                 // if the stack tore it down underneath us.
@@ -843,19 +863,31 @@ internal class CentralGattClient(
             )
         }
 
-        // Flush any MTU that arrived before we knew the peer's device id
-        // BEFORE announcing the peer. The facade stages values from
-        // [onPeerMtuNegotiated] keyed by address; this is the point at
-        // which we have the identifier Rust needs to key its per-peer map,
-        // so the facade can call bleSetPeerMtu safely. Running the flush
-        // first guarantees the very first fragment to this peer sizes
-        // against the negotiated value instead of racing against the
-        // 185-byte fallback floor during the brief window between
-        // blePeerDiscovered and bleSetPeerMtu.
+        // ORDERING INVARIANT — DO NOT REORDER.
+        //
+        // `onDeviceIdResolved` (which flushes the staged MTU via
+        // `BleTransportFacade.flushPeerMtu` → `bleSetPeerMtu`) MUST
+        // run before `protocol.blePeerDiscovered` below. This is
+        // the entire point of commit ac8cce8: any fragmenting send
+        // that lands between announcing the peer to the protocol
+        // layer and flushing the MTU into the Rust transport will
+        // key-miss `peer_mtus`, fall back to the 185-byte floor,
+        // and silently waste ~60% of the negotiated BLE 5
+        // bandwidth for every fragment in that window. The Rust
+        // side pins this from its end via
+        // `test_ble_golden_path_handshake_never_falls_back` and
+        // the `ble_fragment_fallback_count` telemetry counter,
+        // which fires the moment a registered peer has to fall
+        // back.
+        //
+        // If you are refactoring this function and think these two
+        // calls should swap "for clarity", don't.
         host.onDeviceIdResolved(address, deviceIdValue)
 
         val rssi = host.rssiFor(address) ?: (-60).toShort()
         try {
+            // ORDERING INVARIANT: this line MUST come AFTER
+            // `host.onDeviceIdResolved` above.
             host.protocol.blePeerDiscovered(deviceIdValue, rssi)
         } catch (e: Exception) {
             Log.e(TAG, "Error notifying peer discovered", e)

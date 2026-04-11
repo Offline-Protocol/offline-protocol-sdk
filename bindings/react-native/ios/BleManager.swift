@@ -2556,14 +2556,26 @@ extension BleManager: CBPeripheralDelegate {
                 connections.setCentralDeviceId(deviceId, for: peripheral.identifier)
                 connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
 
-                // Push the auto-negotiated ATT payload size into the Rust
-                // transport BEFORE announcing the peer, so the very first
-                // fragment to this peer sizes against the negotiated value
-                // instead of racing against the 185-byte fallback floor.
-                // CoreBluetooth performs MTU negotiation automatically on
-                // connect and exposes the already header-adjusted max-write
-                // length as a stable property — we just read it once at the
-                // moment we know the device id.
+                // ORDERING INVARIANT — DO NOT REORDER.
+                //
+                // `bleSetPeerMtu` MUST run before `blePeerDiscovered`.
+                // This is the entire point of commit ac8cce8: any
+                // fragmenting send that lands between announcing the
+                // peer to the protocol layer and flushing the MTU
+                // into the Rust transport will key-miss `peer_mtus`,
+                // fall back to the 185-byte floor, and silently
+                // waste ~60% of the negotiated BLE 5 bandwidth for
+                // every fragment in that window. The Rust side pins
+                // this from its end via
+                // `test_ble_golden_path_handshake_never_falls_back`
+                // and the `ble_fragment_fallback_count` telemetry
+                // counter, which fires the moment a registered peer
+                // has to fall back.
+                //
+                // CoreBluetooth performs MTU negotiation automatically
+                // on connect and exposes the already header-adjusted
+                // max-write length as a stable property — we just
+                // read it once at the moment we know the device id.
                 let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
                 do {
                     try self.protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(maxPayload))
@@ -2579,6 +2591,10 @@ extension BleManager: CBPeripheralDelegate {
                     ])
                 }
 
+                // ORDERING INVARIANT: this line MUST come AFTER
+                // `bleSetPeerMtu` above. See comment block preceding
+                // the MTU flush. If you are tempted to move this
+                // earlier "for clarity", don't.
                 let rssi = peripheralRSSI[peripheral.identifier] ?? -60
                 try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
                 let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: deviceId) ?? .member

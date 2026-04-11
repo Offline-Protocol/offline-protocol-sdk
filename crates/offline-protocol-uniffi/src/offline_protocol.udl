@@ -503,10 +503,14 @@ interface OfflineProtocol {
     u64 ble_undersized_mtu_reports();
 
     // Monotonic lifetime counter of fragment_message calls that fell back
-    // to the Rust fragment-size floor because no per-peer MTU was on file.
-    // A small steady-state value is normal; a sustained non-trivial rate
-    // signals the recipient → device_id keying contract is broken and
-    // every fragmenting send is silently regressing to the 185-byte floor.
+    // to the Rust fragment-size floor because no per-peer MTU was on file
+    // AND the recipient is still a registered direct BLE peer. In healthy
+    // operation this should remain zero — both platforms push MTU before
+    // announcing the peer, so by the time a send can reach a live peer
+    // the MTU is already on file. Non-zero means either the MTU-before-
+    // discover ordering invariant regressed, or the recipient → device_id
+    // keying contract broke — every fragmenting send to live peers is
+    // then silently regressing to the 185-byte floor.
     u64 ble_fragment_fallback_count();
 
     // Internet transport operations
