@@ -1284,7 +1284,10 @@ public class BleManager: NSObject, TransportManager {
         do {
             try protocolInstance.blePeerLost(peerId: deviceId)
         } catch {
-            print("[BleManager] blePeerLost failed for \(deviceId): \(error)")
+            emitDiagnostic("warning", "blePeerLost failed", context: [
+                "deviceId": deviceId,
+                "error": error.localizedDescription,
+            ])
         }
     }
 
