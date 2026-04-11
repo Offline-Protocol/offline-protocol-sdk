@@ -169,23 +169,31 @@ impl BleTransport {
     ///
     /// The platform layer passes the already-header-adjusted value — iOS via
     /// `CBPeripheral.maximumWriteValueLength(for:)`, Android via
-    /// `onMtuChanged` followed by `mtu - 3`. Values are clamped to
-    /// [`BLE_MAX_FRAGMENT_SIZE`, [`MAX_REASONABLE_BLE_PAYLOAD`]] to protect
-    /// the fragmenter from buggy native layers reporting nonsensical sizes.
+    /// `onMtuChanged` followed by `mtu - 3`. Accepted values are clamped to
+    /// [`MAX_REASONABLE_BLE_PAYLOAD`] on the high end to protect the
+    /// fragmenter from native layers reporting nonsensical sizes.
     ///
-    /// **Note on the lower-bound clamp:** a peer reporting a payload below
-    /// `BLE_MAX_FRAGMENT_SIZE` is clamped *up*, not rejected. This encodes
-    /// the assumption that we will never operate on a link whose real usable
-    /// payload is smaller than the fallback floor — valid in practice
-    /// because both the iOS and Android paths request the BLE-5 maximum ATT
-    /// MTU (517), and every modern controller we target negotiates well
-    /// above 188 (185 + 3-byte ATT header). If that assumption is ever
-    /// invalidated (e.g. by supporting legacy peripherals pinned to the
-    /// 23-byte minimum ATT MTU), the clamp will cause the fragmenter to
-    /// produce chunks the controller cannot transmit — at which point the
-    /// lower bound should be removed and the fallback value revisited.
+    /// **Undersized values are rejected, not clamped up.** A report below
+    /// [`BLE_MAX_FRAGMENT_SIZE`] means the link's real usable payload is
+    /// smaller than our fallback floor — storing a clamped-up 185 would
+    /// cause the fragmenter to emit chunks the controller cannot transmit
+    /// and every fragment to that peer would be silently dropped. We warn
+    /// and leave the entry unset so [`Self::peer_mtu`] falls back to
+    /// [`BLE_MAX_FRAGMENT_SIZE`], which is self-consistent with the
+    /// invariant that we do not operate below that floor on the platforms
+    /// we target (both iOS and Android request the BLE-5 maximum ATT MTU
+    /// and every modern controller negotiates well above 188).
     pub fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
-        let clamped = max_payload.clamp(BLE_MAX_FRAGMENT_SIZE, MAX_REASONABLE_BLE_PAYLOAD);
+        if max_payload < BLE_MAX_FRAGMENT_SIZE {
+            tracing::warn!(
+                peer = %peer_id,
+                max_payload,
+                floor = BLE_MAX_FRAGMENT_SIZE,
+                "ble: ignoring undersized MTU report; keeping fallback"
+            );
+            return;
+        }
+        let clamped = max_payload.min(MAX_REASONABLE_BLE_PAYLOAD);
         tracing::debug!(
             peer = %peer_id,
             raw = max_payload,
@@ -240,9 +248,13 @@ impl BleTransport {
     }
 
     /// Called when a peer device is lost.
+    ///
+    /// Also drops any stored per-peer MTU so a reconnect cannot observe a
+    /// stale value from the previous link. Platforms may still call
+    /// [`Self::clear_peer_mtu`] directly for mid-link renegotiation paths.
     pub fn on_peer_lost(&self, device_id: &str) {
-        let mut peers = self.peers.lock().unwrap();
-        peers.remove(device_id);
+        self.peers.lock().unwrap().remove(device_id);
+        self.peer_mtus.lock().unwrap().remove(device_id);
     }
 
     /// Called when a message is received from a peer.
@@ -405,7 +417,7 @@ impl BleTransport {
 
         let recipient = message.recipient.as_str();
         let mtu = self.peer_mtu(recipient);
-        tracing::debug!(
+        tracing::trace!(
             peer = %recipient,
             mtu,
             "ble: selected fragment payload size"
@@ -951,16 +963,41 @@ mod tests {
         transport.set_peer_mtu("alice", 244);
         assert_eq!(transport.peer_mtu("alice"), 244);
 
-        // Undersized value clamped up to the fallback floor.
+        // Undersized value is rejected outright — no entry is stored, so
+        // peer_mtu falls back to BLE_MAX_FRAGMENT_SIZE rather than
+        // recording a clamped-up 185 that the controller cannot honor.
         transport.set_peer_mtu("bob", 20);
         assert_eq!(transport.peer_mtu("bob"), BLE_MAX_FRAGMENT_SIZE);
+        assert!(
+            !transport.peer_mtus.lock().unwrap().contains_key("bob"),
+            "undersized MTU report must not be stored"
+        );
 
         // Oversized value clamped down to MAX_REASONABLE_BLE_PAYLOAD.
         transport.set_peer_mtu("carol", 9999);
         assert_eq!(transport.peer_mtu("carol"), MAX_REASONABLE_BLE_PAYLOAD);
 
+        // Exact floor is accepted and stored.
+        transport.set_peer_mtu("dave", BLE_MAX_FRAGMENT_SIZE);
+        assert_eq!(transport.peer_mtu("dave"), BLE_MAX_FRAGMENT_SIZE);
+        assert!(transport.peer_mtus.lock().unwrap().contains_key("dave"));
+
         // Per-peer isolation.
         assert_eq!(transport.peer_mtu("alice"), 244);
+    }
+
+    #[test]
+    fn test_ble_on_peer_lost_clears_stored_mtu() {
+        let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("alice"));
+        transport.set_peer_mtu("alice", 400);
+        assert_eq!(transport.peer_mtu("alice"), 400);
+
+        transport.on_peer_lost("alice");
+        // Peer map and MTU map must drop in lockstep so a reconnect cannot
+        // observe a stale value from the previous link.
+        assert!(transport.get_peer("alice").is_none());
+        assert_eq!(transport.peer_mtu("alice"), BLE_MAX_FRAGMENT_SIZE);
     }
 
     #[test]

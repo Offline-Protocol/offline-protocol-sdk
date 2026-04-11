@@ -408,11 +408,12 @@ internal class CentralGattClient(
                 // Watchdog fired first and already resumed the handshake at
                 // the fallback fragment size. Don't re-enter the chain, but
                 // still forward a successful negotiation so the facade can
-                // flush the real payload size into Rust — the facade's
-                // onPeerMtuNegotiated handles the already-announced-peer
-                // case by flushing immediately. Dropping the value here
-                // would pin this link to the 185-byte floor for its
-                // remaining lifetime.
+                // flush the real payload size into Rust — see
+                // BleTransportFacade.onPeerMtuNegotiated, which stages the
+                // payload and, if the device id has already been resolved
+                // for this address, calls flushPeerMtu immediately.
+                // Dropping the value here would pin this link to the
+                // 185-byte floor for its remaining lifetime.
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
                     Log.i(TAG, "Late onMtuChanged for $address after watchdog: mtu=$mtu payload=$maxPayload — forwarding to facade")
