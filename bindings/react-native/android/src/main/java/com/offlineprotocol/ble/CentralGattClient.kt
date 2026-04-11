@@ -334,8 +334,10 @@ internal class CentralGattClient(
          * (`requestMtu` returned true, real `onMtuChanged` fires) resumes
          * via [onMtuChanged]; the error paths resume via
          * [readDeviceIdCharacteristicOrClose] under the controller-default
-         * MTU. Main-thread only; safe to call only from the GATT callback
-         * thread the rest of `onServicesDiscovered` runs on.
+         * MTU. Called from the GATT binder callback thread (the same
+         * thread as the rest of [onServicesDiscovered]); the watchdog
+         * Runnable it arms runs on [mainHandler] instead, and the two
+         * race to claim the `mtuInFlight` slot via ConcurrentHashMap CAS.
          */
         private fun requestPeerMtuOrResumeChain(
             gatt: BluetoothGatt,
@@ -806,6 +808,17 @@ internal class CentralGattClient(
             )
         }
 
+        // Flush any MTU that arrived before we knew the peer's device id
+        // BEFORE announcing the peer. The facade stages values from
+        // [onPeerMtuNegotiated] keyed by address; this is the point at
+        // which we have the identifier Rust needs to key its per-peer map,
+        // so the facade can call bleSetPeerMtu safely. Running the flush
+        // first guarantees the very first fragment to this peer sizes
+        // against the negotiated value instead of racing against the
+        // 185-byte fallback floor during the brief window between
+        // blePeerDiscovered and bleSetPeerMtu.
+        host.onDeviceIdResolved(address, deviceIdValue)
+
         val rssi = host.rssiFor(address) ?: (-60).toShort()
         try {
             host.protocol.blePeerDiscovered(deviceIdValue, rssi)
@@ -813,13 +826,6 @@ internal class CentralGattClient(
             Log.e(TAG, "Error notifying peer discovered", e)
             diagnosticEmitter("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
-
-        // Flush any MTU that arrived before we knew the peer's device id.
-        // The facade stages values from [onPeerMtuNegotiated] keyed by
-        // address; this is the point at which we have the identifier Rust
-        // needs to key its per-peer map, so the facade can call
-        // bleSetPeerMtu safely.
-        host.onDeviceIdResolved(address, deviceIdValue)
 
         // Kick the next GATT op (identity read) BEFORE draining the pending
         // fragment queue. Android's BLE stack runs the read on its own

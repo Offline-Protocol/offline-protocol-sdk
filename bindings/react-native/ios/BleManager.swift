@@ -2556,16 +2556,14 @@ extension BleManager: CBPeripheralDelegate {
                 connections.setCentralDeviceId(deviceId, for: peripheral.identifier)
                 connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
 
-                let rssi = peripheralRSSI[peripheral.identifier] ?? -60
-                try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
-
                 // Push the auto-negotiated ATT payload size into the Rust
-                // transport so its fragmenter sizes outbound chunks per peer
-                // instead of using the 185-byte fallback floor. Unlike
-                // Android, CoreBluetooth performs MTU negotiation
-                // automatically on connect and exposes the already
-                // header-adjusted max-write length as a stable property — we
-                // just read it once at the moment we know the device id.
+                // transport BEFORE announcing the peer, so the very first
+                // fragment to this peer sizes against the negotiated value
+                // instead of racing against the 185-byte fallback floor.
+                // CoreBluetooth performs MTU negotiation automatically on
+                // connect and exposes the already header-adjusted max-write
+                // length as a stable property — we just read it once at the
+                // moment we know the device id.
                 let maxPayload = peripheral.maximumWriteValueLength(for: .withoutResponse)
                 do {
                     try self.protocolInstance.bleSetPeerMtu(peerId: deviceId, maxPayload: UInt32(maxPayload))
@@ -2582,6 +2580,9 @@ extension BleManager: CBPeripheralDelegate {
                         "error": error.localizedDescription,
                     ])
                 }
+
+                let rssi = peripheralRSSI[peripheral.identifier] ?? -60
+                try? self.protocolInstance.blePeerDiscovered(peerId: deviceId, rssi: rssi)
                 let role = connections.consumePendingRole(for: peripheral.identifier) ?? connections.connectionRole(for: deviceId) ?? .member
                 meshController.registerConnection(peerId: deviceId, role: role)
                 connections.setConnectionRole(role, for: deviceId)
