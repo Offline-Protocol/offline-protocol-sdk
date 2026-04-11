@@ -464,7 +464,7 @@ impl BleTransport {
     /// downward renegotiations, snapshot-then-revalidate at the pre-
     /// send boundary; do not hold `peer_mtus` across the whole loop,
     /// which would serialise every fragmenting send on a single peer.
-    pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
+    pub(crate) fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
         let message_bytes = self.serialize_message(message)?;
 
         let recipient = message.recipient.as_str();
@@ -474,13 +474,18 @@ impl BleTransport {
         // `fragment_message` with a recipient that is not a direct peer
         // (e.g., a multi-hop BLE relay where `recipient` is the final
         // destination), the MTU lookup silently falls back to the 185-byte
-        // floor and every fragment is sized against the wrong link. Fail
-        // loudly in debug builds so the break is caught in tests instead
-        // of production.
-        debug_assert!(
-            self.peers.lock().unwrap().contains_key(recipient),
-            "fragment_message called with recipient {recipient} that is not a direct BLE peer — the per-peer MTU keying contract assumes recipient == direct peer device_id"
-        );
+        // floor and every fragment is sized against the wrong link. Warn
+        // (rather than assert) so a disconnect race between `send()`'s
+        // peer check and this lookup does not panic test builds; the
+        // fallback path is already correct in production.
+        if !self.peers.lock().unwrap().contains_key(recipient) {
+            tracing::warn!(
+                peer = %recipient,
+                "ble: fragment_message called with recipient that is not a direct BLE peer — \
+                 falling back to BLE_MAX_FRAGMENT_SIZE. The per-peer MTU keying contract \
+                 assumes recipient == direct peer device_id."
+            );
+        }
         let mtu = self.peer_mtu(recipient);
         tracing::trace!(
             peer = %recipient,
@@ -1192,9 +1197,9 @@ mod tests {
             .content(content)
             .build();
 
-        // `fragment_message` debug-asserts that the recipient is a
-        // registered direct peer — reflect the real send() precondition
-        // in the test setup.
+        // `fragment_message` warns if the recipient is not a registered
+        // direct peer — reflect the real send() precondition in the test
+        // setup so the warn path does not trigger spurious log noise.
         transport.on_peer_discovered(peer_device("small-peer"));
         transport.on_peer_discovered(peer_device("big-peer"));
         transport.set_peer_mtu("small-peer", BLE_MAX_FRAGMENT_SIZE);

@@ -1887,6 +1887,12 @@ impl OfflineProtocol {
     /// `CBPeripheral.maximumWriteValueLength(for: .withoutResponse)`, and
     /// Android subtracts the 3-byte ATT overhead from `onMtuChanged`'s value.
     /// The Rust transport clamps to [BLE_MAX_FRAGMENT_SIZE, MAX_REASONABLE_BLE_PAYLOAD].
+    ///
+    /// If the BLE transport is not registered or not a `BleTransport`
+    /// (both meaning "BLE not configured on this instance"), the call is
+    /// a warn-and-drop no-op rather than an error — the platform layer
+    /// should be free to report MTUs unconditionally without having to
+    /// branch on transport configuration.
     pub fn ble_set_peer_mtu(&self, peer_id: String, max_payload: u32) -> Result<(), ProtocolError> {
         let protocol = self.lock_inner()?;
         if let Some(transport_arc) = protocol
@@ -1899,9 +1905,11 @@ impl OfflineProtocol {
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 ble_transport.set_peer_mtu(&peer_id, max_payload as usize);
             } else {
-                return Err(ProtocolError::Other(
-                    "BLE transport not available or wrong type".to_string(),
-                ));
+                tracing::warn!(
+                    %peer_id,
+                    max_payload,
+                    "ble_set_peer_mtu: BLE transport registered but wrong type; ignoring"
+                );
             }
         } else {
             tracing::warn!(
@@ -1914,6 +1922,10 @@ impl OfflineProtocol {
     }
 
     /// BLE: Forget the MTU for a peer (called on disconnect).
+    ///
+    /// Mirrors [`Self::ble_set_peer_mtu`] — both "BLE not configured"
+    /// shapes warn-and-return-Ok so platform teardown paths can call
+    /// unconditionally.
     pub fn ble_clear_peer_mtu(&self, peer_id: String) -> Result<(), ProtocolError> {
         let protocol = self.lock_inner()?;
         if let Some(transport_arc) = protocol
@@ -1926,9 +1938,10 @@ impl OfflineProtocol {
             if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
                 ble_transport.clear_peer_mtu(&peer_id);
             } else {
-                return Err(ProtocolError::Other(
-                    "BLE transport not available or wrong type".to_string(),
-                ));
+                tracing::warn!(
+                    %peer_id,
+                    "ble_clear_peer_mtu: BLE transport registered but wrong type; ignoring"
+                );
             }
         } else {
             tracing::warn!(
@@ -1937,6 +1950,30 @@ impl OfflineProtocol {
             );
         }
         Ok(())
+    }
+
+    /// BLE: Monotonic count of undersized MTU reports since transport
+    /// creation.
+    ///
+    /// A non-zero value indicates that at least one peer reported a max
+    /// usable fragment payload below the Rust transport's fallback floor
+    /// and is now being served the floor — which is *higher* than the
+    /// real link capacity, so outbound writes to that peer are dropped
+    /// by the controller. Surface in dashboards to detect controllers
+    /// that violate the target-platform assumption. Returns 0 when the
+    /// BLE transport is not registered.
+    pub fn ble_undersized_mtu_reports(&self) -> u64 {
+        let protocol = recover_mutex(&self.inner, "inner");
+        if let Some(transport_arc) = protocol
+            .transport_manager()
+            .get_transport(CoreTransportType::BLE)
+        {
+            let transport = recover_mutex(&transport_arc, "transport");
+            if let Some(ble_transport) = transport.as_any().downcast_ref::<BleTransport>() {
+                return ble_transport.undersized_mtu_reports();
+            }
+        }
+        0
     }
 
     /// BLE: Fragment received

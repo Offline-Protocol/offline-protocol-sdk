@@ -495,7 +495,13 @@ interface OfflineProtocol {
 
     [Throws=ProtocolError]
     void ble_clear_peer_mtu(string peer_id);
-    
+
+    // Monotonic lifetime counter of undersized MTU reports (< BLE_MAX_FRAGMENT_SIZE).
+    // Non-zero means at least one peer's real link capacity is below the Rust
+    // fallback floor — outbound writes to that peer are being dropped by the
+    // controller. Surface in dashboards.
+    u64 ble_undersized_mtu_reports();
+
     // Internet transport operations
     [Throws=ProtocolError]
     void internet_status_changed(boolean is_connected);
