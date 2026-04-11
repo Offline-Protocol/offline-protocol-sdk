@@ -291,6 +291,18 @@ class BleTransportFacade(
                     mainHandler.post {
                         if (shuttingDown) return@post
                         assertMainThread("onPeerMtuNegotiated.stage")
+                        // Re-check after the main-hop: by the time we
+                        // run, teardown may have completed (disconnect,
+                        // give-up, stop) and removed the gatt client
+                        // from the registry. Staging in that window
+                        // would leak an entry in [peerMaxPayloads] that
+                        // no subsequent teardown path would clear, and
+                        // a reconnect on the same BLE address could
+                        // then observe a stale value from the previous
+                        // session. Drop the stage silently.
+                        if (connections.getGatt(address) == null) {
+                            return@post
+                        }
                         peerMaxPayloads[address] = maxPayload
                         // If the reverse GATT read has already landed and
                         // resolved the device id for this address, flush

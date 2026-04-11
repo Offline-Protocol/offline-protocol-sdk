@@ -1268,23 +1268,23 @@ public class BleManager: NSObject, TransportManager {
     }
 
     /// Tears down the protocol-side state for a peer that has been lost —
-    /// routing entries, the BLE peer-lost signal, and the negotiated MTU
-    /// slot. Every disconnect/eviction/give-up path funnels through here
-    /// so the three UniFFI calls stay in lockstep. Local bookkeeping
-    /// (`connections`, `meshController`, `refreshSelfMetrics`, etc.) is
-    /// intentionally left at the call site because not every path removes
-    /// the same local state — only the protocol-side teardown is uniform.
+    /// routing entries and the BLE peer-lost signal. Every
+    /// disconnect/eviction/give-up path funnels through here so the two
+    /// UniFFI calls stay in lockstep. Local bookkeeping (`connections`,
+    /// `meshController`, `refreshSelfMetrics`, etc.) is intentionally
+    /// left at the call site because not every path removes the same
+    /// local state — only the protocol-side teardown is uniform.
+    ///
+    /// `blePeerLost` also drops the per-peer MTU entry inside the Rust
+    /// transport, so no separate `bleClearPeerMtu` call is needed here.
+    /// For mid-link renegotiation paths that need to drop the MTU
+    /// without declaring the peer lost, call `bleClearPeerMtu` directly.
     private func notifyBlePeerLost(deviceId: String) {
         protocolInstance.removeNeighborRoutes(neighborId: deviceId)
         do {
             try protocolInstance.blePeerLost(peerId: deviceId)
         } catch {
             print("[BleManager] blePeerLost failed for \(deviceId): \(error)")
-        }
-        do {
-            try protocolInstance.bleClearPeerMtu(peerId: deviceId)
-        } catch {
-            print("[BleManager] bleClearPeerMtu failed for \(deviceId): \(error)")
         }
     }
 

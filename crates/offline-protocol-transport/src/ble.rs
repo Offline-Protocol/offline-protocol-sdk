@@ -16,6 +16,7 @@ use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus
 use offline_protocol_core::Message;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, SystemTime};
 
@@ -124,6 +125,18 @@ pub struct BleTransport {
     /// silently fall back to [`BLE_MAX_FRAGMENT_SIZE`] for every peer with
     /// no compile-time warning.
     peer_mtus: Arc<Mutex<HashMap<String, usize>>>,
+    /// Count of undersized MTU reports received from the platform layer.
+    ///
+    /// Incremented every time [`Self::set_peer_mtu`] takes the reject
+    /// branch (payload < [`BLE_MAX_FRAGMENT_SIZE`]). A non-zero value in
+    /// production is a signal that the "modern BLE controllers never
+    /// negotiate below 185" assumption is being violated on some link —
+    /// any such peer is silently falling back to the 185-byte floor,
+    /// which is *higher* than the real usable payload, and every
+    /// fragment written to it will be dropped by the controller. Expose
+    /// via [`Self::undersized_mtu_reports`] so fleet telemetry can
+    /// surface it.
+    undersized_mtu_reports: Arc<AtomicU64>,
     /// Platform callback invoked when new fragments are available to send.
     /// Called from `send()` after enqueueing — the platform layer should
     /// respond by calling `get_next_fragment()` and performing the BLE write.
@@ -144,6 +157,7 @@ impl BleTransport {
             platform_handle: Arc::new(Mutex::new(None)),
             fragment_buffers: Arc::new(Mutex::new(HashMap::new())),
             peer_mtus: Arc::new(Mutex::new(HashMap::new())),
+            undersized_mtu_reports: Arc::new(AtomicU64::new(0)),
             on_fragments_available: Arc::new(Mutex::new(None)),
         }
     }
@@ -190,6 +204,7 @@ impl BleTransport {
     /// above 188).
     pub fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
         if max_payload < BLE_MAX_FRAGMENT_SIZE {
+            self.undersized_mtu_reports.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 peer = %peer_id,
                 max_payload,
@@ -228,6 +243,18 @@ impl BleTransport {
             .get(peer_id)
             .copied()
             .unwrap_or(BLE_MAX_FRAGMENT_SIZE)
+    }
+
+    /// Monotonic count of undersized MTU reports since transport creation.
+    ///
+    /// A non-zero value means at least one peer reported a max usable
+    /// payload below [`BLE_MAX_FRAGMENT_SIZE`] and is now being served
+    /// the fallback floor — which is *higher* than the real link
+    /// capacity, so outbound writes to that peer are being dropped by
+    /// the controller. Surface in dashboards to detect controllers that
+    /// violate the target-platform assumption.
+    pub fn undersized_mtu_reports(&self) -> u64 {
+        self.undersized_mtu_reports.load(Ordering::Relaxed)
     }
 
     /// Sets the platform-specific handle.
@@ -418,10 +445,42 @@ impl BleTransport {
     /// platform layer uses when reporting negotiated values via
     /// [`Self::set_peer_mtu`]. Falls back to [`BLE_MAX_FRAGMENT_SIZE`] when
     /// no MTU has been reported yet.
+    ///
+    /// **Race window with [`Self::set_peer_mtu`]:** the MTU is read once
+    /// at the top of this function and the lock is released before the
+    /// fragment loop runs. A concurrent `set_peer_mtu` landing between
+    /// the read and the emit produces a single batch of fragments sized
+    /// against the stale value. This is harmless on the common upward-
+    /// renegotiation path (old MTU was ≤ new MTU, so the old-sized
+    /// fragments still fit). The only hazard is a *downward* mid-link
+    /// renegotiation that stays above the floor (e.g. 400 → 200), where
+    /// the in-flight batch may exceed the new link capacity. We accept
+    /// that window rather than widening the critical section because
+    /// (a) BLE controllers almost never renegotiate down, (b) the
+    /// undersized-reject branch already covers the common "drop to
+    /// floor" case, and (c) the reliability layer retransmits any
+    /// dropped fragments under the new MTU — so recovery is automatic.
+    /// If production telemetry ever shows sustained fragment loss on
+    /// downward renegotiations, snapshot-then-revalidate at the pre-
+    /// send boundary; do not hold `peer_mtus` across the whole loop,
+    /// which would serialise every fragmenting send on a single peer.
     pub fn fragment_message(&self, message: &Message) -> Result<Vec<Vec<u8>>> {
         let message_bytes = self.serialize_message(message)?;
 
         let recipient = message.recipient.as_str();
+        // Invariant: `send()` only enqueues messages whose `recipient` is a
+        // directly-connected BLE peer, and the per-peer MTU map is keyed by
+        // the same device-id string. If a future refactor ever calls
+        // `fragment_message` with a recipient that is not a direct peer
+        // (e.g., a multi-hop BLE relay where `recipient` is the final
+        // destination), the MTU lookup silently falls back to the 185-byte
+        // floor and every fragment is sized against the wrong link. Fail
+        // loudly in debug builds so the break is caught in tests instead
+        // of production.
+        debug_assert!(
+            self.peers.lock().unwrap().contains_key(recipient),
+            "fragment_message called with recipient {recipient} that is not a direct BLE peer — the per-peer MTU keying contract assumes recipient == direct peer device_id"
+        );
         let mtu = self.peer_mtu(recipient);
         tracing::trace!(
             peer = %recipient,
@@ -871,10 +930,23 @@ impl Transport for BleTransport {
 
     fn stop(&mut self) -> Result<()> {
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
-        // Drain per-peer MTU cache on teardown so a subsequent start()
-        // cannot observe stale values from the prior session; every
-        // reconnect renegotiates from scratch.
+        // Drain every per-session cache on teardown so a subsequent
+        // start() observes no state from the prior session. Every
+        // reconnect re-runs peer discovery, fragment reassembly, and
+        // MTU negotiation from scratch. Keep the drains in lockstep —
+        // a one-sided drain (e.g. clearing `peer_mtus` but leaving
+        // `peers` intact) would let `send()` pass its peer guard while
+        // the fragmenter silently falls back to the 185-byte floor, or
+        // would let stale reassembly state outlive the peer it came
+        // from. The `undersized_mtu_reports` counter is a monotonic
+        // lifetime metric and is intentionally *not* reset here.
+        self.peers.lock().unwrap().clear();
         self.peer_mtus.lock().unwrap().clear();
+        self.fragment_buffers.lock().unwrap().clear();
+        self.send_queue.lock().unwrap().clear();
+        self.pending_fragments.lock().unwrap().clear();
+        self.receive_queue.lock().unwrap().clear();
+        self.update_queue_metric();
         Ok(())
     }
 }
@@ -1017,8 +1089,7 @@ mod tests {
     #[test]
     fn test_ble_stop_drains_peer_mtus() {
         // stop() must clear per-peer MTUs so a subsequent start() cannot
-        // observe stale values from the prior session. Every per-peer
-        // cache in this file follows the same discipline.
+        // observe stale values from the prior session.
         let mut transport = BleTransport::new("test-device");
         transport.set_peer_mtu("alice", 400);
         transport.set_peer_mtu("bob", 300);
@@ -1030,6 +1101,52 @@ mod tests {
         assert!(transport.peer_mtus.lock().unwrap().is_empty());
         assert_eq!(transport.peer_mtu("alice"), BLE_MAX_FRAGMENT_SIZE);
         assert_eq!(transport.peer_mtu("bob"), BLE_MAX_FRAGMENT_SIZE);
+    }
+
+    #[test]
+    fn test_ble_stop_drains_all_per_session_state() {
+        // stop() must drain every per-session cache in lockstep. A
+        // one-sided drain would let `send()` pass its peer guard while
+        // the fragmenter silently falls back to the 185-byte floor, or
+        // would let stale reassembly state outlive the peer it came
+        // from.
+        let mut transport = BleTransport::new("test-device");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 400);
+        transport.send(&small_message()).unwrap();
+        // Seed a partial reassembly buffer by feeding one of two
+        // fragments from a larger message.
+        let big = Message::builder(
+            UserId::new("alice").unwrap(),
+            UserId::new("bob").unwrap(),
+            AppId::new("app").unwrap(),
+        )
+        .content("z".repeat(600))
+        .build();
+        let frags = transport.fragment_message(&big).unwrap();
+        assert!(frags.len() > 1);
+        transport.on_fragment_received(frags[0].clone()).unwrap();
+        // Queue a received message so the receive_queue is non-empty.
+        transport.on_message_received(small_message());
+
+        assert!(!transport.peers.lock().unwrap().is_empty());
+        assert!(!transport.peer_mtus.lock().unwrap().is_empty());
+        assert!(!transport.fragment_buffers.lock().unwrap().is_empty());
+        assert!(
+            !transport.send_queue.lock().unwrap().is_empty()
+                || !transport.pending_fragments.lock().unwrap().is_empty()
+        );
+        assert!(!transport.receive_queue.lock().unwrap().is_empty());
+
+        transport.stop().unwrap();
+
+        assert!(transport.peers.lock().unwrap().is_empty());
+        assert!(transport.peer_mtus.lock().unwrap().is_empty());
+        assert!(transport.fragment_buffers.lock().unwrap().is_empty());
+        assert!(transport.send_queue.lock().unwrap().is_empty());
+        assert!(transport.pending_fragments.lock().unwrap().is_empty());
+        assert!(transport.receive_queue.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1075,6 +1192,11 @@ mod tests {
             .content(content)
             .build();
 
+        // `fragment_message` debug-asserts that the recipient is a
+        // registered direct peer — reflect the real send() precondition
+        // in the test setup.
+        transport.on_peer_discovered(peer_device("small-peer"));
+        transport.on_peer_discovered(peer_device("big-peer"));
         transport.set_peer_mtu("small-peer", BLE_MAX_FRAGMENT_SIZE);
         transport.set_peer_mtu("big-peer", 500);
 
@@ -1093,8 +1215,10 @@ mod tests {
     #[test]
     fn test_ble_fragment_unknown_peer_uses_fallback() {
         let transport = BleTransport::new("test-device");
-        // small_message() has recipient "bob" — no MTU stored for it, so the
-        // fragmenter must fall back to BLE_MAX_FRAGMENT_SIZE.
+        // "bob" is a registered direct peer, but no MTU has been reported
+        // for it yet — the fragmenter must fall back to
+        // BLE_MAX_FRAGMENT_SIZE.
+        transport.on_peer_discovered(peer_device("bob"));
         let msg = small_message();
         let fragments = transport.fragment_message(&msg).unwrap();
         for fragment in &fragments {
@@ -1189,6 +1313,7 @@ mod tests {
     #[test]
     fn test_ble_single_fragment_roundtrip() {
         let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("bob"));
         transport.set_peer_mtu("bob", 512);
         let msg = small_message();
         let fragments = transport.fragment_message(&msg).unwrap();
@@ -1205,6 +1330,7 @@ mod tests {
     #[test]
     fn test_ble_fragment_roundtrip() {
         let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("bob"));
         let sender = UserId::new("alice").unwrap();
         let recipient = UserId::new("bob").unwrap();
         let app_id = AppId::new("app").unwrap();
@@ -1266,6 +1392,7 @@ mod tests {
     #[test]
     fn test_ble_on_fragment_received_complete_queues_message() {
         let transport = BleTransport::new("test-device");
+        transport.on_peer_discovered(peer_device("bob"));
         transport.set_peer_mtu("bob", 512);
         let msg = small_message();
         let fragments = transport.fragment_message(&msg).unwrap();

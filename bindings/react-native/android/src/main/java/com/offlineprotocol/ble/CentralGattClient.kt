@@ -354,8 +354,10 @@ internal class CentralGattClient(
             val watchdog = Runnable {
                 if (host.isShuttingDown()) return@Runnable
                 // CAS: watchdog only resumes the chain if no real callback
-                // has already claimed this address.
-                val claimed = mtuInFlight.remove(address) == true
+                // has already claimed this address. `remove() != null`
+                // expresses the atomic present-or-absent semantics more
+                // clearly than the Boolean-autoboxed `== true` pattern.
+                val claimed = mtuInFlight.remove(address) != null
                 if (!claimed) return@Runnable
                 mtuWatchdogs.remove(address)
                 Log.w(TAG, "MTU watchdog fired for $address after ${MTU_WATCHDOG_MS}ms — resuming handshake without negotiated MTU")
@@ -403,7 +405,7 @@ internal class CentralGattClient(
             // already fired (and removed the entry) we're the loser of
             // that race — the chain has already been resumed, so drop
             // this late callback on the floor.
-            val claimed = mtuInFlight.remove(address) == true
+            val claimed = mtuInFlight.remove(address) != null
             if (!claimed) {
                 // Watchdog fired first and already resumed the handshake at
                 // the fallback fragment size. Don't re-enter the chain, but
@@ -414,7 +416,20 @@ internal class CentralGattClient(
                 // for this address, calls flushPeerMtu immediately.
                 // Dropping the value here would pin this link to the
                 // 185-byte floor for its remaining lifetime.
-                if (status == BluetoothGatt.GATT_SUCCESS) {
+                //
+                // Gate the forward on the gatt client still being
+                // registered for this address: if teardown has already
+                // run (closeGattClient → removeGatt, or finalizeGivenUpPeer,
+                // or stop), forwarding the stage would leak an entry in
+                // the facade's `peerMaxPayloads` map that no subsequent
+                // teardown path would clear — a reconnect on the same
+                // BLE address could then observe a stale value from the
+                // previous session. `getGatt(address) != null` is true
+                // throughout normal handshake (including the
+                // post-watchdog, pre-CCCD window) and flips false the
+                // moment `closeGattClient` runs.
+                val stillConnected = host.connections.getGatt(address) != null
+                if (status == BluetoothGatt.GATT_SUCCESS && stillConnected) {
                     val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
                     Log.i(TAG, "Late onMtuChanged for $address after watchdog: mtu=$mtu payload=$maxPayload — forwarding to facade")
                     diagnosticEmitter(
@@ -424,7 +439,7 @@ internal class CentralGattClient(
                     )
                     host.onPeerMtuNegotiated(address, maxPayload)
                 } else {
-                    Log.i(TAG, "Late onMtuChanged for $address after watchdog — status=$status, ignoring")
+                    Log.i(TAG, "Late onMtuChanged for $address after watchdog — status=$status stillConnected=$stillConnected, ignoring")
                 }
                 return
             }
