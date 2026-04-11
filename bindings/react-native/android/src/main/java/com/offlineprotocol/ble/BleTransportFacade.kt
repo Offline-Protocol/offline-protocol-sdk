@@ -158,6 +158,11 @@ class BleTransportFacade(
     // Scanner components
     private var bluetoothLeScanner: BluetoothLeScanner? = null
     private var scanCallback: ScanCallback? = null
+    // @Volatile because onScanFailed (binder thread) clears it while the
+    // scan watchdog and stopScanning read it on the main thread. Without
+    // this, a JMM visibility gap can leave the watchdog polling against a
+    // dead scanner.
+    @Volatile
     private var isScanning = false
     
     // Advertiser component (delegates to LeAdvertiser).
@@ -196,9 +201,6 @@ class BleTransportFacade(
     private var identityRefreshRetryScheduled: Boolean = false
     private var identityRefreshRetryDelayMs: Long = IDENTITY_REFRESH_MIN_BACKOFF_MS
     
-    // Verified peer identities (device address -> SignedIdentityData)
-    private val verifiedPeerIdentities = ConcurrentHashMap<String, com.offlineprotocol.mesh.SignedIdentityData>()
-
     // Addresses whose CCCD subscription has been acked by the remote peer.
     // Until the descriptor write lands we can't trust that the peripheral is
     // actually notifying us, so the link is only considered ready to drain
@@ -317,6 +319,12 @@ class BleTransportFacade(
     private val routingCleanupRunnable = object : Runnable {
         override fun run() {
             protocol.cleanupExpiredRoutes()
+            // Evict stale inbound pending fragments independent of traffic.
+            // Without this, a peer that connects, queues fragments while its
+            // device ID is being resolved, then goes silent will leak those
+            // fragments until another peer's fragment triggers the eviction
+            // sweep inside handleReceivedData.
+            cleanupPendingFragments()
             if (state == TransportState.RUNNING) {
                 mainHandler.postDelayed(this, ROUTING_CLEANUP_INTERVAL_MS)
             }
@@ -879,11 +887,20 @@ class BleTransportFacade(
                         else -> "Unknown error $errorCode"
                     }
                     Log.e(TAG, "BLE scan failed: $errorMsg (code=$errorCode)")
-                    isScanning = false
-                    emitDiagnostic("error", "BLE scan failed", mapOf(
-                        "errorCode" to errorCode,
-                        "errorMessage" to errorMsg
-                    ))
+                    // Repost to main so the state mutation and the runnable
+                    // teardown match the threading contract the rest of the
+                    // facade follows. Without cancelling the watchdog and
+                    // connection monitor here, they keep firing against a
+                    // dead scanner.
+                    mainHandler.post {
+                        isScanning = false
+                        cancelScanWatchdog()
+                        cancelConnectionMonitor()
+                        emitDiagnostic("error", "BLE scan failed", mapOf(
+                            "errorCode" to errorCode,
+                            "errorMessage" to errorMsg
+                        ))
+                    }
                 }
             }
             
@@ -2619,20 +2636,21 @@ class BleTransportFacade(
                         if (!discoveryStarted) {
                             // discoverServices returns false when the stack is
                             // busy or the client is in a bad state. The async
-                            // onServicesDiscovered callback will never fire, so
-                            // the connection would sit here forever holding a
-                            // slot. Tear it down and let the reconnect path
-                            // retry cleanly.
+                            // onServicesDiscovered callback will never fire,
+                            // so we close the client synchronously.
+                            //
+                            // This is a permanent drop by design: closeGattClient
+                            // removes the address from `connections` immediately,
+                            // so the STATE_DISCONNECTED callback that follows
+                            // will observe `wasConnected = false` and skip the
+                            // retry-with-backoff path. A fresh advertisement
+                            // (or a later scan rehydration) will trigger a new
+                            // connectToDevice cycle — we don't thrash an already
+                            // sick stack in the meantime.
                             emitDiagnostic("warning", "discoverServices returned false; closing gatt", mapOf(
                                 "address" to address,
                             ))
-                            try {
-                                gatt.disconnect()
-                                gatt.close()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error closing gatt after discoverServices false", e)
-                            }
-                            connections.removeGatt(address)
+                            closeGattClient(gatt, "discover_services_false")
                         }
                     } catch (e: SecurityException) {
                         Log.e(TAG, "Permission denied discovering services", e)
@@ -2680,6 +2698,19 @@ class BleTransportFacade(
                                 refreshSelfMetrics()
                                 connections.removeIdentifiersForAddress(address)
                                 connections.removeConnectionRole(peerId)
+                                // Drop any queued outbound fragments for the
+                                // exhausted peer. blePeerLost has already been
+                                // fired, so these bytes can never deliver;
+                                // leaving them in the map orphans them until
+                                // the 30s eviction timer. Posted to main
+                                // because ArrayDeque contents are main-only.
+                                runOnMain {
+                                    pendingOutboundFragments.remove(peerId)?.let { removed ->
+                                        if (removed.isNotEmpty()) {
+                                            totalPendingOutboundFragments.addAndGet(-removed.size)
+                                        }
+                                    }
+                                }
                                 mainHandler.post {
                                     if (state == TransportState.RUNNING) {
                                         refreshAdvertising("disconnect_max_retries")
@@ -3013,9 +3044,6 @@ class BleTransportFacade(
                 )
                 
                 if (isValid) {
-                    // Store the verified identity
-                    verifiedPeerIdentities[address] = signedIdentity
-                    
                     // Derive the user ID from the public key
                     val derivedUserId = signedIdentity.deriveUserId()
                     Log.i(TAG, "Verified peer identity: $derivedUserId for $address")
