@@ -20,6 +20,17 @@ import java.util.concurrent.atomic.AtomicInteger
  * the invariant used to live in a comment block; it now fails fast on any
  * drift. Tests inject a no-op guard so the class can be exercised in plain
  * JVM unit tests.
+ *
+ * ### Overflow policy
+ *
+ * When [enqueue] would push the per-recipient queue past [maxPerPeer], the
+ * entire queue for that recipient is discarded before the new fragment is
+ * appended. Dropping just the oldest fragment (the previous policy) was
+ * unsafe: fragments are slices of a single application message and
+ * evicting slice 0 of a five-slice message leaves four orphan slices that
+ * would reassemble into garbage at the receiver. Dropping the whole
+ * queue gives clean backpressure at message boundary granularity — we
+ * lose messages that hadn't started delivery yet, but we never split one.
  */
 internal class OutboundFragmentQueue(
     private val mainThreadCheck: () -> Unit = DEFAULT_MAIN_THREAD_CHECK,
@@ -54,20 +65,22 @@ internal class OutboundFragmentQueue(
 
     /**
      * Append a fragment to [recipientId]'s queue. If doing so would exceed
-     * [maxPerPeer], the oldest entry for that recipient is dropped first —
-     * the guarantee is that under backpressure we keep the freshest bytes,
-     * not the stalest.
+     * [maxPerPeer] the entire per-recipient queue is discarded first (see
+     * the class-level overflow policy note). [onDropped] is invoked once
+     * with the total number of fragments evicted, then the new fragment is
+     * appended to a fresh empty queue.
      */
     fun enqueue(recipientId: String, data: ByteArray) {
         mainThreadCheck()
         val queue = queues.getOrPut(recipientId) { ArrayDeque() }
+        if (queue.size >= maxPerPeer) {
+            val dropped = queue.size
+            queue.clear()
+            total.addAndGet(-dropped)
+            onDropped(recipientId, DropReason.CAPPED, dropped)
+        }
         queue.addLast(Entry(data, clock()))
         total.incrementAndGet()
-        if (queue.size > maxPerPeer) {
-            queue.removeFirst()
-            total.decrementAndGet()
-            onDropped(recipientId, DropReason.CAPPED, 1)
-        }
     }
 
     /**

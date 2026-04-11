@@ -270,6 +270,15 @@ class BleTransportFacade(
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
+    // Barrier that gates binder-thread GATT callbacks from mutating shared
+    // state during teardown. Raised synchronously on the main thread at the
+    // top of [stopUnsafe] before any `clear()` call, and lowered at the end
+    // of [stopUnsafe] once state has been reset. Callbacks on other threads
+    // read this before touching `connections`, `linkReady`, or
+    // `pendingFragments`, so a late delivery can no longer observe half-
+    // cleared state.
+    @Volatile private var shuttingDown: Boolean = false
+
     private val logThrottler = LogThrottler()
     
     // Pending fragments waiting for device ID
@@ -290,6 +299,15 @@ class BleTransportFacade(
     // until a device ID is resolved via reverse GATT read). The outbound
     // queue has its own cap baked into [OutboundFragmentQueue.DEFAULT_MAX_PER_PEER].
     private val MAX_PENDING_FRAGMENTS_PER_PEER = 100
+    // Global cap on the number of peers with outstanding pending-fragment
+    // buffers. Bounds total heap growth of the inbound queue under
+    // address-rotation spam. At 32 peers * 100 fragments * ~200 bytes that
+    // puts the worst-case inbound buffer footprint at ~640 KiB.
+    private val MAX_PENDING_FRAGMENT_PEERS = 32
+    // Hard cap on re-drain iterations inside [processPendingFragments] so a
+    // pathologically chatty peer racing with the drain loop cannot pin the
+    // main thread indefinitely.
+    private val MAX_DRAIN_ITERATIONS = 8
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
     private val LOAD_SATURATION_COUNT = 20
     private val MESH_OBSERVATION_TTL_MS = 120_000L
@@ -539,10 +557,15 @@ class BleTransportFacade(
         if (state == TransportState.RUNNING) {
             throw TransportException.AlreadyRunning()
         }
-        
+
         if (!isAvailable()) {
             throw TransportException.NotAvailable("BLE not available on this device")
         }
+
+        // Lower the shutdown barrier for this new session. stopUnsafe leaves
+        // it raised so late binder callbacks from the previous session keep
+        // early-returning; a fresh start must explicitly re-open the gate.
+        shuttingDown = false
         
         // Check permissions with detailed logging
         Log.i(TAG, "Checking Bluetooth permissions (Android ${Build.VERSION.SDK_INT})...")
@@ -665,19 +688,29 @@ class BleTransportFacade(
 
         updateState(TransportState.STOPPING)
 
+        // Raise the shutdown barrier BEFORE clearing any shared state.
+        // Binder-thread GATT callbacks (`handleReceivedData`, connection
+        // state changes, CCCD writes) check this flag and early-return, so
+        // anything arriving after this point cannot observe half-cleared
+        // maps. The flag is @Volatile, which is sufficient because every
+        // reader is a callback that races with a single main-thread writer.
+        shuttingDown = true
+
         // Stop fragment polling — must happen before clearing queues
         mainHandler.removeCallbacks(fragmentPollingRunnable)
 
         // Stop routing cleanup
         mainHandler.removeCallbacks(routingCleanupRunnable)
-        
+
         // Stop scanning
         stopScanning("stop")
-        
+
         // Stop advertising
         stopAdvertising()
-        
-        // Disconnect all GATT clients
+
+        // Disconnect all GATT clients. `disconnect`+`close` are idempotent
+        // and late binder callbacks from still-draining operations are
+        // absorbed by the [shuttingDown] gate above.
         connections.forEachGatt { gatt ->
             try {
                 gatt.disconnect()
@@ -716,7 +749,12 @@ class BleTransportFacade(
 
         updateState(TransportState.STOPPED)
         protocol.bleStatusChanged(false)
-        
+
+        // Leave [shuttingDown] raised until [startUnsafe] explicitly lowers
+        // it. Any late binder callbacks from the previous session that
+        // arrive between stop and a future start must no-op — lowering the
+        // gate here would re-admit them into cleared state.
+
         Log.i(TAG, "BLE Manager stopped")
         emitDiagnostic("info", "BLE transport stopped")
     }
@@ -2130,31 +2168,53 @@ class BleTransportFacade(
     
     private fun handleReceivedData(data: ByteArray, address: String) {
         try {
-            // Get sender device ID
-            val senderId = connections.deviceIdForAddress(address)
-            if (senderId == null) {
-                // Queue fragment to process later when device ID is available
-                synchronized(pendingFragmentsLock) {
-                    val pendingList = pendingFragments.getOrPut(address) { mutableListOf() }
-                    if (pendingList.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
-                        pendingList.removeFirst()
+            if (shuttingDown) return
+            // Resolve the sender device ID and decide queue-vs-direct path
+            // atomically under [pendingFragmentsLock]. Doing the read outside
+            // the lock was racy: a parallel [processPendingFragments] drain
+            // could finish between a "senderId==null" observation here and
+            // the enqueue below, leaving the fragment stranded in a freshly
+            // created list that no drainer would ever revisit.
+            val senderId: String?
+            val queued: Boolean
+            synchronized(pendingFragmentsLock) {
+                val resolved = connections.deviceIdForAddress(address)
+                val existing = pendingFragments[address]
+                val hasPending = existing != null && existing.isNotEmpty()
+                if (resolved == null || hasPending) {
+                    val list = pendingFragments.getOrPut(address) { mutableListOf() }
+                    if (list.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
+                        list.removeFirst()
                     }
-                    pendingList.add(PendingFragment(data, System.currentTimeMillis()))
+                    list.add(PendingFragment(data, System.currentTimeMillis()))
+                    enforcePendingFragmentPeerCapLocked(keepAddress = address)
+                    senderId = resolved
+                    queued = true
+                } else {
+                    senderId = resolved
+                    queued = false
                 }
-                if (logThrottler.shouldLog("queue_pending_$address")) {
-                    Log.d(TAG, "Queued fragment while awaiting device ID for $address")
-                    emitDiagnostic(
-                        "info",
-                        "Queued BLE fragment pending device ID",
-                        mapOf("address" to address, "length" to data.size)
-                    )
-                }
-                
-                // Proactively attempt to resolve the device ID by initiating a client connection
-                bluetoothAdapter?.let { adapter ->
-                    try {
-                        val device = adapter.getRemoteDevice(address)
-                        mainHandler.post {
+            }
+
+            if (queued) {
+                if (senderId == null) {
+                    if (logThrottler.shouldLog("queue_pending_$address")) {
+                        Log.d(TAG, "Queued fragment while awaiting device ID for $address")
+                        emitDiagnostic(
+                            "info",
+                            "Queued BLE fragment pending device ID",
+                            mapOf("address" to address, "length" to data.size)
+                        )
+                    }
+
+                    // Proactively attempt to resolve the device ID by initiating a client connection.
+                    // We're already on a caller-controlled thread (usually a binder GATT callback);
+                    // [connectToDevice] is safe to invoke from any thread, so there is no reason to
+                    // pay an extra main-handler hop here — the old `mainHandler.post` widened the
+                    // queue-vs-drain race window above.
+                    bluetoothAdapter?.let { adapter ->
+                        try {
+                            val device = adapter.getRemoteDevice(address)
                             val hasGattClient = connections.getGatt(device.address) != null
                             val mappedId = connections.deviceIdForAddress(device.address)
                             val now = System.currentTimeMillis()
@@ -2172,60 +2232,50 @@ class BleTransportFacade(
                                 }
                                 connectToDevice(device)
                             }
-                        }
-                    } catch (e: IllegalArgumentException) {
-                        if (logThrottler.shouldLog("resolve_device_error_$address", intervalMs = 10000)) {
-                            Log.w(TAG, "Failed to obtain remote device for address $address", e)
-                            emitDiagnostic(
-                                "warning",
-                                "Failed to resolve BLE device for pending fragment",
-                                mapOf("address" to address, "message" to (e.message ?: "unknown"))
-                            )
+                        } catch (e: IllegalArgumentException) {
+                            if (logThrottler.shouldLog("resolve_device_error_$address", intervalMs = 10000)) {
+                                Log.w(TAG, "Failed to obtain remote device for address $address", e)
+                                emitDiagnostic(
+                                    "warning",
+                                    "Failed to resolve BLE device for pending fragment",
+                                    mapOf("address" to address, "message" to (e.message ?: "unknown"))
+                                )
+                            }
                         }
                     }
                 }
 
-                // Clean up old pending fragments
+                // Clean up old pending fragments across all peers
                 cleanupPendingFragments()
                 return
             }
 
-            // If pending fragments exist for this address, append to maintain FIFO ordering.
-            // processPendingFragments() will handle them all in order.
-            synchronized(pendingFragmentsLock) {
-                val list = pendingFragments[address]
-                if (list != null && list.isNotEmpty()) {
-                    if (list.size >= MAX_PENDING_FRAGMENTS_PER_PEER) {
-                        list.removeFirst()
-                    }
-                    list.add(PendingFragment(data, System.currentTimeMillis()))
-                    return
-                }
-            }
+            // senderId is non-null and no drain was in flight — process directly.
+            val resolvedSenderId: String = senderId!!
 
             lastSeenRssi[address]?.toInt()?.let { observedRssi ->
                 meshController.updatePeerMetrics(
-                    senderId,
+                    resolvedSenderId,
                     MeshController.PeerMetrics(rssi = observedRssi)
                 )
             }
-            meshController.markPeerActive(senderId)
+            meshController.markPeerActive(resolvedSenderId)
             meshController.markPeerActive(deviceId)
 
             // Convert to UByte list
             val bytes = data.map { it.toUByte() }
-            
+
             // Pass to protocol
-            Log.i(TAG, "RECEIVED FRAGMENT from $senderId, size: ${data.size}")
+            Log.i(TAG, "RECEIVED FRAGMENT from $resolvedSenderId, size: ${data.size}")
             emitDiagnostic("info", "Fragment received from BLE", mapOf(
-                "senderId" to senderId,
+                "senderId" to resolvedSenderId,
                 "fragmentSize" to data.size
             ))
-            
+
             try {
-                protocol.bleFragmentReceived(senderId, bytes)
-                Log.i(TAG, "Fragment processed successfully for sender: $senderId")
-                
+                protocol.bleFragmentReceived(resolvedSenderId, bytes)
+                Log.i(TAG, "Fragment processed successfully for sender: $resolvedSenderId")
+
                 // Drain all completed messages (a fragment may complete multiple messages)
                 var completedMessage = protocol.receiveMessage()
                 if (completedMessage == null) {
@@ -2235,16 +2285,16 @@ class BleTransportFacade(
                     Log.i(TAG, "COMPLETE MESSAGE ASSEMBLED FROM FRAGMENTS!")
                     Log.i(TAG, "Received message: $completedMessage")
                     emitDiagnostic("info", "Complete message assembled from fragments", mapOf(
-                        "senderId" to senderId,
+                        "senderId" to resolvedSenderId,
                         "messageContent" to completedMessage
                     ))
-                    learnRouteFromMessage(completedMessage, senderId, address)
+                    learnRouteFromMessage(completedMessage, resolvedSenderId, address)
                     completedMessage = protocol.receiveMessage()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error processing fragment from $senderId: ${e.message}", e)
+                Log.e(TAG, "Error processing fragment from $resolvedSenderId: ${e.message}", e)
                 emitDiagnostic("error", "Error processing received fragment", mapOf(
-                    "senderId" to senderId,
+                    "senderId" to resolvedSenderId,
                     "fragmentSize" to data.size,
                     "error" to (e.message ?: "unknown"),
                     "exception" to e.javaClass.simpleName
@@ -2261,7 +2311,6 @@ class BleTransportFacade(
     
     private fun processPendingFragments(address: String, deviceId: String) {
         deviceIdResolutionAttempts.remove(address)
-        val fragments = synchronized(pendingFragmentsLock) { pendingFragments.remove(address) } ?: return
         val role = connections.consumePendingRole(address) ?: MeshRole.MEMBER
         meshController.registerConnection(deviceId, role)
         connections.setConnectionRole(deviceId, role)
@@ -2273,27 +2322,85 @@ class BleTransportFacade(
                 refreshAdvertising("membership_change")
             }
         }
-        
-        for (fragment in fragments) {
-            try {
-                val bytes = fragment.data.map { it.toUByte() }
-                protocol.bleFragmentReceived(deviceId, bytes)
-                bytesReceived += fragment.data.size
-                fragmentsReceived++
 
-                // Drain all completed messages (a multi-fragment message may complete here)
-                var msg = protocol.receiveMessage()
-                while (msg != null) {
-                    Log.i(TAG, "Complete message assembled from queued fragments for $deviceId")
-                    emitDiagnostic("info", "Complete message assembled from queued fragments", mapOf(
-                        "senderId" to deviceId,
-                        "messageContent" to msg
-                    ))
-                    learnRouteFromMessage(msg, deviceId, address)
-                    msg = protocol.receiveMessage()
+        // Loop-drain: a binder-thread `handleReceivedData` may race with us
+        // and queue a late fragment under [pendingFragmentsLock] after our
+        // first remove but before we return. Re-checking under the lock until
+        // the bucket is empty closes that orphan-fragment window.
+        // [MAX_DRAIN_ITERATIONS] is a defensive cap so a pathologically
+        // chatty peer cannot pin the main thread here indefinitely.
+        var iterations = 0
+        while (iterations < MAX_DRAIN_ITERATIONS) {
+            val fragments = synchronized(pendingFragmentsLock) {
+                pendingFragments.remove(address)
+            }
+            if (fragments.isNullOrEmpty()) break
+            iterations++
+
+            for (fragment in fragments) {
+                try {
+                    val bytes = fragment.data.map { it.toUByte() }
+                    protocol.bleFragmentReceived(deviceId, bytes)
+                    bytesReceived += fragment.data.size
+                    fragmentsReceived++
+
+                    // Drain all completed messages (a multi-fragment message may complete here)
+                    var msg = protocol.receiveMessage()
+                    while (msg != null) {
+                        Log.i(TAG, "Complete message assembled from queued fragments for $deviceId")
+                        emitDiagnostic("info", "Complete message assembled from queued fragments", mapOf(
+                            "senderId" to deviceId,
+                            "messageContent" to msg
+                        ))
+                        learnRouteFromMessage(msg, deviceId, address)
+                        msg = protocol.receiveMessage()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error processing pending fragment", e)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error processing pending fragment", e)
+            }
+        }
+        if (iterations >= MAX_DRAIN_ITERATIONS) {
+            Log.w(TAG, "processPendingFragments hit drain iteration cap for $address")
+            emitDiagnostic(
+                "warning",
+                "Pending-fragment drain iteration cap reached",
+                mapOf("address" to address, "deviceId" to deviceId)
+            )
+        }
+    }
+
+    /**
+     * Must be called while holding [pendingFragmentsLock]. Enforces a hard
+     * upper bound on the number of peers with outstanding pending-fragment
+     * buffers so a hostile scanner rotating random addresses cannot inflate
+     * the map without bound before the 5s cleanup fires.
+     *
+     * Eviction policy: drop the oldest-arriving buffer (by head timestamp)
+     * that is NOT [keepAddress], i.e. never evict the peer we just queued
+     * for. If every remaining bucket is empty we simply drop the entry.
+     */
+    private fun enforcePendingFragmentPeerCapLocked(keepAddress: String) {
+        if (pendingFragments.size <= MAX_PENDING_FRAGMENT_PEERS) return
+        var victimAddress: String? = null
+        var victimTimestamp: Long = Long.MAX_VALUE
+        for ((addr, list) in pendingFragments) {
+            if (addr == keepAddress) continue
+            val headTs = list.firstOrNull()?.timestamp ?: 0L
+            if (headTs < victimTimestamp) {
+                victimTimestamp = headTs
+                victimAddress = addr
+            }
+        }
+        if (victimAddress != null) {
+            pendingFragments.remove(victimAddress)
+            if (logThrottler.shouldLog("pending_peer_cap_evict", intervalMs = 10_000)) {
+                Log.w(TAG, "Pending-fragment peer cap hit; evicting $victimAddress")
+                emitDiagnostic(
+                    "warning",
+                    "Pending-fragment peer cap evicted buffer",
+                    mapOf("victim" to victimAddress!!, "cap" to MAX_PENDING_FRAGMENT_PEERS)
+                )
             }
         }
     }
@@ -2579,14 +2686,23 @@ class BleTransportFacade(
         }
 
         override fun onCentralConnected(device: BluetoothDevice) {
-            mainHandler.post { handleCentralConnectedOnMain(device) }
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleCentralConnectedOnMain(device)
+            }
         }
 
         override fun onCentralDisconnected(device: BluetoothDevice, status: Int) {
-            mainHandler.post { handleCentralDisconnectedOnMain(device, status) }
+            if (shuttingDown) return
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleCentralDisconnectedOnMain(device, status)
+            }
         }
 
         override fun onInboundFragment(device: BluetoothDevice, bytes: ByteArray) {
+            if (shuttingDown) return
             Log.i(TAG, "MESSAGE CHARACTERISTIC WRITE from ${device.address}, processing...")
             emitDiagnostic(
                 "info",
@@ -2597,15 +2713,20 @@ class BleTransportFacade(
                 ),
             )
             val address = device.address
-            mainHandler.post { handleReceivedData(bytes, address) }
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleReceivedData(bytes, address)
+            }
         }
 
         override fun provideDeviceIdBytes(device: BluetoothDevice): ByteArray? {
+            if (shuttingDown) return null
             Log.d(TAG, "Sent device ID to ${device.address}")
             return deviceId.toByteArray(Charsets.UTF_8)
         }
 
         override fun provideIdentityBytes(device: BluetoothDevice): ByteArray? {
+            if (shuttingDown) return null
             // Pure volatile read. Never call updateSignedIdentity() here —
             // it would block this binder thread on the protocol mutex.
             // If the cache isn't primed yet, return null; the central will
@@ -2692,6 +2813,13 @@ class BleTransportFacade(
     
     private val gattClientCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (shuttingDown) {
+                // A stale callback landing mid-teardown must not touch the
+                // shared state the main thread has just cleared. Close the
+                // gatt handle locally so the stack releases its LL slot.
+                try { gatt.close() } catch (_: Exception) {}
+                return
+            }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     val address = gatt.device.address
@@ -2838,6 +2966,10 @@ class BleTransportFacade(
         }
         
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (shuttingDown) {
+                try { gatt.close() } catch (_: Exception) {}
+                return
+            }
             val address = gatt.device.address
             Log.i(TAG, "onServicesDiscovered callback: $address, status=$status (${if (status == BluetoothGatt.GATT_SUCCESS) "SUCCESS" else "FAILED"})")
 
@@ -2896,6 +3028,7 @@ class BleTransportFacade(
         }
         
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (shuttingDown) return
             // Snapshot the payload on the binder thread before the BLE
             // stack reuses the buffer for the next operation, then repost
             // the entire body to the main handler. Everything downstream
@@ -2907,7 +3040,10 @@ class BleTransportFacade(
             val charUuid = characteristic.uuid
             @Suppress("DEPRECATION")
             val snapshot = characteristic.value?.copyOf()
-            mainHandler.post { handleCharacteristicReadOnMain(gatt, charUuid, snapshot, status) }
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleCharacteristicReadOnMain(gatt, charUuid, snapshot, status)
+            }
         }
 
         private fun handleCharacteristicReadOnMain(
@@ -3079,6 +3215,7 @@ class BleTransportFacade(
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (shuttingDown) return
             val address = gatt.device.address
             if (descriptor.uuid != PeripheralGattServer.CCCD_UUID) {
                 return
@@ -3161,6 +3298,7 @@ class BleTransportFacade(
         }
         
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (shuttingDown) return
             if (characteristic.uuid != MESSAGE_CHAR_UUID) return
             // Snapshot the value on the binder thread — characteristic.value
             // is overwritten by the BLE stack on the next notification — then
@@ -3188,7 +3326,10 @@ class BleTransportFacade(
             }
             val data = raw.copyOf()
             val address = gatt.device.address
-            mainHandler.post { handleReceivedData(data, address) }
+            mainHandler.post {
+                if (shuttingDown) return@post
+                handleReceivedData(data, address)
+            }
         }
     }
 }

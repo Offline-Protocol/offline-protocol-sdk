@@ -14,7 +14,8 @@ import org.junit.Test
  * Properties under test:
  *
  *   - FIFO ordering per recipient, across enqueue → flush cycles.
- *   - Per-peer cap evicts oldest-first and reports via the drop callback.
+ *   - Per-peer cap drops the whole per-recipient queue at message-boundary
+ *     granularity (never mid-message) and reports via the drop callback.
  *   - Expiry during flush evicts stale entries and reports via the drop
  *     callback, and the aggregate counter stays consistent.
  *   - Flush stops draining a recipient on the first failed send but keeps
@@ -108,27 +109,51 @@ class OutboundFragmentQueueTest {
     }
 
     @Test
-    fun `per-peer cap drops oldest and reports CAPPED`() {
+    fun `per-peer cap drops the whole queue and reports CAPPED with count`() {
+        // The overflow policy is whole-queue drop, not oldest-first. Dropping a
+        // single fragment mid-message would leave the receiver with orphan
+        // slices that reassemble into garbage. The regression check is that:
+        //   1. The queue size after overflow is exactly 1 (only the new entry).
+        //   2. The drop callback reports the number of fragments evicted
+        //      (`maxPerPeer`), not 1.
+        //   3. Only the freshly enqueued byte (3) is drained on flush.
         val h = Harness(maxPerPeer = 2)
         h.queue.enqueue("alice", byteArrayOf(1))
         h.queue.enqueue("alice", byteArrayOf(2))
         h.queue.enqueue("alice", byteArrayOf(3))
-        assertEquals(2, h.queue.totalCount())
+        assertEquals(1, h.queue.totalCount())
         assertEquals(1, h.drops.size)
         assertEquals(
-            DropEvent("alice", OutboundFragmentQueue.DropReason.CAPPED, 1),
+            DropEvent("alice", OutboundFragmentQueue.DropReason.CAPPED, 2),
             h.drops[0],
         )
 
-        // FIFO guarantee: the oldest (byte 1) was evicted, so drain returns 2 then 3.
         val sent = mutableListOf<ByteArray>()
         h.queue.flush { _, data ->
             sent += data
             true
         }
-        assertEquals(2, sent.size)
-        assertArrayEquals(byteArrayOf(2), sent[0])
-        assertArrayEquals(byteArrayOf(3), sent[1])
+        assertEquals(1, sent.size)
+        assertArrayEquals(byteArrayOf(3), sent[0])
+    }
+
+    @Test
+    fun `per-peer cap overflow does not affect other recipients`() {
+        val h = Harness(maxPerPeer = 2)
+        h.queue.enqueue("alice", byteArrayOf(1))
+        h.queue.enqueue("alice", byteArrayOf(2))
+        h.queue.enqueue("bob", byteArrayOf(10))
+        h.queue.enqueue("bob", byteArrayOf(11))
+        h.queue.enqueue("alice", byteArrayOf(3)) // overflow alice
+
+        // Alice: dropped all, then appended 3 → 1 fragment
+        // Bob: untouched → 2 fragments
+        assertEquals(3, h.queue.totalCount())
+        assertTrue(h.queue.hasPending("alice"))
+        assertTrue(h.queue.hasPending("bob"))
+        assertEquals(1, h.drops.size)
+        assertEquals("alice", h.drops[0].recipientId)
+        assertEquals(2, h.drops[0].count)
     }
 
     @Test

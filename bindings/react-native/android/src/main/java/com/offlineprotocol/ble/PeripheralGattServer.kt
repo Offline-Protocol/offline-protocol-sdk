@@ -123,6 +123,13 @@ class PeripheralGattServer(
          *  facade's MAX_FRAGMENT_SIZE (185 bytes) to tolerate MTU-negotiation
          *  headroom, but bounded so a hostile central cannot balloon memory. */
         const val MAX_INBOUND_WRITE_BYTES = 4096
+        /** Maximum age of a per-central identity long-read snapshot. A
+         *  coherent long-read session finishes in well under a second on
+         *  real hardware; anything older is either the result of a central
+         *  that disconnected without a clean STATE_DISCONNECTED (leaving
+         *  the snapshot pinned) or a misbehaving peer we do not want to
+         *  hold memory for. */
+        private const val IDENTITY_SNAPSHOT_TTL_MS = 5_000L
     }
 
     private val bluetoothManager: BluetoothManager =
@@ -142,6 +149,8 @@ class PeripheralGattServer(
     @Volatile
     private var identityCharacteristic: BluetoothGattCharacteristic? = null
 
+    private data class IdentitySnapshot(val bytes: ByteArray, val timestamp: Long)
+
     /**
      * Per-central snapshot of the identity bytes served on a long read.
      * Android's long-read flow issues repeated reads with increasing offsets
@@ -151,10 +160,12 @@ class PeripheralGattServer(
      *
      * Populated on `offset == 0` (the start of a read session) and served on
      * every follow-up offset for the same central. Cleared when the central
-     * disconnects, when the server is stopped, or when a fresh `offset == 0`
-     * read replaces it.
+     * disconnects, when the server is stopped, when a fresh `offset == 0`
+     * read replaces it, or when the snapshot exceeds [IDENTITY_SNAPSHOT_TTL_MS]
+     * — the TTL bounds the damage from a central that starts a long-read
+     * session and never issues the follow-up reads to complete it.
      */
-    private val identityReadSnapshots: ConcurrentHashMap<String, ByteArray> =
+    private val identityReadSnapshots: ConcurrentHashMap<String, IdentitySnapshot> =
         ConcurrentHashMap()
 
     @Volatile
@@ -503,10 +514,12 @@ class PeripheralGattServer(
          */
         private fun resolveIdentityValue(device: BluetoothDevice, offset: Int): ByteArray? {
             val address = device.address
+            val now = System.currentTimeMillis()
+            pruneStaleIdentitySnapshots(now)
             if (offset == 0) {
                 val fresh = listener.provideIdentityBytes(device)
                 if (fresh != null) {
-                    identityReadSnapshots[address] = fresh
+                    identityReadSnapshots[address] = IdentitySnapshot(fresh, now)
                 } else {
                     identityReadSnapshots.remove(address)
                 }
@@ -514,13 +527,27 @@ class PeripheralGattServer(
             }
             // Follow-up blob read within the same long-read session: serve
             // from the snapshot taken on offset == 0.
-            identityReadSnapshots[address]?.let { return it }
-            // No snapshot (e.g. we missed the offset==0 read, or the central
-            // started a blob read out of the blue). Fall back to a fresh
-            // read — correctness may degrade to the pre-fix tearing behaviour
-            // for this single session, but we do not strand the central with
-            // a null response.
+            val cached = identityReadSnapshots[address]
+            if (cached != null && now - cached.timestamp <= IDENTITY_SNAPSHOT_TTL_MS) {
+                return cached.bytes
+            }
+            // No fresh snapshot (either none was ever stored, or it aged out).
+            // Fall back to a fresh read — correctness may degrade to the pre-
+            // fix tearing behaviour for this single session, but we do not
+            // strand the central with a null response, and we evict the stale
+            // snapshot so future reads start coherent.
+            if (cached != null) identityReadSnapshots.remove(address)
             return listener.provideIdentityBytes(device)
+        }
+
+        private fun pruneStaleIdentitySnapshots(now: Long) {
+            if (identityReadSnapshots.isEmpty()) return
+            val iterator = identityReadSnapshots.entries.iterator()
+            while (iterator.hasNext()) {
+                if (now - iterator.next().value.timestamp > IDENTITY_SNAPSHOT_TTL_MS) {
+                    iterator.remove()
+                }
+            }
         }
 
         override fun onCharacteristicWriteRequest(
