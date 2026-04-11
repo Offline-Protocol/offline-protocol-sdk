@@ -178,19 +178,25 @@ impl BleTransport {
     /// smaller than our fallback floor — storing a clamped-up 185 would
     /// cause the fragmenter to emit chunks the controller cannot transmit
     /// and every fragment to that peer would be silently dropped. We warn
-    /// and leave the entry unset so [`Self::peer_mtu`] falls back to
-    /// [`BLE_MAX_FRAGMENT_SIZE`], which is self-consistent with the
-    /// invariant that we do not operate below that floor on the platforms
-    /// we target (both iOS and Android request the BLE-5 maximum ATT MTU
-    /// and every modern controller negotiates well above 188).
+    /// and drop any previously stored entry so [`Self::peer_mtu`] falls
+    /// back to [`BLE_MAX_FRAGMENT_SIZE`]. Dropping (rather than leaving
+    /// the prior entry in place) is load-bearing for mid-link
+    /// renegotiation: if a peer had a stored 400 and the controller
+    /// later renegotiates down to 20, silently keeping 400 would still
+    /// produce writes the new link cannot honor. Self-consistent with
+    /// the invariant that we do not operate below that floor on the
+    /// platforms we target (both iOS and Android request the BLE-5
+    /// maximum ATT MTU and every modern controller negotiates well
+    /// above 188).
     pub fn set_peer_mtu(&self, peer_id: &str, max_payload: usize) {
         if max_payload < BLE_MAX_FRAGMENT_SIZE {
             tracing::warn!(
                 peer = %peer_id,
                 max_payload,
                 floor = BLE_MAX_FRAGMENT_SIZE,
-                "ble: ignoring undersized MTU report; keeping fallback"
+                "ble: undersized MTU report; dropping stored entry and falling back"
             );
+            self.peer_mtus.lock().unwrap().remove(peer_id);
             return;
         }
         let clamped = max_payload.min(MAX_REASONABLE_BLE_PAYLOAD);
@@ -865,6 +871,10 @@ impl Transport for BleTransport {
 
     fn stop(&mut self) -> Result<()> {
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
+        // Drain per-peer MTU cache on teardown so a subsequent start()
+        // cannot observe stale values from the prior session; every
+        // reconnect renegotiates from scratch.
+        self.peer_mtus.lock().unwrap().clear();
         Ok(())
     }
 }
@@ -984,6 +994,42 @@ mod tests {
 
         // Per-peer isolation.
         assert_eq!(transport.peer_mtu("alice"), 244);
+    }
+
+    #[test]
+    fn test_ble_undersized_renegotiation_drops_stored_entry() {
+        // Regression: the reject branch must remove any prior entry, not
+        // just return early. Otherwise a stored-400 → renegotiate-to-20
+        // transition keeps the stale 400 and the fragmenter writes chunks
+        // the new link cannot honor.
+        let transport = BleTransport::new("test-device");
+        transport.set_peer_mtu("alice", 400);
+        assert_eq!(transport.peer_mtu("alice"), 400);
+
+        transport.set_peer_mtu("alice", 20);
+        assert_eq!(transport.peer_mtu("alice"), BLE_MAX_FRAGMENT_SIZE);
+        assert!(
+            !transport.peer_mtus.lock().unwrap().contains_key("alice"),
+            "undersized renegotiation must drop the stale entry"
+        );
+    }
+
+    #[test]
+    fn test_ble_stop_drains_peer_mtus() {
+        // stop() must clear per-peer MTUs so a subsequent start() cannot
+        // observe stale values from the prior session. Every per-peer
+        // cache in this file follows the same discipline.
+        let mut transport = BleTransport::new("test-device");
+        transport.set_peer_mtu("alice", 400);
+        transport.set_peer_mtu("bob", 300);
+        assert_eq!(transport.peer_mtu("alice"), 400);
+        assert_eq!(transport.peer_mtu("bob"), 300);
+
+        transport.stop().unwrap();
+
+        assert!(transport.peer_mtus.lock().unwrap().is_empty());
+        assert_eq!(transport.peer_mtu("alice"), BLE_MAX_FRAGMENT_SIZE);
+        assert_eq!(transport.peer_mtu("bob"), BLE_MAX_FRAGMENT_SIZE);
     }
 
     #[test]
