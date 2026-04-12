@@ -164,6 +164,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     switch (eventType) {
       case 'neighbor_discovered': {
         const peerId = event.peerId || event.peer_id;
+        console.log('[ProtocolContext] neighbor_discovered peerId:', peerId);
         if (!peerId || blockedUsersRef.current.has(peerId)) {break;}
         setNeighbors(prev => {
           const next = new Map(prev);
@@ -246,6 +247,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'connection_accepted': {
         const peerId = event.accepted_by || event.peerId || event.peer_id || event.byUserId || event.by_user_id;
+        console.log('[ProtocolContext] connection_accepted peerId:', peerId);
         if (!peerId) {break;}
         setConnectionRequests(prev => prev.filter(r => r.peerId !== peerId));
         setContacts(prev => {
@@ -281,6 +283,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'secure_session_established': {
         const peerId = event.peerId || event.peer_id || event.otherUserId || event.other_user_id;
+        console.log('[ProtocolContext] secure_session_established raw event:', JSON.stringify(event), 'resolved peerId:', peerId);
         if (!peerId) {break;}
         setContacts(prev => {
           const next = new Map(prev);
@@ -378,6 +381,19 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
           }
           return next;
         });
+        setGroups(prev => {
+          const next = new Map(prev);
+          for (const [groupId, group] of next) {
+            const msgIndex = group.messages.findIndex(m => m.id === msgId);
+            if (msgIndex >= 0) {
+              const msgs = [...group.messages];
+              msgs[msgIndex] = {...msgs[msgIndex], status: 'delivered'};
+              next.set(groupId, {...group, messages: msgs});
+              break;
+            }
+          }
+          return next;
+        });
         break;
       }
 
@@ -392,6 +408,19 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
               const msgs = [...chat.messages];
               msgs[msgIndex] = {...msgs[msgIndex], status: 'failed'};
               next.set(peerId, {...chat, messages: msgs});
+              break;
+            }
+          }
+          return next;
+        });
+        setGroups(prev => {
+          const next = new Map(prev);
+          for (const [groupId, group] of next) {
+            const msgIndex = group.messages.findIndex(m => m.id === msgId);
+            if (msgIndex >= 0) {
+              const msgs = [...group.messages];
+              msgs[msgIndex] = {...msgs[msgIndex], status: 'failed'};
+              next.set(groupId, {...group, messages: msgs});
               break;
             }
           }

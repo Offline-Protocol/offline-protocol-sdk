@@ -132,6 +132,7 @@ class BleTransportFacade(
          * trigger an ANR.
          */
         private const val MAX_DRAIN_ITERATIONS_PER_CALL = 32
+        private const val BACKPRESSURE_RETRY_MS = 50L
         private const val CONNECTION_TIMEOUT_MS = 10000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
@@ -2122,25 +2123,27 @@ class BleTransportFacade(
         if (state != TransportState.RUNNING) return
 
         var hitIterationCap = false
+        var hitBackpressure = false
         try {
             val stalledAfterFlush = outboundQueue.flush(::sendFragmentData)
-            if (stalledAfterFlush &&
-                logThrottler.shouldLog("drain_flush_stalled", intervalMs = 5000)
-            ) {
-                val recipientCount = outboundQueue.recipientCount()
-                Log.w(
-                    TAG,
-                    "drainAndSendFragments: outbound flush left $recipientCount " +
-                        "recipient(s) with unsent fragments",
-                )
-                emitDiagnostic(
-                    "warning",
-                    "Outbound drain flush stalled",
-                    mapOf(
-                        "recipientCount" to recipientCount,
-                        "pending" to outboundQueue.totalCount(),
-                    ),
-                )
+            if (stalledAfterFlush) {
+                hitBackpressure = true
+                if (logThrottler.shouldLog("drain_flush_stalled", intervalMs = 5000)) {
+                    val recipientCount = outboundQueue.recipientCount()
+                    Log.w(
+                        TAG,
+                        "drainAndSendFragments: outbound flush left $recipientCount " +
+                            "recipient(s) with unsent fragments",
+                    )
+                    emitDiagnostic(
+                        "warning",
+                        "Outbound drain flush stalled",
+                        mapOf(
+                            "recipientCount" to recipientCount,
+                            "pending" to outboundQueue.totalCount(),
+                        ),
+                    )
+                }
             }
 
             var consecutiveSkips = 0
@@ -2197,6 +2200,7 @@ class BleTransportFacade(
 
                 if (!sendFragmentData(recipientId, data)) {
                     outboundQueue.enqueue(recipientId, data)
+                    hitBackpressure = true
                     break
                 }
             }
@@ -2204,12 +2208,12 @@ class BleTransportFacade(
             Log.e(TAG, "Error in drainAndSendFragments", e)
         }
 
-        if (hitIterationCap && state == TransportState.RUNNING) {
-            // Yield to other main-thread work (BLE callbacks, UI, the fragment
-            // poll timer) before resuming the drain. The post is unconditional
-            // because we know there is at least one more fragment available
-            // and we want it serviced as soon as the handler is free.
+        if (state != TransportState.RUNNING) return
+
+        if (hitIterationCap) {
             mainHandler.post { drainAndSendFragments() }
+        } else if (hitBackpressure && outboundQueue.totalCount() > 0) {
+            mainHandler.postDelayed({ drainAndSendFragments() }, BACKPRESSURE_RETRY_MS)
         }
     }
 
