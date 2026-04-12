@@ -20,6 +20,7 @@ android/.gradle/
 android/app/build/
 android/build/
 android/local.properties
+android/app/.cxx/
 
 # Ruby (CocoaPods)
 Gemfile.lock
