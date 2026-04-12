@@ -372,8 +372,30 @@ impl BleTransport {
     }
 
     /// Called when connection status changes.
+    ///
+    /// When transitioning away from [`TransportStatus::Available`], all
+    /// per-session state is drained so a subsequent reconnect starts clean.
+    /// The drain mirrors [`Transport::stop`] and respects the same lockstep
+    /// ordering (peers → peer_mtus → fragment_buffers → send_queue →
+    /// pending_fragments → receive_queue). Monotonic lifetime counters
+    /// (`undersized_mtu_reports`, `fragment_fallback_count`) are preserved.
     pub fn on_status_changed(&self, status: TransportStatus) {
-        *self.status.lock().unwrap() = status;
+        let previous = {
+            let mut guard = self.status.lock().unwrap();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
+
+        if previous == TransportStatus::Available && status != TransportStatus::Available {
+            self.peers.lock().unwrap().clear();
+            self.peer_mtus.lock().unwrap().clear();
+            self.fragment_buffers.lock().unwrap().clear();
+            self.send_queue.lock().unwrap().clear();
+            self.pending_fragments.lock().unwrap().clear();
+            self.receive_queue.lock().unwrap().clear();
+            self.update_queue_metric();
+        }
     }
 
     /// Gets all discovered peers.
@@ -1155,6 +1177,85 @@ mod tests {
         assert_eq!(transport.status(), TransportStatus::Available);
         transport.on_status_changed(TransportStatus::Error);
         assert_eq!(transport.status(), TransportStatus::Error);
+    }
+
+    #[test]
+    fn test_ble_on_status_changed_drains_session_state() {
+        let transport = BleTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 244);
+        transport.send(&small_message()).unwrap();
+
+        // Seed a fragment buffer via on_fragment_received with a partial fragment.
+        // Simpler: insert directly.
+        transport.fragment_buffers.lock().unwrap().insert(
+            "msg-1".to_string(),
+            FragmentAssembly {
+                total_fragments: 2,
+                fragments: HashMap::new(),
+                started_at: SystemTime::now(),
+            },
+        );
+
+        // Bump a lifetime counter so we can verify it survives.
+        transport
+            .undersized_mtu_reports
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Transition away from Available.
+        transport.on_status_changed(TransportStatus::Unavailable);
+
+        assert!(transport.peers.lock().unwrap().is_empty());
+        assert!(transport.peer_mtus.lock().unwrap().is_empty());
+        assert!(transport.fragment_buffers.lock().unwrap().is_empty());
+        assert!(transport.send_queue.lock().unwrap().is_empty());
+        assert!(transport.pending_fragments.lock().unwrap().is_empty());
+        assert!(transport.receive_queue.lock().unwrap().is_empty());
+        assert_eq!(transport.metrics.lock().unwrap().queue_depth, 0);
+
+        // Lifetime counters must survive.
+        assert_eq!(
+            transport
+                .undersized_mtu_reports
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn test_ble_on_status_changed_available_to_available_preserves_state() {
+        let transport = BleTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        transport.on_peer_discovered(peer_device("bob"));
+        transport.set_peer_mtu("bob", 244);
+        transport.send(&small_message()).unwrap();
+
+        // Transition Available → Available must not clear anything.
+        transport.on_status_changed(TransportStatus::Available);
+
+        assert_eq!(transport.peers.lock().unwrap().len(), 1);
+        assert_eq!(transport.peer_mtus.lock().unwrap().len(), 1);
+        assert!(!transport.send_queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_ble_on_status_changed_non_available_to_non_available_no_drain() {
+        let transport = BleTransport::new("test-device");
+
+        // Start at Unavailable (default), add a peer manually.
+        transport
+            .peers
+            .lock()
+            .unwrap()
+            .insert("alice".to_string(), peer_device("alice"));
+
+        // Transition Unavailable → Error — should NOT drain because
+        // previous was not Available.
+        transport.on_status_changed(TransportStatus::Error);
+        assert_eq!(transport.peers.lock().unwrap().len(), 1);
     }
 
     #[test]
