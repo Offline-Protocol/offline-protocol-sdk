@@ -594,6 +594,7 @@ internal class CentralGattClient(
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (host.isShuttingDown()) return
             if (characteristic.uuid != messageCharUuid) return
+            if (status != BluetoothGatt.GATT_SUCCESS) return
             mainHandler.post {
                 if (host.isShuttingDown()) return@post
                 if (host.isRunning()) {
