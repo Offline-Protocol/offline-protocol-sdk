@@ -9,7 +9,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
-import {generateUserId, generateUserName, requestBluetoothPermissions, ensureBluetoothEnabled} from '../utils';
+import {generateUserId, generateUserName, requestBluetoothPermissions, ensureBluetoothEnabled, showPermissionDeniedAlert} from '../utils';
 import {useProtocol} from '../context/ProtocolContext';
 
 interface OnboardingScreenProps {
@@ -32,10 +32,7 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
       // Request Bluetooth permissions
       const permResult = await requestBluetoothPermissions();
       if (!permResult.granted) {
-        Alert.alert(
-          'Permissions Required',
-          'Bluetooth permissions are needed for offline messaging. Please grant them in Settings.',
-        );
+        showPermissionDeniedAlert(permResult);
         setIsLoading(false);
         return;
       }

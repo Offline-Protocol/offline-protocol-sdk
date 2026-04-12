@@ -131,14 +131,23 @@ export async function ensureBluetoothEnabled(): Promise<boolean> {
 export interface PermissionResult {
   granted: boolean;
   deniedPermissions: string[];
+  hasNeverAskAgain: boolean;
 }
+
+const PERMISSION_LABELS: Record<string, string> = {
+  [PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN]: 'Nearby Devices (Scan)',
+  [PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT]: 'Nearby Devices (Connect)',
+  [PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE]: 'Nearby Devices (Advertise)',
+  [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION]: 'Location',
+  [PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION]: 'Location',
+};
 
 export async function requestBluetoothPermissions(): Promise<PermissionResult> {
   if (Platform.OS === 'ios') {
-    return {granted: true, deniedPermissions: []};
+    return {granted: true, deniedPermissions: [], hasNeverAskAgain: false};
   }
   if (Platform.OS !== 'android') {
-    return {granted: true, deniedPermissions: []};
+    return {granted: true, deniedPermissions: [], hasNeverAskAgain: false};
   }
 
   try {
@@ -150,7 +159,6 @@ export async function requestBluetoothPermissions(): Promise<PermissionResult> {
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
       );
     } else {
       permissions.push(
@@ -162,16 +170,46 @@ export async function requestBluetoothPermissions(): Promise<PermissionResult> {
     const results = await PermissionsAndroid.requestMultiple(permissions);
     const deniedPermissions: string[] = [];
     let allGranted = true;
+    let hasNeverAskAgain = false;
 
     for (const permission of permissions) {
-      if (results[permission] !== PermissionsAndroid.RESULTS.GRANTED) {
+      const status = results[permission];
+      if (status !== PermissionsAndroid.RESULTS.GRANTED) {
         allGranted = false;
         deniedPermissions.push(permission);
+        if (status === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) {
+          hasNeverAskAgain = true;
+        }
       }
     }
 
-    return {granted: allGranted, deniedPermissions};
+    return {granted: allGranted, deniedPermissions, hasNeverAskAgain};
   } catch {
-    return {granted: false, deniedPermissions: ['UNKNOWN_ERROR']};
+    return {granted: false, deniedPermissions: ['UNKNOWN_ERROR'], hasNeverAskAgain: false};
+  }
+}
+
+function formatDeniedPermissions(denied: string[]): string {
+  const labels = [...new Set(denied.map(p => PERMISSION_LABELS[p] ?? p))];
+  return labels.join(', ');
+}
+
+export function showPermissionDeniedAlert(result: PermissionResult): void {
+  const names = formatDeniedPermissions(result.deniedPermissions);
+
+  if (result.hasNeverAskAgain) {
+    Alert.alert(
+      'Permissions Required',
+      `The following permissions were permanently denied: ${names}.\n\nPlease open Settings > Apps > Offline Demo > Permissions and grant them manually.`,
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {text: 'Open Settings', onPress: () => Linking.openSettings()},
+      ],
+    );
+  } else {
+    Alert.alert(
+      'Permissions Required',
+      `Please grant the following permissions for offline messaging: ${names}.`,
+    );
   }
 }
