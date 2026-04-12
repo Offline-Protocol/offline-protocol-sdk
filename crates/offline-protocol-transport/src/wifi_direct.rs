@@ -137,8 +137,25 @@ impl WifiDirectTransport {
     }
 
     /// Called when connection status changes.
+    ///
+    /// When transitioning away from [`TransportStatus::Available`], peers
+    /// and queues are drained so a subsequent reconnect starts clean.
     pub fn on_status_changed(&self, status: TransportStatus) {
-        *self.status.lock().unwrap() = status;
+        let previous = {
+            let mut guard = self.status.lock().unwrap();
+            let prev = *guard;
+            *guard = status;
+            prev
+        };
+
+        if previous == TransportStatus::Available && status != TransportStatus::Available {
+            self.peers.lock().unwrap().clear();
+            self.send_queue.lock().unwrap().clear();
+            self.receive_queue.lock().unwrap().clear();
+            let mut metrics = self.metrics.lock().unwrap();
+            metrics.queue_depth = 0;
+            metrics.congestion = 0.0;
+        }
     }
 
     /// Called when a message is received from a peer.
@@ -285,6 +302,12 @@ impl Transport for WifiDirectTransport {
 
     fn stop(&mut self) -> Result<()> {
         *self.status.lock().unwrap() = TransportStatus::Disconnected;
+        self.peers.lock().unwrap().clear();
+        self.send_queue.lock().unwrap().clear();
+        self.receive_queue.lock().unwrap().clear();
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.queue_depth = 0;
+        metrics.congestion = 0.0;
         Ok(())
     }
 }
@@ -514,6 +537,75 @@ mod tests {
         transport.on_status_changed(TransportStatus::Available);
         transport.stop().unwrap();
         assert_eq!(transport.status(), TransportStatus::Disconnected);
+    }
+
+    #[test]
+    fn test_stop_clears_session_state() {
+        let mut transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let peer = WifiDirectPeer {
+            device_name: "P".to_string(),
+            device_address: "00:11:22:33:44:55".to_string(),
+            is_group_owner: false,
+            last_seen: SystemTime::now(),
+            connected: true,
+        };
+        transport.on_peer_discovered(peer);
+        transport.send(&create_test_message()).unwrap();
+
+        transport.stop().unwrap();
+
+        assert!(transport.peers.lock().unwrap().is_empty());
+        assert!(transport.send_queue.lock().unwrap().is_empty());
+        assert!(transport.receive_queue.lock().unwrap().is_empty());
+        assert_eq!(transport.metrics.lock().unwrap().queue_depth, 0);
+        assert_eq!(transport.metrics.lock().unwrap().congestion, 0.0);
+    }
+
+    #[test]
+    fn test_wifi_direct_on_status_changed_clears_state() {
+        let transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let peer = WifiDirectPeer {
+            device_name: "P".to_string(),
+            device_address: "00:11:22:33:44:55".to_string(),
+            is_group_owner: false,
+            last_seen: SystemTime::now(),
+            connected: true,
+        };
+        transport.on_peer_discovered(peer);
+        transport.send(&create_test_message()).unwrap();
+
+        transport.on_status_changed(TransportStatus::Disconnected);
+
+        assert!(transport.peers.lock().unwrap().is_empty());
+        assert!(transport.send_queue.lock().unwrap().is_empty());
+        assert!(transport.receive_queue.lock().unwrap().is_empty());
+        assert_eq!(transport.metrics.lock().unwrap().queue_depth, 0);
+    }
+
+    #[test]
+    fn test_wifi_direct_on_status_changed_available_preserves_state() {
+        let transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let peer = WifiDirectPeer {
+            device_name: "P".to_string(),
+            device_address: "00:11:22:33:44:55".to_string(),
+            is_group_owner: false,
+            last_seen: SystemTime::now(),
+            connected: true,
+        };
+        transport.on_peer_discovered(peer);
+        transport.send(&create_test_message()).unwrap();
+
+        // Available → Available must not clear anything.
+        transport.on_status_changed(TransportStatus::Available);
+
+        assert_eq!(transport.peers.lock().unwrap().len(), 1);
+        assert!(!transport.send_queue.lock().unwrap().is_empty());
     }
 
     #[test]
