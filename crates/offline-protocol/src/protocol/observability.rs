@@ -2,8 +2,10 @@
 
 use super::OfflineProtocol;
 #[cfg(feature = "mls-observability")]
-use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
+use crate::mls_observability::{timestamp_now_ms, MlsLifecycleEvent};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
+#[cfg(feature = "mls-observability")]
+use crate::telemetry::scrubber::opaque_id;
 
 impl OfflineProtocol {
     #[cfg(feature = "mls-observability")]

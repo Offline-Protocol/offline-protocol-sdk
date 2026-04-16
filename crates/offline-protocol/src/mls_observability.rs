@@ -3,7 +3,6 @@
 use crate::telemetry::CategorySampler;
 use offline_protocol_mls::MlsError;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 /// Operation context for MLS lifecycle events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -214,20 +213,6 @@ pub fn timestamp_now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Generates a stable opaque identifier for telemetry.
-pub fn opaque_id(raw: &str, secret: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret);
-    hasher.update(raw.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(32);
-    for byte in &digest[..16] {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{:02x}", byte);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,21 +235,6 @@ mod tests {
             DecryptionFailureKind::from_mls_error(&MlsError::VerificationFailed("sig".to_string())),
             DecryptionFailureKind::IdentityMismatch
         );
-    }
-
-    #[test]
-    fn opaque_id_is_stable_for_same_input() {
-        let secret = b"secret";
-        let first = opaque_id("peer:alice", secret);
-        let second = opaque_id("peer:alice", secret);
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn opaque_id_changes_for_different_secret() {
-        let first = opaque_id("peer:alice", b"secret-a");
-        let second = opaque_id("peer:alice", b"secret-b");
-        assert_ne!(first, second);
     }
 
     #[test]

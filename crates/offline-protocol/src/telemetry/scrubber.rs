@@ -1,15 +1,45 @@
 //! PII-scrubbing helper for telemetry emit sites.
 //!
-//! [`Scrubber`] wraps the SHA-256-based opaque-identifier scheme already in
-//! use by [`crate::mls_observability`] and exposes a single `hash_id` entry
-//! point. When scrubbing is disabled (caller opted in via
-//! `TelemetryConfig::with_scrub_ids(false)`), the helper returns the input
-//! unchanged so emit sites can call it unconditionally.
+//! [`Scrubber`] wraps the SHA-256-based opaque-identifier scheme used across
+//! the SDK and exposes a single `hash_id` entry point. When scrubbing is
+//! disabled (caller opted in via `TelemetryConfig::with_scrub_ids(false)`),
+//! the helper returns the input unchanged so emit sites can call it
+//! unconditionally.
+//!
+//! The underlying [`opaque_id`] function is also exposed for call sites that
+//! need to hash identifiers independently of a `Scrubber` instance
+//! (e.g. MLS lifecycle emission, where multiple distinct identifiers are
+//! hashed per event with a single caller-owned secret).
+//!
+//! Construction note: the hash is `SHA-256(secret || raw)` — a prefix-MAC,
+//! adequate for deterministic pseudonymization but **not** length-extension
+//! resistant. Do not repurpose for integrity checks; use HMAC if that ever
+//! becomes a requirement.
 
 use std::borrow::Cow;
 
-use crate::mls_observability::opaque_id;
+use sha2::{Digest, Sha256};
+
 use crate::telemetry::config::TelemetryConfig;
+
+/// Generates a stable opaque identifier for telemetry.
+///
+/// Produces a 32-character lowercase hex string derived from the first 16
+/// bytes of `SHA-256(secret || raw)`. The result is deterministic for a
+/// given `(secret, raw)` pair but reveals no information about `raw` to a
+/// party that does not hold the secret.
+pub fn opaque_id(raw: &str, secret: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret);
+    hasher.update(raw.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(32);
+    for byte in &digest[..16] {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
 
 /// Helper for hashing long-lived pseudonymous identifiers before they cross
 /// the telemetry sink boundary.
@@ -35,8 +65,8 @@ impl Scrubber {
     /// its own.
     pub fn from_config(config: &TelemetryConfig, fallback_secret: [u8; 16]) -> Self {
         Self {
-            enabled: config.scrub_ids,
-            secret: config.scrub_secret.unwrap_or(fallback_secret),
+            enabled: config.scrub_ids(),
+            secret: config.scrub_secret().unwrap_or(fallback_secret),
         }
     }
 
@@ -63,12 +93,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opaque_id_is_stable_for_same_input() {
+        let secret = b"secret";
+        let first = opaque_id("peer:alice", secret);
+        let second = opaque_id("peer:alice", secret);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 32);
+    }
+
+    #[test]
+    fn opaque_id_changes_for_different_secret() {
+        let first = opaque_id("peer:alice", b"secret-a");
+        let second = opaque_id("peer:alice", b"secret-b");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn opaque_id_handles_empty_input() {
+        let secret = b"secret";
+        let out = opaque_id("", secret);
+        assert_eq!(out.len(), 32);
+        assert!(out.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn disabled_scrubber_borrows_raw() {
         let scrubber = Scrubber::new(false, [0; 16]);
         let out = scrubber.hash_id("peer-a");
         assert_eq!(out, "peer-a");
         assert!(matches!(out, Cow::Borrowed(_)));
         assert!(!scrubber.is_enabled());
+    }
+
+    #[test]
+    fn disabled_scrubber_borrows_empty_input() {
+        let scrubber = Scrubber::new(false, [0; 16]);
+        let out = scrubber.hash_id("");
+        assert_eq!(out, "");
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn enabled_scrubber_handles_empty_input() {
+        let scrubber = Scrubber::new(true, [1; 16]);
+        let out = scrubber.hash_id("");
+        assert_eq!(out.len(), 32);
+        assert!(matches!(out, Cow::Owned(_)));
     }
 
     #[test]
