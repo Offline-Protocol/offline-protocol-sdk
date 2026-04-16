@@ -219,6 +219,28 @@ mod tests {
         assert_eq!(scrubber.hash_id("peer-a"), expected);
     }
 
+    /// Locks the leaf-identifier policy the emission-wiring follow-up will
+    /// inherit: when the caller opts out of scrubbing via
+    /// `TelemetryConfig::with_scrub_ids(false)`, `hash_id` passes the raw
+    /// identifier through unchanged, but `hash_always` still hashes derived
+    /// correlation tokens. Flipping either half silently would change the
+    /// privacy contract apps are told to expect.
+    #[test]
+    fn from_config_with_scrub_ids_disabled_passes_raw_through_hash_id() {
+        let config = TelemetryConfig::default().with_scrub_ids(false);
+        let scrubber = Scrubber::from_config(&config, [3; 16]);
+        assert!(!scrubber.is_enabled());
+
+        let leaf = scrubber.hash_id("peer-a");
+        assert_eq!(leaf, "peer-a");
+        assert!(matches!(leaf, Cow::Borrowed(_)));
+
+        let derived = scrubber.hash_always("peer-a|group-b");
+        assert_eq!(derived.len(), 32);
+        assert!(derived.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(derived, "peer-a|group-b");
+    }
+
     #[test]
     fn hash_always_ignores_enabled_flag() {
         let enabled = Scrubber::new(true, [1; 16]);

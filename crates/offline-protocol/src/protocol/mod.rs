@@ -230,6 +230,13 @@ impl OfflineProtocol {
             welcome_lifecycles: HashMap::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
+            // TODO(telemetry-wiring): replace with
+            // `Scrubber::from_config(&config.telemetry, <per-install fallback>)`
+            // once `ProtocolConfig` carries a `TelemetryConfig`. The hardcoded
+            // `true` preserves today's always-scrub MLS observability semantics;
+            // driving it from config is the single switch that activates the
+            // `with_scrub_ids(false)` opt-out path the Scrubber API already
+            // contracts (see `telemetry::scrubber::tests`).
             telemetry_scrubber: Scrubber::new(true, *uuid::Uuid::new_v4().as_bytes()),
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
