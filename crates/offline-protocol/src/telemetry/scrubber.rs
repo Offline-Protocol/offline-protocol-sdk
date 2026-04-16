@@ -13,6 +13,7 @@
 //! becomes a requirement.
 
 use std::borrow::Cow;
+use std::fmt;
 
 use sha2::{Digest, Sha256};
 
@@ -27,6 +28,7 @@ use crate::telemetry::config::TelemetryConfig;
 ///
 /// Crate-private: external callers use [`Scrubber::hash_id`] instead so
 /// there is a single public entry point to the hashing operation.
+#[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
 pub(crate) fn opaque_id(raw: &str, secret: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret);
@@ -47,10 +49,23 @@ pub(crate) fn opaque_id(raw: &str, secret: &[u8]) -> String {
 /// same peer appears under the same opaque identifier in every record
 /// produced by the same SDK instance, but the raw identifier cannot be
 /// recovered without the secret.
-#[derive(Debug, Clone)]
-pub struct Scrubber {
+#[derive(Clone)]
+pub(crate) struct Scrubber {
     enabled: bool,
+    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     secret: [u8; 16],
+}
+
+impl fmt::Debug for Scrubber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Hand-rolled to redact `secret` — a derived Debug would dump the
+        // per-instance hashing key verbatim into any log that formats a
+        // Scrubber (directly or transitively via an owning struct).
+        f.debug_struct("Scrubber")
+            .field("enabled", &self.enabled)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Scrubber {
@@ -62,6 +77,10 @@ impl Scrubber {
     /// Constructs a scrubber from a [`TelemetryConfig`], falling back to the
     /// supplied per-instance secret when the config does not carry one of
     /// its own.
+    ///
+    /// Scaffolding for the emission-wiring follow-up; the protocol engine
+    /// does not yet invoke this path.
+    #[allow(dead_code)]
     pub fn from_config(config: &TelemetryConfig, fallback_secret: [u8; 16]) -> Self {
         Self {
             enabled: config.scrub_ids(),
@@ -70,6 +89,7 @@ impl Scrubber {
     }
 
     /// Returns `true` when scrubbing is active.
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -85,6 +105,7 @@ impl Scrubber {
     /// multiple raw identifiers — use [`Scrubber::hash_always`] instead, so
     /// that the composite cannot be disabled by a user-facing scrubbing
     /// preference.
+    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     pub fn hash_id<'a>(&self, raw: &'a str) -> Cow<'a, str> {
         if self.enabled {
             Cow::Owned(opaque_id(raw, &self.secret))
@@ -103,6 +124,7 @@ impl Scrubber {
     /// preference, because disabling scrubbing is a choice about leaf IDs
     /// the caller already controls, not about derived values the SDK
     /// constructs internally.
+    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     pub fn hash_always(&self, raw: &str) -> String {
         opaque_id(raw, &self.secret)
     }
@@ -220,6 +242,20 @@ mod tests {
         assert_eq!(
             scrubber.hash_always("peer-a"),
             scrubber.hash_id("peer-a").into_owned(),
+        );
+    }
+
+    #[test]
+    fn debug_redacts_secret() {
+        let scrubber = Scrubber::new(true, [0xAB; 16]);
+        let rendered = format!("{scrubber:?}");
+        assert!(
+            rendered.contains("<redacted>"),
+            "expected redaction marker, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("ab, ab") && !rendered.contains("171, 171"),
+            "secret bytes leaked into Debug output: {rendered}"
         );
     }
 }

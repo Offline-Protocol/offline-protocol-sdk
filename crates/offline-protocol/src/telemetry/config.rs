@@ -22,6 +22,11 @@ pub enum MlsVerbosity {
     /// Emit the standard lifecycle stream (initialization, session ready,
     /// decryption failures, etc.) — matches the legacy `mls-observability`
     /// feature-enabled behavior.
+    ///
+    /// No-op until emission wiring lands: in this release, MLS emit paths
+    /// remain gated by the compile-time `mls-observability` feature, so
+    /// setting this knob (or `Off`/`Diagnostic`) does not yet change what
+    /// the SDK actually emits.
     #[default]
     Lifecycle,
     /// Emit the full lifecycle stream plus additional per-operation
@@ -104,13 +109,11 @@ impl TelemetryConfig {
     ///
     /// Supplying `Some(secret)` enables cross-session correlation of the
     /// same peer in backend telemetry; supplying `None` (the default)
-    /// leaves the secret unset in the config, and downstream construction
-    /// of a [`crate::telemetry::Scrubber`] falls back to the per-instance
-    /// secret passed as [`crate::telemetry::Scrubber::from_config`]'s
-    /// `fallback_secret` argument. Install-time generation of a random
-    /// per-instance secret inside the protocol engine lands with the
-    /// emission-wiring follow-up; until then, callers that construct a
-    /// `Scrubber` directly must supply the fallback themselves.
+    /// leaves the secret unset in the config, and the SDK falls back to a
+    /// random per-instance secret derived at protocol construction.
+    /// Install-time generation of a stable, per-install secret (so
+    /// correlation survives process restarts) lands with the emission-
+    /// wiring follow-up.
     ///
     /// **Do not share the secret across tenants, and do not rotate it
     /// mid-run** — rotation invalidates every previously emitted opaque
@@ -136,7 +139,15 @@ impl TelemetryConfig {
     }
 
     /// Returns the configured opaque-identifier hashing secret, if any.
-    pub fn scrub_secret(&self) -> Option<[u8; 16]> {
+    ///
+    /// Crate-private: the secret feeds `Scrubber` construction and is not
+    /// part of the external reader surface — the Debug redaction on this
+    /// struct would otherwise be defeated by a public byte-level accessor.
+    ///
+    /// Currently only consumed by `Scrubber::from_config` (scaffolding for
+    /// the emission-wiring follow-up).
+    #[allow(dead_code)]
+    pub(crate) fn scrub_secret(&self) -> Option<[u8; 16]> {
         self.scrub_secret
     }
 }

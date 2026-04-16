@@ -12,7 +12,7 @@
 pub mod config;
 pub mod record;
 pub mod sampling;
-pub mod scrubber;
+pub(crate) mod scrubber;
 pub mod sink;
 
 pub use config::{MlsVerbosity, TelemetryConfig};

@@ -122,9 +122,10 @@ pub struct OfflineProtocol {
     /// Scrubber for hashing long-lived pseudonymous identifiers (peer, group,
     /// session) into non-reversible opaque telemetry IDs. Holds the
     /// per-instance secret; constructed once at protocol creation and reused
-    /// by every MLS lifecycle emit site.
+    /// by every emit site. Today only the MLS observability path consumes it;
+    /// additional emit sites land alongside the wiring follow-up.
     #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
-    mls_observability_scrubber: Scrubber,
+    telemetry_scrubber: Scrubber,
 
     /// File transfer manager for chunking outbound and reassembling inbound media.
     file_transfer_manager: FileTransferManager,
@@ -229,7 +230,7 @@ impl OfflineProtocol {
             welcome_lifecycles: HashMap::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
-            mls_observability_scrubber: Scrubber::new(true, *uuid::Uuid::new_v4().as_bytes()),
+            telemetry_scrubber: Scrubber::new(true, *uuid::Uuid::new_v4().as_bytes()),
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
             outbound_media_transfers: HashMap::new(),
