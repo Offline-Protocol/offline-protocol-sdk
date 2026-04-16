@@ -1397,7 +1397,7 @@ impl OfflineProtocol {
         for eviction in self.ack_manager.take_evicted_acks() {
             self.emit_event(Event::ack_evicted(
                 eviction.message_id,
-                &format!("{:?}", eviction.priority),
+                eviction.priority.as_str(),
                 "capacity".to_string(),
             ));
         }

@@ -716,6 +716,9 @@ impl BleTransport {
         let mut completed_payload: Option<Vec<u8>> = None;
         let mut assembly_started_at: Option<SystemTime> = None;
         let mut evicted = false;
+        // Collected outside the lock to avoid holding fragment_buffers while
+        // invoking the callback (which may acquire shared_state).
+        let mut eviction_info: Option<FragmentEvictionInfo> = None;
 
         {
             // Multi-fragment message - add to reassembly buffer
@@ -749,13 +752,10 @@ impl BleTransport {
                         "Evicting fragment assembly to make room (priority-based)"
                     );
 
-                    // Notify the protocol layer before removing the assembly.
-                    if let Some(cb) = self.eviction_callback.lock().unwrap().as_ref() {
-                        cb(FragmentEvictionInfo {
-                            message_id: evict_id.clone(),
-                            completion_percent,
-                        });
-                    }
+                    eviction_info = Some(FragmentEvictionInfo {
+                        message_id: evict_id.clone(),
+                        completion_percent,
+                    });
 
                     buffers.remove(&evict_id);
                     evicted = true;
@@ -798,6 +798,14 @@ impl BleTransport {
                 assembly_started_at = Some(assembly.started_at);
                 buffers.remove(&fragment.message_id);
                 completed_payload = Some(complete_data);
+            }
+        }
+
+        // Fire eviction callback outside the fragment_buffers lock to avoid
+        // lock ordering issues (callback may acquire shared_state).
+        if let Some(info) = eviction_info {
+            if let Some(cb) = self.eviction_callback.lock().unwrap().as_ref() {
+                cb(info);
             }
         }
 

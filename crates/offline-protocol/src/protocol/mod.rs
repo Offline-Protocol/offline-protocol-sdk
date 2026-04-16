@@ -412,6 +412,16 @@ impl OfflineProtocol {
         // Flush debounced Lamport clock before stopping so no ticks are lost.
         drop(state);
         self.flush_lamport_clock();
+
+        // Clear BLE fragment eviction callback to release shared_state reference.
+        if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
+            if let Ok(transport) = ble_arc.lock() {
+                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble.set_fragment_eviction_callback(None);
+                }
+            }
+        }
+
         self.transport_manager.stop()?;
         let mut state = lock_shared_state(&self.shared_state)?;
 

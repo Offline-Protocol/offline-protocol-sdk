@@ -560,4 +560,34 @@ mod tests {
         // Second drain is empty
         assert!(manager.take_evicted_acks().is_empty());
     }
+
+    #[test]
+    fn test_eviction_buffer_overflow_drops_oldest() {
+        // Use a capacity of MAX_EVICTION_BUFFER + 2 so we can trigger that many evictions.
+        let capacity = super::MAX_EVICTION_BUFFER + 2;
+        let config = AckConfig {
+            default_timeout_ms: 5000,
+            max_pending_acks: capacity,
+        };
+        let mut manager = AckManager::with_config(config);
+
+        // Fill to capacity with Low priority entries.
+        for _ in 0..capacity {
+            manager
+                .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::Low)
+                .unwrap();
+        }
+
+        // Now register High priority entries that each evict a Low one.
+        // This produces `capacity` evictions, exceeding MAX_EVICTION_BUFFER.
+        for _ in 0..capacity {
+            manager
+                .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::High)
+                .unwrap();
+        }
+
+        let evictions = manager.take_evicted_acks();
+        // Buffer should be capped at MAX_EVICTION_BUFFER — oldest entries were dropped.
+        assert_eq!(evictions.len(), super::MAX_EVICTION_BUFFER);
+    }
 }
