@@ -1,15 +1,11 @@
 //! PII-scrubbing helper for telemetry emit sites.
 //!
-//! [`Scrubber`] wraps the SHA-256-based opaque-identifier scheme used across
-//! the SDK and exposes a single `hash_id` entry point. When scrubbing is
-//! disabled (caller opted in via `TelemetryConfig::with_scrub_ids(false)`),
-//! the helper returns the input unchanged so emit sites can call it
-//! unconditionally.
-//!
-//! The underlying [`opaque_id`] function is also exposed for call sites that
-//! need to hash identifiers independently of a `Scrubber` instance
-//! (e.g. MLS lifecycle emission, where multiple distinct identifiers are
-//! hashed per event with a single caller-owned secret).
+//! [`Scrubber`] is the single entry point for hashing long-lived pseudonymous
+//! identifiers before they cross the telemetry sink boundary. Callers
+//! construct one (via [`Scrubber::new`] or [`Scrubber::from_config`]) and call
+//! `hash_id` — when scrubbing is disabled (caller opted in via
+//! `TelemetryConfig::with_scrub_ids(false)`), the helper returns the input
+//! unchanged so emit sites can call it unconditionally.
 //!
 //! Construction note: the hash is `SHA-256(secret || raw)` — a prefix-MAC,
 //! adequate for deterministic pseudonymization but **not** length-extension
@@ -28,7 +24,10 @@ use crate::telemetry::config::TelemetryConfig;
 /// bytes of `SHA-256(secret || raw)`. The result is deterministic for a
 /// given `(secret, raw)` pair but reveals no information about `raw` to a
 /// party that does not hold the secret.
-pub fn opaque_id(raw: &str, secret: &[u8]) -> String {
+///
+/// Crate-private: external callers use [`Scrubber::hash_id`] instead so
+/// there is a single public entry point to the hashing operation.
+pub(crate) fn opaque_id(raw: &str, secret: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret);
     hasher.update(raw.as_bytes());

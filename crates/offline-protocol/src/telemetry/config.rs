@@ -104,9 +104,16 @@ impl TelemetryConfig {
     ///
     /// Supplying `Some(secret)` enables cross-session correlation of the
     /// same peer in backend telemetry; supplying `None` (the default)
-    /// causes the SDK to generate a random per-instance secret at install
-    /// time. **Do not share the secret across tenants, and do not rotate
-    /// it mid-run** — rotation invalidates every previously emitted opaque
+    /// leaves the secret unset in the config, and downstream construction
+    /// of a [`crate::telemetry::Scrubber`] falls back to the per-instance
+    /// secret passed as [`crate::telemetry::Scrubber::from_config`]'s
+    /// `fallback_secret` argument. Install-time generation of a random
+    /// per-instance secret inside the protocol engine lands with the
+    /// emission-wiring follow-up; until then, callers that construct a
+    /// `Scrubber` directly must supply the fallback themselves.
+    ///
+    /// **Do not share the secret across tenants, and do not rotate it
+    /// mid-run** — rotation invalidates every previously emitted opaque
     /// identifier and breaks correlation on the receiving side.
     pub fn with_scrub_secret(mut self, secret: Option<[u8; 16]>) -> Self {
         self.scrub_secret = secret;
