@@ -1299,6 +1299,7 @@ dependencies = [
  "offline-protocol-core",
  "serde",
  "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]

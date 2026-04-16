@@ -21,7 +21,9 @@ pub mod traits;
 pub mod types;
 pub mod wifi_direct;
 
-pub use ble::{BleTransport, BleTransportBuilder, PeerDevice};
+pub use ble::{
+    BleTransport, BleTransportBuilder, FragmentEvictionCallback, FragmentEvictionInfo, PeerDevice,
+};
 pub use constants::DEFAULT_MAX_MESSAGE_SIZE;
 pub use error::{Error, Result};
 pub use internet::{InternetConfig, InternetTransport};

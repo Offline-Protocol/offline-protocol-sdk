@@ -3,8 +3,21 @@
 use crate::constants::{DEFAULT_ACK_TIMEOUT_MS, DEFAULT_MAX_PENDING_ACKS};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{MessageId, MessagePriority};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
+
+/// Maximum number of eviction records buffered before oldest are dropped.
+const MAX_EVICTION_BUFFER: usize = 64;
+
+/// Information about an ACK that was evicted due to capacity pressure.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AckEvictionInfo {
+    /// ID of the message whose ACK tracking was evicted.
+    pub message_id: MessageId,
+    /// Priority of the evicted message.
+    pub priority: MessagePriority,
+}
 
 /// Status of an ACK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +87,8 @@ impl Default for AckConfig {
 pub struct AckManager {
     config: AckConfig,
     pending_acks: HashMap<MessageId, PendingAck>,
+    /// Buffer of recent evictions, drained by the caller via [`Self::take_evicted_acks`].
+    evicted_acks: VecDeque<AckEvictionInfo>,
 }
 
 impl AckManager {
@@ -87,6 +102,7 @@ impl AckManager {
         Self {
             config,
             pending_acks: HashMap::new(),
+            evicted_acks: VecDeque::new(),
         }
     }
 
@@ -179,6 +195,17 @@ impl AckManager {
             // Only evict if the candidate's priority is strictly lower
             if Self::priority_rank(evict_priority) < Self::priority_rank(new_priority) {
                 self.pending_acks.remove(&evict_id);
+
+                // Record the eviction so the caller can emit an event.
+                if self.evicted_acks.len() >= MAX_EVICTION_BUFFER {
+                    tracing::warn!("AckEviction buffer full, dropping oldest entry");
+                    self.evicted_acks.pop_front();
+                }
+                self.evicted_acks.push_back(AckEvictionInfo {
+                    message_id: evict_id,
+                    priority: evict_priority,
+                });
+
                 return true;
             }
         }
@@ -194,6 +221,13 @@ impl AckManager {
             MessagePriority::High => 2,
             MessagePriority::Critical => 3,
         }
+    }
+
+    /// Drains and returns all buffered eviction records since the last call.
+    ///
+    /// The caller is expected to emit an event for each returned entry.
+    pub fn take_evicted_acks(&mut self) -> Vec<AckEvictionInfo> {
+        self.evicted_acks.drain(..).collect()
     }
 
     /// Records that an ACK was received for a message.
@@ -492,5 +526,38 @@ mod tests {
 
         // Recording ACK for non-existent message should return false
         assert!(!manager.record_ack_received(&msg_id));
+    }
+
+    #[test]
+    fn test_eviction_records_drain() {
+        let config = AckConfig {
+            default_timeout_ms: 5000,
+            max_pending_acks: 2,
+        };
+        let mut manager = AckManager::with_config(config);
+
+        let low_id = MessageId::new();
+        manager
+            .register_pending_ack_with_priority(low_id.clone(), None, MessagePriority::Low)
+            .unwrap();
+        manager
+            .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::Medium)
+            .unwrap();
+
+        // No evictions yet
+        assert!(manager.take_evicted_acks().is_empty());
+
+        // High priority triggers eviction of low
+        manager
+            .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::High)
+            .unwrap();
+
+        let evictions = manager.take_evicted_acks();
+        assert_eq!(evictions.len(), 1);
+        assert_eq!(evictions[0].message_id, low_id);
+        assert_eq!(evictions[0].priority, MessagePriority::Low);
+
+        // Second drain is empty
+        assert!(manager.take_evicted_acks().is_empty());
     }
 }

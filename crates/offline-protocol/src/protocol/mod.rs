@@ -29,6 +29,7 @@ use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMess
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
 use offline_protocol_services::MeshServices;
+use offline_protocol_transport::{BleTransport, TransportType};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -365,6 +366,24 @@ impl OfflineProtocol {
                     s.emit_event(event);
                 }
             })));
+
+        // Wire BLE fragment eviction callback so app receives FragmentAssemblyEvicted.
+        if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
+            let shared = self.shared_state.clone();
+            if let Ok(transport) = ble_arc.lock() {
+                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble.set_fragment_eviction_callback(Some(Arc::new(move |info| {
+                        if let Ok(s) = shared.lock() {
+                            s.emit_event(Event::fragment_assembly_evicted(
+                                info.message_id,
+                                info.completion_percent,
+                                "capacity".to_string(),
+                            ));
+                        }
+                    })));
+                }
+            }
+        }
 
         let mut state = lock_shared_state(&self.shared_state)?;
 

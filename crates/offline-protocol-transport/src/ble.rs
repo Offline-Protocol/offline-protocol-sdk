@@ -20,6 +20,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, SystemTime};
 
+/// Information about a fragment assembly that was evicted due to capacity pressure.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FragmentEvictionInfo {
+    /// ID of the message whose fragment assembly was evicted.
+    pub message_id: String,
+    /// Completion percentage (0–100) at the time of eviction.
+    pub completion_percent: u8,
+}
+
+/// Callback invoked when a fragment assembly is evicted from the reassembly cache.
+pub type FragmentEvictionCallback = Arc<dyn Fn(FragmentEvictionInfo) + Send + Sync>;
+
 /// Peer device information
 #[derive(Debug, Clone)]
 pub struct PeerDevice {
@@ -170,6 +183,10 @@ pub struct BleTransport {
     /// Called from `send()` after enqueueing — the platform layer should
     /// respond by calling `get_next_fragment()` and performing the BLE write.
     on_fragments_available: SharedCallback,
+    /// Optional callback fired when a fragment assembly is evicted from the
+    /// reassembly cache due to capacity pressure. Wired by the protocol layer
+    /// to emit `Event::FragmentAssemblyEvicted`.
+    eviction_callback: Arc<Mutex<Option<FragmentEvictionCallback>>>,
 }
 
 impl BleTransport {
@@ -189,6 +206,7 @@ impl BleTransport {
             undersized_mtu_reports: Arc::new(AtomicU64::new(0)),
             fragment_fallback_count: Arc::new(AtomicU64::new(0)),
             on_fragments_available: Arc::new(Mutex::new(None)),
+            eviction_callback: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -198,6 +216,12 @@ impl BleTransport {
     /// `get_next_fragment()` instead of polling on a timer.
     pub fn set_on_fragments_available(&self, callback: Arc<dyn Fn() + Send + Sync>) {
         *self.on_fragments_available.lock().unwrap() = Some(callback);
+    }
+
+    /// Registers a callback that fires when a fragment assembly is evicted
+    /// from the reassembly cache due to capacity pressure.
+    pub fn set_fragment_eviction_callback(&self, callback: Option<FragmentEvictionCallback>) {
+        *self.eviction_callback.lock().unwrap() = callback;
     }
 
     /// Notifies the platform that fragments are ready to send.
@@ -703,7 +727,7 @@ impl BleTransport {
             {
                 // Priority-based eviction: prefer evicting assemblies with less progress
                 // rather than just the oldest. This preserves near-complete assemblies.
-                if let Some(evict_id) = buffers
+                if let Some((evict_id, completion_percent)) = buffers
                     .iter()
                     .min_by(|(_, a), (_, b)| {
                         let priority_a = a.eviction_priority(now);
@@ -712,12 +736,27 @@ impl BleTransport {
                             .partial_cmp(&priority_b)
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                    .map(|(id, _)| id.clone())
+                    .map(|(id, assembly)| {
+                        let pct = (assembly.completion_ratio() * 100.0)
+                            .round()
+                            .clamp(0.0, 100.0) as u8;
+                        (id.clone(), pct)
+                    })
                 {
                     tracing::debug!(
                         message_id = %evict_id,
+                        completion_percent,
                         "Evicting fragment assembly to make room (priority-based)"
                     );
+
+                    // Notify the protocol layer before removing the assembly.
+                    if let Some(cb) = self.eviction_callback.lock().unwrap().as_ref() {
+                        cb(FragmentEvictionInfo {
+                            message_id: evict_id.clone(),
+                            completion_percent,
+                        });
+                    }
+
                     buffers.remove(&evict_id);
                     evicted = true;
                 }
@@ -2057,5 +2096,41 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn test_fragment_eviction_fires_callback() {
+        let transport = BleTransport::new("test-device");
+
+        let evictions: Arc<Mutex<Vec<FragmentEvictionInfo>>> = Arc::new(Mutex::new(Vec::new()));
+        let evictions_clone = evictions.clone();
+        transport.set_fragment_eviction_callback(Some(Arc::new(move |info| {
+            evictions_clone.lock().unwrap().push(info);
+        })));
+
+        // Fill the reassembly buffer to capacity with partial assemblies.
+        // Each entry: message_id "msg-N", fragment 0 of 4 (so 25% complete).
+        for i in 0..BLE_MAX_FRAGMENT_ASSEMBLIES {
+            let msg_id = format!("msg-{i}");
+            let frag = encode_fragment(msg_id.as_bytes(), 0, 4, b"payload-data").unwrap();
+            let result = transport.process_fragment(&frag).unwrap();
+            assert!(result.is_none(), "partial fragment should not complete");
+        }
+
+        // No evictions yet
+        assert!(evictions.lock().unwrap().is_empty());
+
+        // Add one more — must trigger eviction of the least-valuable entry.
+        let trigger_frag = encode_fragment(b"new-msg", 0, 4, b"payload-data").unwrap();
+        let result = transport.process_fragment(&trigger_frag).unwrap();
+        assert!(result.is_none());
+
+        let captured = evictions.lock().unwrap();
+        assert_eq!(captured.len(), 1, "exactly one eviction should fire");
+        assert_eq!(captured[0].completion_percent, 25);
+        assert!(
+            captured[0].message_id.starts_with("msg-"),
+            "evicted entry should be one of the pre-filled assemblies"
+        );
     }
 }
