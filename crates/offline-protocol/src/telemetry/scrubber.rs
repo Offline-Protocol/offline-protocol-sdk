@@ -78,12 +78,33 @@ impl Scrubber {
     /// `raw` unchanged when scrubbing is disabled.
     ///
     /// The `Cow` return avoids allocation on the disabled-scrubbing hot path.
+    ///
+    /// Use this for **leaf** identifiers the caller has chosen to expose
+    /// (individual `peer_id`, `group_id`, `user_id` on a record). For
+    /// **derived correlation tokens** — values built by concatenating
+    /// multiple raw identifiers — use [`Scrubber::hash_always`] instead, so
+    /// that the composite cannot be disabled by a user-facing scrubbing
+    /// preference.
     pub fn hash_id<'a>(&self, raw: &'a str) -> Cow<'a, str> {
         if self.enabled {
             Cow::Owned(opaque_id(raw, &self.secret))
         } else {
             Cow::Borrowed(raw)
         }
+    }
+
+    /// Unconditionally hashes `raw` with the scrubber's secret, ignoring the
+    /// `enabled` flag.
+    ///
+    /// Intended for derived correlation tokens (session IDs built from
+    /// concatenated peer+group IDs, fingerprints over composite seeds) where
+    /// emitting the raw string would leak more than the sum of its parts —
+    /// these MUST be obfuscated regardless of the user's identifier-scrubbing
+    /// preference, because disabling scrubbing is a choice about leaf IDs
+    /// the caller already controls, not about derived values the SDK
+    /// constructs internally.
+    pub fn hash_always(&self, raw: &str) -> String {
+        opaque_id(raw, &self.secret)
     }
 }
 
@@ -174,5 +195,31 @@ mod tests {
         let scrubber = Scrubber::from_config(&config, fallback);
         let expected = Scrubber::new(true, fallback).hash_id("peer-a").into_owned();
         assert_eq!(scrubber.hash_id("peer-a"), expected);
+    }
+
+    #[test]
+    fn hash_always_ignores_enabled_flag() {
+        let enabled = Scrubber::new(true, [1; 16]);
+        let disabled = Scrubber::new(false, [1; 16]);
+        // Identical output across both modes: `hash_always` never passes
+        // through, so it is safe for derived correlation tokens.
+        assert_eq!(
+            enabled.hash_always("peer-a"),
+            disabled.hash_always("peer-a")
+        );
+        // Output is always a 32-character hex opaque — never the raw input.
+        let out = disabled.hash_always("peer-a");
+        assert_eq!(out.len(), 32);
+        assert!(out.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(out, "peer-a");
+    }
+
+    #[test]
+    fn hash_always_matches_hash_id_when_enabled() {
+        let scrubber = Scrubber::new(true, [9; 16]);
+        assert_eq!(
+            scrubber.hash_always("peer-a"),
+            scrubber.hash_id("peer-a").into_owned(),
+        );
     }
 }

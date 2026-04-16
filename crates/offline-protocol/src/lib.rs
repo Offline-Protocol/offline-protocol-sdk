@@ -56,5 +56,5 @@ pub use mls_observability::{
     MlsOperationContext, NoopMlsEventEmitter,
 };
 pub use telemetry::{
-    MlsVerbosity, NoopTelemetrySink, Scrubber, TelemetryConfig, TelemetryRecord, TelemetrySink,
+    MlsVerbosity, NoopTelemetrySink, TelemetryConfig, TelemetryRecord, TelemetrySink,
 };

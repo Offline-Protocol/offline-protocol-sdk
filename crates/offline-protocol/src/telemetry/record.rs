@@ -171,6 +171,26 @@ mod tests {
         segment_count >= 2
     }
 
+    /// Regression guard for the `Box<Event>` decision on the `Protocol`
+    /// variant. `Event` is ~368 bytes; the non-Protocol variants are much
+    /// smaller (`MlsLifecycleEvent` is the next-largest at ~100 bytes). If
+    /// someone removes the `Box`, `TelemetryRecord` balloons to `Event`'s
+    /// size and the size tax is paid by every non-Protocol record stored in
+    /// a collection. This assertion fails loudly if that happens.
+    #[test]
+    fn telemetry_record_is_smaller_than_unboxed_event() {
+        use std::mem::size_of;
+        assert!(
+            size_of::<TelemetryRecord>() < size_of::<Event>(),
+            "TelemetryRecord ({} bytes) is not smaller than Event ({} bytes) \
+             — the `Box<Event>` variant was removed or the size budget was \
+             blown by another variant. Re-box the Protocol variant or audit \
+             the new variant's payload.",
+            size_of::<TelemetryRecord>(),
+            size_of::<Event>(),
+        );
+    }
+
     #[test]
     fn protocol_variant_names_are_dotted() {
         let event = Event::MessageReceived {

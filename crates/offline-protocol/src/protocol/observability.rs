@@ -17,7 +17,11 @@ impl OfflineProtocol {
             peer_id.unwrap_or("none"),
             group_id.unwrap_or("none")
         );
-        self.mls_observability_scrubber.hash_id(&seed).into_owned()
+        // `hash_always` (not `hash_id`): the seed couples raw peer+group IDs,
+        // so emitting it unhashed would leak strictly more than the sum of
+        // its parts. Session IDs are a derived correlation token and MUST be
+        // obfuscated regardless of the user's `scrub_ids` preference.
+        self.mls_observability_scrubber.hash_always(&seed)
     }
 
     #[cfg(feature = "mls-observability")]

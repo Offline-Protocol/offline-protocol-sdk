@@ -18,5 +18,5 @@ pub mod sink;
 pub use config::{MlsVerbosity, TelemetryConfig};
 pub use record::TelemetryRecord;
 pub use sampling::CategorySampler;
-pub use scrubber::Scrubber;
+pub(crate) use scrubber::Scrubber;
 pub use sink::{NoopTelemetrySink, TelemetrySink};
