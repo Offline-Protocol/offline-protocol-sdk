@@ -55,3 +55,6 @@ pub use mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsEventEmitter, MlsLifecycleEvent,
     MlsOperationContext, NoopMlsEventEmitter,
 };
+pub use telemetry::{
+    MlsVerbosity, NoopTelemetrySink, TelemetryConfig, TelemetryRecord, TelemetrySink,
+};

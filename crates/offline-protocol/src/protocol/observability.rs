@@ -2,7 +2,7 @@
 
 use super::OfflineProtocol;
 #[cfg(feature = "mls-observability")]
-use crate::mls_observability::{opaque_id, timestamp_now_ms, MlsLifecycleEvent};
+use crate::mls_observability::{timestamp_now_ms, MlsLifecycleEvent};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 
 impl OfflineProtocol {
@@ -17,7 +17,11 @@ impl OfflineProtocol {
             peer_id.unwrap_or("none"),
             group_id.unwrap_or("none")
         );
-        opaque_id(&seed, &self.mls_observability_secret)
+        // `hash_always` (not `hash_id`): the seed couples raw peer+group IDs,
+        // so emitting it unhashed would leak strictly more than the sum of
+        // its parts. Session IDs are a derived correlation token and MUST be
+        // obfuscated regardless of the user's `scrub_ids` preference.
+        self.telemetry_scrubber.hash_always(&seed)
     }
 
     #[cfg(feature = "mls-observability")]
@@ -44,7 +48,7 @@ impl OfflineProtocol {
 
     #[cfg(feature = "mls-observability")]
     pub(super) fn emit_mls_encryption_used(&self, recipient: &str) {
-        let peer_id = opaque_id(recipient, &self.mls_observability_secret);
+        let peer_id = self.telemetry_scrubber.hash_id(recipient).into_owned();
         self.emit_mls_lifecycle_event(MlsLifecycleEvent::EncryptionUsed {
             timestamp_ms: timestamp_now_ms(),
             session_id: self.session_id_for_observability(Some(recipient), None),
@@ -69,8 +73,8 @@ impl OfflineProtocol {
         self.emit_mls_lifecycle_event(MlsLifecycleEvent::SessionMissing {
             timestamp_ms: timestamp_now_ms(),
             session_id: self.session_id_for_observability(peer_id, group_id),
-            group_id: group_id.map(|id| opaque_id(id, &self.mls_observability_secret)),
-            peer_id: peer_id.map(|id| opaque_id(id, &self.mls_observability_secret)),
+            group_id: group_id.map(|id| self.telemetry_scrubber.hash_id(id).into_owned()),
+            peer_id: peer_id.map(|id| self.telemetry_scrubber.hash_id(id).into_owned()),
             context,
             error_category: Some(error_category),
         });
@@ -97,8 +101,8 @@ impl OfflineProtocol {
         self.emit_mls_lifecycle_event(MlsLifecycleEvent::DecryptionFailed {
             timestamp_ms: timestamp_now_ms(),
             session_id: self.session_id_for_observability(Some(sender_id), group_id),
-            group_id: group_id.map(|id| opaque_id(id, &self.mls_observability_secret)),
-            peer_id: Some(opaque_id(sender_id, &self.mls_observability_secret)),
+            group_id: group_id.map(|id| self.telemetry_scrubber.hash_id(id).into_owned()),
+            peer_id: Some(self.telemetry_scrubber.hash_id(sender_id).into_owned()),
             context,
             error_category: Some(kind.error_category()),
             failure_kind: kind,
@@ -125,8 +129,8 @@ impl OfflineProtocol {
         self.emit_mls_lifecycle_event(MlsLifecycleEvent::SessionReady {
             timestamp_ms: timestamp_now_ms(),
             session_id: self.session_id_for_observability(Some(peer_id), Some(group_id)),
-            group_id: Some(opaque_id(group_id, &self.mls_observability_secret)),
-            peer_id: Some(opaque_id(peer_id, &self.mls_observability_secret)),
+            group_id: Some(self.telemetry_scrubber.hash_id(group_id).into_owned()),
+            peer_id: Some(self.telemetry_scrubber.hash_id(peer_id).into_owned()),
             context,
             error_category: None,
         });

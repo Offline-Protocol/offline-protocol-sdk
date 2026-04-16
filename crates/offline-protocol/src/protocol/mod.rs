@@ -22,6 +22,7 @@ pub(crate) use types::*;
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
+use crate::telemetry::Scrubber;
 use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId};
@@ -118,9 +119,13 @@ pub struct OfflineProtocol {
     #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     mls_event_rate_limiter: MlsEventRateLimiter,
 
-    /// Per-instance secret used to derive non-reversible opaque telemetry IDs.
+    /// Scrubber for hashing long-lived pseudonymous identifiers (peer, group,
+    /// session) into non-reversible opaque telemetry IDs. Holds the
+    /// per-instance secret; constructed once at protocol creation and reused
+    /// by every emit site. Today only the MLS observability path consumes it;
+    /// additional emit sites land alongside the wiring follow-up.
     #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
-    mls_observability_secret: [u8; 16],
+    telemetry_scrubber: Scrubber,
 
     /// File transfer manager for chunking outbound and reassembling inbound media.
     file_transfer_manager: FileTransferManager,
@@ -225,7 +230,14 @@ impl OfflineProtocol {
             welcome_lifecycles: HashMap::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
-            mls_observability_secret: *uuid::Uuid::new_v4().as_bytes(),
+            // TODO(telemetry-wiring): replace with
+            // `Scrubber::from_config(&config.telemetry, <per-install fallback>)`
+            // once `ProtocolConfig` carries a `TelemetryConfig`. The hardcoded
+            // `true` preserves today's always-scrub MLS observability semantics;
+            // driving it from config is the single switch that activates the
+            // `with_scrub_ids(false)` opt-out path the Scrubber API already
+            // contracts (see `telemetry::scrubber::tests`).
+            telemetry_scrubber: Scrubber::new(true, *uuid::Uuid::new_v4().as_bytes()),
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
             outbound_media_transfers: HashMap::new(),
