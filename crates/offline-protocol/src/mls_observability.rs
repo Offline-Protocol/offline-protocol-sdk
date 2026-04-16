@@ -1,14 +1,9 @@
 //! MLS lifecycle observability primitives.
 
+use crate::telemetry::CategorySampler;
 use offline_protocol_mls::MlsError;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::Mutex;
-
-const DEFAULT_RATE_LIMIT_WINDOW_MS: i64 = 1_000;
-const DEFAULT_RATE_LIMIT_MAX_EVENTS: u32 = 10;
-const MAX_RATE_LIMIT_KEYS: usize = 4096;
 
 /// Operation context for MLS lifecycle events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -163,64 +158,16 @@ impl MlsEventEmitter for NoopMlsEventEmitter {
     fn emit(&self, _event: MlsLifecycleEvent) {}
 }
 
-#[derive(Debug, Clone)]
-struct EventWindow {
-    window_start_ms: i64,
-    count: u32,
-}
-
 /// Best-effort fixed-window limiter to reduce high-volume failure event floods.
-#[derive(Debug)]
+///
+/// Thin wrapper around [`CategorySampler`] that maps MLS lifecycle events to
+/// rate-limit keys.
+#[derive(Debug, Default)]
 pub struct MlsEventRateLimiter {
-    max_events_per_window: u32,
-    window_ms: i64,
-    windows: Mutex<HashMap<String, EventWindow>>,
-}
-
-impl Default for MlsEventRateLimiter {
-    fn default() -> Self {
-        Self {
-            max_events_per_window: DEFAULT_RATE_LIMIT_MAX_EVENTS,
-            window_ms: DEFAULT_RATE_LIMIT_WINDOW_MS,
-            windows: Mutex::new(HashMap::new()),
-        }
-    }
+    sampler: CategorySampler,
 }
 
 impl MlsEventRateLimiter {
-    /// Returns true when an event should be emitted for the current window.
-    pub fn allow(&self, key: &str, now_ms: i64) -> bool {
-        let Ok(mut windows) = self.windows.lock() else {
-            return true;
-        };
-
-        if windows.len() >= MAX_RATE_LIMIT_KEYS && !windows.contains_key(key) {
-            windows.retain(|_, window| {
-                now_ms.saturating_sub(window.window_start_ms) <= DEFAULT_RATE_LIMIT_WINDOW_MS
-            });
-            if windows.len() >= MAX_RATE_LIMIT_KEYS {
-                windows.clear();
-            }
-        }
-
-        let window = windows.entry(key.to_string()).or_insert(EventWindow {
-            window_start_ms: now_ms,
-            count: 0,
-        });
-
-        if now_ms.saturating_sub(window.window_start_ms) >= self.window_ms {
-            window.window_start_ms = now_ms;
-            window.count = 0;
-        }
-
-        if window.count >= self.max_events_per_window {
-            return false;
-        }
-
-        window.count = window.count.saturating_add(1);
-        true
-    }
-
     /// Returns true if the event passes rate limiting.
     pub fn should_emit(&self, event: &MlsLifecycleEvent) -> bool {
         let now_ms = timestamp_now_ms();
@@ -235,11 +182,11 @@ impl MlsEventRateLimiter {
                     peer_id.as_deref().unwrap_or("none"),
                     failure_kind
                 );
-                self.allow(&key, now_ms)
+                self.sampler.allow(&key, now_ms)
             }
             MlsLifecycleEvent::SessionMissing { peer_id, .. } => {
                 let key = format!("session_missing:{}", peer_id.as_deref().unwrap_or("none"));
-                self.allow(&key, now_ms)
+                self.sampler.allow(&key, now_ms)
             }
             _ => true,
         }
@@ -305,14 +252,32 @@ mod tests {
     }
 
     #[test]
-    fn limiter_blocks_after_budget() {
+    fn limiter_suppresses_flood() {
         let limiter = MlsEventRateLimiter::default();
-        let now = 1000_i64;
-        let key = "k";
-        for _ in 0..DEFAULT_RATE_LIMIT_MAX_EVENTS {
-            assert!(limiter.allow(key, now));
+        let base_ts = 1000_i64;
+        // First 10 DecryptionFailed events for the same peer+kind pass.
+        for i in 0..10 {
+            let event = MlsLifecycleEvent::DecryptionFailed {
+                timestamp_ms: base_ts + i,
+                session_id: "s".to_string(),
+                group_id: None,
+                peer_id: Some("peer-a".to_string()),
+                context: MlsOperationContext::Receive,
+                error_category: None,
+                failure_kind: DecryptionFailureKind::InvalidCiphertext,
+            };
+            assert!(limiter.should_emit(&event));
         }
-        assert!(!limiter.allow(key, now));
-        assert!(limiter.allow(key, now + DEFAULT_RATE_LIMIT_WINDOW_MS));
+        // 11th is suppressed.
+        let event = MlsLifecycleEvent::DecryptionFailed {
+            timestamp_ms: base_ts + 10,
+            session_id: "s".to_string(),
+            group_id: None,
+            peer_id: Some("peer-a".to_string()),
+            context: MlsOperationContext::Receive,
+            error_category: None,
+            failure_kind: DecryptionFailureKind::InvalidCiphertext,
+        };
+        assert!(!limiter.should_emit(&event));
     }
 }

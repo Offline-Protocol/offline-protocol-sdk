@@ -17,6 +17,7 @@ mod group_mesh;
 pub mod mls;
 pub mod mls_observability;
 pub mod protocol;
+pub mod telemetry;
 pub mod transport_manager;
 pub mod visualization;
 
