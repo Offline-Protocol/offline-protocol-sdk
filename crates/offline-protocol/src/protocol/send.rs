@@ -1385,21 +1385,17 @@ impl OfflineProtocol {
         if self.ack_manager.is_waiting_for_ack(&message.id) {
             Ok(false)
         } else {
-            self.ack_manager
-                .register_pending_ack(message.id.clone(), None)?;
-            self.drain_and_emit_ack_evictions();
+            if let Some(eviction) = self
+                .ack_manager
+                .register_pending_ack(message.id.clone(), None)?
+            {
+                self.emit_event(Event::ack_evicted(
+                    eviction.message_id,
+                    eviction.priority.as_str(),
+                    "capacity".to_string(),
+                ));
+            }
             Ok(true)
-        }
-    }
-
-    /// Drains any buffered ACK eviction records and emits an event for each.
-    fn drain_and_emit_ack_evictions(&mut self) {
-        for eviction in self.ack_manager.take_evicted_acks() {
-            self.emit_event(Event::ack_evicted(
-                eviction.message_id,
-                eviction.priority.as_str(),
-                "capacity".to_string(),
-            ));
         }
     }
 

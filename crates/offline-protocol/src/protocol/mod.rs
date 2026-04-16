@@ -413,7 +413,8 @@ impl OfflineProtocol {
         drop(state);
         self.flush_lamport_clock();
 
-        // Clear BLE fragment eviction callback to release shared_state reference.
+        // Clear event callbacks to release shared_state references.
+        self.transport_manager.set_dors_event_callback(None);
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
             if let Ok(transport) = ble_arc.lock() {
                 if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
