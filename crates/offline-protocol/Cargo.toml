@@ -29,6 +29,7 @@ sha2 = "0.10"
 [lib]
 
 [features]
-default = []
+default = ["telemetry"]
 mls-observability = []
+telemetry = []
 
