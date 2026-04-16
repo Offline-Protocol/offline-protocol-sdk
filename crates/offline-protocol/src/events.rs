@@ -385,9 +385,6 @@ pub enum Event {
         next_retry_at: Option<i64>,
     },
 
-    // TODO: AckEvicted and FragmentAssemblyEvicted are not yet emitted — wire
-    // AckManager::evict_lowest_priority and BLE fragment reassembly eviction
-    // to emit these so the app layer has observability into capacity pressure.
     /// A pending ACK was evicted due to capacity constraints.
     AckEvicted {
         /// ID of the message whose ACK was evicted.

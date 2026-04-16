@@ -6,6 +6,16 @@ use offline_protocol_core::{MessageId, MessagePriority};
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Information about an ACK that was evicted due to capacity pressure.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AckEvictionInfo {
+    /// ID of the message whose ACK tracking was evicted.
+    pub message_id: MessageId,
+    /// Priority of the evicted message.
+    pub priority: MessagePriority,
+}
+
 /// Status of an ACK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckStatus {
@@ -99,12 +109,14 @@ impl AckManager {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if registered, `Err` if ACK limit exceeded.
+    /// Returns `Ok(Some(info))` if a lower-priority ACK was evicted to make room,
+    /// `Ok(None)` if no eviction was needed, or `Err` if capacity is full and no
+    /// lower-priority ACK exists to evict.
     pub fn register_pending_ack(
         &mut self,
         message_id: MessageId,
         timeout_ms: Option<u64>,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Option<AckEvictionInfo>> {
         self.register_pending_ack_with_priority(message_id, timeout_ms, MessagePriority::Medium)
     }
 
@@ -118,27 +130,32 @@ impl AckManager {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if registered successfully.
-    /// If at capacity, attempts priority-based eviction before returning error.
+    /// Returns `Ok(Some(info))` if a lower-priority ACK was evicted to make room,
+    /// `Ok(None)` if no eviction was needed, or `Err` if capacity is full and no
+    /// lower-priority ACK exists to evict.
     pub fn register_pending_ack_with_priority(
         &mut self,
         message_id: MessageId,
         timeout_ms: Option<u64>,
         priority: MessagePriority,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Option<AckEvictionInfo>> {
         // Check if we've hit the limit
+        let mut eviction = None;
         if self.pending_acks.len() >= self.config.max_pending_acks {
             // Clean up timed out ACKs first
             self.cleanup_timed_out();
 
             // If still at limit, try priority-based eviction
-            if self.pending_acks.len() >= self.config.max_pending_acks
-                && !self.evict_lowest_priority(priority)
-            {
-                return Err(crate::Error::Other(
-                    "Maximum pending ACKs limit reached (no lower priority ACKs to evict)"
-                        .to_string(),
-                ));
+            if self.pending_acks.len() >= self.config.max_pending_acks {
+                match self.evict_lowest_priority(priority) {
+                    Some(info) => eviction = Some(info),
+                    None => {
+                        return Err(crate::Error::Other(
+                            "Maximum pending ACKs limit reached (no lower priority ACKs to evict)"
+                                .to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -152,12 +169,12 @@ impl AckManager {
         };
 
         self.pending_acks.insert(message_id, pending);
-        Ok(())
+        Ok(eviction)
     }
 
     /// Attempts to evict the lowest priority ACK to make room for a higher priority one.
-    /// Returns true if an ACK was evicted, false if no lower priority ACK exists.
-    fn evict_lowest_priority(&mut self, new_priority: MessagePriority) -> bool {
+    /// Returns `Some(info)` if an ACK was evicted, `None` if no lower priority ACK exists.
+    fn evict_lowest_priority(&mut self, new_priority: MessagePriority) -> Option<AckEvictionInfo> {
         // Find the lowest priority pending ACK
         let evict_candidate = self
             .pending_acks
@@ -179,11 +196,14 @@ impl AckManager {
             // Only evict if the candidate's priority is strictly lower
             if Self::priority_rank(evict_priority) < Self::priority_rank(new_priority) {
                 self.pending_acks.remove(&evict_id);
-                return true;
+                return Some(AckEvictionInfo {
+                    message_id: evict_id,
+                    priority: evict_priority,
+                });
             }
         }
 
-        false
+        None
     }
 
     /// Returns a numeric rank for priority (higher = more important).
@@ -492,5 +512,33 @@ mod tests {
 
         // Recording ACK for non-existent message should return false
         assert!(!manager.record_ack_received(&msg_id));
+    }
+
+    #[test]
+    fn test_eviction_returned_from_register() {
+        let config = AckConfig {
+            default_timeout_ms: 5000,
+            max_pending_acks: 2,
+        };
+        let mut manager = AckManager::with_config(config);
+
+        let low_id = MessageId::new();
+        // No eviction when registering into non-full capacity.
+        assert!(manager
+            .register_pending_ack_with_priority(low_id.clone(), None, MessagePriority::Low)
+            .unwrap()
+            .is_none());
+        assert!(manager
+            .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::Medium)
+            .unwrap()
+            .is_none());
+
+        // High priority triggers eviction of low — returned in-band.
+        let eviction = manager
+            .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::High)
+            .unwrap();
+        let eviction = eviction.expect("should have evicted the low-priority ACK");
+        assert_eq!(eviction.message_id, low_id);
+        assert_eq!(eviction.priority, MessagePriority::Low);
     }
 }

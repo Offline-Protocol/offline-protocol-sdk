@@ -29,6 +29,7 @@ use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMess
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
 use offline_protocol_services::MeshServices;
+use offline_protocol_transport::{BleTransport, TransportType};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -366,6 +367,24 @@ impl OfflineProtocol {
                 }
             })));
 
+        // Wire BLE fragment eviction callback so app receives FragmentAssemblyEvicted.
+        if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
+            let shared = self.shared_state.clone();
+            if let Ok(transport) = ble_arc.lock() {
+                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble.set_fragment_eviction_callback(Some(Arc::new(move |info| {
+                        if let Ok(s) = shared.lock() {
+                            s.emit_event(Event::fragment_assembly_evicted(
+                                info.message_id,
+                                info.completion_percent,
+                                "capacity".to_string(),
+                            ));
+                        }
+                    })));
+                }
+            }
+        }
+
         let mut state = lock_shared_state(&self.shared_state)?;
 
         state.state = ProtocolState::Running;
@@ -393,6 +412,17 @@ impl OfflineProtocol {
         // Flush debounced Lamport clock before stopping so no ticks are lost.
         drop(state);
         self.flush_lamport_clock();
+
+        // Clear event callbacks to release shared_state references.
+        self.transport_manager.set_dors_event_callback(None);
+        if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
+            if let Ok(transport) = ble_arc.lock() {
+                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble.set_fragment_eviction_callback(None);
+                }
+            }
+        }
+
         self.transport_manager.stop()?;
         let mut state = lock_shared_state(&self.shared_state)?;
 

@@ -1385,8 +1385,16 @@ impl OfflineProtocol {
         if self.ack_manager.is_waiting_for_ack(&message.id) {
             Ok(false)
         } else {
-            self.ack_manager
-                .register_pending_ack(message.id.clone(), None)?;
+            if let Some(eviction) = self
+                .ack_manager
+                .register_pending_ack(message.id.clone(), None)?
+            {
+                self.emit_event(Event::ack_evicted(
+                    eviction.message_id,
+                    eviction.priority.as_str(),
+                    "capacity".to_string(),
+                ));
+            }
             Ok(true)
         }
     }

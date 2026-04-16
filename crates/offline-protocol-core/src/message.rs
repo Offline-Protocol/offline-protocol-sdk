@@ -207,6 +207,16 @@ impl MessagePriority {
             Self::Critical => 4,
         }
     }
+
+    /// Returns a stable string representation suitable for event payloads.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+            Self::Critical => "Critical",
+        }
+    }
 }
 
 /// A message in the Offline Protocol.
