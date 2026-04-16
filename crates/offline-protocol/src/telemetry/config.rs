@@ -5,6 +5,8 @@
 //! without a breaking-change bump; construct via [`TelemetryConfig::default`]
 //! and the `with_*` builder methods.
 
+use std::fmt;
+
 /// Verbosity tier for MLS lifecycle telemetry.
 ///
 /// Replaces the compile-time `mls-observability` feature flag with a runtime
@@ -33,7 +35,7 @@ pub enum MlsVerbosity {
 /// methods. The struct is `#[non_exhaustive]` to preserve room for future
 /// knobs; downstream crates must not construct it with struct-literal syntax.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelemetryConfig {
     /// When `true`, long-lived pseudonymous identifiers (`peer_id`, `user_id`,
     /// `app_id`, `group_id`) are hashed before crossing the telemetry sink
@@ -52,6 +54,20 @@ pub struct TelemetryConfig {
     /// same peer in backend telemetry — do not share the secret across
     /// tenants.
     pub scrub_secret: Option<[u8; 16]>,
+}
+
+impl fmt::Debug for TelemetryConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TelemetryConfig")
+            .field("scrub_ids", &self.scrub_ids)
+            .field("mls_verbosity", &self.mls_verbosity)
+            .field("metrics_cadence_ms", &self.metrics_cadence_ms)
+            .field(
+                "scrub_secret",
+                &self.scrub_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for TelemetryConfig {
@@ -115,5 +131,26 @@ mod tests {
         assert_eq!(cfg.mls_verbosity, MlsVerbosity::Off);
         assert!(cfg.metrics_cadence_ms.is_none());
         assert_eq!(cfg.scrub_secret, Some([7; 16]));
+    }
+
+    #[test]
+    fn debug_redacts_scrub_secret() {
+        let cfg = TelemetryConfig::default().with_scrub_secret(Some([0xAB; 16]));
+        let rendered = format!("{cfg:?}");
+        assert!(
+            rendered.contains("<redacted>"),
+            "expected redaction marker, got {rendered}"
+        );
+        assert!(
+            !rendered.contains("ab, ab") && !rendered.contains("171, 171"),
+            "scrub_secret bytes leaked into Debug output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn debug_shows_none_when_no_secret() {
+        let cfg = TelemetryConfig::default();
+        let rendered = format!("{cfg:?}");
+        assert!(rendered.contains("scrub_secret: None"), "got {rendered}");
     }
 }

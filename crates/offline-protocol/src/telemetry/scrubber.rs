@@ -6,6 +6,8 @@
 //! `TelemetryConfig::with_scrub_ids(false)`), the helper returns the input
 //! unchanged so emit sites can call it unconditionally.
 
+use std::borrow::Cow;
+
 use crate::mls_observability::opaque_id;
 use crate::telemetry::config::TelemetryConfig;
 
@@ -43,13 +45,15 @@ impl Scrubber {
         self.enabled
     }
 
-    /// Hashes `raw` into a 32-character hex opaque identifier, or returns
+    /// Hashes `raw` into a 32-character hex opaque identifier, or borrows
     /// `raw` unchanged when scrubbing is disabled.
-    pub fn hash_id(&self, raw: &str) -> String {
+    ///
+    /// The `Cow` return avoids allocation on the disabled-scrubbing hot path.
+    pub fn hash_id<'a>(&self, raw: &'a str) -> Cow<'a, str> {
         if self.enabled {
-            opaque_id(raw, &self.secret)
+            Cow::Owned(opaque_id(raw, &self.secret))
         } else {
-            raw.to_string()
+            Cow::Borrowed(raw)
         }
     }
 }
@@ -59,17 +63,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disabled_scrubber_returns_raw() {
+    fn disabled_scrubber_borrows_raw() {
         let scrubber = Scrubber::new(false, [0; 16]);
-        assert_eq!(scrubber.hash_id("peer-a"), "peer-a");
+        let out = scrubber.hash_id("peer-a");
+        assert_eq!(out, "peer-a");
+        assert!(matches!(out, Cow::Borrowed(_)));
         assert!(!scrubber.is_enabled());
     }
 
     #[test]
     fn enabled_scrubber_returns_stable_hash() {
         let scrubber = Scrubber::new(true, [1; 16]);
-        let first = scrubber.hash_id("peer-a");
-        let second = scrubber.hash_id("peer-a");
+        let first = scrubber.hash_id("peer-a").into_owned();
+        let second = scrubber.hash_id("peer-a").into_owned();
         assert_eq!(first, second);
         assert_eq!(first.len(), 32);
         assert_ne!(first, "peer-a");
@@ -88,7 +94,7 @@ mod tests {
         let fallback = [0; 16];
         let scrubber = Scrubber::from_config(&config, fallback);
         assert!(scrubber.is_enabled());
-        let expected = Scrubber::new(true, [9; 16]).hash_id("peer-a");
+        let expected = Scrubber::new(true, [9; 16]).hash_id("peer-a").into_owned();
         assert_eq!(scrubber.hash_id("peer-a"), expected);
     }
 
@@ -97,7 +103,7 @@ mod tests {
         let config = TelemetryConfig::default();
         let fallback = [5; 16];
         let scrubber = Scrubber::from_config(&config, fallback);
-        let expected = Scrubber::new(true, fallback).hash_id("peer-a");
+        let expected = Scrubber::new(true, fallback).hash_id("peer-a").into_owned();
         assert_eq!(scrubber.hash_id("peer-a"), expected);
     }
 }

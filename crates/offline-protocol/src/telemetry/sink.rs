@@ -41,7 +41,7 @@ impl TelemetrySink for NoopTelemetrySink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::record::MetricsFrame;
+    use crate::mls_observability::{MlsLifecycleEvent, MlsOperationContext};
     use std::sync::Arc;
 
     #[test]
@@ -58,7 +58,14 @@ mod tests {
     #[test]
     fn noop_sink_accepts_records_without_panic() {
         let sink = NoopTelemetrySink;
-        let record = TelemetryRecord::MetricsSnapshot(MetricsFrame::new(0));
+        let record = TelemetryRecord::Mls(MlsLifecycleEvent::Initialized {
+            timestamp_ms: 0,
+            session_id: "s".into(),
+            group_id: None,
+            peer_id: None,
+            context: MlsOperationContext::Initialize,
+            error_category: None,
+        });
         sink.emit(&record);
     }
 }

@@ -144,6 +144,22 @@ pub enum MlsLifecycleEvent {
     },
 }
 
+impl MlsLifecycleEvent {
+    /// Returns the stable `snake.dot.case` telemetry name for this event.
+    ///
+    /// Names are compatible with OpenTelemetry naming conventions and are
+    /// considered stable across minor versions of the SDK.
+    pub fn telemetry_name(&self) -> &'static str {
+        match self {
+            Self::Initialized { .. } => "mls.initialized",
+            Self::EncryptionUsed { .. } => "mls.encryption_used",
+            Self::DecryptionFailed { .. } => "mls.decryption_failed",
+            Self::SessionMissing { .. } => "mls.session_missing",
+            Self::SessionReady { .. } => "mls.session_ready",
+        }
+    }
+}
+
 /// Sink abstraction for MLS lifecycle events.
 pub trait MlsEventEmitter: Send + Sync {
     /// Emits a structured MLS lifecycle event.

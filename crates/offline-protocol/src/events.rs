@@ -1552,6 +1552,71 @@ impl Event {
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
+
+    /// Returns the stable `snake.dot.case` telemetry name for this event.
+    ///
+    /// Names are compatible with OpenTelemetry naming conventions and are
+    /// considered stable across minor versions of the SDK.
+    pub fn telemetry_name(&self) -> &'static str {
+        match self {
+            Self::MessageSent { .. } => "protocol.message.sent",
+            Self::MessageReceived { .. } => "protocol.message.received",
+            Self::MessageDelivered { .. } => "protocol.message.delivered",
+            Self::MessageFailed { .. } => "protocol.message.failed",
+            Self::MessageDecryptionFailed { .. } => "protocol.message.decryption_failed",
+            Self::TransportSwitched { .. } => "protocol.transport.switched",
+            Self::RelayPromoted { .. } => "protocol.relay.promoted",
+            Self::RelayDemoted { .. } => "protocol.relay.demoted",
+            Self::NeighborDiscovered { .. } => "protocol.neighbor.discovered",
+            Self::NeighborLost { .. } => "protocol.neighbor.lost",
+            Self::NetworkMetrics { .. } => "protocol.network.metrics",
+            Self::FileProgress { .. } => "protocol.file.progress",
+            Self::FileReceived { .. } => "protocol.file.received",
+            Self::MediaSent { .. } => "protocol.media.sent",
+            Self::MessageDeferred { .. } => "protocol.message.deferred",
+            Self::AckEvicted { .. } => "protocol.ack.evicted",
+            Self::FragmentAssemblyEvicted { .. } => "protocol.fragment.assembly_evicted",
+            Self::RelayDemotedBattery { .. } => "protocol.relay.demoted_battery",
+            Self::SecureSessionEstablished { .. } => "protocol.secure_session.established",
+            Self::SecureSessionFailed { .. } => "protocol.secure_session.failed",
+            Self::WelcomeSendAttempted { .. } => "protocol.welcome.send_attempted",
+            Self::WelcomeSendSucceeded { .. } => "protocol.welcome.send_succeeded",
+            Self::WelcomeSendFailed { .. } => "protocol.welcome.send_failed",
+            Self::WelcomeSendExpired { .. } => "protocol.welcome.send_expired",
+            Self::ConnectionRequestReceived { .. } => "protocol.connection.request_received",
+            Self::ConnectionAccepted { .. } => "protocol.connection.accepted",
+            Self::ConnectionRejected { .. } => "protocol.connection.rejected",
+            Self::ConnectionRequestCancelled { .. } => "protocol.connection.request_cancelled",
+            Self::GroupCreated { .. } => "protocol.group.created",
+            Self::GroupMessageReceived { .. } => "protocol.group.message_received",
+            Self::GroupMemberAdded { .. } => "protocol.group.member_added",
+            Self::GroupMemberRemoved { .. } => "protocol.group.member_removed",
+            Self::GroupInfo { .. } => "protocol.group.info",
+            Self::UserGroups { .. } => "protocol.group.user_groups",
+            Self::GroupError { .. } => "protocol.group.error",
+            Self::GroupMessageSent { .. } => "protocol.group.message_sent",
+            Self::GroupMessagePartialFailure { .. } => "protocol.group.message_partial_failure",
+            Self::GroupEpochForkDetected { .. } => "protocol.group.epoch_fork_detected",
+            Self::GroupEpochForkResolved { .. } => "protocol.group.epoch_fork_resolved",
+            Self::GroupRoleChanged { .. } => "protocol.group.role_changed",
+            Self::GroupRenamed { .. } => "protocol.group.renamed",
+            Self::ServiceDiscovered { .. } => "protocol.service.discovered",
+            Self::ServiceRequestReceived { .. } => "protocol.service.request_received",
+            Self::ServiceResponseReceived { .. } => "protocol.service.response_received",
+            Self::PresenceUpdated { .. } => "protocol.presence.updated",
+            Self::TypingIndicatorReceived { .. } => "protocol.typing.received",
+            Self::ReadReceiptReceived { .. } => "protocol.read_receipt.received",
+            Self::DorsScoreUpdated { .. } => "protocol.dors.score_updated",
+            Self::DorsTransportSelected { .. } => "protocol.dors.transport_selected",
+            Self::DorsTransportSwitched { .. } => "protocol.dors.transport_switched",
+            Self::DorsEscalationTriggered { .. } => "protocol.dors.escalation_triggered",
+            Self::SecurityWarning { .. } => "protocol.security.warning",
+            Self::MessageRelayed { .. } => "protocol.message.relayed",
+            Self::UserBlocked { .. } => "protocol.user.blocked",
+            Self::UserUnblocked { .. } => "protocol.user.unblocked",
+            Self::TofuReset { .. } => "protocol.tofu.reset",
+        }
+    }
 }
 
 impl From<ServiceEvent> for Event {
