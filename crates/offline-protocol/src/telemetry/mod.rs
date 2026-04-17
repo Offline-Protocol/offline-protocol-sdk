@@ -10,12 +10,14 @@
 //! point on the protocol engine land in follow-up work.
 
 pub mod config;
+pub(crate) mod context;
 pub mod record;
 pub mod sampling;
 pub(crate) mod scrubber;
 pub mod sink;
 
 pub use config::{MlsVerbosity, TelemetryConfig};
+pub(crate) use context::TelemetryContext;
 pub use record::TelemetryRecord;
 pub use sampling::CategorySampler;
 pub(crate) use scrubber::Scrubber;

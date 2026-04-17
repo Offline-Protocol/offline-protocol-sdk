@@ -1,6 +1,7 @@
 //! Type definitions, constants, and shared state for the protocol engine.
 
 use crate::events::{Event, EventCallback, PresenceStatus};
+use crate::telemetry::TelemetryContext;
 use crate::Error;
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{
@@ -381,6 +382,13 @@ pub(crate) struct SharedState {
 
     /// Received messages queue.
     pub(crate) received_messages: VecDeque<Message>,
+
+    /// Installed telemetry context. When present, `emit_event` additionally
+    /// forwards every protocol event to `ctx.sink` as a
+    /// `TelemetryRecord::Protocol`, with identifier scrubbing applied per
+    /// `ctx.config`. Set via `OfflineProtocol::install_telemetry_sink`.
+    #[allow(dead_code)]
+    pub(crate) telemetry: Option<Arc<TelemetryContext>>,
 }
 
 impl SharedState {
@@ -389,6 +397,7 @@ impl SharedState {
             state: ProtocolState::Stopped,
             event_handlers: Vec::new(),
             received_messages: VecDeque::new(),
+            telemetry: None,
         }
     }
 

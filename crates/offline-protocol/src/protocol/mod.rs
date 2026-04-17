@@ -22,7 +22,7 @@ pub(crate) use types::*;
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
-use crate::telemetry::Scrubber;
+use crate::telemetry::{Scrubber, TelemetryConfig, TelemetryContext, TelemetrySink};
 use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId};
@@ -127,6 +127,22 @@ pub struct OfflineProtocol {
     #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     telemetry_scrubber: Scrubber,
 
+    /// Per-instance fallback secret for identifier scrubbing. Random at
+    /// construction. Reused by both the pre-install `telemetry_scrubber`
+    /// and by any scrubber built inside `install_telemetry_sink` (unless the
+    /// installed `TelemetryConfig` carries its own `scrub_secret`). Keeping
+    /// the fallback stable across installs means the legacy
+    /// `MlsEventEmitter` path observes consistent opaque IDs before and
+    /// after a sink is installed on the same protocol instance.
+    telemetry_fallback_secret: [u8; 16],
+
+    /// Installed telemetry context (sink + config + scrubber). `None` until
+    /// `install_telemetry_sink` is called; thereafter shared with
+    /// `SharedState` via `Arc` clone so both emit paths dispatch through the
+    /// same configuration.
+    #[allow(dead_code)]
+    telemetry: Option<Arc<TelemetryContext>>,
+
     /// File transfer manager for chunking outbound and reassembling inbound media.
     file_transfer_manager: FileTransferManager,
 
@@ -204,6 +220,12 @@ impl OfflineProtocol {
         // Create transport manager
         let transport_manager = TransportManager::new(transport_selector);
 
+        // Per-instance fallback secret for identifier scrubbing. Stable for
+        // the life of this protocol instance so opaque IDs stay consistent
+        // across any later `install_telemetry_sink` call that does not
+        // supply its own `scrub_secret`.
+        let telemetry_fallback_secret = *uuid::Uuid::new_v4().as_bytes();
+
         Ok(Self {
             transport_manager,
             path_selector: PathSelector::with_config(
@@ -230,14 +252,20 @@ impl OfflineProtocol {
             welcome_lifecycles: HashMap::new(),
             mls_event_emitter: Arc::new(NoopMlsEventEmitter),
             mls_event_rate_limiter: MlsEventRateLimiter::default(),
-            // TODO(telemetry-wiring): replace with
-            // `Scrubber::from_config(&config.telemetry, <per-install fallback>)`
-            // once `ProtocolConfig` carries a `TelemetryConfig`. The hardcoded
-            // `true` preserves today's always-scrub MLS observability semantics;
-            // driving it from config is the single switch that activates the
-            // `with_scrub_ids(false)` opt-out path the Scrubber API already
-            // contracts (see `telemetry::scrubber::tests`).
-            telemetry_scrubber: Scrubber::new(true, *uuid::Uuid::new_v4().as_bytes()),
+            // The pre-install scrubber uses `TelemetryConfig::default()` —
+            // `scrub_ids=true`, no explicit `scrub_secret`. Identifier hashing
+            // is therefore on from the moment the protocol is constructed,
+            // matching today's always-scrub MLS observability semantics. When
+            // `install_telemetry_sink` later supplies a config with
+            // `scrub_ids(false)`, a new scrubber is derived from that config
+            // but reuses `telemetry_fallback_secret` so opaque IDs remain
+            // stable across the install boundary.
+            telemetry_scrubber: Scrubber::from_config(
+                &TelemetryConfig::default(),
+                telemetry_fallback_secret,
+            ),
+            telemetry_fallback_secret,
+            telemetry: None,
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
             outbound_media_transfers: HashMap::new(),
@@ -352,6 +380,40 @@ impl OfflineProtocol {
     /// Configures the MLS lifecycle event emitter.
     pub fn set_mls_event_emitter(&mut self, emitter: Arc<dyn MlsEventEmitter>) {
         self.mls_event_emitter = emitter;
+    }
+
+    /// Installs the unified telemetry sink for this protocol instance.
+    ///
+    /// Every subsequent protocol [`Event`] and MLS lifecycle event is
+    /// additionally forwarded to `sink` as a
+    /// [`crate::telemetry::TelemetryRecord`], gated by the verbosity tier
+    /// and identifier-scrubbing preferences in `config`. Protocol events
+    /// flow through as [`TelemetryRecord::Protocol`], MLS lifecycle events
+    /// as [`TelemetryRecord::Mls`].
+    ///
+    /// This does not replace the legacy [`EventCallback`] and
+    /// [`MlsEventEmitter`] paths — they continue to fire independently for
+    /// backward compatibility.
+    ///
+    /// Events emitted before this call (for example
+    /// [`crate::mls_observability::MlsLifecycleEvent::Initialized`] fired
+    /// during `initialize_mls`) are not replayed to a sink installed later.
+    ///
+    /// [`TelemetryRecord::Protocol`]: crate::telemetry::TelemetryRecord::Protocol
+    /// [`TelemetryRecord::Mls`]: crate::telemetry::TelemetryRecord::Mls
+    pub fn install_telemetry_sink(
+        &mut self,
+        sink: Arc<dyn TelemetrySink>,
+        config: TelemetryConfig,
+    ) {
+        let ctx = TelemetryContext::new(sink, config, self.telemetry_fallback_secret);
+        let Ok(mut state) = lock_shared_state(&self.shared_state) else {
+            error!("Failed to lock shared state in install_telemetry_sink");
+            return;
+        };
+        state.telemetry = Some(ctx.clone());
+        drop(state);
+        self.telemetry = Some(ctx);
     }
 
     /// Starts the protocol.

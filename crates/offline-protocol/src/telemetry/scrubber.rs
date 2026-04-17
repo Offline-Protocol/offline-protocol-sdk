@@ -70,6 +70,7 @@ impl fmt::Debug for Scrubber {
 
 impl Scrubber {
     /// Constructs a scrubber with the given enabled flag and secret.
+    #[allow(dead_code)]
     pub fn new(enabled: bool, secret: [u8; 16]) -> Self {
         Self { enabled, secret }
     }
