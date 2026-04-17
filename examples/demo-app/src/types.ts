@@ -81,14 +81,3 @@ export interface ServiceLogEntry {
 }
 
 export type TabName = 'people' | 'chats' | 'groups' | 'services' | 'diagnostics';
-
-export interface MlsLogEntry {
-  ts: number;
-  type: string;
-  raw: any;
-}
-
-export interface ProtocolEventLogEntry {
-  ts: number;
-  type: string;
-}

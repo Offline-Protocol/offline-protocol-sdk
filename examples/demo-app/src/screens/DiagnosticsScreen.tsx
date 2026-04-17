@@ -1,5 +1,5 @@
-import React, {useMemo, useState} from 'react';
-import {View, Text, ScrollView, StyleSheet, TouchableOpacity} from 'react-native';
+import React, {useMemo} from 'react';
+import {View, Text, ScrollView, StyleSheet} from 'react-native';
 import {useProtocol} from '../context/ProtocolContext';
 import {
   MetricCard,
@@ -9,22 +9,34 @@ import {
   KeyValueRow,
   Sparkline,
   TransportBadge,
-  RoutingScoreBars,
+  SegmentedBar,
+  VerticalHistogram,
   CardDivider,
 } from '../components/TelemetryViz';
 import {
   transportColor,
   transportLabel,
-  transportStatusColor,
-  routingPhaseColor,
   reasonLabel,
-  formatBytes,
-  formatCount,
-  formatPercent,
   formatRelative,
 } from '../telemetryFormat';
-import type {RoutingDecision, MetricsFrame} from '@offline-protocol/mesh-sdk';
+import type {
+  MetricsFrame,
+  TransportStateTelemetryEvent,
+  RoutingDecision,
+  DeviceCapabilitySnapshot,
+  TransportType,
+  RoutingReasonCode,
+} from '@offline-protocol/mesh-sdk';
 
+/**
+ * Diagnostics screen.
+ *
+ * Visualizes only the ethical, aggregate, anonymized observations the SDK
+ * emits: no peer IDs, no message content, no per-decision internals — just
+ * the shape of the mesh from this device's vantage point. Every card is
+ * either (a) directly wired to a SDK-emitted field, or (b) a pure derivation
+ * over a telemetry buffer already populated by ProtocolContext.
+ */
 export function DiagnosticsScreen() {
   const {
     latestMetrics,
@@ -32,9 +44,8 @@ export function DiagnosticsScreen() {
     transportTimeline,
     routingDecisions,
     deviceCapability,
-    mlsLog,
-    eventCounts,
-    totalProtocolEvents,
+    deviceCapabilityHistory,
+    hopCountHistogram,
   } = useProtocol();
 
   return (
@@ -42,602 +53,635 @@ export function DiagnosticsScreen() {
       style={styles.scroll}
       contentContainerStyle={styles.content}
       showsVerticalScrollIndicator={false}>
-      <HeroCard metrics={latestMetrics} history={metricsHistory} />
-      <NetworkAtAGlance metrics={latestMetrics} />
-      <DeviceCapabilityCard
-        snapshot={deviceCapability}
-        isLocalRelay={latestMetrics?.isLocalRelay ?? false}
+      <MeshHealthCard metrics={latestMetrics} history={metricsHistory} />
+      <TransportDistributionCard history={metricsHistory} />
+      <DorsDriversCard decisions={routingDecisions} />
+      <LinkStabilityCard timeline={transportTimeline} />
+      <ReliabilityCard metrics={latestMetrics} />
+      <HopDistributionCard histogram={hopCountHistogram} />
+      <RetryQueueCard metrics={latestMetrics} />
+      <PartitionCard history={metricsHistory} />
+      <BatteryImpactCard
+        latest={deviceCapability}
+        history={deviceCapabilityHistory}
+        relayActiveNow={latestMetrics?.isLocalRelay ?? false}
       />
-      <PerTransportCard metrics={latestMetrics} history={metricsHistory} />
-      <RetryDedupCard metrics={latestMetrics} />
-      <RoutingDecisionsCard decisions={routingDecisions} />
-      <TransportTimelineCard timeline={transportTimeline} />
-      <MlsLogCard log={mlsLog} />
-      <EventCountersCard counts={eventCounts} total={totalProtocolEvents} />
       <View style={styles.footer}>
         <Text style={styles.footerText}>
-          Live stream from TelemetrySink · push delivery · 2s metrics cadence
+          Aggregate, anonymized observations · live from TelemetrySink · 2s cadence
         </Text>
       </View>
     </ScrollView>
   );
 }
 
-// ─── Hero ────────────────────────────────────────────────────
+// ─── Mesh Health ─────────────────────────────────────────────
 
-function HeroCard({
+function MeshHealthCard({
   metrics,
   history,
 }: {
   metrics: MetricsFrame | null;
   history: MetricsFrame[];
 }) {
+  const neighborSeries = useMemo(
+    () => history.map(f => f.neighborCount),
+    [history],
+  );
+
   if (!metrics) {
     return (
-      <View style={styles.hero}>
-        <Text style={styles.heroEmpty}>Waiting for first telemetry frame…</Text>
-      </View>
+      <MetricCard title="Mesh Health" subtitle="waiting for first frame">
+        <Text style={styles.empty}>No telemetry frames received yet.</Text>
+      </MetricCard>
     );
   }
+
   const transport = metrics.currentTransport;
   const color = transport ? transportColor(transport) : '#8E8E93';
   const label = transport ? transportLabel(transport) : 'NONE';
-
-  // Aggregate packets-per-frame across all transports for a hero sparkline
-  const series = useMemo(() => {
-    if (history.length < 2) {return [];}
-    const totals = history.map(f =>
-      f.transports.reduce((s, t) => s + t.metrics.packetsSent + t.metrics.packetsReceived, 0),
-    );
-    const deltas: number[] = [];
-    for (let i = 1; i < totals.length; i++) {
-      deltas.push(Math.max(0, totals[i] - totals[i - 1]));
-    }
-    return deltas;
-  }, [history]);
+  const connected = metrics.neighborCount > 0;
 
   return (
-    <View style={[styles.hero, {borderLeftColor: color}]}>
-      <View style={styles.heroTop}>
+    <MetricCard title="Mesh Health" subtitle={formatRelative(metrics.timestampMs)}>
+      <View style={styles.heroRow}>
         <View>
-          <Text style={styles.heroLabel}>ACTIVE TRANSPORT</Text>
-          <View style={styles.heroRow}>
+          <Text style={styles.heroKicker}>ACTIVE TRANSPORT</Text>
+          <View style={styles.heroLine}>
             <View style={[styles.heroDot, {backgroundColor: color}]} />
             <Text style={[styles.heroValue, {color}]}>{label}</Text>
           </View>
         </View>
-        <View>
-          <Text style={styles.heroLabel}>UPDATED</Text>
-          <Text style={styles.heroSecondary}>{formatRelative(metrics.timestampMs)}</Text>
+        <View style={styles.heroRight}>
+          <Text style={styles.heroKicker}>REACHABILITY</Text>
+          <Text
+            style={[
+              styles.heroReach,
+              {color: connected ? '#34C759' : '#FF3B30'},
+            ]}>
+            {connected ? 'CONNECTED' : 'PARTITIONED'}
+          </Text>
         </View>
       </View>
-      {series.length > 0 && (
-        <View style={styles.heroSpark}>
-          <Sparkline values={series} color={color} height={36} />
-          <Text style={styles.heroSparkLabel}>packets / 2s · last {series.length} frames</Text>
-        </View>
-      )}
-    </View>
-  );
-}
-
-// ─── Network at a glance ─────────────────────────────────────
-
-function NetworkAtAGlance({metrics}: {metrics: MetricsFrame | null}) {
-  if (!metrics) {return null;}
-  const dedupPct = Math.round(metrics.dedup.capacityUsedPercent);
-  return (
-    <MetricCard title="Network at a Glance">
       <TileRow>
+        <StatTile label="Neighbors" value={metrics.neighborCount} />
         <StatTile
-          label="Neighbors"
+          label="Role"
+          value={metrics.isLocalRelay ? 'RELAY' : 'LEAF'}
+          accent={metrics.isLocalRelay ? '#5856D6' : undefined}
+        />
+        <StatTile
+          label="Degree"
           value={metrics.neighborCount}
-          accent={metrics.neighborCount > 0 ? '#34C759' : undefined}
-        />
-        <StatTile
-          label="ACK Pend"
-          value={metrics.ackPending}
-          accent={metrics.ackPending > 10 ? '#FF9500' : undefined}
-        />
-        <StatTile
-          label="Retry Q"
-          value={metrics.retryQueue.totalCount}
-          hint={`${metrics.retryQueue.readyCount} ready`}
-          accent={metrics.retryQueue.totalCount > 0 ? '#FF9500' : undefined}
-        />
-        <StatTile
-          label="Dedup"
-          value={`${dedupPct}%`}
-          hint={metrics.dedup.mode}
-          accent={dedupPct >= 80 ? '#FF3B30' : undefined}
+          hint="local"
         />
       </TileRow>
-    </MetricCard>
-  );
-}
-
-// ─── Device capability ───────────────────────────────────────
-
-function DeviceCapabilityCard({
-  snapshot,
-  isLocalRelay,
-}: {
-  snapshot: ReturnType<typeof useProtocol>['deviceCapability'];
-  isLocalRelay: boolean;
-}) {
-  if (!snapshot) {return null;}
-  const battery = snapshot.batteryLevel;
-  const batteryColor =
-    snapshot.isCharging
-      ? '#34C759'
-      : battery !== undefined && battery !== null && battery <= 20
-      ? '#FF3B30'
-      : battery !== undefined && battery !== null && battery <= 40
-      ? '#FF9500'
-      : '#34C759';
-
-  return (
-    <MetricCard title="Device" subtitle={formatRelative(snapshot.timestampMs)}>
-      {battery !== undefined && battery !== null ? (
-        <Bar
-          label="Battery"
-          value={battery}
-          max={100}
-          color={batteryColor}
-          rightLabel={`${battery}%${snapshot.isCharging ? ' ⚡' : ''}`}
-        />
-      ) : (
-        <KeyValueRow k="Battery" v="unknown" />
-      )}
-      <View style={styles.chipRow}>
-        <View
-          style={[
-            styles.chip,
-            {backgroundColor: snapshot.relayRole === 'relay' ? '#5856D6' : '#E5E5EA'},
-          ]}>
-          <Text
-            style={[
-              styles.chipText,
-              {color: snapshot.relayRole === 'relay' ? '#FFFFFF' : '#3C3C43'},
-            ]}>
-            {snapshot.relayRole === 'relay' ? 'RELAY ROLE' : 'REGULAR ROLE'}
-          </Text>
+      {neighborSeries.length > 1 && (
+        <View style={styles.sparkWrap}>
+          <Text style={styles.sparkLabel}>neighbor count · last {neighborSeries.length * 2}s</Text>
+          <Sparkline values={neighborSeries} color={color} height={28} />
         </View>
-        {isLocalRelay && (
-          <View style={[styles.chip, {backgroundColor: '#34C759'}]}>
-            <Text style={[styles.chipText, {color: '#FFFFFF'}]}>ACTIVE RELAY</Text>
-          </View>
-        )}
-        <View
-          style={[
-            styles.chip,
-            {backgroundColor: snapshot.isCharging ? '#34C759' : '#E5E5EA'},
-          ]}>
-          <Text
-            style={[
-              styles.chipText,
-              {color: snapshot.isCharging ? '#FFFFFF' : '#3C3C43'},
-            ]}>
-            {snapshot.isCharging ? 'CHARGING' : 'ON BATTERY'}
-          </Text>
-        </View>
-      </View>
-      {snapshot.changedFields !== 0 && (
-        <Text style={styles.changedHint}>
-          changed: {decodeChangedFields(snapshot.changedFields)}
-        </Text>
       )}
     </MetricCard>
   );
 }
 
-function decodeChangedFields(mask: number): string {
-  const out: string[] = [];
-  if (mask & 0x01) {out.push('battery');}
-  if (mask & 0x02) {out.push('charging');}
-  if (mask & 0x04) {out.push('relay-role');}
-  return out.join(', ') || 'none';
-}
+// ─── Transport time distribution ─────────────────────────────
 
-// ─── Per-transport metrics ───────────────────────────────────
-
-function PerTransportCard({
-  metrics,
-  history,
-}: {
-  metrics: MetricsFrame | null;
-  history: MetricsFrame[];
-}) {
-  if (!metrics || metrics.transports.length === 0) {return null;}
+function TransportDistributionCard({history}: {history: MetricsFrame[]}) {
+  const dist = useMemo(() => computeTransportDistribution(history), [history]);
   return (
     <MetricCard
-      title="Per-Transport Metrics"
-      subtitle={`${metrics.transports.length} transport${metrics.transports.length === 1 ? '' : 's'}`}>
-      {metrics.transports.map((entry, i) => (
-        <View key={entry.transport}>
-          {i > 0 && <CardDivider />}
-          <TransportRow entry={entry} history={history} />
+      title="Transport Distribution"
+      subtitle={dist.total > 0 ? `${dist.windowSec}s window` : 'no samples'}>
+      {dist.total === 0 ? (
+        <Text style={styles.empty}>
+          Waiting for metrics frames. Each frame contributes its active transport
+          to the distribution.
+        </Text>
+      ) : (
+        <>
+          <SegmentedBar
+            segments={dist.entries.map(e => ({
+              key: e.transport,
+              value: e.count,
+              color: transportColor(e.transport),
+            }))}
+          />
+          <View style={styles.legendRow}>
+            {dist.entries.map(e => (
+              <View key={e.transport} style={styles.legendItem}>
+                <View
+                  style={[styles.legendDot, {backgroundColor: transportColor(e.transport)}]}
+                />
+                <Text style={styles.legendText}>
+                  {transportLabel(e.transport)} · {Math.round((e.count / dist.total) * 100)}%
+                </Text>
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+    </MetricCard>
+  );
+}
+
+interface TransportDistribution {
+  entries: Array<{transport: TransportType; count: number}>;
+  total: number;
+  windowSec: number;
+}
+
+function computeTransportDistribution(history: MetricsFrame[]): TransportDistribution {
+  const counts = new Map<TransportType, number>();
+  let total = 0;
+  let windowStart = history[0]?.timestampMs ?? 0;
+  let windowEnd = history[0]?.timestampMs ?? 0;
+  for (const frame of history) {
+    windowEnd = frame.timestampMs;
+    if (windowStart === 0) {windowStart = frame.timestampMs;}
+    if (frame.currentTransport) {
+      counts.set(
+        frame.currentTransport,
+        (counts.get(frame.currentTransport) ?? 0) + 1,
+      );
+      total += 1;
+    }
+  }
+  const entries = Array.from(counts.entries())
+    .map(([transport, count]) => ({transport, count}))
+    .sort((a, b) => b.count - a.count);
+  const windowSec = Math.max(0, Math.round((windowEnd - windowStart) / 1000));
+  return {entries, total, windowSec};
+}
+
+// ─── DORS switch drivers ─────────────────────────────────────
+
+function DorsDriversCard({decisions}: {decisions: RoutingDecision[]}) {
+  const drivers = useMemo(() => computeDorsDrivers(decisions), [decisions]);
+  const totalSwitches = drivers.reduce((s, d) => s + d.count, 0);
+  const max = Math.max(1, ...drivers.map(d => d.count));
+  return (
+    <MetricCard
+      title="DORS Switch Drivers"
+      subtitle={totalSwitches > 0 ? `${totalSwitches} switches observed` : 'no switches yet'}>
+      {totalSwitches === 0 ? (
+        <Text style={styles.empty}>
+          Transport switches appear here once DORS moves between transports.
+          Reason codes tell you what triggered the switch — signal, congestion,
+          unavailability, etc.
+        </Text>
+      ) : (
+        drivers.map(d => (
+          <Bar
+            key={d.reason}
+            label={reasonLabel(d.reason)}
+            value={d.count}
+            max={max}
+            color="#5856D6"
+            rightLabel={String(d.count)}
+          />
+        ))
+      )}
+    </MetricCard>
+  );
+}
+
+function computeDorsDrivers(
+  decisions: RoutingDecision[],
+): Array<{reason: RoutingReasonCode; count: number}> {
+  const counts = new Map<RoutingReasonCode, number>();
+  for (const d of decisions) {
+    if (d.phase !== 'switched' || !d.reasonCode) {continue;}
+    counts.set(d.reasonCode, (counts.get(d.reasonCode) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([reason, count]) => ({reason, count}))
+    .sort((a, b) => b.count - a.count);
+}
+
+// ─── Link stability ──────────────────────────────────────────
+
+function LinkStabilityCard({
+  timeline,
+}: {
+  timeline: TransportStateTelemetryEvent[];
+}) {
+  const stability = useMemo(() => computeLinkStability(timeline), [timeline]);
+
+  if (stability.length === 0) {
+    return (
+      <MetricCard title="Link Stability" subtitle="no transitions yet">
+        <Text style={styles.empty}>
+          Every connect/disconnect on a transport is recorded here. With no
+          transitions observed, every link has been stable since startup.
+        </Text>
+      </MetricCard>
+    );
+  }
+
+  return (
+    <MetricCard title="Link Stability" subtitle={`${stability.length} transports observed`}>
+      {stability.map(s => (
+        <View key={s.transport} style={styles.linkRow}>
+          <TransportBadge transport={s.transport} small />
+          <View style={styles.linkMeta}>
+            <Text style={styles.linkMetaValue}>{s.flaps} transitions</Text>
+            <Text style={styles.linkMetaHint}>
+              {s.avgGapMs > 0
+                ? `avg gap ${formatDuration(s.avgGapMs)}`
+                : 'single event'}
+            </Text>
+          </View>
         </View>
       ))}
     </MetricCard>
   );
 }
 
-function TransportRow({
-  entry,
-  history,
-}: {
-  entry: MetricsFrame['transports'][number];
-  history: MetricsFrame[];
-}) {
-  const m = entry.metrics;
-  const isCurrent = false; // visual emphasis is via the badge color already
-  void isCurrent;
+interface LinkStabilityEntry {
+  transport: TransportType;
+  flaps: number;
+  avgGapMs: number;
+}
 
-  // Per-transport packet sparkline (last N frames)
-  const packetSeries = useMemo(() => {
-    if (history.length < 2) {return [];}
-    const totals = history.map(f => {
-      const t = f.transports.find(x => x.transport === entry.transport);
-      return t ? t.metrics.packetsSent + t.metrics.packetsReceived : 0;
-    });
-    const deltas: number[] = [];
-    for (let i = 1; i < totals.length; i++) {
-      deltas.push(Math.max(0, totals[i] - totals[i - 1]));
-    }
-    return deltas;
-  }, [history, entry.transport]);
+function computeLinkStability(
+  timeline: TransportStateTelemetryEvent[],
+): LinkStabilityEntry[] {
+  const byTransport = new Map<TransportType, number[]>();
+  for (const ev of timeline) {
+    const arr = byTransport.get(ev.transport) ?? [];
+    arr.push(ev.timestampMs);
+    byTransport.set(ev.transport, arr);
+  }
+  return Array.from(byTransport.entries())
+    .map(([transport, timestamps]) => {
+      const sorted = [...timestamps].sort((a, b) => a - b);
+      let totalGap = 0;
+      for (let i = 1; i < sorted.length; i++) {
+        totalGap += sorted[i] - sorted[i - 1];
+      }
+      const avgGapMs = sorted.length > 1 ? totalGap / (sorted.length - 1) : 0;
+      return {transport, flaps: sorted.length, avgGapMs};
+    })
+    .sort((a, b) => b.flaps - a.flaps);
+}
 
-  const errorPct = m.errorRate * 100;
-  const errorColor = errorPct >= 10 ? '#FF3B30' : errorPct >= 2 ? '#FF9500' : '#34C759';
+// ─── Reliability by transport ────────────────────────────────
 
+function ReliabilityCard({metrics}: {metrics: MetricsFrame | null}) {
+  if (!metrics || metrics.transports.length === 0) {
+    return (
+      <MetricCard title="Reliability by Transport" subtitle="no data">
+        <Text style={styles.empty}>
+          Per-transport delivery, error, and latency metrics will appear once a
+          transport becomes active.
+        </Text>
+      </MetricCard>
+    );
+  }
   return (
-    <View>
-      <View style={styles.transportHeader}>
-        <TransportBadge transport={entry.transport} />
-        <Sparkline
-          values={packetSeries}
-          color={transportColor(entry.transport)}
-          height={20}
-        />
-      </View>
-
-      <View style={styles.kvGrid}>
-        <View style={styles.kvCol}>
-          <KeyValueRow k="Sent" v={`${formatCount(m.packetsSent)} pkt`} />
-          <KeyValueRow k="Bytes ↑" v={formatBytes(m.bytesSent)} />
-          <KeyValueRow k="Latency" v={`${m.avgLatencyMs.toFixed(0)} ms`} />
-          {m.bandwidthBps !== undefined && (
-            <KeyValueRow k="Bandwidth" v={`${formatBytes(m.bandwidthBps)}/s`} />
-          )}
-          {m.queueDepth !== undefined && (
-            <KeyValueRow k="Queue" v={m.queueDepth} />
-          )}
-        </View>
-        <View style={styles.kvCol}>
-          <KeyValueRow k="Recv" v={`${formatCount(m.packetsReceived)} pkt`} />
-          <KeyValueRow k="Bytes ↓" v={formatBytes(m.bytesReceived)} />
-          <KeyValueRow
-            k="Errors"
-            v={`${errorPct.toFixed(1)}%`}
-            accent={errorColor}
+    <MetricCard
+      title="Reliability by Transport"
+      subtitle={`${metrics.transports.length} transport${metrics.transports.length === 1 ? '' : 's'}`}>
+      {metrics.transports.map((entry, i) => (
+        <View key={entry.transport}>
+          {i > 0 && <CardDivider />}
+          <View style={styles.reliabilityHeader}>
+            <TransportBadge transport={entry.transport} small />
+          </View>
+          <Bar
+            label="Delivery"
+            value={entry.metrics.deliveryRatio ?? 0}
+            max={1}
+            color="#34C759"
+            rightLabel={
+              entry.metrics.deliveryRatio !== undefined
+                ? `${(entry.metrics.deliveryRatio * 100).toFixed(1)}%`
+                : '—'
+            }
           />
-          {m.deliveryRatio !== undefined && (
-            <KeyValueRow k="Delivery" v={formatPercent(m.deliveryRatio, 1)} />
-          )}
-          {m.averageHopCount !== undefined && (
-            <KeyValueRow k="Hops" v={m.averageHopCount.toFixed(1)} />
+          <Bar
+            label="Error rate"
+            value={entry.metrics.errorRate}
+            max={1}
+            color={
+              entry.metrics.errorRate >= 0.1
+                ? '#FF3B30'
+                : entry.metrics.errorRate >= 0.02
+                ? '#FF9500'
+                : '#34C759'
+            }
+            rightLabel={`${(entry.metrics.errorRate * 100).toFixed(2)}%`}
+          />
+          <Bar
+            label="Avg latency"
+            value={Math.min(entry.metrics.avgLatencyMs, 1000)}
+            max={1000}
+            color="#007AFF"
+            rightLabel={`${Math.round(entry.metrics.avgLatencyMs)} ms`}
+          />
+          {entry.metrics.averageHopCount !== undefined && (
+            <KeyValueRow
+              k="Avg hop count"
+              v={entry.metrics.averageHopCount.toFixed(2)}
+            />
           )}
         </View>
-      </View>
-
-      {m.rssi !== undefined && (
-        <Bar
-          label="RSSI"
-          value={Math.max(0, m.rssi + 100)}
-          max={70}
-          color="#007AFF"
-          rightLabel={`${m.rssi} dBm`}
-        />
-      )}
-      {m.congestion !== undefined && (
-        <Bar
-          label="Congestion"
-          value={m.congestion}
-          max={1}
-          color={m.congestion > 0.7 ? '#FF3B30' : m.congestion > 0.4 ? '#FF9500' : '#34C759'}
-          rightLabel={formatPercent(m.congestion, 0)}
-        />
-      )}
-      {m.energyCost !== undefined && (
-        <Bar
-          label="Energy"
-          value={m.energyCost}
-          max={1}
-          color="#FFCC00"
-          rightLabel={m.energyCost.toFixed(2)}
-        />
-      )}
-    </View>
+      ))}
+    </MetricCard>
   );
 }
 
-// ─── Retry queue + dedup ─────────────────────────────────────
+// ─── Hop count distribution ──────────────────────────────────
 
-function RetryDedupCard({metrics}: {metrics: MetricsFrame | null}) {
+function HopDistributionCard({
+  histogram,
+}: {
+  histogram: Record<number, number>;
+}) {
+  const {buckets, total, max} = useMemo(() => {
+    const observed = Object.keys(histogram)
+      .map(k => Number(k))
+      .filter(n => Number.isFinite(n));
+    const maxHop = observed.length > 0 ? Math.max(...observed) : 0;
+    const upper = Math.min(Math.max(maxHop, 7), 15);
+    const arr: Array<{key: string | number; value: number}> = [];
+    let runningTotal = 0;
+    for (let h = 0; h <= upper; h++) {
+      const v = histogram[h] ?? 0;
+      runningTotal += v;
+      arr.push({key: h === 15 ? '15+' : h, value: v});
+    }
+    return {buckets: arr, total: runningTotal, max: upper};
+  }, [histogram]);
+
+  if (total === 0) {
+    return (
+      <MetricCard title="Hop Count Distribution" subtitle="no samples">
+        <Text style={styles.empty}>
+          Sampled from every received and delivered message's final hop count.
+          Direct deliveries land at 0; mesh-routed deliveries climb from there.
+        </Text>
+      </MetricCard>
+    );
+  }
+
+  return (
+    <MetricCard
+      title="Hop Count Distribution"
+      subtitle={`${total} message${total === 1 ? '' : 's'} sampled · max observed ${max}`}>
+      <VerticalHistogram buckets={buckets} color="#007AFF" height={70} />
+    </MetricCard>
+  );
+}
+
+// ─── Retry queue ─────────────────────────────────────────────
+
+function RetryQueueCard({metrics}: {metrics: MetricsFrame | null}) {
   if (!metrics) {return null;}
   const r = metrics.retryQueue;
   const total = Math.max(
     1,
     r.criticalPriorityCount + r.highPriorityCount + r.mediumPriorityCount + r.lowPriorityCount,
   );
-  return (
-    <MetricCard title="Reliability" subtitle="retry queue · deduplicator">
-      <Text style={styles.subhead}>RETRY QUEUE BY PRIORITY</Text>
-      <Bar
-        label="Critical"
-        value={r.criticalPriorityCount}
-        max={total}
-        color="#FF3B30"
-        rightLabel={String(r.criticalPriorityCount)}
-      />
-      <Bar
-        label="High"
-        value={r.highPriorityCount}
-        max={total}
-        color="#FF9500"
-        rightLabel={String(r.highPriorityCount)}
-      />
-      <Bar
-        label="Medium"
-        value={r.mediumPriorityCount}
-        max={total}
-        color="#007AFF"
-        rightLabel={String(r.mediumPriorityCount)}
-      />
-      <Bar
-        label="Low"
-        value={r.lowPriorityCount}
-        max={total}
-        color="#8E8E93"
-        rightLabel={String(r.lowPriorityCount)}
-      />
-      <CardDivider />
-      <Text style={styles.subhead}>DEDUPLICATOR</Text>
-      <KeyValueRow k="Mode" v={metrics.dedup.mode} />
-      <KeyValueRow k="Tracked" v={formatCount(metrics.dedup.totalTracked)} />
-      <KeyValueRow k="Recent" v={formatCount(metrics.dedup.recentTracked)} />
-      <Bar
-        label="Capacity"
-        value={metrics.dedup.capacityUsedPercent}
-        max={100}
-        color={
-          metrics.dedup.capacityUsedPercent >= 80
-            ? '#FF3B30'
-            : metrics.dedup.capacityUsedPercent >= 50
-            ? '#FF9500'
-            : '#34C759'
-        }
-        rightLabel={`${metrics.dedup.capacityUsedPercent.toFixed(0)}%`}
-      />
-      {metrics.dedup.falsePositiveRate !== undefined && (
-        <KeyValueRow
-          k="False-pos rate"
-          v={`${(metrics.dedup.falsePositiveRate * 100).toFixed(3)}%`}
-        />
-      )}
-    </MetricCard>
-  );
-}
-
-// ─── DORS decisions ──────────────────────────────────────────
-
-function RoutingDecisionsCard({decisions}: {decisions: RoutingDecision[]}) {
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const anyPending = total > 1 || r.totalCount > 0;
   return (
     <MetricCard
-      title="DORS Decisions"
-      subtitle={decisions.length > 0 ? `${decisions.length} recent` : 'no decisions yet'}>
-      {decisions.length === 0 && (
-        <Text style={styles.empty}>
-          No routing decisions emitted yet. They appear when DORS scores or switches transports.
-        </Text>
-      )}
-      {decisions.slice(0, 8).map((d, i) => {
-        const isOpen = expanded === i;
-        return (
-          <View key={i} style={styles.decisionRow}>
-            <TouchableOpacity
-              activeOpacity={0.7}
-              onPress={() => setExpanded(isOpen ? null : i)}>
-              <View style={styles.decisionHeader}>
-                <View
-                  style={[
-                    styles.phaseBadge,
-                    {backgroundColor: routingPhaseColor(d.phase)},
-                  ]}>
-                  <Text style={styles.phaseText}>{d.phase}</Text>
-                </View>
-                <Text style={styles.reason}>{reasonLabel(d.reasonCode)}</Text>
-                <Text style={styles.decisionTime}>{formatRelative(d.timestampMs)}</Text>
-              </View>
-              <View style={styles.decisionBody}>
-                {d.from && (
-                  <>
-                    <TransportBadge transport={d.from} small />
-                    <Text style={styles.arrow}>→</Text>
-                  </>
-                )}
-                {d.to ? (
-                  <TransportBadge transport={d.to} small />
-                ) : (
-                  <Text style={styles.noTo}>—</Text>
-                )}
-                {d.winningScore !== undefined && (
-                  <Text style={styles.score}>score {d.winningScore.toFixed(2)}</Text>
-                )}
-                {d.scores.length > 0 && (
-                  <Text style={styles.expandHint}>{isOpen ? '▾' : '▸'} scores</Text>
-                )}
-              </View>
-            </TouchableOpacity>
-            {isOpen && d.scores.length > 0 && (
-              <View>
-                {d.scores.map(s => (
-                  <RoutingScoreBars key={s.transport} entry={s} />
-                ))}
-              </View>
-            )}
-          </View>
-        );
-      })}
-    </MetricCard>
-  );
-}
-
-// ─── Transport state timeline ────────────────────────────────
-
-function TransportTimelineCard({
-  timeline,
-}: {
-  timeline: ReturnType<typeof useProtocol>['transportTimeline'];
-}) {
-  return (
-    <MetricCard
-      title="Transport State Timeline"
-      subtitle={timeline.length > 0 ? `${timeline.length} transitions` : 'no transitions'}>
-      {timeline.length === 0 && (
-        <Text style={styles.empty}>
-          Transitions appear when a transport's connection status changes.
-        </Text>
-      )}
-      {timeline.slice(0, 12).map((ev, i) => (
-        <View key={`${ev.timestampMs}-${i}`} style={styles.timelineRow}>
-          <View
-            style={[
-              styles.timelineDot,
-              {backgroundColor: transportStatusColor(ev.current)},
-            ]}
+      title="Retry Queue"
+      subtitle={
+        anyPending
+          ? `${r.totalCount} pending · ${r.readyCount} ready`
+          : 'queue empty'
+      }>
+      {anyPending ? (
+        <>
+          <Bar
+            label="Critical"
+            value={r.criticalPriorityCount}
+            max={total}
+            color="#FF3B30"
+            rightLabel={String(r.criticalPriorityCount)}
           />
-          <View style={styles.timelineBody}>
-            <View style={styles.timelineTopRow}>
-              <TransportBadge transport={ev.transport} small />
-              <Text style={styles.timelineTime}>{formatRelative(ev.timestampMs)}</Text>
-            </View>
-            <View style={styles.timelineTransition}>
-              <Text style={[styles.statusText, {color: transportStatusColor(ev.previous)}]}>
-                {ev.previous}
-              </Text>
-              <Text style={styles.arrow}>→</Text>
-              <Text style={[styles.statusText, {color: transportStatusColor(ev.current)}]}>
-                {ev.current}
-              </Text>
-            </View>
-          </View>
-        </View>
-      ))}
-    </MetricCard>
-  );
-}
-
-// ─── MLS lifecycle log ───────────────────────────────────────
-
-const MLS_TYPE_COLORS: Record<string, string> = {
-  initialized: '#34C759',
-  encryption_used: '#007AFF',
-  session_ready: '#34C759',
-  session_missing: '#FF9500',
-  decryption_failed: '#FF3B30',
-};
-
-function MlsLogCard({log}: {log: ReturnType<typeof useProtocol>['mlsLog']}) {
-  return (
-    <MetricCard
-      title="MLS Lifecycle"
-      subtitle={log.length > 0 ? `${log.length} events` : 'no MLS activity yet'}>
-      {log.length === 0 && (
+          <Bar
+            label="High"
+            value={r.highPriorityCount}
+            max={total}
+            color="#FF9500"
+            rightLabel={String(r.highPriorityCount)}
+          />
+          <Bar
+            label="Medium"
+            value={r.mediumPriorityCount}
+            max={total}
+            color="#007AFF"
+            rightLabel={String(r.mediumPriorityCount)}
+          />
+          <Bar
+            label="Low"
+            value={r.lowPriorityCount}
+            max={total}
+            color="#8E8E93"
+            rightLabel={String(r.lowPriorityCount)}
+          />
+        </>
+      ) : (
         <Text style={styles.empty}>
-          MLS lifecycle events appear when a session initializes, encrypts, or fails.
+          No messages are waiting for retry. Queue fills under intermittent
+          connectivity or ACK timeouts.
         </Text>
       )}
-      {log.slice(0, 10).map((entry, i) => {
-        const color = MLS_TYPE_COLORS[entry.type] ?? '#8E8E93';
-        return (
-          <View key={i} style={styles.mlsRow}>
-            <View style={[styles.mlsDot, {backgroundColor: color}]} />
-            <View style={styles.mlsBody}>
-              <View style={styles.mlsTopRow}>
-                <Text style={[styles.mlsType, {color}]}>{entry.type}</Text>
-                <Text style={styles.mlsTime}>{formatRelative(entry.ts)}</Text>
-              </View>
-              {renderMlsDetail(entry.raw)}
-            </View>
-          </View>
-        );
-      })}
     </MetricCard>
   );
 }
 
-function renderMlsDetail(raw: any): React.ReactNode {
-  if (!raw || typeof raw !== 'object') {return null;}
-  const interesting = ['groupId', 'group_id', 'peerId', 'peer_id', 'ciphersuite', 'reason', 'epoch'];
-  const lines: string[] = [];
-  for (const k of interesting) {
-    if (raw[k] !== undefined && raw[k] !== null) {
-      lines.push(`${k}=${String(raw[k])}`);
+// ─── Partition & recovery ────────────────────────────────────
+
+function PartitionCard({history}: {history: MetricsFrame[]}) {
+  const partition = useMemo(() => computePartitionStats(history), [history]);
+
+  return (
+    <MetricCard
+      title="Partition & Recovery"
+      subtitle={
+        partition.observed === 0
+          ? 'no partitions observed'
+          : `${partition.observed} resolved · ${formatDuration(partition.avgDurationMs)} avg`
+      }>
+      <TileRow>
+        <StatTile
+          label="State"
+          value={partition.currentMs !== null ? 'PARTITIONED' : 'CONNECTED'}
+          accent={partition.currentMs !== null ? '#FF3B30' : '#34C759'}
+        />
+        <StatTile
+          label="Current"
+          value={partition.currentMs !== null ? formatDuration(partition.currentMs) : '—'}
+          hint={partition.currentMs !== null ? 'in progress' : ''}
+        />
+        <StatTile label="Resolved" value={partition.observed} hint="in window" />
+      </TileRow>
+      {partition.observed > 0 && (
+        <View style={{marginTop: 6}}>
+          <KeyValueRow k="Avg duration" v={formatDuration(partition.avgDurationMs)} />
+          <KeyValueRow k="Longest" v={formatDuration(partition.maxDurationMs)} />
+          <KeyValueRow
+            k="Last ended"
+            v={
+              partition.lastEndedMs !== null
+                ? formatRelative(partition.lastEndedMs)
+                : '—'
+            }
+          />
+        </View>
+      )}
+    </MetricCard>
+  );
+}
+
+interface PartitionStats {
+  observed: number;
+  avgDurationMs: number;
+  maxDurationMs: number;
+  currentMs: number | null;
+  lastEndedMs: number | null;
+}
+
+function computePartitionStats(history: MetricsFrame[]): PartitionStats {
+  const completed: Array<{startMs: number; endMs: number}> = [];
+  let partitionStart: number | null = null;
+  let lastEndedMs: number | null = null;
+  for (const frame of history) {
+    if (frame.neighborCount === 0 && partitionStart === null) {
+      partitionStart = frame.timestampMs;
+    } else if (frame.neighborCount > 0 && partitionStart !== null) {
+      completed.push({startMs: partitionStart, endMs: frame.timestampMs});
+      lastEndedMs = frame.timestampMs;
+      partitionStart = null;
     }
   }
-  if (lines.length === 0) {return null;}
-  return <Text style={styles.mlsDetail}>{lines.join(' · ')}</Text>;
+  const currentMs =
+    partitionStart !== null ? Math.max(0, Date.now() - partitionStart) : null;
+  const durations = completed.map(p => p.endMs - p.startMs);
+  const avgDurationMs = durations.length
+    ? durations.reduce((s, d) => s + d, 0) / durations.length
+    : 0;
+  const maxDurationMs = durations.length ? Math.max(...durations) : 0;
+  return {
+    observed: completed.length,
+    avgDurationMs,
+    maxDurationMs,
+    currentMs,
+    lastEndedMs,
+  };
 }
 
-// ─── Event counters ──────────────────────────────────────────
+// ─── Battery impact ──────────────────────────────────────────
 
-function EventCountersCard({
-  counts,
-  total,
+function BatteryImpactCard({
+  latest,
+  history,
+  relayActiveNow,
 }: {
-  counts: Record<string, number>;
-  total: number;
+  latest: DeviceCapabilitySnapshot | null;
+  history: DeviceCapabilitySnapshot[];
+  relayActiveNow: boolean;
 }) {
-  const sorted = useMemo(
-    () =>
-      Object.entries(counts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 12),
-    [counts],
-  );
-  if (sorted.length === 0) {
+  const drain = useMemo(() => computeBatteryDrain(history), [history]);
+
+  if (!latest || latest.batteryLevel === undefined || latest.batteryLevel === null) {
     return (
-      <MetricCard title="Protocol Event Stream" subtitle="0 total">
-        <Text style={styles.empty}>No protocol events received yet.</Text>
+      <MetricCard title="Battery Impact" subtitle="no samples">
+        <Text style={styles.empty}>
+          Device capability snapshots are emitted when battery level, charging
+          state, or relay role changes. Nothing to plot yet.
+        </Text>
       </MetricCard>
     );
   }
-  const max = Math.max(...sorted.map(([, n]) => n));
+
+  const level = latest.batteryLevel;
+  const batteryColor = latest.isCharging
+    ? '#34C759'
+    : level <= 20
+    ? '#FF3B30'
+    : level <= 40
+    ? '#FF9500'
+    : '#34C759';
+
+  const levelSeries = history
+    .map(s => s.batteryLevel)
+    .filter((n): n is number => typeof n === 'number');
+
   return (
-    <MetricCard
-      title="Protocol Event Stream"
-      subtitle={`${formatCount(total)} total · top ${sorted.length}`}>
-      {sorted.map(([type, n]) => (
-        <Bar
-          key={type}
-          label={shortenEventType(type)}
-          value={n}
-          max={max}
-          color="#007AFF"
-          rightLabel={String(n)}
+    <MetricCard title="Battery Impact" subtitle={formatRelative(latest.timestampMs)}>
+      <Bar
+        label="Level"
+        value={level}
+        max={100}
+        color={batteryColor}
+        rightLabel={`${level}%${latest.isCharging ? ' ⚡' : ''}`}
+      />
+      <TileRow>
+        <StatTile
+          label="Drain"
+          value={drain ? `${drain.ratePerHour.toFixed(1)}%/h` : '—'}
+          hint={drain ? `${drain.samples} samples` : 'need ≥2 samples'}
+          accent={drain && drain.ratePerHour > 10 ? '#FF3B30' : undefined}
         />
-      ))}
+        <StatTile
+          label="Role"
+          value={latest.relayRole === 'relay' ? 'RELAY' : 'LEAF'}
+          accent={latest.relayRole === 'relay' ? '#5856D6' : undefined}
+        />
+        <StatTile
+          label="Relay active"
+          value={relayActiveNow ? 'YES' : 'NO'}
+          accent={relayActiveNow ? '#5856D6' : undefined}
+        />
+      </TileRow>
+      {levelSeries.length > 1 && (
+        <View style={styles.sparkWrap}>
+          <Text style={styles.sparkLabel}>
+            battery level · last {levelSeries.length} samples
+          </Text>
+          <Sparkline values={levelSeries} color={batteryColor} height={28} />
+        </View>
+      )}
     </MetricCard>
   );
 }
 
-function shortenEventType(t: string): string {
-  // Strip any common prefixes for readability while keeping uniqueness
-  return t.replace(/^protocol_/, '').replace(/_/g, ' ');
+interface BatteryDrain {
+  ratePerHour: number;
+  samples: number;
 }
+
+function computeBatteryDrain(history: DeviceCapabilitySnapshot[]): BatteryDrain | null {
+  const levels = history.filter(
+    (s): s is DeviceCapabilitySnapshot & {batteryLevel: number} =>
+      typeof s.batteryLevel === 'number' && !s.isCharging,
+  );
+  if (levels.length < 2) {return null;}
+  const first = levels[0];
+  const last = levels[levels.length - 1];
+  const dMs = last.timestampMs - first.timestampMs;
+  if (dMs <= 0) {return null;}
+  const dLevel = first.batteryLevel - last.batteryLevel; // positive = draining
+  const hours = dMs / 3_600_000;
+  return {ratePerHour: dLevel / hours, samples: levels.length};
+}
+
+// ─── Formatters ──────────────────────────────────────────────
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) {return `${Math.round(ms)} ms`;}
+  if (ms < 60_000) {return `${(ms / 1000).toFixed(1)} s`;}
+  if (ms < 3_600_000) {return `${Math.floor(ms / 60_000)} min`;}
+  return `${(ms / 3_600_000).toFixed(1)} h`;
+}
+
+// ─── Styles ──────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   scroll: {
@@ -647,33 +691,29 @@ const styles = StyleSheet.create({
   content: {
     paddingBottom: 24,
   },
-  hero: {
-    backgroundColor: '#FFFFFF',
-    marginHorizontal: 12,
-    marginTop: 12,
-    borderRadius: 12,
-    padding: 14,
-    borderLeftWidth: 4,
-    borderLeftColor: '#C7C7CC',
-  },
-  heroEmpty: {
+  empty: {
+    fontSize: 12,
     color: '#8E8E93',
     fontStyle: 'italic',
-    textAlign: 'center',
-    paddingVertical: 16,
+    paddingVertical: 4,
+    lineHeight: 16,
   },
-  heroTop: {
+  heroRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 10,
+  },
+  heroRight: {
     alignItems: 'flex-end',
   },
-  heroLabel: {
+  heroKicker: {
     fontSize: 10,
     fontWeight: '700',
     color: '#8E8E93',
     letterSpacing: 0.6,
   },
-  heroRow: {
+  heroLine: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
@@ -685,206 +725,71 @@ const styles = StyleSheet.create({
     borderRadius: 5,
   },
   heroValue: {
-    fontSize: 28,
+    fontSize: 22,
     fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  heroReach: {
+    fontSize: 16,
+    fontWeight: '800',
+    marginTop: 4,
     letterSpacing: 0.5,
   },
-  heroSecondary: {
-    fontSize: 14,
-    color: '#1C1C1E',
-    fontWeight: '600',
-    marginTop: 4,
-    fontVariant: ['tabular-nums'],
-  },
-  heroSpark: {
-    marginTop: 12,
-  },
-  heroSparkLabel: {
-    fontSize: 10,
-    color: '#8E8E93',
-    marginTop: 4,
-    textAlign: 'right',
-  },
-  chipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
+  sparkWrap: {
     marginTop: 10,
   },
-  chip: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  chipText: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.4,
-  },
-  changedHint: {
+  sparkLabel: {
     fontSize: 10,
     color: '#8E8E93',
-    marginTop: 6,
-    fontStyle: 'italic',
-  },
-  transportHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 6,
-  },
-  kvGrid: {
-    flexDirection: 'row',
-    gap: 16,
-    marginVertical: 4,
-  },
-  kvCol: {
-    flex: 1,
-  },
-  subhead: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#8E8E93',
-    letterSpacing: 0.6,
     marginBottom: 4,
   },
-  empty: {
-    fontSize: 12,
-    color: '#8E8E93',
-    fontStyle: 'italic',
-    paddingVertical: 4,
-  },
-  decisionRow: {
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E5E5EA',
-  },
-  decisionHeader: {
+  legendRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  phaseBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  phaseText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#FFFFFF',
-    letterSpacing: 0.4,
-  },
-  reason: {
-    fontSize: 11,
-    color: '#3C3C43',
-    fontWeight: '600',
-    flex: 1,
-  },
-  decisionTime: {
-    fontSize: 10,
-    color: '#8E8E93',
-    fontVariant: ['tabular-nums'],
-  },
-  decisionBody: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 6,
-  },
-  arrow: {
-    fontSize: 14,
-    color: '#8E8E93',
-    fontWeight: '700',
-  },
-  noTo: {
-    fontSize: 12,
-    color: '#8E8E93',
-  },
-  score: {
-    fontSize: 11,
-    color: '#1C1C1E',
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-    marginLeft: 'auto',
-  },
-  expandHint: {
-    fontSize: 10,
-    color: '#007AFF',
-    fontWeight: '600',
-  },
-  timelineRow: {
-    flexDirection: 'row',
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E5E5EA',
+    flexWrap: 'wrap',
     gap: 10,
+    marginTop: 8,
   },
-  timelineDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    marginTop: 4,
-  },
-  timelineBody: {
-    flex: 1,
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 4,
   },
-  timelineTopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  timelineTime: {
-    fontSize: 10,
-    color: '#8E8E93',
-    fontVariant: ['tabular-nums'],
-  },
-  timelineTransition: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  statusText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  mlsRow: {
-    flexDirection: 'row',
-    paddingVertical: 8,
-    gap: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#E5E5EA',
-  },
-  mlsDot: {
+  legendDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    marginTop: 6,
   },
-  mlsBody: {
-    flex: 1,
-  },
-  mlsTopRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  mlsType: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
-  mlsTime: {
-    fontSize: 10,
-    color: '#8E8E93',
-    fontVariant: ['tabular-nums'],
-  },
-  mlsDetail: {
+  legendText: {
     fontSize: 11,
     color: '#3C3C43',
+    fontWeight: '600',
+  },
+  linkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+    gap: 10,
+  },
+  linkMeta: {
+    flex: 1,
+    alignItems: 'flex-end',
+  },
+  linkMetaValue: {
+    fontSize: 12,
+    color: '#1C1C1E',
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  linkMetaHint: {
+    fontSize: 10,
+    color: '#8E8E93',
     marginTop: 2,
-    fontFamily: 'Courier',
+  },
+  reliabilityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+    marginTop: 2,
   },
   footer: {
     paddingVertical: 16,

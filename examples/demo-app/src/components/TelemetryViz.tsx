@@ -1,6 +1,5 @@
 import React from 'react';
 import {View, Text, StyleSheet} from 'react-native';
-import type {RoutingScoreEntry} from '@offline-protocol/mesh-sdk';
 import {transportColor, transportLabel} from '../telemetryFormat';
 
 // ─── MetricCard — section frame ──────────────────────────────
@@ -326,40 +325,39 @@ const badgeStyles = StyleSheet.create({
   },
 });
 
-// ─── RoutingScoreBars — full DORS breakdown for one row ──────
+// ─── Segmented bar — stacked segments for share-of-total views ───
 
-const SCORE_DIMENSIONS: Array<{key: keyof RoutingScoreEntry; label: string; color: string}> = [
-  {key: 'signal', label: 'Signal', color: '#007AFF'},
-  {key: 'proximity', label: 'Proximity', color: '#5AC8FA'},
-  {key: 'bandwidth', label: 'Bandwidth', color: '#34C759'},
-  {key: 'congestion', label: 'Congestion', color: '#FF9500'},
-  {key: 'energy', label: 'Energy', color: '#FFCC00'},
-  {key: 'reliability', label: 'Reliability', color: '#5856D6'},
-  {key: 'load', label: 'Load', color: '#AF52DE'},
-];
+export interface SegmentedBarSegment {
+  key: string;
+  value: number;
+  color: string;
+  label?: string;
+}
 
-export function RoutingScoreBars({entry}: {entry: RoutingScoreEntry}) {
-  const max = Math.max(
-    1,
-    ...SCORE_DIMENSIONS.map(d => Math.abs(Number(entry[d.key]) || 0)),
-    Math.abs(entry.total),
-  );
+/**
+ * A single horizontal bar split into colored segments proportional to each
+ * segment's value. Used by the transport-distribution card.
+ * Renders nothing when `total <= 0` so callers can inline it without guards.
+ */
+export function SegmentedBar({
+  segments,
+  height = 14,
+}: {
+  segments: SegmentedBarSegment[];
+  height?: number;
+}) {
+  const total = segments.reduce((s, seg) => s + Math.max(0, seg.value), 0);
+  if (total <= 0) {return null;}
   return (
-    <View style={scoreStyles.wrap}>
-      <View style={scoreStyles.header}>
-        <TransportBadge transport={entry.transport} small />
-        <Text style={scoreStyles.total}>total {entry.total.toFixed(2)}</Text>
-      </View>
-      {SCORE_DIMENSIONS.map(d => {
-        const v = Number(entry[d.key]) || 0;
+    <View style={[segmentStyles.track, {height}]}>
+      {segments.map(seg => {
+        const v = Math.max(0, seg.value);
+        if (v === 0) {return null;}
+        const pct = (v / total) * 100;
         return (
-          <Bar
-            key={d.key as string}
-            label={d.label}
-            value={Math.abs(v)}
-            max={max}
-            color={d.color}
-            rightLabel={v.toFixed(2)}
+          <View
+            key={seg.key}
+            style={{width: `${pct}%`, backgroundColor: seg.color, height}}
           />
         );
       })}
@@ -367,23 +365,103 @@ export function RoutingScoreBars({entry}: {entry: RoutingScoreEntry}) {
   );
 }
 
-const scoreStyles = StyleSheet.create({
-  wrap: {
-    backgroundColor: '#F2F2F7',
-    borderRadius: 8,
-    padding: 10,
-    marginTop: 8,
-  },
-  header: {
+const segmentStyles = StyleSheet.create({
+  track: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
+    width: '100%',
+    backgroundColor: '#E5E5EA',
+    borderRadius: 999,
+    overflow: 'hidden',
   },
-  total: {
-    fontSize: 11,
-    color: '#8E8E93',
+});
+
+// ─── VerticalHistogram — vertical bar distribution ──────────────
+
+/**
+ * Vertical bar histogram for distributions keyed by integer bucket
+ * (hop count, retry count, etc.). Labels each column with its bucket
+ * key and renders count below. Empty buckets are shown as empty columns
+ * so the shape of the distribution is visible.
+ */
+export function VerticalHistogram({
+  buckets,
+  color = '#007AFF',
+  height = 60,
+}: {
+  buckets: Array<{key: string | number; value: number}>;
+  color?: string;
+  height?: number;
+}) {
+  const max = Math.max(1, ...buckets.map(b => b.value));
+  return (
+    <View style={histoStyles.wrap}>
+      <View style={[histoStyles.row, {height}]}>
+        {buckets.map(b => {
+          const ratio = b.value / max;
+          return (
+            <View key={String(b.key)} style={histoStyles.col}>
+              <View style={histoStyles.barWrap}>
+                <View
+                  style={[
+                    histoStyles.bar,
+                    {height: Math.max(b.value > 0 ? 2 : 0, ratio * height), backgroundColor: color},
+                  ]}
+                />
+              </View>
+            </View>
+          );
+        })}
+      </View>
+      <View style={histoStyles.labelRow}>
+        {buckets.map(b => (
+          <View key={`l-${b.key}`} style={histoStyles.col}>
+            <Text style={histoStyles.bucketLabel}>{b.key}</Text>
+            <Text style={histoStyles.bucketValue}>{b.value}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+const histoStyles = StyleSheet.create({
+  wrap: {
+    marginTop: 4,
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 3,
+  },
+  col: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  barWrap: {
+    width: '100%',
+    flex: 1,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  bar: {
+    width: '80%',
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+  },
+  labelRow: {
+    flexDirection: 'row',
+    gap: 3,
+    marginTop: 4,
+  },
+  bucketLabel: {
+    fontSize: 10,
+    color: '#3C3C43',
     fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  bucketValue: {
+    fontSize: 9,
+    color: '#8E8E93',
     fontVariant: ['tabular-nums'],
   },
 });
