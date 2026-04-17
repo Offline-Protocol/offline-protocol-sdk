@@ -22,7 +22,12 @@ pub(crate) use types::*;
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
-use crate::telemetry::{Scrubber, TelemetryConfig, TelemetryContext, TelemetrySink};
+use crate::telemetry::aggregator::{
+    build_metrics_frame, diff_device_capability, diff_transport_state, DeviceSnap,
+};
+use crate::telemetry::{
+    Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
+};
 use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId};
@@ -30,7 +35,7 @@ use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMess
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
 use offline_protocol_services::MeshServices;
-use offline_protocol_transport::{BleTransport, TransportType};
+use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -190,6 +195,19 @@ pub struct OfflineProtocol {
     /// (list_sessions → Keychain/Keystore) on every process tick / receive poll.
     last_reconciliation_at: Option<Instant>,
 
+    /// Instant of the last periodic `MetricsFrame` emission, used to rate
+    /// the telemetry aggregator to `TelemetryConfig::metrics_cadence`.
+    last_metrics_emit_at: Option<Instant>,
+
+    /// Last observed per-transport status map, used by the telemetry
+    /// aggregator to diff against the current map and emit one
+    /// `TransportStateEvent` per transition.
+    transport_status_snapshot: HashMap<TransportType, TransportStatus>,
+
+    /// Last observed (battery, charging, relay_role) snapshot, used by the
+    /// telemetry aggregator to fire `DeviceCapabilitySnapshot` on change.
+    device_capability_snapshot: Option<DeviceSnap>,
+
     /// The Lamport clock value at the time of the last storage write.
     /// Used to debounce `persist_lamport_clock()` — only write when the
     /// in-memory value has advanced past this by `LAMPORT_PERSIST_INTERVAL`
@@ -283,6 +301,9 @@ impl OfflineProtocol {
             known_peer_public_keys: HashMap::new(),
             blocked_users: HashSet::new(),
             last_reconciliation_at: None,
+            last_metrics_emit_at: None,
+            transport_status_snapshot: HashMap::new(),
+            device_capability_snapshot: None,
             last_persisted_lamport: 0,
             config,
         })
@@ -466,6 +487,20 @@ impl OfflineProtocol {
                 }
             })));
 
+        // Wire the structured routing-decision callback so telemetry sinks
+        // receive the richer shape alongside the flattened `Event::Dors*`
+        // stream. The legacy `EventCallback` fan-out is unaffected.
+        let shared_routing = self.shared_state.clone();
+        self.transport_manager
+            .set_routing_decision_callback(Some(Arc::new(move |decision| {
+                if let Ok(s) = shared_routing.lock() {
+                    if let Some(ctx) = &s.telemetry {
+                        let record = TelemetryRecord::Routing(Box::new(decision));
+                        ctx.sink.emit(&record);
+                    }
+                }
+            })));
+
         // Wire BLE fragment eviction callback so app receives FragmentAssemblyEvicted.
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
             let shared = self.shared_state.clone();
@@ -514,6 +549,7 @@ impl OfflineProtocol {
 
         // Clear event callbacks to release shared_state references.
         self.transport_manager.set_dors_event_callback(None);
+        self.transport_manager.set_routing_decision_callback(None);
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
             if let Ok(transport) = ble_arc.lock() {
                 if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
@@ -1232,8 +1268,97 @@ impl OfflineProtocol {
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.pump_media_transfers();
         self.cleanup_expired_entries();
+        self.tick_telemetry_categories();
 
         Ok(())
+    }
+
+    /// Per-tick telemetry work: diff transport statuses, diff device
+    /// capability, and emit a `MetricsFrame` when `metrics_cadence` has
+    /// elapsed. No-ops unless a sink has been installed.
+    ///
+    /// Runs at the end of `process()` so reliability/queue state observed
+    /// here is the same state the rest of the tick has already advanced.
+    fn tick_telemetry_categories(&mut self) {
+        let Some(ctx) = self.telemetry.clone() else {
+            return;
+        };
+        let now_ms = Utc::now().timestamp_millis();
+        let now = Instant::now();
+
+        // Transport-status diff: one record per changed transport.
+        let current_statuses = self.transport_manager.get_all_transport_statuses();
+        let transitions =
+            diff_transport_state(now_ms, &self.transport_status_snapshot, &current_statuses);
+        for event in transitions {
+            ctx.sink.emit(&TelemetryRecord::TransportState(event));
+        }
+        self.transport_status_snapshot = current_statuses;
+
+        // Device capability diff.
+        let (battery_level, is_charging) = self.current_device_battery();
+        let relay_role = self.path_selector.relay_manager().current_role();
+        let device_now = DeviceSnap::from_parts(battery_level, is_charging, relay_role);
+        if let Some(snapshot) =
+            diff_device_capability(now_ms, self.device_capability_snapshot, device_now)
+        {
+            ctx.sink.emit(&TelemetryRecord::Device(snapshot));
+        }
+        self.device_capability_snapshot = Some(device_now);
+
+        // Periodic metrics snapshot.
+        if let Some(cadence) = ctx.config.metrics_cadence() {
+            let due = match self.last_metrics_emit_at {
+                None => true,
+                Some(prev) => now.saturating_duration_since(prev) >= cadence,
+            };
+            if due {
+                let frame = build_metrics_frame(
+                    now_ms,
+                    &self.transport_manager,
+                    &self.retry_queue,
+                    &self.deduplicator,
+                    &self.ack_manager,
+                    self.known_peers.len(),
+                    self.relay_neighbor_count(),
+                );
+                ctx.sink
+                    .emit(&TelemetryRecord::MetricsSnapshot(Box::new(frame)));
+                self.last_metrics_emit_at = Some(now);
+            }
+        }
+    }
+
+    /// Returns the battery level and charging state of the currently
+    /// selected transport, if any. Falls back to the first transport's
+    /// metrics when no current transport is selected (e.g. pre-start).
+    fn current_device_battery(&self) -> (Option<u8>, bool) {
+        let available = self.transport_manager.get_available_transports();
+        if let Some(current) = self.transport_manager.current_transport() {
+            if let Some(metrics) = available.get(&current) {
+                return (metrics.battery_level, metrics.is_charging);
+            }
+        }
+        available
+            .values()
+            .next()
+            .map(|metrics| (metrics.battery_level, metrics.is_charging))
+            .unwrap_or((None, false))
+    }
+
+    /// Counts the number of known peers currently acting as relays on this
+    /// node. Today the SDK does not maintain a relay-peer registry separate
+    /// from `known_peers`; relay count falls back to 0 until a dedicated
+    /// accessor is introduced.
+    fn relay_neighbor_count(&self) -> usize {
+        if matches!(
+            self.path_selector.relay_manager().current_role(),
+            offline_protocol_router::RelayRole::Relay
+        ) {
+            1
+        } else {
+            0
+        }
     }
     /// Processes messages ready for retry from the retry queue.
     ///

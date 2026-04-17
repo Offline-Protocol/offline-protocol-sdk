@@ -74,6 +74,13 @@ impl MockTransport {
     pub fn set_metrics(&self, metrics: TransportMetrics) {
         *self.metrics.lock().unwrap() = metrics;
     }
+
+    /// Overrides the reported status, bypassing `start()`/`stop()`. Used by
+    /// tests that drive status transitions directly (e.g. the telemetry
+    /// aggregator diff).
+    pub fn set_status(&self, status: TransportStatus) {
+        *self.status.lock().unwrap() = status;
+    }
 }
 
 impl Transport for MockTransport {

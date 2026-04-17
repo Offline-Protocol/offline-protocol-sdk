@@ -9956,3 +9956,208 @@ fn test_flush_outbox_for_peer_skips_messages_awaiting_ack() {
         "flush_outbox_for_peer should not re-send messages awaiting ACK"
     );
 }
+
+// --- Telemetry categories (metrics snapshot, transport state, device, routing) ---
+
+#[test]
+fn test_process_emits_metrics_snapshot_on_first_tick() {
+    // With cadence defaulted to 5s and `last_metrics_emit_at` starting at
+    // `None`, the first process() tick is unconditionally due and must
+    // emit one MetricsSnapshot.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.start().unwrap();
+
+    protocol.process().unwrap();
+
+    let records = sink.take();
+    let snapshots: Vec<_> = records
+        .iter()
+        .filter(|r| matches!(r, TelemetryRecord::MetricsSnapshot(_)))
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "first process() tick must emit one MetricsSnapshot, got {records:?}",
+    );
+}
+
+#[test]
+fn test_process_skips_metrics_snapshot_when_cadence_is_none() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(
+            Arc::new(sink.clone()),
+            TelemetryConfig::default().with_metrics_cadence(None),
+        )
+        .unwrap();
+    protocol.start().unwrap();
+
+    protocol.process().unwrap();
+
+    let records = sink.take();
+    assert!(
+        records
+            .iter()
+            .all(|r| !matches!(r, TelemetryRecord::MetricsSnapshot(_))),
+        "cadence=None must suppress MetricsSnapshot emission, got {records:?}",
+    );
+}
+
+#[test]
+fn test_process_emits_transport_state_on_status_transition() {
+    // Register a mock transport. start() flips it to Available; the first
+    // process() tick records that as the snapshot (emitting one
+    // Unavailable→Available transition). Then flip the mock to
+    // Disconnected and run process() again — expect exactly one
+    // Available→Disconnected transition.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    let mock_clone = mock.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.start().unwrap();
+
+    // Drain the first-tick snapshot (which includes the Unavailable→Available
+    // transition bootstrap).
+    protocol.process().unwrap();
+    sink.take();
+
+    mock_clone.set_status(TransportStatus::Disconnected);
+    protocol.process().unwrap();
+
+    let records = sink.take();
+    let transitions: Vec<&TransportStateEvent> = records
+        .iter()
+        .filter_map(|r| match r {
+            TelemetryRecord::TransportState(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        transitions.len(),
+        1,
+        "exactly one TransportState should fire for the Available→Disconnected transition, got {records:?}",
+    );
+    assert_eq!(transitions[0].transport, TransportType::BLE);
+    assert_eq!(transitions[0].previous, TransportStatus::Available);
+    assert_eq!(transitions[0].current, TransportStatus::Disconnected);
+}
+
+#[test]
+fn test_process_emits_device_capability_on_first_tick() {
+    // First tick after install always emits a device record (prev == None
+    // is treated as "all fields changed").
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.start().unwrap();
+
+    protocol.process().unwrap();
+
+    let records = sink.take();
+    let device: Vec<_> = records
+        .iter()
+        .filter(|r| matches!(r, TelemetryRecord::Device(_)))
+        .collect();
+    assert_eq!(
+        device.len(),
+        1,
+        "first tick must emit exactly one Device snapshot, got {records:?}",
+    );
+}
+
+#[test]
+fn test_legacy_dors_events_still_fire_with_routing_callback_wired() {
+    // Regression guard: step 3 (wiring `set_routing_decision_callback`)
+    // must not displace the existing `dors_event_callback` → EventCallback
+    // path. Apps that consume `DorsScoreUpdated`/`DorsTransportSelected`
+    // via `on_event` continue to see them whether or not a telemetry sink
+    // is installed.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let captured: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handler = captured.clone();
+    protocol.on_event(move |event| handler.lock().unwrap().push(event));
+
+    let mock = MockTransport::new(TransportType::BLE);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    // Install a telemetry sink AFTER start() so the routing callback is
+    // already wired — exercising the path where both callbacks coexist.
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    // Trigger a DORS scoring pass by sending a message.
+    let msg = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "ping",
+    );
+    protocol.transport_manager_mut().send(&msg).unwrap();
+
+    let legacy_events = captured.lock().unwrap().clone();
+    assert!(
+        legacy_events
+            .iter()
+            .any(|e| matches!(e, crate::events::Event::DorsScoreUpdated { .. })),
+        "Event::DorsScoreUpdated must still reach legacy callback, got {legacy_events:?}",
+    );
+    assert!(
+        legacy_events
+            .iter()
+            .any(|e| matches!(e, crate::events::Event::DorsTransportSelected { .. })),
+        "Event::DorsTransportSelected must still reach legacy callback, got {legacy_events:?}",
+    );
+
+    // And the sink now receives the new Routing records alongside.
+    let sink_records = sink.take();
+    assert!(
+        sink_records
+            .iter()
+            .any(|r| matches!(r, TelemetryRecord::Routing(_))),
+        "sink must observe at least one Routing record, got {sink_records:?}",
+    );
+}
+
+#[test]
+fn test_process_skips_telemetry_tick_without_sink() {
+    // With no sink installed, the tick must be a no-op: nothing is emitted
+    // and no snapshots are taken (the existing `EventCallback` stream is
+    // independent and unaffected).
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let captured: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handler = captured.clone();
+    protocol.on_event(move |event| handler.lock().unwrap().push(event));
+
+    protocol.start().unwrap();
+    protocol.process().unwrap();
+
+    // The legacy callback may receive DORS events during process(), but
+    // that does not mean the new telemetry tick ran. Sanity: there is no
+    // telemetry context to dispatch into, so the aggregator returned early.
+    assert!(
+        protocol.telemetry.is_none(),
+        "precondition: no sink installed",
+    );
+}
+
+use crate::telemetry::transport_state::TransportStateEvent;

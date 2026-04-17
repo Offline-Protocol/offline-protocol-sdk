@@ -483,6 +483,14 @@ impl PathSelector {
         self.local_device_id = device_id.into();
     }
 
+    /// Returns a reference to the internal [`RelayManager`].
+    ///
+    /// Exposed for read-only callers (e.g., the telemetry aggregator that
+    /// needs to know the current relay role without duplicating the state).
+    pub fn relay_manager(&self) -> &RelayManager {
+        &self.relay_manager
+    }
+
     /// Computes the forwarding probability based on visible peer count.
     ///
     /// Uses the formula: min(1.0, max(min_probability, target_fanout / peer_count))
