@@ -711,12 +711,17 @@ impl From<CoreRoutingPhase> for RoutingPhase {
             // `RoutingPhase` is `#[non_exhaustive]` on the core side. Map
             // unrecognised variants to a dedicated `Unknown` so consumers
             // see the drift instead of a plausible-looking existing phase.
-            // Also warn so operators notice a new-core / old-FFI skew.
+            // Warn once per process so operators notice a new-core /
+            // old-FFI skew without spamming logs if the unknown variant
+            // sits on a hot path (routing decisions fire on every send).
             other => {
-                tracing::warn!(
-                    variant = ?other,
-                    "telemetry: unknown CoreRoutingPhase variant; mapping to Unknown — FFI crate likely out of date",
-                );
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    tracing::warn!(
+                        variant = ?other,
+                        "telemetry: unknown CoreRoutingPhase variant; mapping to Unknown — FFI crate likely out of date (further occurrences suppressed)",
+                    );
+                });
                 RoutingPhase::Unknown
             }
         }
@@ -737,11 +742,18 @@ impl From<CoreRoutingReasonCode> for RoutingReasonCode {
             CoreRoutingReasonCode::Congestion => RoutingReasonCode::Congestion,
             CoreRoutingReasonCode::LowTtl => RoutingReasonCode::LowTtl,
             CoreRoutingReasonCode::LowSuccessRate => RoutingReasonCode::LowSuccessRate,
+            // Warn once per process — same rationale as `RoutingPhase`
+            // above: reason codes ride along with every routing decision,
+            // so a hot-path variant added to the core would otherwise
+            // drown the tracing layer.
             other => {
-                tracing::warn!(
-                    variant = ?other,
-                    "telemetry: unknown CoreRoutingReasonCode variant; mapping to Unknown — FFI crate likely out of date",
-                );
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    tracing::warn!(
+                        variant = ?other,
+                        "telemetry: unknown CoreRoutingReasonCode variant; mapping to Unknown — FFI crate likely out of date (further occurrences suppressed)",
+                    );
+                });
                 RoutingReasonCode::Unknown
             }
         }
