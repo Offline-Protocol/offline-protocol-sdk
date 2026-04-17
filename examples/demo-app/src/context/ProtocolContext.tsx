@@ -11,7 +11,14 @@ import {
   MeshServices,
   MessagePriority,
 } from '@offline-protocol/mesh-sdk';
-import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, GroupRole, DiscoveredService, ServiceLogEntry, ForwardInfo, PresenceStatus} from '../types';
+import type {
+  TelemetryRecord,
+  MetricsFrame,
+  TransportStateTelemetryEvent,
+  RoutingDecision,
+  DeviceCapabilitySnapshot,
+} from '@offline-protocol/mesh-sdk';
+import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, GroupRole, DiscoveredService, ServiceLogEntry, ForwardInfo, PresenceStatus, MlsLogEntry} from '../types';
 import {
   PRESENCE_BROADCAST_INTERVAL_MS,
   TYPING_INDICATOR_TIMEOUT_MS,
@@ -38,6 +45,16 @@ interface ProtocolContextValue {
   serviceLog: ServiceLogEntry[];
   /** Map of peerId → timestamp when they started typing */
   typingPeers: Map<string, number>;
+
+  // Telemetry state (populated by installed TelemetrySink)
+  latestMetrics: MetricsFrame | null;
+  metricsHistory: MetricsFrame[];
+  transportTimeline: TransportStateTelemetryEvent[];
+  routingDecisions: RoutingDecision[];
+  deviceCapability: DeviceCapabilitySnapshot | null;
+  mlsLog: MlsLogEntry[];
+  eventCounts: Record<string, number>;
+  totalProtocolEvents: number;
 
   // Actions
   initialize: (userId: string, userName: string) => Promise<void>;
@@ -93,6 +110,21 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const [discoveredServices, setDiscoveredServices] = useState<DiscoveredService[]>([]);
   const [serviceLog, setServiceLog] = useState<ServiceLogEntry[]>([]);
   const [typingPeers, setTypingPeers] = useState<Map<string, number>>(new Map());
+
+  // ─── Telemetry state ──────────────────────────────────────
+  const [latestMetrics, setLatestMetrics] = useState<MetricsFrame | null>(null);
+  const [metricsHistory, setMetricsHistory] = useState<MetricsFrame[]>([]);
+  const [transportTimeline, setTransportTimeline] = useState<TransportStateTelemetryEvent[]>([]);
+  const [routingDecisions, setRoutingDecisions] = useState<RoutingDecision[]>([]);
+  const [deviceCapability, setDeviceCapability] = useState<DeviceCapabilitySnapshot | null>(null);
+  const [mlsLog, setMlsLog] = useState<MlsLogEntry[]>([]);
+  const [eventCounts, setEventCounts] = useState<Record<string, number>>({});
+  const [totalProtocolEvents, setTotalProtocolEvents] = useState(0);
+
+  const MAX_METRICS_HISTORY = 30;
+  const MAX_TIMELINE = 50;
+  const MAX_DECISIONS = 50;
+  const MAX_MLS_LOG = 50;
 
   const MAX_SERVICE_LOG = 100;
   const appendServiceLog = useCallback((entry: ServiceLogEntry) => {
@@ -824,6 +856,70 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     }
   }, []);
 
+  // ─── Telemetry handler ───────────────────────────────────
+
+  const handleTelemetry = useCallback((rec: TelemetryRecord) => {
+    switch (rec.category) {
+      case 'metricsFrame': {
+        setLatestMetrics(rec.frame);
+        setMetricsHistory(prev => {
+          const next = [...prev, rec.frame];
+          return next.length > MAX_METRICS_HISTORY ? next.slice(-MAX_METRICS_HISTORY) : next;
+        });
+        break;
+      }
+      case 'transportState': {
+        setTransportTimeline(prev => {
+          const next = [rec.event, ...prev];
+          return next.length > MAX_TIMELINE ? next.slice(0, MAX_TIMELINE) : next;
+        });
+        break;
+      }
+      case 'routingDecision': {
+        setRoutingDecisions(prev => {
+          const next = [rec.decision, ...prev];
+          return next.length > MAX_DECISIONS ? next.slice(0, MAX_DECISIONS) : next;
+        });
+        break;
+      }
+      case 'deviceCapability': {
+        setDeviceCapability(rec.snapshot);
+        break;
+      }
+      case 'mls': {
+        let parsed: any = null;
+        let evType = 'unknown';
+        try {
+          parsed = JSON.parse(rec.eventJson);
+          evType = parsed?.type || parsed?.event || 'unknown';
+        } catch {
+          /* ignore — keep raw */
+        }
+        setMlsLog(prev => {
+          const entry: MlsLogEntry = {ts: Date.now(), type: evType, raw: parsed ?? rec.eventJson};
+          const next = [entry, ...prev];
+          return next.length > MAX_MLS_LOG ? next.slice(0, MAX_MLS_LOG) : next;
+        });
+        break;
+      }
+      case 'protocol': {
+        let evType = 'unknown';
+        try {
+          const parsed = JSON.parse(rec.eventJson);
+          evType = parsed?.type || parsed?.event || 'unknown';
+        } catch {
+          /* ignore */
+        }
+        setEventCounts(prev => ({...prev, [evType]: (prev[evType] || 0) + 1}));
+        setTotalProtocolEvents(n => n + 1);
+        break;
+      }
+      case 'extension':
+      default:
+        break;
+    }
+  }, []);
+
   // ─── Initialize Protocol ─────────────────────────────────
 
   const initialize = useCallback(async (uid: string, uname: string) => {
@@ -849,7 +945,26 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     // Initialize mesh services
     const svc = new MeshServices();
     setMeshServices(svc);
-  }, [handleEvent]);
+
+    // Install telemetry sink — push delivery, fast cadence, full DORS detail.
+    // routingDiagnostic gives per-transport score breakdowns the demo renders
+    // as bar charts; mls verbosity stays at 'lifecycle' so we get session ready
+    // / decryption-failed without per-op spam; pull queue disabled because we
+    // consume via callback only.
+    try {
+      await proto.installTelemetrySink(
+        {
+          routingDiagnostic: true,
+          metricsCadenceMs: 2000,
+          mlsVerbosity: 'lifecycle',
+          enablePollQueue: false,
+        },
+        handleTelemetry,
+      );
+    } catch (err) {
+      console.warn('[ProtocolContext] installTelemetrySink failed:', err);
+    }
+  }, [handleEvent, handleTelemetry]);
 
   // ─── Presence Broadcasting ───────────────────────────────
 
@@ -935,6 +1050,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   useEffect(() => {
     return () => {
       if (protocolRef.current) {
+        protocolRef.current.uninstallTelemetrySink().catch(() => {});
         protocolRef.current.removeAllListeners();
         protocolRef.current.stop().catch(console.warn);
       }
@@ -1447,6 +1563,14 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     discoveredServices,
     serviceLog,
     typingPeers,
+    latestMetrics,
+    metricsHistory,
+    transportTimeline,
+    routingDecisions,
+    deviceCapability,
+    mlsLog,
+    eventCounts,
+    totalProtocolEvents,
     initialize,
     sendMessage,
     sendConnectionRequest: sendConnectionRequestAction,
