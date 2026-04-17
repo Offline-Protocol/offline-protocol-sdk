@@ -8,6 +8,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
+import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -578,7 +579,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
         try {
             val cfg = parseTelemetryConfig(configMap)
-            proto.installTelemetrySink(TelemetrySinkImpl(), cfg)
+            proto.installTelemetrySink(TelemetrySinkImpl(this), cfg)
             promise.resolve(null)
         } catch (e: Exception) {
             promise.reject("TELEMETRY_INSTALL", "Failed to install telemetry sink: ${e.message}", e)
@@ -594,6 +595,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
+    // only emits camelCase keys — these parsers match that contract.
     private fun parseTelemetryConfig(map: ReadableMap?): TelemetryConfig {
         if (map == null) {
             return TelemetryConfig(
@@ -603,8 +606,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 routingDiagnostic = null,
             )
         }
-        val scrubIds = readOptionalBoolean(map, "scrubIds", "scrub_ids")
-        val verbosity = readOptionalString(map, "mlsVerbosity", "mls_verbosity")?.let {
+        val scrubIds = readOptionalBoolean(map, "scrubIds")
+        val verbosity = readOptionalString(map, "mlsVerbosity")?.let {
             when (it.lowercase()) {
                 "off" -> MlsVerbosity.OFF
                 "diagnostic" -> MlsVerbosity.DIAGNOSTIC
@@ -612,8 +615,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 else -> null
             }
         }
-        val cadence = readOptionalLong(map, "metricsCadenceMs", "metrics_cadence_ms")?.toULong()
-        val routingDiag = readOptionalBoolean(map, "routingDiagnostic", "routing_diagnostic")
+        val cadence = readOptionalLong(map, "metricsCadenceMs")?.toULong()
+        val routingDiag = readOptionalBoolean(map, "routingDiagnostic")
         return TelemetryConfig(
             scrubIds = scrubIds,
             mlsVerbosity = verbosity,
@@ -622,90 +625,92 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         )
     }
 
-    private fun readOptionalBoolean(map: ReadableMap, vararg keys: String): Boolean? {
-        for (k in keys) {
-            if (map.hasKey(k) && !map.isNull(k)) return map.getBoolean(k)
-        }
-        return null
-    }
+    private fun readOptionalBoolean(map: ReadableMap, key: String): Boolean? =
+        if (map.hasKey(key) && !map.isNull(key)) map.getBoolean(key) else null
 
-    private fun readOptionalString(map: ReadableMap, vararg keys: String): String? {
-        for (k in keys) {
-            if (map.hasKey(k) && !map.isNull(k)) return map.getString(k)
-        }
-        return null
-    }
+    private fun readOptionalString(map: ReadableMap, key: String): String? =
+        if (map.hasKey(key) && !map.isNull(key)) map.getString(key) else null
 
-    private fun readOptionalLong(map: ReadableMap, vararg keys: String): Long? {
-        for (k in keys) {
-            if (map.hasKey(k) && !map.isNull(k)) return map.getDouble(k).toLong()
-        }
-        return null
-    }
+    // `metricsCadenceMs` is config-sized (cadences measured in ms fit in an
+    // f64's 53-bit mantissa with room to spare). Do NOT reuse this helper
+    // for counter fields like bytes-transferred that can exceed 2^53.
+    private fun readOptionalLong(map: ReadableMap, key: String): Long? =
+        if (map.hasKey(key) && !map.isNull(key)) map.getDouble(key).toLong() else null
 
     /**
      * Forwards each typed TelemetryRecord variant into the RN bridge as a
      * discriminated body keyed by `category`. Mirrors the iOS
      * `TelemetrySinkImpl`. Must not block, reenter the SDK, or panic.
+     *
+     * Deliberately a nested (non-`inner`) class holding a
+     * `WeakReference<OfflineProtocolModule>` — if this were an inner class
+     * it would pin the enclosing module alive for as long as the Rust
+     * adapter kept the sink, defeating React Native's ability to GC a
+     * detached module (e.g. after a reload).
      */
-    private inner class TelemetrySinkImpl : TelemetrySink {
+    private class TelemetrySinkImpl(module: OfflineProtocolModule) : TelemetrySink {
+        private val moduleRef = WeakReference(module)
+
         // Every callback is invoked synchronously from the Rust emit path.
         // A thrown Kotlin exception here would cross the UniFFI boundary
         // and crash the native caller, so we log-and-swallow anything the
         // encoders or React bridge throw (e.g. detached ReactContext during
-        // app tear-down).
-        private inline fun safeDispatch(build: () -> WritableMap) {
+        // app tear-down). If the weak reference has been GC'd we drop the
+        // record silently — the Rust side will eventually replace or free
+        // this sink.
+        private inline fun safeDispatch(build: (OfflineProtocolModule) -> WritableMap) {
+            val module = moduleRef.get() ?: return
             try {
-                val params = build()
-                sendEvent(TELEMETRY_EVENT_NAME, params)
+                val params = build(module)
+                module.sendEvent(TELEMETRY_EVENT_NAME, params)
             } catch (t: Throwable) {
                 Log.w(NAME, "telemetry dispatch failed; dropping record", t)
             }
         }
 
-        override fun onProtocolEvent(eventJson: String) = safeDispatch {
+        override fun onProtocolEvent(eventJson: String) = safeDispatch { _ ->
             Arguments.createMap().apply {
                 putString("category", "protocol")
                 putString("eventJson", eventJson)
             }
         }
 
-        override fun onMlsEvent(eventJson: String) = safeDispatch {
+        override fun onMlsEvent(eventJson: String) = safeDispatch { _ ->
             Arguments.createMap().apply {
                 putString("category", "mls")
                 putString("eventJson", eventJson)
             }
         }
 
-        override fun onMetricsFrame(frame: MetricsFrame) = safeDispatch {
+        override fun onMetricsFrame(frame: MetricsFrame) = safeDispatch { m ->
             Arguments.createMap().apply {
                 putString("category", "metricsFrame")
-                putMap("frame", encodeFrame(frame))
+                putMap("frame", m.encodeFrame(frame))
             }
         }
 
-        override fun onTransportState(event: TransportStateEvent) = safeDispatch {
+        override fun onTransportState(event: TransportStateEvent) = safeDispatch { m ->
             Arguments.createMap().apply {
                 putString("category", "transportState")
-                putMap("event", encodeTransportState(event))
+                putMap("event", m.encodeTransportState(event))
             }
         }
 
-        override fun onRoutingDecision(decision: RoutingDecision) = safeDispatch {
+        override fun onRoutingDecision(decision: RoutingDecision) = safeDispatch { m ->
             Arguments.createMap().apply {
                 putString("category", "routingDecision")
-                putMap("decision", encodeRouting(decision))
+                putMap("decision", m.encodeRouting(decision))
             }
         }
 
-        override fun onDeviceCapability(snapshot: DeviceCapabilitySnapshot) = safeDispatch {
+        override fun onDeviceCapability(snapshot: DeviceCapabilitySnapshot) = safeDispatch { m ->
             Arguments.createMap().apply {
                 putString("category", "deviceCapability")
-                putMap("snapshot", encodeDevice(snapshot))
+                putMap("snapshot", m.encodeDevice(snapshot))
             }
         }
 
-        override fun onExtension(name: String, payloadJson: String) = safeDispatch {
+        override fun onExtension(name: String, payloadJson: String) = safeDispatch { _ ->
             Arguments.createMap().apply {
                 putString("category", "extension")
                 putString("name", name)

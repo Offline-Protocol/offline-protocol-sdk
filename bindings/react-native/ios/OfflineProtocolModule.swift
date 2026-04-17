@@ -3795,6 +3795,8 @@ class TelemetrySinkImpl: TelemetrySink, @unchecked Sendable {
 // MARK: - TelemetryConfig parsing
 
 extension OfflineProtocolModule {
+    // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
+    // only emits camelCase keys — this parser matches that contract.
     fileprivate func parseTelemetryConfig(_ dict: [String: Any]?) -> TelemetryConfig {
         guard let dict = dict else {
             return TelemetryConfig(
@@ -3803,7 +3805,7 @@ extension OfflineProtocolModule {
             )
         }
         let verbosity: MlsVerbosity?
-        if let raw = (dict["mlsVerbosity"] as? String) ?? (dict["mls_verbosity"] as? String) {
+        if let raw = dict["mlsVerbosity"] as? String {
             switch raw.lowercased() {
             case "off": verbosity = .off
             case "diagnostic": verbosity = .diagnostic
@@ -3813,10 +3815,9 @@ extension OfflineProtocolModule {
         } else {
             verbosity = nil
         }
-        let scrubIds = (dict["scrubIds"] as? Bool) ?? (dict["scrub_ids"] as? Bool)
+        let scrubIds = dict["scrubIds"] as? Bool
         let cadence = (dict["metricsCadenceMs"] as? NSNumber)?.uint64Value
-            ?? (dict["metrics_cadence_ms"] as? NSNumber)?.uint64Value
-        let routingDiag = (dict["routingDiagnostic"] as? Bool) ?? (dict["routing_diagnostic"] as? Bool)
+        let routingDiag = dict["routingDiagnostic"] as? Bool
         return TelemetryConfig(
             scrubIds: scrubIds,
             mlsVerbosity: verbosity,

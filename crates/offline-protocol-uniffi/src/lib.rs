@@ -7,9 +7,10 @@
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
 use offline_protocol::{
-    DeviceCapabilitySnapshot as CoreDeviceSnapshot, EstablishmentState as CoreEstablishmentState,
-    Event as CoreEvent, MetricsFrame as CoreMetricsFrame, MlsVerbosity as CoreMlsVerbosity,
-    NetworkVisualizer, OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
+    DeduplicatorMode as CoreDeduplicatorMode, DeviceCapabilitySnapshot as CoreDeviceSnapshot,
+    EstablishmentState as CoreEstablishmentState, Event as CoreEvent,
+    MetricsFrame as CoreMetricsFrame, MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
+    OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
     PendingQueueConfig as CorePendingQueueConfig, PresenceStatus as CorePresenceStatus,
     ProtocolConfig as CoreConfig, RoutingDecision as CoreRoutingDecision,
     RoutingPhase as CoreRoutingPhase, RoutingReasonCode as CoreRoutingReasonCode,
@@ -800,7 +801,14 @@ impl From<&CoreMetricsFrame> for MetricsFrame {
                 recent_tracked: f.dedup.recent_tracked as u64,
                 capacity_used_percent: f.dedup.capacity_used_percent,
                 false_positive_rate: f.dedup.false_positive_rate,
-                mode: format!("{:?}", f.dedup.mode),
+                // Explicit stable-string mapping. Do NOT switch to
+                // `format!("{:?}", ...)` — that would tie the public FFI
+                // wire format to the Rust `Debug` impl of
+                // `DeduplicatorMode`, which is not a stability guarantee.
+                mode: match f.dedup.mode {
+                    CoreDeduplicatorMode::HashMap => "hashMap".to_string(),
+                    CoreDeduplicatorMode::BloomFilter => "bloomFilter".to_string(),
+                },
             },
             ack_pending: f.ack_pending as u64,
             neighbor_count: f.neighbor_count as u64,
@@ -932,41 +940,17 @@ impl TelemetrySinkAdapter {
             .unwrap_or_else(|_| format!(r#"{{"category":"{}"}}"#, category))
     }
 
-    /// Serializes `dto` to a JSON `Value`. On failure, logs and returns a
-    /// `null` so the envelope shape is still well-formed. Callers upstream
-    /// also fall back to `on_extension` so a downstream observer can count
-    /// the failure rather than silently miss the record.
-    fn to_value<T: Serialize>(dto: &T, category: &str) -> serde_json::Value {
-        match serde_json::to_value(dto) {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::warn!(
-                    category,
-                    error = %err,
-                    "telemetry: DTO serialization failed; enqueueing null payload",
-                );
-                serde_json::Value::Null
-            }
-        }
-    }
-
-    /// Last-resort path for variants whose payload could not be serialized:
-    /// emit an `extension` envelope so the observer still gets a signal
-    /// (category + error message) instead of silent loss.
-    fn emit_serialization_failure(&self, name: &str, err: &dyn std::fmt::Display) {
-        let msg = format!("{}", err);
-        tracing::warn!(
-            record = name,
-            error = %err,
-            "telemetry: record serialization failed; dispatching via on_extension",
-        );
+    /// Builds the extension-error envelope + the `payloadJson` string that
+    /// the two failure helpers below share. Kept separate so the pull-queue
+    /// envelope and the push-callback payload stay bit-identical.
+    fn serialization_failure_parts(name: &str, err: &dyn std::fmt::Display) -> (String, String) {
         let payload_json = serde_json::json!({
             "telemetry_error": "serialization_failed",
             "record": name,
-            "message": msg,
+            "message": format!("{}", err),
         })
         .to_string();
-        self.enqueue(Self::envelope(
+        let envelope = Self::envelope(
             "extension",
             &[
                 (
@@ -978,7 +962,38 @@ impl TelemetrySinkAdapter {
                     serde_json::Value::String(payload_json.clone()),
                 ),
             ],
-        ));
+        );
+        (envelope, payload_json)
+    }
+
+    /// Pull-channel-only failure path. Used for the four typed-DTO
+    /// variants (metrics frame, transport state, routing decision, device
+    /// capability) where the push callback still fires with the owned
+    /// DTO — we must not re-dispatch through `on_extension` or the
+    /// consumer sees two records for one emit.
+    fn enqueue_serialization_failure(&self, name: &str, err: &dyn std::fmt::Display) {
+        tracing::warn!(
+            record = name,
+            error = %err,
+            "telemetry: pull-queue serialization failed; enqueueing extension-error envelope (typed push already fired)",
+        );
+        let (envelope, _payload_json) = Self::serialization_failure_parts(name, err);
+        self.enqueue(envelope);
+    }
+
+    /// Last-resort path for the two JSON-string variants (`Protocol`,
+    /// `Mls`) whose typed callback takes a pre-serialized string — if
+    /// serialization fails there is no DTO to hand the typed callback.
+    /// Enqueue the extension-error envelope AND fire `on_extension` so
+    /// downstream observers still see exactly one record.
+    fn emit_serialization_failure(&self, name: &str, err: &dyn std::fmt::Display) {
+        tracing::warn!(
+            record = name,
+            error = %err,
+            "telemetry: record serialization failed; dispatching via on_extension",
+        );
+        let (envelope, payload_json) = Self::serialization_failure_parts(name, err);
+        self.enqueue(envelope);
         self.callback
             .on_extension(format!("telemetry.error.{name}"), payload_json);
     }
@@ -1007,36 +1022,49 @@ impl CoreTelemetrySink for TelemetrySinkAdapter {
                 }
                 Err(err) => self.emit_serialization_failure("mls", &err),
             },
+            // Rich-variant arms: the typed push callback takes an owned
+            // Rust DTO that cannot fail to cross the FFI boundary, so it
+            // fires unconditionally. Pull-queue JSON serialization is the
+            // only thing that can fail (e.g. NaN floats); on failure the
+            // queue gets an extension-error envelope under the variant's
+            // `telemetry.error.<name>` key and the push callback is NOT
+            // re-fired through `on_extension`.
             CoreTelemetryRecord::MetricsSnapshot(frame) => {
                 let dto = MetricsFrame::from(frame.as_ref());
-                self.enqueue(Self::envelope(
-                    "metricsFrame",
-                    &[("frame", Self::to_value(&dto, "metricsFrame"))],
-                ));
+                match serde_json::to_value(&dto) {
+                    Ok(value) => self.enqueue(Self::envelope("metricsFrame", &[("frame", value)])),
+                    Err(err) => self.enqueue_serialization_failure("metricsFrame", &err),
+                }
                 self.callback.on_metrics_frame(dto);
             }
             CoreTelemetryRecord::TransportState(event) => {
                 let dto = TransportStateEvent::from(event);
-                self.enqueue(Self::envelope(
-                    "transportState",
-                    &[("event", Self::to_value(&dto, "transportState"))],
-                ));
+                match serde_json::to_value(&dto) {
+                    Ok(value) => {
+                        self.enqueue(Self::envelope("transportState", &[("event", value)]))
+                    }
+                    Err(err) => self.enqueue_serialization_failure("transportState", &err),
+                }
                 self.callback.on_transport_state(dto);
             }
             CoreTelemetryRecord::Routing(decision) => {
                 let dto = RoutingDecision::from(decision.as_ref());
-                self.enqueue(Self::envelope(
-                    "routingDecision",
-                    &[("decision", Self::to_value(&dto, "routingDecision"))],
-                ));
+                match serde_json::to_value(&dto) {
+                    Ok(value) => {
+                        self.enqueue(Self::envelope("routingDecision", &[("decision", value)]))
+                    }
+                    Err(err) => self.enqueue_serialization_failure("routingDecision", &err),
+                }
                 self.callback.on_routing_decision(dto);
             }
             CoreTelemetryRecord::Device(snapshot) => {
                 let dto = DeviceCapabilitySnapshot::from(snapshot);
-                self.enqueue(Self::envelope(
-                    "deviceCapability",
-                    &[("snapshot", Self::to_value(&dto, "deviceCapability"))],
-                ));
+                match serde_json::to_value(&dto) {
+                    Ok(value) => {
+                        self.enqueue(Self::envelope("deviceCapability", &[("snapshot", value)]))
+                    }
+                    Err(err) => self.enqueue_serialization_failure("deviceCapability", &err),
+                }
                 self.callback.on_device_capability(dto);
             }
             // Forward-compat: any variant added to CoreTelemetryRecord after
@@ -1542,6 +1570,23 @@ pub trait EventCallback: Send + Sync {
 /// `offline_protocol::TelemetrySink`. Dispatches are synchronous; see the
 /// UDL-level comment on `callback interface TelemetrySink` for the thread
 /// and locking contract.
+///
+/// # Failure semantics
+///
+/// The four typed-DTO variants (`on_metrics_frame`, `on_transport_state`,
+/// `on_routing_decision`, `on_device_capability`) always fire — the DTOs
+/// are plain Rust structs crossing the FFI boundary and nothing between
+/// `emit` and the foreign call site can fail. If the pull-queue JSON
+/// envelope fails to serialize (e.g. a NaN float slipped through), the
+/// queue receives an `extension` envelope named
+/// `telemetry.error.<variant>`; the typed push callback is NOT re-fired
+/// through `on_extension`.
+///
+/// The two JSON-string variants (`on_protocol_event`, `on_mls_event`) can
+/// only fire when the inner event serializes. On serialization failure
+/// the typed callback is skipped *and* `on_extension` fires with
+/// `telemetry.error.<variant>` so consumers see exactly one record per
+/// emit regardless of outcome.
 pub trait TelemetrySink: Send + Sync {
     fn on_protocol_event(&self, event_json: String);
     fn on_mls_event(&self, event_json: String);
@@ -2142,9 +2187,23 @@ impl OfflineProtocol {
             .map_err(ProtocolError::from)
     }
 
-    /// Polls the next buffered telemetry record as a JSON envelope of shape
-    /// `{"category": "<category>", "payload": <variant-specific JSON>}`.
-    /// Returns `None` when empty.
+    /// Polls the next buffered telemetry record as a JSON envelope. Every
+    /// envelope carries a `category` discriminator plus variant-specific
+    /// fields:
+    ///
+    /// | category           | extra fields                     |
+    /// |--------------------|----------------------------------|
+    /// | `protocol`         | `eventJson: string`              |
+    /// | `mls`              | `eventJson: string`              |
+    /// | `metricsFrame`     | `frame: MetricsFrame`            |
+    /// | `transportState`   | `event: TransportStateEvent`     |
+    /// | `routingDecision`  | `decision: RoutingDecision`      |
+    /// | `deviceCapability` | `snapshot: DeviceCapabilitySnapshot` |
+    /// | `extension`        | `name: string, payloadJson: string` |
+    ///
+    /// Returns `None` when empty. The queue is bounded
+    /// ([`TELEMETRY_POLL_QUEUE_CAP`], drop-oldest on overflow) and is only
+    /// populated while a sink is installed.
     pub fn poll_telemetry_frame(&self) -> Option<String> {
         recover_mutex(&self.telemetry_queue, "telemetry_queue").pop_front()
     }
@@ -3682,6 +3741,20 @@ impl OfflineProtocol {
         _transport_type: TransportType,
         _metrics: TransportMetrics,
     ) -> Result<(), ProtocolError> {
+        // First-call warning so integrators wiring this method up don't
+        // debug an invisible no-op. Uses `std::sync::Once` (via the static
+        // below) so long-running relays don't spam the tracing layer — one
+        // line per process lifetime is enough to surface the mistake.
+        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+        WARN_ONCE.call_once(|| {
+            tracing::warn!(
+                "update_transport_metrics is a no-op retained for source/ABI compat \
+                 and discards every field (including the 12 extended optional ones). \
+                 Read live metrics via `get_transport_metrics(...)` or install a \
+                 TelemetrySink to observe `MetricsFrame` push updates. This method \
+                 will be removed in a future major release.",
+            );
+        });
         Ok(())
     }
 
@@ -6259,5 +6332,114 @@ mod tests {
         assert_eq!(parsed["category"], "extension");
         assert_eq!(parsed["name"], "telemetry.error.protocol");
         assert!(parsed["payloadJson"].is_string());
+    }
+
+    #[test]
+    fn get_transport_metrics_returns_none_for_disabled_transport() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        protocol.start().unwrap();
+        // `create_ble_only_config` only registers BLE with the transport
+        // manager. The new implementation of `get_transport_metrics` pulls
+        // from `TransportManager::get_transport(...)` — disabled transports
+        // return `None`. This is the breaking contract change called out
+        // in CHANGELOG (prior behaviour: always Some(zeroed_struct)).
+        assert!(
+            protocol
+                .get_transport_metrics(TransportType::WiFiDirect)
+                .is_none(),
+            "disabled transport must return None, not a zeroed stub"
+        );
+        assert!(
+            protocol
+                .get_transport_metrics(TransportType::Nostr)
+                .is_none(),
+            "disabled transport must return None, not a zeroed stub"
+        );
+    }
+
+    #[test]
+    fn adapter_sink_replacement_shares_poll_queue_but_isolates_push() {
+        // Installing a second sink replaces the first on the core side, but
+        // both adapters share the same `protocol.telemetry_queue`. This
+        // test pins both halves of that contract: (a) sink A only sees the
+        // records emitted while it was installed, sink B only sees its
+        // own, and (b) the pull queue accumulates both in order regardless
+        // of which sink is currently live.
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+
+        let sink_a = Arc::new(TestTelemetrySink::default());
+        let adapter_a = install_sink_via_adapter(&protocol, sink_a.clone());
+        adapter_a.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
+            timestamp_ms: 1,
+            battery_level: None,
+            is_charging: false,
+            relay_role: CoreRelayRole::Regular,
+            changed_fields: 0,
+        }));
+
+        let sink_b = Arc::new(TestTelemetrySink::default());
+        let adapter_b = install_sink_via_adapter(&protocol, sink_b.clone());
+        adapter_b.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
+            timestamp_ms: 2,
+            battery_level: None,
+            is_charging: false,
+            relay_role: CoreRelayRole::Regular,
+            changed_fields: 0,
+        }));
+
+        assert_eq!(sink_a.device_snapshots.lock().unwrap().len(), 1);
+        assert_eq!(sink_b.device_snapshots.lock().unwrap().len(), 1);
+
+        let e1 = protocol.poll_telemetry_frame().expect("first envelope");
+        let e2 = protocol.poll_telemetry_frame().expect("second envelope");
+        let p1: serde_json::Value = serde_json::from_str(&e1).unwrap();
+        let p2: serde_json::Value = serde_json::from_str(&e2).unwrap();
+        assert_eq!(p1["snapshot"]["timestampMs"], 1);
+        assert_eq!(p2["snapshot"]["timestampMs"], 2);
+        assert!(
+            protocol.poll_telemetry_frame().is_none(),
+            "queue drained cleanly"
+        );
+    }
+
+    #[test]
+    fn enqueue_serialization_failure_rich_variant_does_not_fire_extension_callback() {
+        // Rich-variant failure contract: the pull queue gets an
+        // extension-error envelope under `telemetry.error.<variant>`, and
+        // `on_extension` does NOT fire (the typed push already carried
+        // the DTO — double-firing would deliver the same emit twice).
+        //
+        // Serde-level failure is effectively unreachable in practice for
+        // rich variants (`serde_json::to_value` maps NaN/Inf to `null`
+        // rather than erroring), so we exercise the helper directly. This
+        // test pins the contract of `enqueue_serialization_failure` so a
+        // future refactor that accidentally re-routes rich-variant
+        // failures through `emit_serialization_failure` (which also fires
+        // the callback) trips the assertion below.
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        struct FakeErr;
+        impl std::fmt::Display for FakeErr {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "synthetic")
+            }
+        }
+        adapter.enqueue_serialization_failure("metricsFrame", &FakeErr);
+
+        assert!(
+            sink.extensions.lock().unwrap().is_empty(),
+            "on_extension must not fire — rich-variant typed push already delivered",
+        );
+
+        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "extension");
+        assert_eq!(parsed["name"], "telemetry.error.metricsFrame");
+        assert!(
+            parsed.get("frame").is_none(),
+            "pull channel must not leak a null-valued frame on serialization failure"
+        );
     }
 }

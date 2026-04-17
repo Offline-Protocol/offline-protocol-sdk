@@ -1290,7 +1290,11 @@ export class OfflineProtocol {
    */
   async pollTelemetry(): Promise<TelemetryRecord | null> {
     const json: string | null = await OfflineProtocolNativeModule.pollTelemetryFrame();
-    if (!json) {
+    // Null/undefined is "queue empty". Anything else (including the empty
+    // string) would indicate a bridge bug — fall through to JSON.parse,
+    // which will then throw and let the caller distinguish corruption from
+    // "no data".
+    if (json === null || json === undefined) {
       return null;
     }
     try {

@@ -553,6 +553,18 @@ dictionary TelemetryConfig {
 // do not yet have a typed method here dispatch through on_extension with the
 // record's stable snake.dot.case name and the inner payload as JSON.
 //
+// Failure semantics:
+//   - on_metrics_frame / on_transport_state / on_routing_decision /
+//     on_device_capability always fire — the DTOs are plain value types
+//     crossing the FFI boundary. If the pull-queue JSON envelope fails
+//     to serialize (e.g. NaN floats), only the pull channel gets a
+//     `telemetry.error.<variant>` extension envelope; the push callback
+//     is NOT re-fired through on_extension.
+//   - on_protocol_event / on_mls_event only fire when the inner event
+//     serializes. On failure, the typed callback is skipped and
+//     on_extension fires with `telemetry.error.<variant>` so consumers
+//     see exactly one record per emit.
+//
 // Implementations MUST NOT block, reenter the SDK, or panic — the emit path
 // may be called while the protocol holds internal locks.
 callback interface TelemetrySink {
@@ -630,11 +642,21 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     void install_telemetry_sink(TelemetrySink sink, TelemetryConfig config);
 
-    // Poll the next buffered telemetry record as a JSON envelope of shape
-    // {"category": "<category>", "payload": <variant-specific JSON>}.
-    // Returns null when the queue is empty. The queue is bounded; overflow
-    // drops the oldest entry. Available whether or not a sink is installed —
-    // records are queued regardless.
+    // Poll the next buffered telemetry record as a JSON envelope. Every
+    // envelope carries a `category` discriminator plus variant-specific
+    // fields:
+    //   protocol         → { "category": "protocol",         "eventJson": <string> }
+    //   mls              → { "category": "mls",              "eventJson": <string> }
+    //   metricsFrame     → { "category": "metricsFrame",     "frame":     <MetricsFrame> }
+    //   transportState   → { "category": "transportState",   "event":     <TransportStateEvent> }
+    //   routingDecision  → { "category": "routingDecision",  "decision":  <RoutingDecision> }
+    //   deviceCapability → { "category": "deviceCapability", "snapshot":  <DeviceCapabilitySnapshot> }
+    //   extension        → { "category": "extension",        "name": <string>, "payloadJson": <string> }
+    //
+    // Returns null when the queue is empty. The queue is bounded (1024
+    // slots, drop-oldest on overflow). Records are only enqueued while a
+    // sink is installed — polling before `install_telemetry_sink` returns
+    // null.
     string? poll_telemetry_frame();
     
     // Messaging
