@@ -141,8 +141,17 @@ fn bench_emit_noop_sink_diagnostic(c: &mut Criterion) {
             ] {
                 decision.scores.push((
                     t,
-                    offline_protocol_router::TransportScore::new(
-                        80.0, 70.0, 60.0, 90.0, 85.0, 95.0, 75.0, 82.0,
+                    offline_protocol_router::TransportScore::from_factors(
+                        offline_protocol_router::TransportScoreFactors {
+                            signal: 80.0,
+                            proximity: 70.0,
+                            bandwidth: 60.0,
+                            congestion: 90.0,
+                            energy: 85.0,
+                            reliability: 95.0,
+                            load: 75.0,
+                            total: 82.0,
+                        },
                     ),
                 ));
             }

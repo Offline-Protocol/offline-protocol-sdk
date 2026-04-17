@@ -23,7 +23,8 @@ pub(crate) use types::*;
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
 use crate::telemetry::aggregator::{
-    build_metrics_frame, diff_device_capability, diff_transport_state, DeviceSnap,
+    build_metrics_frame, device_battery_from_available, diff_device_capability,
+    diff_transport_state, DeviceSnap,
 };
 use crate::telemetry::{
     Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
@@ -35,7 +36,7 @@ use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMess
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::{PathSelector, RelayManager, RelayRole, TransportSelector};
 use offline_protocol_services::MeshServices;
-use offline_protocol_transport::{BleTransport, TransportMetrics, TransportStatus, TransportType};
+use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -485,12 +486,10 @@ impl OfflineProtocol {
         // reports honest transitions only. Without this, a sink installed
         // after start() would observe a synthetic `Unavailable → Available`
         // transition for every already-running transport on the next tick.
-        self.transport_status_snapshot = self.transport_manager.get_all_transport_statuses();
-        let available = self.transport_manager.get_available_transports();
-        let (battery_level, is_charging) = Self::device_battery_from_available(
-            self.transport_manager.current_transport(),
-            &available,
-        );
+        let (statuses, available) = self.transport_manager.snapshot_status_and_available();
+        self.transport_status_snapshot = statuses;
+        let (battery_level, is_charging) =
+            device_battery_from_available(self.transport_manager.current_transport(), &available);
         let relay_role = self.path_selector.current_relay_role();
         self.device_capability_snapshot = Some(DeviceSnap::from_parts(
             battery_level,
@@ -1337,11 +1336,13 @@ impl OfflineProtocol {
         let now_ms = Utc::now().timestamp_millis();
         let now = Instant::now();
 
-        // Snapshot once per tick, reuse everywhere below.
-        let available = self.transport_manager.get_available_transports();
+        // One lock-per-transport pass: get statuses (for the transition
+        // diff) and the available-only metrics map (for the metrics frame
+        // and the device-capability diff). Reused across every helper
+        // below.
+        let (current_statuses, available) = self.transport_manager.snapshot_status_and_available();
 
         // Transport-status diff: one record per changed transport.
-        let current_statuses = self.transport_manager.get_all_transport_statuses();
         let transitions =
             diff_transport_state(now_ms, &self.transport_status_snapshot, &current_statuses);
         for event in transitions {
@@ -1350,10 +1351,8 @@ impl OfflineProtocol {
         self.transport_status_snapshot = current_statuses;
 
         // Device capability diff.
-        let (battery_level, is_charging) = Self::device_battery_from_available(
-            self.transport_manager.current_transport(),
-            &available,
-        );
+        let (battery_level, is_charging) =
+            device_battery_from_available(self.transport_manager.current_transport(), &available);
         let relay_role = self.path_selector.current_relay_role();
         let device_now = DeviceSnap::from_parts(battery_level, is_charging, relay_role);
         if let Some(snapshot) =
@@ -1388,73 +1387,6 @@ impl OfflineProtocol {
         }
     }
 
-    /// Derives `(battery_level, is_charging)` for the local device from the
-    /// per-transport metrics map.
-    ///
-    /// Selection order:
-    ///   1. Currently selected transport, if it reports `Some(battery_level)`.
-    ///   2. First available transport (deterministic by `TransportType`
-    ///      priority) that reports `Some(battery_level)`.
-    ///   3. `(None, is_charging)` where `is_charging` comes from the current
-    ///      transport if present, else `false`.
-    ///
-    /// `is_charging` is **always** the current transport's reading when a
-    /// current transport is registered — regardless of which transport
-    /// supplied `battery_level`. Mixing `is_charging` from one transport
-    /// with `battery_level` from another produces non-deterministic flips
-    /// across ticks (HashMap iteration order is unspecified) and would
-    /// spuriously trigger `CHANGED_CHARGING` on the device-capability diff.
-    fn device_battery_from_available(
-        current: Option<TransportType>,
-        available: &HashMap<TransportType, TransportMetrics>,
-    ) -> (Option<u8>, bool) {
-        // Deterministic walk order: honour the existing transport-priority
-        // (Internet > WiFiDirect > BLE > everything else) so the choice of
-        // "first with Some(battery)" is stable across ticks.
-        const PRIORITY: &[TransportType] = &[
-            TransportType::Internet,
-            TransportType::WiFiDirect,
-            TransportType::BLE,
-            TransportType::Reticulum,
-            TransportType::Nostr,
-        ];
-        let first_with_battery = |skip: Option<TransportType>| -> Option<u8> {
-            for t in PRIORITY {
-                if skip == Some(*t) {
-                    continue;
-                }
-                if let Some(m) = available.get(t) {
-                    if m.battery_level.is_some() {
-                        return m.battery_level;
-                    }
-                }
-            }
-            // Fallback for transport types not in the priority list.
-            available
-                .iter()
-                .find(|(t, m)| Some(**t) != skip && m.battery_level.is_some())
-                .and_then(|(_, m)| m.battery_level)
-        };
-
-        if let Some(current) = current {
-            if let Some(metrics) = available.get(&current) {
-                let battery = metrics
-                    .battery_level
-                    .or_else(|| first_with_battery(Some(current)));
-                return (battery, metrics.is_charging);
-            }
-            // `current` is set but not present in `available` — fall through
-            // to the no-current branch but without an `is_charging` anchor.
-        }
-        let battery = first_with_battery(None);
-        let is_charging = PRIORITY
-            .iter()
-            .find_map(|t| available.get(t))
-            .or_else(|| available.values().next())
-            .map(|m| m.is_charging)
-            .unwrap_or(false);
-        (battery, is_charging)
-    }
     /// Processes messages ready for retry from the retry queue.
     ///
     /// EDGE CASE HANDLING:

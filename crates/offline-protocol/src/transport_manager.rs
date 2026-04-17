@@ -763,6 +763,50 @@ impl TransportManager {
         out
     }
 
+    /// Returns the per-transport status map AND the available-only metrics
+    /// map in a single lock-per-transport pass.
+    ///
+    /// Equivalent to calling [`Self::get_all_transport_statuses`] and
+    /// [`Self::get_available_transports`] back-to-back, but takes each
+    /// transport's mutex once instead of twice. Used by the per-tick
+    /// telemetry aggregator.
+    pub fn snapshot_status_and_available(
+        &self,
+    ) -> (
+        HashMap<TransportType, TransportStatus>,
+        HashMap<TransportType, TransportMetrics>,
+    ) {
+        let mut statuses = HashMap::with_capacity(self.transports.len());
+        let mut available = HashMap::new();
+
+        for (transport_type, transport) in &self.transports {
+            let (status, metrics) = match transport.lock() {
+                Ok(lock) => {
+                    let status = lock.status();
+                    let metrics = if status == TransportStatus::Available {
+                        Some(lock.metrics())
+                    } else {
+                        None
+                    };
+                    (status, metrics)
+                }
+                Err(_) => {
+                    warn!(transport = ?transport_type, "Transport mutex poisoned, reporting Error");
+                    (TransportStatus::Error, None)
+                }
+            };
+            statuses.insert(*transport_type, status);
+            if let Some(mut metrics) = metrics {
+                if let Some(stats) = self.observations.get(transport_type) {
+                    stats.apply_to_metrics(&mut metrics);
+                }
+                available.insert(*transport_type, metrics);
+            }
+        }
+
+        (statuses, available)
+    }
+
     /// Starts all transports.
     pub fn start(&mut self) -> Result<()> {
         for (transport_type, transport) in &self.transports {

@@ -10173,23 +10173,49 @@ fn test_legacy_dors_events_still_fire_with_routing_callback_wired() {
 
 #[test]
 fn test_process_skips_telemetry_tick_without_sink() {
-    // With no sink installed, the tick must be a no-op: nothing is emitted
-    // and no snapshots are taken (the existing `EventCallback` stream is
-    // independent and unaffected).
+    // With no sink installed, `tick_telemetry_categories` must early-return
+    // before touching any of the per-tick aggregator state. We assert that
+    // by registering a transport (so a real aggregator pass would observe
+    // an `Unavailable → Available` transition and seed the snapshots) and
+    // then verifying the three state fields the aggregator would mutate
+    // remain at their pre-tick defaults across multiple ticks.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mut mock = MockTransport::new(TransportType::BLE);
+    mock.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+
     let captured: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
     let handler = captured.clone();
     protocol.on_event(move |event| handler.lock().unwrap().push(event));
 
     protocol.start().unwrap();
-    protocol.process().unwrap();
 
-    // The legacy callback may receive DORS events during process(), but
-    // that does not mean the new telemetry tick ran. Sanity: there is no
-    // telemetry context to dispatch into, so the aggregator returned early.
     assert!(
         protocol.telemetry.is_none(),
         "precondition: no sink installed",
+    );
+
+    for _ in 0..5 {
+        protocol.process().unwrap();
+    }
+
+    // The aggregator never ran, so its state is untouched. If the early
+    // return regressed, the BLE transport would have been observed and
+    // these fields would have been populated.
+    assert!(
+        protocol.last_metrics_emit_at.is_none(),
+        "no sink installed; metrics cadence tracker must stay None across ticks",
+    );
+    assert!(
+        protocol.transport_status_snapshot.is_empty(),
+        "no sink installed; transport status snapshot must stay empty across ticks, got {:?}",
+        protocol.transport_status_snapshot,
+    );
+    assert!(
+        protocol.device_capability_snapshot.is_none(),
+        "no sink installed; device capability snapshot must stay None across ticks",
     );
 }
 
@@ -10402,75 +10428,6 @@ fn test_metrics_frame_is_local_relay_matches_role() {
 use crate::telemetry::routing::RoutingDecision;
 use crate::telemetry::transport_state::TransportStateEvent;
 
-#[test]
-fn test_device_battery_walk_is_charging_always_from_current_when_set() {
-    // Regression guard: when `current` is Some, `is_charging` is taken from
-    // the current transport's metrics even if its `battery_level` is None
-    // and the walk has to fall through to another transport for the
-    // battery reading. Mixing is_charging across transports produces
-    // non-deterministic flips on the CHANGED_CHARGING diff bit.
-    let mut available = HashMap::new();
-    available.insert(
-        TransportType::BLE,
-        TransportMetrics {
-            battery_level: None,
-            is_charging: false,
-            ..Default::default()
-        },
-    );
-    available.insert(
-        TransportType::Internet,
-        TransportMetrics {
-            battery_level: Some(73),
-            is_charging: true,
-            ..Default::default()
-        },
-    );
-
-    let (battery, is_charging) =
-        OfflineProtocol::device_battery_from_available(Some(TransportType::BLE), &available);
-    assert_eq!(
-        battery,
-        Some(73),
-        "battery must come from the first transport with Some(battery_level)",
-    );
-    assert!(
-        !is_charging,
-        "is_charging must come from the current transport (BLE → false), not from Internet",
-    );
-}
-
-#[test]
-fn test_device_battery_walk_is_deterministic_when_current_is_none() {
-    // With no current transport, the walk picks by transport priority
-    // (Internet > WiFiDirect > BLE) rather than HashMap order, so the
-    // result is stable across ticks regardless of iteration order.
-    let mut available = HashMap::new();
-    available.insert(
-        TransportType::BLE,
-        TransportMetrics {
-            battery_level: Some(40),
-            is_charging: false,
-            ..Default::default()
-        },
-    );
-    available.insert(
-        TransportType::Internet,
-        TransportMetrics {
-            battery_level: Some(90),
-            is_charging: true,
-            ..Default::default()
-        },
-    );
-
-    let (battery, is_charging) = OfflineProtocol::device_battery_from_available(None, &available);
-    assert_eq!(
-        battery,
-        Some(90),
-        "priority-ordered walk must prefer Internet's battery (90)",
-    );
-    assert!(
-        is_charging,
-        "priority-ordered walk must prefer Internet's is_charging (true)",
-    );
-}
+// `device_battery_from_available` lives in `crate::telemetry::aggregator`
+// and is exercised by the unit tests in that module — including the
+// current-not-in-available fall-through path that was previously uncovered.

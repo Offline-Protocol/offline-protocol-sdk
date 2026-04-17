@@ -17,7 +17,9 @@ pub mod router;
 pub mod ttl;
 
 pub use congestion::{CongestionConfig, CongestionController, DeliveryOutcome, SendDecision};
-pub use dors::{DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector};
+pub use dors::{
+    DorsConfig, EscalationTriggerReason, TransportScore, TransportScoreFactors, TransportSelector,
+};
 pub use error::{Error, Result};
 pub use relay::{RelayConfig, RelayManager, RelayRole};
 pub use router::{

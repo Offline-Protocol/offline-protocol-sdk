@@ -204,11 +204,37 @@ struct EscalationEvaluation {
 ///
 /// `#[non_exhaustive]` so a future scoring factor can be added without a
 /// breaking-change bump. External callers that need to construct a value
-/// (benchmarks, tests, tooling) should use [`Self::new`] rather than struct
-/// literal syntax.
+/// (benchmarks, tests, tooling) build a [`TransportScoreFactors`] literal
+/// and pass it to [`Self::from_factors`] — the factors struct uses named
+/// fields so adding a factor in the future does not silently misorder
+/// existing call sites.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct TransportScore {
+    /// Signal strength score (0-100).
+    pub signal: f32,
+    /// Proximity/hop distance score (0-100).
+    pub proximity: f32,
+    /// Available bandwidth score (0-100).
+    pub bandwidth: f32,
+    /// Congestion score (0-100, higher is less congested).
+    pub congestion: f32,
+    /// Energy efficiency score (0-100).
+    pub energy: f32,
+    /// Reliability score (0-100).
+    pub reliability: f32,
+    /// Load score (0-100, higher = more capacity available).
+    pub load: f32,
+    /// Total weighted score.
+    pub total: f32,
+}
+
+/// Named-field factors accepted by [`TransportScore::from_factors`].
+///
+/// Using named fields prevents the silent-misorder bug that an N-arg
+/// positional constructor would invite (every factor is `f32`).
+#[derive(Debug, Clone, Default)]
+pub struct TransportScoreFactors {
     /// Signal strength score (0-100).
     pub signal: f32,
     /// Proximity/hop distance score (0-100).
@@ -233,26 +259,16 @@ impl TransportScore {
     /// Intended for callers outside this crate (benchmarks, tooling). The
     /// per-factor weighting is the selector's responsibility; this
     /// constructor performs no validation or recomputation of `total`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        signal: f32,
-        proximity: f32,
-        bandwidth: f32,
-        congestion: f32,
-        energy: f32,
-        reliability: f32,
-        load: f32,
-        total: f32,
-    ) -> Self {
+    pub fn from_factors(factors: TransportScoreFactors) -> Self {
         Self {
-            signal,
-            proximity,
-            bandwidth,
-            congestion,
-            energy,
-            reliability,
-            load,
-            total,
+            signal: factors.signal,
+            proximity: factors.proximity,
+            bandwidth: factors.bandwidth,
+            congestion: factors.congestion,
+            energy: factors.energy,
+            reliability: factors.reliability,
+            load: factors.load,
+            total: factors.total,
         }
     }
 }
