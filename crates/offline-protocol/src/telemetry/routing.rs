@@ -3,8 +3,8 @@
 //! Where the `Event::DorsScoreUpdated` / `Event::DorsTransportSelected` /
 //! `Event::DorsTransportSwitched` / `Event::DorsEscalationTriggered` variants
 //! report a flattened subset (transport name + score + reason code), this
-//! record carries the full scoring breakdown and the gate-suppression context
-//! that DORS evaluates before it decides whether to switch.
+//! record carries the full per-factor scoring breakdown that DORS evaluates
+//! before it decides which transport to use.
 //!
 //! The legacy `Event::Dors*` path continues to fire for back-compat — apps
 //! that want the richer shape consume [`crate::telemetry::TelemetrySink`] and
@@ -28,8 +28,6 @@ pub enum RoutingPhase {
     Switched,
     /// BLE→WiFi escalation triggered or applied.
     Escalated,
-    /// A switch candidate was suppressed by hysteresis/cooldown/stability.
-    Suppressed,
 }
 
 /// Top-level reason space for routing decisions.
@@ -63,37 +61,20 @@ pub enum RoutingReasonCode {
     LowTtl,
     /// Sustained low success rate tripped escalation.
     LowSuccessRate,
-    /// Candidate score improvement below `switch_hysteresis`.
-    HysteresisNotMet,
-    /// `switch_cooldown_secs` has not elapsed since last switch.
-    InCooldown,
-    /// Candidate has not held superiority over `stability_window_secs`.
-    StabilityWindowUnmet,
-}
-
-/// Structured explanation of *why* a candidate switch was suppressed.
-///
-/// All fields are populated best-effort — a suppressed decision may have
-/// multiple overlapping reasons (e.g. hysteresis AND cooldown); fields
-/// unrelated to the primary reason are left as their defaults.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SuppressionReason {
-    /// Required score delta vs. observed delta (observed < required ⇒ block).
-    pub hysteresis_delta: Option<f32>,
-    /// Seconds remaining until `switch_cooldown_secs` elapses.
-    pub cooldown_remaining_secs: Option<u64>,
-    /// `true` when the candidate has not held superiority across
-    /// `stability_window_secs`.
-    pub stability_unmet: bool,
 }
 
 /// A single structured routing decision.
 ///
-/// Populated by the DORS callback installed via
-/// `TransportManager::set_routing_decision_callback`. The `scores` field is
-/// only populated when `TelemetryConfig::routing_diagnostic` is `true`; at the
+/// Populated by the DORS callback installed by
+/// `OfflineProtocol::install_telemetry_sink`. The `scores` field is only
+/// populated when `TelemetryConfig::routing_diagnostic` is `true`; at the
 /// default verbosity the vector is empty, keeping the hot-path allocation
 /// free.
+///
+/// A future PR will introduce a `Suppressed` phase carrying hysteresis /
+/// cooldown / stability detail; that variant and its payload were excluded
+/// from this record on purpose so the shape can be designed alongside the
+/// emit sites that produce it.
 #[derive(Debug, Clone)]
 pub struct RoutingDecision {
     /// Emission timestamp (milliseconds since Unix epoch).
@@ -111,8 +92,6 @@ pub struct RoutingDecision {
     /// Full per-transport score breakdown. Empty unless
     /// `TelemetryConfig::routing_diagnostic` is enabled.
     pub scores: Vec<(TransportType, TransportScore)>,
-    /// Present only when `phase == Suppressed`.
-    pub suppression: Option<SuppressionReason>,
 }
 
 impl RoutingDecision {
@@ -139,17 +118,8 @@ mod tests {
             winning_score: Some(84.0),
             reason_code: Some(RoutingReasonCode::InitialSelection),
             scores: Vec::new(),
-            suppression: None,
         };
         assert_eq!(RoutingDecision::NAME, "protocol.routing.decision");
         assert_eq!(decision.telemetry_name(), "protocol.routing.decision");
-    }
-
-    #[test]
-    fn suppression_default_is_empty() {
-        let suppression = SuppressionReason::default();
-        assert!(suppression.hysteresis_delta.is_none());
-        assert!(suppression.cooldown_remaining_secs.is_none());
-        assert!(!suppression.stability_unmet);
     }
 }

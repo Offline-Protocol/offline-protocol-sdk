@@ -173,7 +173,12 @@ impl TransportManager {
     ///
     /// Fires at the same sites as `dors_event_callback`, carrying a richer
     /// shape suitable for the unified telemetry sink.
-    pub fn set_routing_decision_callback(
+    ///
+    /// Crate-private: apps must drive routing telemetry through
+    /// [`crate::OfflineProtocol::install_telemetry_sink`] rather than wiring
+    /// the callback directly. This keeps [`crate::telemetry::TelemetryConfig`]
+    /// the single source of truth for sink configuration.
+    pub(crate) fn set_routing_decision_callback(
         &mut self,
         callback: Option<Arc<dyn Fn(RoutingDecision) + Send + Sync>>,
     ) {
@@ -187,7 +192,9 @@ impl TransportManager {
     /// emission. When `false` (default), the vector is empty and the hot
     /// path avoids the per-emission allocation. Mirrors
     /// `TelemetryConfig::routing_diagnostic`.
-    pub fn set_routing_diagnostic(&mut self, enabled: bool) {
+    ///
+    /// Crate-private: see [`Self::set_routing_decision_callback`].
+    pub(crate) fn set_routing_diagnostic(&mut self, enabled: bool) {
         self.routing_diagnostic = enabled;
     }
 
@@ -241,8 +248,15 @@ impl TransportManager {
     /// Builds a [`RoutingDecision`]. The `detailed_scores` slice is cloned
     /// into `scores` when `routing_diagnostic` is enabled on the manager;
     /// otherwise the vector stays empty (allocation-free).
+    ///
+    /// Takes `now_ms` by argument rather than calling `Utc::now()` per
+    /// build so every decision emitted from a single `send()` cycle shares
+    /// one timestamp — easier to correlate downstream and saves three to
+    /// four syscalls on the send hot path.
+    #[allow(clippy::too_many_arguments)]
     fn build_routing_decision(
         &self,
+        now_ms: i64,
         phase: RoutingPhase,
         from: Option<TransportType>,
         to: Option<TransportType>,
@@ -255,20 +269,20 @@ impl TransportManager {
             _ => Vec::new(),
         };
         RoutingDecision {
-            timestamp_ms: Utc::now().timestamp_millis(),
+            timestamp_ms: now_ms,
             phase,
             from,
             to,
             winning_score,
             reason_code,
             scores,
-            suppression: None,
         }
     }
 
     /// Emit dors_escalation_triggered at trigger boundary (typed reason), deduped by reason + time window.
     fn emit_escalation_trigger_if_deduped(
         &mut self,
+        now_ms: i64,
         reason_code: DorsEscalationReasonCode,
         from: TransportType,
         to: TransportType,
@@ -294,6 +308,7 @@ impl TransportManager {
             ));
             self.emit_routing_decision(|| {
                 self.build_routing_decision(
+                    now_ms,
                     RoutingPhase::Escalated,
                     Some(from),
                     Some(to),
@@ -345,6 +360,11 @@ impl TransportManager {
             )));
         }
 
+        // Single timestamp shared by every RoutingDecision emitted from this
+        // send cycle — cheaper than per-emit `Utc::now()` and lets downstream
+        // consumers group decisions by timestamp.
+        let now_ms = Utc::now().timestamp_millis();
+
         let previous = self.current_transport;
 
         // DORS selects the primary transport (applies hysteresis/cooldown/stability).
@@ -358,15 +378,9 @@ impl TransportManager {
             })?;
 
         // Emit DORS observability: scores and selection (before send attempt).
-        // Compute once and reuse for both observability and fallback ordering.
-        let scored = self.selector.score_and_rank(message, &available);
-        let scores: Vec<(String, f32)> = scored.iter().map(|(t, s)| (t.to_string(), *s)).collect();
-        self.emit_dors_event(Event::dors_score_updated(scores));
-
-        // Compute the detailed per-transport score breakdown only when a
-        // consumer has (a) installed a routing_decision_callback AND
-        // (b) opted into the diagnostic tier. Without both, the breakdown
-        // is never materialised.
+        // At the default (non-diagnostic) tier we project the detailed
+        // breakdown down to `(transport, total)` — a single scoring pass
+        // feeds both the legacy event and the routing record.
         let detailed_scores: Option<Vec<(TransportType, TransportScore)>> =
             if self.routing_diagnostic && self.routing_decision_callback.is_some() {
                 Some(self.selector.score_and_rank_detailed(message, &available))
@@ -374,9 +388,16 @@ impl TransportManager {
                 None
             };
         let detailed_slice = detailed_scores.as_deref();
+        let scored: Vec<(TransportType, f32)> = match detailed_slice {
+            Some(d) => d.iter().map(|(t, s)| (*t, s.total)).collect(),
+            None => self.selector.score_and_rank(message, &available),
+        };
+        let scores: Vec<(String, f32)> = scored.iter().map(|(t, s)| (t.to_string(), *s)).collect();
+        self.emit_dors_event(Event::dors_score_updated(scores));
 
         self.emit_routing_decision(|| {
             self.build_routing_decision(
+                now_ms,
                 RoutingPhase::ScoreUpdated,
                 previous,
                 None,
@@ -403,6 +424,7 @@ impl TransportManager {
         ));
         self.emit_routing_decision(|| {
             self.build_routing_decision(
+                now_ms,
                 RoutingPhase::Selected,
                 previous,
                 Some(primary),
@@ -441,6 +463,7 @@ impl TransportManager {
                     ));
                     self.emit_routing_decision(|| {
                         self.build_routing_decision(
+                            now_ms,
                             RoutingPhase::Switched,
                             previous,
                             Some(primary),
@@ -487,6 +510,7 @@ impl TransportManager {
                 if let Some(trigger_reason) = self.selector.escalation_trigger_reason() {
                     let reason_code = Self::escalation_trigger_reason_to_code(trigger_reason);
                     self.emit_escalation_trigger_if_deduped(
+                        now_ms,
                         reason_code,
                         primary,
                         *transport_type,
@@ -533,6 +557,7 @@ impl TransportManager {
                         let fallback = *transport_type;
                         self.emit_routing_decision(|| {
                             self.build_routing_decision(
+                                now_ms,
                                 RoutingPhase::Switched,
                                 previous,
                                 Some(fallback),
@@ -555,6 +580,7 @@ impl TransportManager {
                         let escalated = *transport_type;
                         self.emit_routing_decision(|| {
                             self.build_routing_decision(
+                                now_ms,
                                 RoutingPhase::Escalated,
                                 Some(primary),
                                 Some(escalated),

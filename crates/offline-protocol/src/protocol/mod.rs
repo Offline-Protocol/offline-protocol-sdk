@@ -443,6 +443,13 @@ impl OfflineProtocol {
     /// install time should pull them explicitly via
     /// [`TransportManager::get_all_transport_statuses`].
     ///
+    /// The escalation-trigger dedupe window (`ESCALATION_TRIGGER_DEDUPE_SECS`
+    /// inside [`TransportManager`]) is **not** rearmed. A sink installed
+    /// within that window after an escalation event fired to a previous
+    /// sink may miss the next occurrence of the same reason until the
+    /// window elapses. This is intentional: the dedupe is a property of
+    /// the routing engine, not of the observer.
+    ///
     /// # Errors
     ///
     /// Returns `Err` if the shared-state mutex is poisoned (indicating an
@@ -484,7 +491,7 @@ impl OfflineProtocol {
             self.transport_manager.current_transport(),
             &available,
         );
-        let relay_role = self.path_selector.relay_manager().current_role();
+        let relay_role = self.path_selector.current_relay_role();
         self.device_capability_snapshot = Some(DeviceSnap::from_parts(
             battery_level,
             is_charging,
@@ -1318,6 +1325,11 @@ impl OfflineProtocol {
     /// here is the same state the rest of the tick has already advanced.
     /// Snapshots `get_available_transports()` exactly once per tick and
     /// reuses the map across every downstream helper that needs it.
+    ///
+    /// If an earlier step in `process()` returns `Err(...)`, this method is
+    /// skipped and telemetry emission for that interval is deferred to the
+    /// next successful tick — the cadence guarantee relaxes under sustained
+    /// partial failure.
     fn tick_telemetry_categories(&mut self) {
         let Some(ctx) = self.telemetry.clone() else {
             return;
@@ -1342,7 +1354,7 @@ impl OfflineProtocol {
             self.transport_manager.current_transport(),
             &available,
         );
-        let relay_role = self.path_selector.relay_manager().current_role();
+        let relay_role = self.path_selector.current_relay_role();
         let device_now = DeviceSnap::from_parts(battery_level, is_charging, relay_role);
         if let Some(snapshot) =
             diff_device_capability(now_ms, self.device_capability_snapshot, device_now)
@@ -1381,44 +1393,67 @@ impl OfflineProtocol {
     ///
     /// Selection order:
     ///   1. Currently selected transport, if it reports `Some(battery_level)`.
-    ///   2. First available transport that reports `Some(battery_level)`.
+    ///   2. First available transport (deterministic by `TransportType`
+    ///      priority) that reports `Some(battery_level)`.
     ///   3. `(None, is_charging)` where `is_charging` comes from the current
     ///      transport if present, else `false`.
     ///
-    /// Skipping past a current transport whose `battery_level` is `None` is
-    /// deliberate: every registered transport reports the hosting device's
-    /// battery, so any `Some` reading is more informative than the default
-    /// `None` on the selected one.
+    /// `is_charging` is **always** the current transport's reading when a
+    /// current transport is registered — regardless of which transport
+    /// supplied `battery_level`. Mixing `is_charging` from one transport
+    /// with `battery_level` from another produces non-deterministic flips
+    /// across ticks (HashMap iteration order is unspecified) and would
+    /// spuriously trigger `CHANGED_CHARGING` on the device-capability diff.
     fn device_battery_from_available(
         current: Option<TransportType>,
         available: &HashMap<TransportType, TransportMetrics>,
     ) -> (Option<u8>, bool) {
+        // Deterministic walk order: honour the existing transport-priority
+        // (Internet > WiFiDirect > BLE > everything else) so the choice of
+        // "first with Some(battery)" is stable across ticks.
+        const PRIORITY: &[TransportType] = &[
+            TransportType::Internet,
+            TransportType::WiFiDirect,
+            TransportType::BLE,
+            TransportType::Reticulum,
+            TransportType::Nostr,
+        ];
+        let first_with_battery = |skip: Option<TransportType>| -> Option<u8> {
+            for t in PRIORITY {
+                if skip == Some(*t) {
+                    continue;
+                }
+                if let Some(m) = available.get(t) {
+                    if m.battery_level.is_some() {
+                        return m.battery_level;
+                    }
+                }
+            }
+            // Fallback for transport types not in the priority list.
+            available
+                .iter()
+                .find(|(t, m)| Some(**t) != skip && m.battery_level.is_some())
+                .and_then(|(_, m)| m.battery_level)
+        };
+
         if let Some(current) = current {
             if let Some(metrics) = available.get(&current) {
-                if metrics.battery_level.is_some() {
-                    return (metrics.battery_level, metrics.is_charging);
-                }
-                // Current transport has no battery reading; try any other.
-                if let Some((_, other)) = available
-                    .iter()
-                    .find(|(t, m)| **t != current && m.battery_level.is_some())
-                {
-                    return (other.battery_level, other.is_charging);
-                }
-                return (None, metrics.is_charging);
+                let battery = metrics
+                    .battery_level
+                    .or_else(|| first_with_battery(Some(current)));
+                return (battery, metrics.is_charging);
             }
+            // `current` is set but not present in `available` — fall through
+            // to the no-current branch but without an `is_charging` anchor.
         }
-        available
-            .values()
-            .find(|m| m.battery_level.is_some())
-            .map(|m| (m.battery_level, m.is_charging))
-            .unwrap_or_else(|| {
-                available
-                    .values()
-                    .next()
-                    .map(|m| (None, m.is_charging))
-                    .unwrap_or((None, false))
-            })
+        let battery = first_with_battery(None);
+        let is_charging = PRIORITY
+            .iter()
+            .find_map(|t| available.get(t))
+            .or_else(|| available.values().next())
+            .map(|m| m.is_charging)
+            .unwrap_or(false);
+        (battery, is_charging)
     }
     /// Processes messages ready for retry from the retry queue.
     ///

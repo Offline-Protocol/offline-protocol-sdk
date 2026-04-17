@@ -73,7 +73,6 @@ fn sample_routing_decision() -> RoutingDecision {
         winning_score: Some(84.0),
         reason_code: Some(RoutingReasonCode::InitialSelection),
         scores: Vec::new(),
-        suppression: None,
     }
 }
 
@@ -142,16 +141,9 @@ fn bench_emit_noop_sink_diagnostic(c: &mut Criterion) {
             ] {
                 decision.scores.push((
                     t,
-                    offline_protocol_router::TransportScore {
-                        signal: 80.0,
-                        proximity: 70.0,
-                        bandwidth: 60.0,
-                        congestion: 90.0,
-                        energy: 85.0,
-                        reliability: 95.0,
-                        load: 75.0,
-                        total: 82.0,
-                    },
+                    offline_protocol_router::TransportScore::new(
+                        80.0, 70.0, 60.0, 90.0, 85.0, 95.0, 75.0, 82.0,
+                    ),
                 ));
             }
             let record = TelemetryRecord::Routing(Box::new(decision));

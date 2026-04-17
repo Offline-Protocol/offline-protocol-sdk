@@ -201,6 +201,12 @@ struct EscalationEvaluation {
 }
 
 /// Score breakdown for transport selection.
+///
+/// `#[non_exhaustive]` so a future scoring factor can be added without a
+/// breaking-change bump. External callers that need to construct a value
+/// (benchmarks, tests, tooling) should use [`Self::new`] rather than struct
+/// literal syntax.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct TransportScore {
     /// Signal strength score (0-100).
@@ -219,6 +225,36 @@ pub struct TransportScore {
     pub load: f32,
     /// Total weighted score.
     pub total: f32,
+}
+
+impl TransportScore {
+    /// Constructs a score from explicit per-factor values.
+    ///
+    /// Intended for callers outside this crate (benchmarks, tooling). The
+    /// per-factor weighting is the selector's responsibility; this
+    /// constructor performs no validation or recomputation of `total`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        signal: f32,
+        proximity: f32,
+        bandwidth: f32,
+        congestion: f32,
+        energy: f32,
+        reliability: f32,
+        load: f32,
+        total: f32,
+    ) -> Self {
+        Self {
+            signal,
+            proximity,
+            bandwidth,
+            congestion,
+            energy,
+            reliability,
+            load,
+            total,
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -644,60 +680,48 @@ impl TransportSelector {
         message: &Message,
         available_transports: &HashMap<TransportType, TransportMetrics>,
     ) -> Vec<(TransportType, f32)> {
-        let mut scored: Vec<(TransportType, f32)> = Vec::new();
-
-        for (transport_type, metrics) in available_transports.iter() {
-            let score = self.calculate_transport_score(message, *transport_type, metrics);
-            scored.push((*transport_type, score.total));
-        }
-
-        sort_scores_descending(&mut scored, |(_, s)| *s, |(t, _)| *t);
-        scored
+        // Single source of truth: project the detailed breakdown to totals.
+        // Sort order (descending with Internet > WiFiDirect > BLE tie-break)
+        // is preserved by `score_and_rank_detailed`.
+        self.score_and_rank_detailed(message, available_transports)
+            .into_iter()
+            .map(|(t, s)| (t, s.total))
+            .collect()
     }
 
     /// Diagnostic variant of [`Self::score_and_rank`] that returns the full
     /// seven-factor [`TransportScore`] per transport rather than just the
     /// total. Used by telemetry consumers that opted into `routing_diagnostic`.
     ///
-    /// Identical determinism/tie-break contract; identical read-only guarantees.
-    /// Costs one additional `TransportScore` struct per transport (all `f32`),
-    /// which is why it is kept behind a flag — callers that never emit
-    /// diagnostic routing records should stay on `score_and_rank`.
+    /// Sorted descending by `total`; ties resolve via the same priority
+    /// (Internet > WiFiDirect > BLE) used by selection. Identical read-only
+    /// guarantees as `score_and_rank`.
     pub fn score_and_rank_detailed(
         &self,
         message: &Message,
         available_transports: &HashMap<TransportType, TransportMetrics>,
     ) -> Vec<(TransportType, TransportScore)> {
-        let mut scored: Vec<(TransportType, TransportScore)> = Vec::new();
-        for (transport_type, metrics) in available_transports.iter() {
-            let score = self.calculate_transport_score(message, *transport_type, metrics);
-            scored.push((*transport_type, score));
-        }
-        sort_scores_descending(&mut scored, |(_, s)| s.total, |(t, _)| *t);
+        let mut scored: Vec<(TransportType, TransportScore)> = available_transports
+            .iter()
+            .map(|(transport_type, metrics)| {
+                let score = self.calculate_transport_score(message, *transport_type, metrics);
+                (*transport_type, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            let ord =
+                b.1.total
+                    .partial_cmp(&a.1.total)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+            if ord == std::cmp::Ordering::Equal {
+                tie_break_priority(a.0).cmp(&tie_break_priority(b.0))
+            } else {
+                ord
+            }
+        });
         scored
     }
-}
 
-/// Shared sort implementation for `score_and_rank` and `score_and_rank_detailed`:
-/// descending by score with deterministic tie-break (Internet > WiFiDirect > BLE).
-fn sort_scores_descending<T>(
-    items: &mut [T],
-    total: impl Fn(&T) -> f32,
-    transport: impl Fn(&T) -> TransportType,
-) {
-    items.sort_by(|a, b| {
-        let ord = total(b)
-            .partial_cmp(&total(a))
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if ord == std::cmp::Ordering::Equal {
-            tie_break_priority(transport(a)).cmp(&tie_break_priority(transport(b)))
-        } else {
-            ord
-        }
-    });
-}
-
-impl TransportSelector {
     /// Calculates the transport score based on multiple factors.
     fn calculate_transport_score(
         &self,

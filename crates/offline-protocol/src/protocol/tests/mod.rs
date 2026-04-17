@@ -10401,3 +10401,76 @@ fn test_metrics_frame_is_local_relay_matches_role() {
 
 use crate::telemetry::routing::RoutingDecision;
 use crate::telemetry::transport_state::TransportStateEvent;
+
+#[test]
+fn test_device_battery_walk_is_charging_always_from_current_when_set() {
+    // Regression guard: when `current` is Some, `is_charging` is taken from
+    // the current transport's metrics even if its `battery_level` is None
+    // and the walk has to fall through to another transport for the
+    // battery reading. Mixing is_charging across transports produces
+    // non-deterministic flips on the CHANGED_CHARGING diff bit.
+    let mut available = HashMap::new();
+    available.insert(
+        TransportType::BLE,
+        TransportMetrics {
+            battery_level: None,
+            is_charging: false,
+            ..Default::default()
+        },
+    );
+    available.insert(
+        TransportType::Internet,
+        TransportMetrics {
+            battery_level: Some(73),
+            is_charging: true,
+            ..Default::default()
+        },
+    );
+
+    let (battery, is_charging) =
+        OfflineProtocol::device_battery_from_available(Some(TransportType::BLE), &available);
+    assert_eq!(
+        battery,
+        Some(73),
+        "battery must come from the first transport with Some(battery_level)",
+    );
+    assert!(
+        !is_charging,
+        "is_charging must come from the current transport (BLE → false), not from Internet",
+    );
+}
+
+#[test]
+fn test_device_battery_walk_is_deterministic_when_current_is_none() {
+    // With no current transport, the walk picks by transport priority
+    // (Internet > WiFiDirect > BLE) rather than HashMap order, so the
+    // result is stable across ticks regardless of iteration order.
+    let mut available = HashMap::new();
+    available.insert(
+        TransportType::BLE,
+        TransportMetrics {
+            battery_level: Some(40),
+            is_charging: false,
+            ..Default::default()
+        },
+    );
+    available.insert(
+        TransportType::Internet,
+        TransportMetrics {
+            battery_level: Some(90),
+            is_charging: true,
+            ..Default::default()
+        },
+    );
+
+    let (battery, is_charging) = OfflineProtocol::device_battery_from_available(None, &available);
+    assert_eq!(
+        battery,
+        Some(90),
+        "priority-ordered walk must prefer Internet's battery (90)",
+    );
+    assert!(
+        is_charging,
+        "priority-ordered walk must prefer Internet's is_charging (true)",
+    );
+}
