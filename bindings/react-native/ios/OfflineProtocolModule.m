@@ -31,6 +31,9 @@ RCT_EXTERN_METHOD(installTelemetrySink:(NSDictionary * _Nullable)configDict
 RCT_EXTERN_METHOD(pollTelemetryFrame:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(uninstallTelemetrySink:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(stop:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

@@ -588,10 +588,30 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun pollTelemetryFrame(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.reject("NOT_STARTED", "Protocol not created", null)
+            return
+        }
         try {
-            promise.resolve(protocol?.pollTelemetryFrame())
+            promise.resolve(proto.pollTelemetryFrame())
         } catch (e: Exception) {
             promise.reject("TELEMETRY_POLL", "Failed to poll telemetry frame: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun uninstallTelemetrySink(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.reject("NOT_STARTED", "Protocol not created", null)
+            return
+        }
+        try {
+            proto.uninstallTelemetrySink()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_UNINSTALL", "Failed to uninstall telemetry sink: ${e.message}", e)
         }
     }
 

@@ -682,9 +682,19 @@ interface OfflineProtocol {
     // first (FIFO). This is intentional — the queue is a property of the
     // FFI adapter, not of any individual sink. Apps that need a clean
     // slate should drain `poll_telemetry_frame` in a loop until it
-    // returns null before installing the new sink.
+    // returns null before installing the new sink, or call
+    // `uninstall_telemetry_sink()` which both detaches the sink and
+    // drains the queue in a single call.
     string? poll_telemetry_frame();
-    
+
+    // Detach the installed telemetry sink. Replaces the core-side sink
+    // with a no-op (so future emissions are discarded with zero overhead)
+    // and drains the pull queue so a subsequent
+    // `install_telemetry_sink(...)` starts with an empty queue. Idempotent
+    // — safe to call without a prior install.
+    [Throws=ProtocolError]
+    void uninstall_telemetry_sink();
+
     // Messaging
     [Throws=ProtocolError]
     string send_message(string recipient, string content, MessagePriority priority, string? reply_to_msg);
@@ -839,8 +849,8 @@ interface OfflineProtocol {
     // Legacy no-op retained only for source/ABI compat. Every field of
     // `metrics` (including the 12 extended optional fields) is discarded.
     // Read live data via `get_transport_metrics(...)` or install a
-    // `TelemetrySink` to observe push `MetricsFrame`s instead. Will be
-    // removed in a future major release.
+    // `TelemetrySink` to observe push `MetricsFrame`s instead. Scheduled
+    // for removal in the v1.0 release.
     [Throws=ProtocolError]
     void update_transport_metrics(TransportType transport_type, TransportMetrics metrics);
     

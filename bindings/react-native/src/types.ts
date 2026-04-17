@@ -1608,7 +1608,18 @@ export interface DeduplicatorStatsFrame {
   mode: string;
 }
 
-/** Periodic snapshot of protocol-wide counters and per-transport metrics. */
+/**
+ * Periodic snapshot of protocol-wide counters and per-transport metrics.
+ *
+ * Note on precision: the counter fields here (`ackPending`, `neighborCount`,
+ * every `RetryQueueStatsFrame.*Count`, `DeduplicatorStatsFrame.totalTracked`
+ * / `.recentTracked`, and the `TransportMetrics.{packetsSent,
+ * packetsReceived, bytesSent, bytesReceived, bandwidthBps}` fields) are
+ * `u64` on the Rust side but bridge as JS `number` (f64, 53-bit mantissa).
+ * Values above 2^53 silently lose precision. Realistic mobile deployments
+ * do not hit this, but long-running relays that tail byte counters for
+ * months should treat any single value above ~9 PB as approximate.
+ */
 export interface MetricsFrame {
   timestampMs: number;
   transports: TransportMetricsEntry[];

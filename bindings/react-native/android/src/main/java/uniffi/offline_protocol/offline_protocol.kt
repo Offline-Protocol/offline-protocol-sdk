@@ -1120,6 +1120,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config(
@@ -1496,6 +1498,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -2071,6 +2075,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink() != 481.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 58995.toShort()) {
@@ -3284,6 +3291,8 @@ public interface OfflineProtocolInterface {
     fun `stop`()
     
     fun `unblockUser`(`userId`: kotlin.String)
+    
+    fun `uninstallTelemetrySink`()
     
     fun `updateAckConfig`(`config`: AckConfig)
     
@@ -5172,6 +5181,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(
         it,
         FfiConverterString.lower(`userId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `uninstallTelemetrySink`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink(
+        it,
+        _status)
 }
     }
     

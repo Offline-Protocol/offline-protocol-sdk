@@ -1044,6 +1044,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func unblockUser(userId: String) throws 
     
+    func uninstallTelemetrySink() throws 
+    
     func updateAckConfig(config: AckConfig) 
     
     func updateDedupConfig(config: DedupConfig) 
@@ -2280,6 +2282,13 @@ open func unblockUser(userId: String)throws   {try rustCallWithError(FfiConverte
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(userId),$0
+    )
+}
+}
+    
+open func uninstallTelemetrySink()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink(
+            self.uniffiCloneHandle(),$0
     )
 }
 }
@@ -8960,6 +8969,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink() != 481) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 58995) {

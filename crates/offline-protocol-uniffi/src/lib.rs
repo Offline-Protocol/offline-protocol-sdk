@@ -10,12 +10,13 @@ use offline_protocol::{
     DeduplicatorMode as CoreDeduplicatorMode, DeviceCapabilitySnapshot as CoreDeviceSnapshot,
     EstablishmentState as CoreEstablishmentState, Event as CoreEvent,
     MetricsFrame as CoreMetricsFrame, MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
-    OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
-    PendingQueueConfig as CorePendingQueueConfig, PresenceStatus as CorePresenceStatus,
-    ProtocolConfig as CoreConfig, RoutingDecision as CoreRoutingDecision,
-    RoutingPhase as CoreRoutingPhase, RoutingReasonCode as CoreRoutingReasonCode,
-    TelemetryConfig as CoreTelemetryConfig, TelemetryRecord as CoreTelemetryRecord,
-    TelemetrySink as CoreTelemetrySink, TransportStateEvent as CoreTransportStateEvent,
+    NoopTelemetrySink as CoreNoopTelemetrySink, OfflineProtocol as CoreProtocol,
+    OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
+    PresenceStatus as CorePresenceStatus, ProtocolConfig as CoreConfig,
+    RoutingDecision as CoreRoutingDecision, RoutingPhase as CoreRoutingPhase,
+    RoutingReasonCode as CoreRoutingReasonCode, TelemetryConfig as CoreTelemetryConfig,
+    TelemetryRecord as CoreTelemetryRecord, TelemetrySink as CoreTelemetrySink,
+    TransportStateEvent as CoreTransportStateEvent,
 };
 use offline_protocol_core::{
     ContentType as CoreContentType, MediaMetadata as CoreMediaMetadata,
@@ -2281,6 +2282,24 @@ impl OfflineProtocol {
         recover_mutex(&self.telemetry_queue, "telemetry_queue").pop_front()
     }
 
+    /// Detaches the installed telemetry sink. Subsequent emissions drop on
+    /// the core side (a `NoopTelemetrySink` replaces the current sink), and
+    /// any records still sitting in the pull queue are drained so a
+    /// subsequent `install_telemetry_sink` starts with a clean slate.
+    ///
+    /// Idempotent — calling this without a prior install still produces a
+    /// noop-sink install and drains the (empty) queue.
+    pub fn uninstall_telemetry_sink(&self) -> Result<(), ProtocolError> {
+        let noop: Arc<dyn CoreTelemetrySink> = Arc::new(CoreNoopTelemetrySink);
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .install_telemetry_sink(noop, CoreTelemetryConfig::default())
+            .map_err(ProtocolError::from)?;
+        drop(protocol);
+        recover_mutex(&self.telemetry_queue, "telemetry_queue").clear();
+        Ok(())
+    }
+
     // ========================================================================
     // TRANSPORT CALLBACKS (EVENT-DRIVEN SENDING)
     // ========================================================================
@@ -3808,7 +3827,7 @@ impl OfflineProtocol {
     /// **also discarded**. Use `get_transport_metrics(transport_type)` to
     /// read live metrics, or install a `TelemetrySink` to observe the
     /// push stream (`MetricsFrame`). Do not build new integrations around
-    /// this method; it will be removed in a future major release.
+    /// this method; **it is scheduled for removal in the v1.0 release.**
     pub fn update_transport_metrics(
         &self,
         _transport_type: TransportType,
@@ -3825,7 +3844,7 @@ impl OfflineProtocol {
                  and discards every field (including the 12 extended optional ones). \
                  Read live metrics via `get_transport_metrics(...)` or install a \
                  TelemetrySink to observe `MetricsFrame` push updates. This method \
-                 will be removed in a future major release.",
+                 is scheduled for removal in the v1.0 release.",
             );
         });
         Ok(())
@@ -7006,6 +7025,40 @@ mod tests {
         protocol
             .install_telemetry_sink(Box::new(Forward), cfg)
             .expect("install must succeed");
+        assert!(protocol.poll_telemetry_frame().is_none());
+    }
+
+    #[test]
+    fn uninstall_telemetry_sink_drains_queue_and_detaches() {
+        // Pin the uninstall contract: after calling it (a) the pull queue
+        // is drained, so subsequent `poll_telemetry_frame` returns None,
+        // and (b) future emissions through a freshly-built adapter do NOT
+        // land in the queue because the core-side sink is now a NoopTS.
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink);
+
+        // Prime the queue with a couple of records via the adapter.
+        let record = CoreTelemetryRecord::Protocol(Box::new(CoreEvent::NetworkMetrics {
+            neighbor_count: 1,
+            relay_count: 0,
+            delivery_ratio: 0.5,
+            avg_latency_ms: 42,
+        }));
+        adapter.emit(&record);
+        adapter.emit(&record);
+        assert!(protocol.poll_telemetry_frame().is_some());
+
+        // Uninstall drains the queue AND replaces the core sink.
+        protocol
+            .uninstall_telemetry_sink()
+            .expect("uninstall must succeed");
+        assert!(protocol.poll_telemetry_frame().is_none());
+
+        // Idempotent: second call is a no-op and still succeeds.
+        protocol
+            .uninstall_telemetry_sink()
+            .expect("uninstall must be idempotent");
         assert!(protocol.poll_telemetry_frame().is_none());
     }
 }

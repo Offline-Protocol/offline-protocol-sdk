@@ -1256,15 +1256,15 @@ export class OfflineProtocol {
    * Telemetry records are dispatched via `onTelemetry` (push) and buffered
    * for `pollTelemetry` (pull). The legacy `on(...)` event path is unaffected.
    *
-   * **Ordering requirement**: register any `onTelemetry(listener)` BEFORE
-   * calling `installTelemetrySink(...)`. Records emitted between the
-   * install returning and the first listener registration are fanned out
-   * to an empty listener set and silently dropped on the push channel
-   * (they still reach the pull queue when `enablePollQueue` is true, but
-   * there is no way to discover that from `onTelemetry` alone). The
-   * bridge call is async, so "install first then add listener" is racy
-   * even within a single synchronous JS frame — always attach listeners
-   * first.
+   * **Listener race**: the bridge call is async, so registering an
+   * `onTelemetry(listener)` *after* `installTelemetrySink(...)` resolves
+   * leaves a window where records emitted in the gap are fanned out to an
+   * empty listener set and dropped on the push channel (they still reach
+   * the pull queue when `enablePollQueue` is true). To close the race,
+   * pass the listener directly to this call — it is registered
+   * synchronously *before* the underlying native install is dispatched,
+   * so no emission can slip through. The returned unsubscribe removes the
+   * listener; further listeners can still be added via `onTelemetry(...)`.
    *
    * **Poll queue opt-out**: push-only integrations should pass
    * `{ enablePollQueue: false }` to skip the per-emit JSON envelope build
@@ -1275,10 +1275,52 @@ export class OfflineProtocol {
    * time replaces the sink but does NOT drain the pull queue. A consumer
    * polling immediately after replace will see the previous sink's
    * buffered records first (FIFO). Drain `pollTelemetry()` in a loop
-   * until it returns null before re-installing if you need a clean slate.
+   * until it returns null before re-installing if you need a clean slate,
+   * or call `uninstallTelemetrySink()` which atomically detaches the
+   * sink and drains the queue in one shot.
+   *
+   * @returns An unsubscribe function for the optional `listener`, or a
+   * no-op when no listener was provided.
    */
-  async installTelemetrySink(config: TelemetryConfig = {}): Promise<void> {
-    await OfflineProtocolNativeModule.installTelemetrySink(config);
+  async installTelemetrySink(
+    config: TelemetryConfig = {},
+    listener?: TelemetryListener
+  ): Promise<() => void> {
+    // Register the listener synchronously BEFORE awaiting the bridge so
+    // records emitted between native-side install completion and the next
+    // JS microtask cannot slip past an empty listener set.
+    let unsubscribe: () => void = () => {};
+    if (listener) {
+      unsubscribe = this.onTelemetry(listener);
+    }
+    try {
+      await OfflineProtocolNativeModule.installTelemetrySink(config);
+    } catch (err) {
+      // If the install failed, drop the pre-registered listener so a
+      // retrying caller doesn't accumulate dangling listeners.
+      unsubscribe();
+      throw err;
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * Detaches the installed telemetry sink. After this resolves, no further
+   * telemetry records reach `onTelemetry` listeners or the pull queue —
+   * the Rust adapter replaces the core sink with a no-op and drains the
+   * pull queue in a single call, so a subsequent
+   * `installTelemetrySink(...)` starts with an empty queue.
+   *
+   * Idempotent — calling without a prior install is a no-op.
+   *
+   * Does NOT remove TS-side listeners registered via `onTelemetry(...)`
+   * or via the optional-listener form of `installTelemetrySink(...)`;
+   * they remain bound but will simply never fire again unless a new sink
+   * is installed. Drop them explicitly via their unsubscribe if that is
+   * the intent.
+   */
+  async uninstallTelemetrySink(): Promise<void> {
+    await OfflineProtocolNativeModule.uninstallTelemetrySink();
   }
 
   /**
@@ -1287,8 +1329,9 @@ export class OfflineProtocol {
    * sink the Rust side emits nothing on either the push channel or the poll
    * buffer.
    *
-   * **Register this BEFORE `installTelemetrySink(...)`.** See that method's
-   * docstring for the ordering rationale.
+   * To close the install→register race window, prefer passing the listener
+   * directly to `installTelemetrySink(config, listener)`; that form
+   * registers synchronously before the native install is dispatched.
    *
    * @returns An unsubscribe function.
    */

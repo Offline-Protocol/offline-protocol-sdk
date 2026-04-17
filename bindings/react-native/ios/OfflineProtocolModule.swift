@@ -722,7 +722,25 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     @objc func pollTelemetryFrame(_ resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        resolver(protocolInstance?.pollTelemetryFrame())
+        guard let proto = protocolInstance else {
+            rejecter("NOT_STARTED", "Protocol not created", nil)
+            return
+        }
+        resolver(proto.pollTelemetryFrame())
+    }
+
+    @objc func uninstallTelemetrySink(_ resolver: @escaping RCTPromiseResolveBlock,
+                                      rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("NOT_STARTED", "Protocol not created", nil)
+            return
+        }
+        do {
+            try proto.uninstallTelemetrySink()
+            resolver(nil)
+        } catch {
+            rejecter("TELEMETRY_UNINSTALL", "Failed to uninstall telemetry sink: \(error.localizedDescription)", error)
+        }
     }
     
     @objc func stop(_ resolver: @escaping RCTPromiseResolveBlock,
