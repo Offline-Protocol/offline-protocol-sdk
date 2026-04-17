@@ -8123,7 +8123,8 @@ enum class RoutingPhase {
     SCORE_UPDATED,
     SELECTED,
     SWITCHED,
-    ESCALATED;
+    ESCALATED,
+    UNKNOWN;
     companion object
 }
 
@@ -8162,7 +8163,8 @@ enum class RoutingReasonCode {
     POOR_SIGNAL,
     CONGESTION,
     LOW_TTL,
-    LOW_SUCCESS_RATE;
+    LOW_SUCCESS_RATE,
+    UNKNOWN;
     companion object
 }
 

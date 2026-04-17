@@ -1,6 +1,7 @@
 package com.offlineprotocol
 
 import android.net.Uri
+import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
@@ -648,61 +649,68 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * `TelemetrySinkImpl`. Must not block, reenter the SDK, or panic.
      */
     private inner class TelemetrySinkImpl : TelemetrySink {
-        override fun onProtocolEvent(eventJson: String) {
-            val params = Arguments.createMap().apply {
+        // Every callback is invoked synchronously from the Rust emit path.
+        // A thrown Kotlin exception here would cross the UniFFI boundary
+        // and crash the native caller, so we log-and-swallow anything the
+        // encoders or React bridge throw (e.g. detached ReactContext during
+        // app tear-down).
+        private inline fun safeDispatch(build: () -> WritableMap) {
+            try {
+                val params = build()
+                sendEvent(TELEMETRY_EVENT_NAME, params)
+            } catch (t: Throwable) {
+                Log.w(NAME, "telemetry dispatch failed; dropping record", t)
+            }
+        }
+
+        override fun onProtocolEvent(eventJson: String) = safeDispatch {
+            Arguments.createMap().apply {
                 putString("category", "protocol")
                 putString("eventJson", eventJson)
             }
-            sendEvent(TELEMETRY_EVENT_NAME, params)
         }
 
-        override fun onMlsEvent(eventJson: String) {
-            val params = Arguments.createMap().apply {
+        override fun onMlsEvent(eventJson: String) = safeDispatch {
+            Arguments.createMap().apply {
                 putString("category", "mls")
                 putString("eventJson", eventJson)
             }
-            sendEvent(TELEMETRY_EVENT_NAME, params)
         }
 
-        override fun onMetricsFrame(frame: MetricsFrame) {
-            val params = Arguments.createMap().apply {
+        override fun onMetricsFrame(frame: MetricsFrame) = safeDispatch {
+            Arguments.createMap().apply {
                 putString("category", "metricsFrame")
                 putMap("frame", encodeFrame(frame))
             }
-            sendEvent(TELEMETRY_EVENT_NAME, params)
         }
 
-        override fun onTransportState(event: TransportStateEvent) {
-            val params = Arguments.createMap().apply {
+        override fun onTransportState(event: TransportStateEvent) = safeDispatch {
+            Arguments.createMap().apply {
                 putString("category", "transportState")
                 putMap("event", encodeTransportState(event))
             }
-            sendEvent(TELEMETRY_EVENT_NAME, params)
         }
 
-        override fun onRoutingDecision(decision: RoutingDecision) {
-            val params = Arguments.createMap().apply {
+        override fun onRoutingDecision(decision: RoutingDecision) = safeDispatch {
+            Arguments.createMap().apply {
                 putString("category", "routingDecision")
                 putMap("decision", encodeRouting(decision))
             }
-            sendEvent(TELEMETRY_EVENT_NAME, params)
         }
 
-        override fun onDeviceCapability(snapshot: DeviceCapabilitySnapshot) {
-            val params = Arguments.createMap().apply {
+        override fun onDeviceCapability(snapshot: DeviceCapabilitySnapshot) = safeDispatch {
+            Arguments.createMap().apply {
                 putString("category", "deviceCapability")
                 putMap("snapshot", encodeDevice(snapshot))
             }
-            sendEvent(TELEMETRY_EVENT_NAME, params)
         }
 
-        override fun onExtension(name: String, payloadJson: String) {
-            val params = Arguments.createMap().apply {
+        override fun onExtension(name: String, payloadJson: String) = safeDispatch {
+            Arguments.createMap().apply {
                 putString("category", "extension")
                 putString("name", name)
                 putString("payloadJson", payloadJson)
             }
-            sendEvent(TELEMETRY_EVENT_NAME, params)
         }
     }
 
@@ -729,6 +737,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         RoutingPhase.SELECTED -> "selected"
         RoutingPhase.SWITCHED -> "switched"
         RoutingPhase.ESCALATED -> "escalated"
+        RoutingPhase.UNKNOWN -> "unknown"
     }
 
     private fun encodeReason(r: RoutingReasonCode): String = when (r) {
@@ -743,6 +752,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         RoutingReasonCode.CONGESTION -> "congestion"
         RoutingReasonCode.LOW_TTL -> "lowTtl"
         RoutingReasonCode.LOW_SUCCESS_RATE -> "lowSuccessRate"
+        RoutingReasonCode.UNKNOWN -> "unknown"
     }
 
     private fun encodeMetrics(m: TransportMetrics): WritableMap = Arguments.createMap().apply {

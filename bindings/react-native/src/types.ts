@@ -1496,10 +1496,22 @@ export type TransportStatus =
 /** Local relay role reported by DeviceCapabilitySnapshot. */
 export type RelayRole = 'regular' | 'relay';
 
-/** Which kind of routing decision a RoutingDecision record describes. */
-export type RoutingPhase = 'scoreUpdated' | 'selected' | 'switched' | 'escalated';
+/**
+ * Which kind of routing decision a RoutingDecision record describes.
+ * `'unknown'` signals new-core / old-FFI skew — consumers should surface it as
+ * "unrecognised" rather than folding it into an existing phase.
+ */
+export type RoutingPhase =
+  | 'scoreUpdated'
+  | 'selected'
+  | 'switched'
+  | 'escalated'
+  | 'unknown';
 
-/** Flat reason space for routing decisions. */
+/**
+ * Flat reason space for routing decisions. `'unknown'` carries the same
+ * new-core / old-FFI skew semantics as `RoutingPhase`'s `'unknown'`.
+ */
 export type RoutingReasonCode =
   | 'initialSelection'
   | 'primarySelected'
@@ -1511,7 +1523,8 @@ export type RoutingReasonCode =
   | 'poorSignal'
   | 'congestion'
   | 'lowTtl'
-  | 'lowSuccessRate';
+  | 'lowSuccessRate'
+  | 'unknown';
 
 /**
  * Runtime configuration for the telemetry subsystem. All fields optional.

@@ -3598,14 +3598,18 @@ class TelemetrySinkImpl: TelemetrySink, @unchecked Sendable {
         self.emitter = emitter
     }
 
+    // Every callback is invoked synchronously from the Rust emit path; the
+    // encoders are pure Swift dict construction and cannot throw, so the
+    // only failure mode here is `emitter` having been deallocated.
     private func dispatch(_ body: [String: Any]) {
         guard let emitter = emitter else { return }
-        if Thread.isMainThread {
+        let send: () -> Void = {
             emitter.sendEventToJS(OfflineProtocolModule.Events.onTelemetry, body: body)
+        }
+        if Thread.isMainThread {
+            send()
         } else {
-            DispatchQueue.main.async {
-                emitter.sendEventToJS(OfflineProtocolModule.Events.onTelemetry, body: body)
-            }
+            DispatchQueue.main.async(execute: send)
         }
     }
 
@@ -3755,6 +3759,7 @@ class TelemetrySinkImpl: TelemetrySink, @unchecked Sendable {
         case .selected: return "selected"
         case .switched: return "switched"
         case .escalated: return "escalated"
+        case .unknown: return "unknown"
         }
     }
 
@@ -3771,6 +3776,7 @@ class TelemetrySinkImpl: TelemetrySink, @unchecked Sendable {
         case .congestion: return "congestion"
         case .lowTtl: return "lowTtl"
         case .lowSuccessRate: return "lowSuccessRate"
+        case .unknown: return "unknown"
         }
     }
 

@@ -6207,6 +6207,7 @@ public enum RoutingPhase: Equatable, Hashable {
     case selected
     case switched
     case escalated
+    case unknown
 
 
 
@@ -6234,6 +6235,8 @@ public struct FfiConverterTypeRoutingPhase: FfiConverterRustBuffer {
         
         case 4: return .escalated
         
+        case 5: return .unknown
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -6256,6 +6259,10 @@ public struct FfiConverterTypeRoutingPhase: FfiConverterRustBuffer {
         
         case .escalated:
             writeInt(&buf, Int32(4))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(5))
         
         }
     }
@@ -6293,6 +6300,7 @@ public enum RoutingReasonCode: Equatable, Hashable {
     case congestion
     case lowTtl
     case lowSuccessRate
+    case unknown
 
 
 
@@ -6333,6 +6341,8 @@ public struct FfiConverterTypeRoutingReasonCode: FfiConverterRustBuffer {
         case 10: return .lowTtl
         
         case 11: return .lowSuccessRate
+        
+        case 12: return .unknown
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6384,6 +6394,10 @@ public struct FfiConverterTypeRoutingReasonCode: FfiConverterRustBuffer {
         
         case .lowSuccessRate:
             writeInt(&buf, Int32(11))
+        
+        
+        case .unknown:
+            writeInt(&buf, Int32(12))
         
         }
     }

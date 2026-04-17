@@ -2,6 +2,22 @@
 
 All notable changes to the Offline Protocol SDK are documented in this file. This changelog covers everything after the **v0.7.1** release.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`getTransportMetrics` returns real data (or `null`) instead of a zeroed mock** — The UniFFI method `get_transport_metrics(transportType)` (exposed as `getTransportMetrics` in Swift/Kotlin/TypeScript) previously always returned a `TransportMetrics` populated with zeros. It now pulls directly from `Transport::metrics()` and returns `null` when the requested transport is not registered with the `TransportManager`. Callers that relied on the non-null guarantee or zero-valued fields must add a null-check and treat absent transports as "metrics unavailable" rather than "all counters zero".
+
+### Added
+
+- **Unified `TelemetrySink` across UniFFI / iOS / Android / RN** ([#94](https://github.com/Offline-Protocol/sdk/pull/94))
+  Apps can now install a single sink that receives every typed `TelemetryRecord` the SDK emits — protocol events, MLS lifecycle, periodic `MetricsFrame`s, `TransportStateEvent`s, `RoutingDecision`s, and `DeviceCapabilitySnapshot`s — plus a forward-compatible `on_extension(name, payloadJson)` fallback for variants added to the Rust enum after the FFI was generated. A bounded (1024-slot, drop-oldest) poll queue backs `pollTelemetry()` for apps that prefer pull over push. `TransportMetrics` gained 12 optional fields mirroring the richer Rust struct and flows unchanged through both the pull and push paths. The legacy `EventCallback` path remains source-compatible — apps that install both will see each `Event` twice.
+- **`RoutingPhase.Unknown` / `RoutingReasonCode.Unknown`** — When the Rust core reports a routing variant the FFI build does not recognise (new-core / old-FFI skew), the adapter now maps to an explicit `Unknown` value instead of silently folding into `ScoreUpdated` / `InitialSelection`. Consumers should surface `Unknown` as "unrecognised" rather than treating it as a plausible existing value.
+
+### Deprecated
+
+- **`updateTransportMetrics(...)` is a documented no-op** — This method predates the per-transport tracking the Rust core now performs internally and has never written to any field the SDK reads from. All passed fields — including the 12 newly-added optional extended fields — are discarded. Use `getTransportMetrics(...)` to read live metrics, or install a `TelemetrySink` to observe push `MetricsFrame`s. The method will be removed in a future major release.
+
 ## [0.9.1] — 2026-03-20
 
 ### Bug Fixes

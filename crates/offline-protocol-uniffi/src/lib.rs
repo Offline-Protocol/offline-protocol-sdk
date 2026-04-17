@@ -480,6 +480,10 @@ pub enum RelayRole {
 }
 
 /// Which kind of routing decision a `RoutingDecision` record describes.
+///
+/// `Unknown` is emitted when the core crate reports a variant this FFI build
+/// does not recognise (new-core / old-FFI skew). Consumers should surface it
+/// as "unrecognised decision" rather than folding it into an existing phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RoutingPhase {
@@ -487,10 +491,14 @@ pub enum RoutingPhase {
     Selected,
     Switched,
     Escalated,
+    Unknown,
 }
 
 /// Flat reason space for routing decisions (unifies the legacy
 /// `DorsReasonCode` / `DorsEscalationReasonCode` enums).
+///
+/// `Unknown` is emitted when the core crate reports a variant this FFI build
+/// does not recognise — see [`RoutingPhase::Unknown`] for rationale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RoutingReasonCode {
@@ -505,6 +513,7 @@ pub enum RoutingReasonCode {
     Congestion,
     LowTtl,
     LowSuccessRate,
+    Unknown,
 }
 
 /// Per-transport entry inside a `MetricsFrame`.
@@ -689,17 +698,16 @@ impl From<CoreRoutingPhase> for RoutingPhase {
             CoreRoutingPhase::Selected => RoutingPhase::Selected,
             CoreRoutingPhase::Switched => RoutingPhase::Switched,
             CoreRoutingPhase::Escalated => RoutingPhase::Escalated,
-            // `RoutingPhase` is `#[non_exhaustive]` on the core side; fall
-            // back to `ScoreUpdated` for forward-compat and log so drift is
-            // visible to operators (new-core/old-FFI skew). Entirely new
-            // record variants land on the `on_extension` path instead; here
-            // we are just widening an existing field.
+            // `RoutingPhase` is `#[non_exhaustive]` on the core side. Map
+            // unrecognised variants to a dedicated `Unknown` so consumers
+            // see the drift instead of a plausible-looking existing phase.
+            // Also warn so operators notice a new-core / old-FFI skew.
             other => {
                 tracing::warn!(
                     variant = ?other,
-                    "telemetry: unknown CoreRoutingPhase variant; mapping to ScoreUpdated — FFI crate likely out of date",
+                    "telemetry: unknown CoreRoutingPhase variant; mapping to Unknown — FFI crate likely out of date",
                 );
-                RoutingPhase::ScoreUpdated
+                RoutingPhase::Unknown
             }
         }
     }
@@ -722,9 +730,9 @@ impl From<CoreRoutingReasonCode> for RoutingReasonCode {
             other => {
                 tracing::warn!(
                     variant = ?other,
-                    "telemetry: unknown CoreRoutingReasonCode variant; mapping to InitialSelection — FFI crate likely out of date",
+                    "telemetry: unknown CoreRoutingReasonCode variant; mapping to Unknown — FFI crate likely out of date",
                 );
-                RoutingReasonCode::InitialSelection
+                RoutingReasonCode::Unknown
             }
         }
     }
@@ -732,14 +740,19 @@ impl From<CoreRoutingReasonCode> for RoutingReasonCode {
 
 impl From<&CoreTransportMetrics> for TransportMetrics {
     fn from(m: &CoreTransportMetrics) -> Self {
-        // Map legacy fields. The Rust `TransportMetrics` struct does not
-        // track packets_sent/received or bytes_sent/received — report 0 for
-        // back-compat. `error_rate` and `avg_latency_ms` are derived from
-        // the existing Rust fields so the pull shape carries real data.
+        // Legacy six-field shape. The Rust `TransportMetrics` core does not
+        // track packet or byte counters, so the four `packets_*` / `bytes_*`
+        // fields are zero-filled. A previous pass set `packets_sent =
+        // success_count + failure_count`, but that conflates per-message
+        // send *attempts* with packet-level I/O and misleads dashboards;
+        // the richer `success_count` / `failure_count` surface reaches
+        // consumers through `delivery_ratio` / `drop_rate` / `error_rate`
+        // below. `error_rate` and `avg_latency_ms` are derived from the
+        // real Rust fields.
         let avg_latency_ms = m.latency_ms.unwrap_or(0);
         let error_rate = m.effective_drop_ratio().unwrap_or(0.0);
         TransportMetrics {
-            packets_sent: m.success_count.saturating_add(m.failure_count),
+            packets_sent: 0,
             packets_received: 0,
             bytes_sent: 0,
             bytes_received: 0,
@@ -3654,14 +3667,21 @@ impl OfflineProtocol {
         transports.iter().map(|t| format!("{:?}", t)).collect()
     }
 
-    /// Updates transport metrics
+    /// **Legacy no-op — retained only for source/ABI compatibility.**
+    ///
+    /// This method predates the per-transport metrics tracking the Rust
+    /// core now performs internally via `Transport::metrics()`. It has
+    /// never written anywhere the SDK reads from, and the 12 extended
+    /// optional fields introduced in the telemetry workstream are
+    /// **also discarded**. Use `get_transport_metrics(transport_type)` to
+    /// read live metrics, or install a `TelemetrySink` to observe the
+    /// push stream (`MetricsFrame`). Do not build new integrations around
+    /// this method; it will be removed in a future major release.
     pub fn update_transport_metrics(
         &self,
         _transport_type: TransportType,
         _metrics: TransportMetrics,
     ) -> Result<(), ProtocolError> {
-        // Transport metrics are tracked internally by the transport implementations
-        // This method is kept for backwards compatibility but is a no-op
         Ok(())
     }
 

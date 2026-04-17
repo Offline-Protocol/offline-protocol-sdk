@@ -426,15 +426,20 @@ enum RelayRole {
 };
 
 // Which kind of routing decision a RoutingDecision record describes.
+// `Unknown` is emitted when the Rust core reports a variant this FFI build
+// does not recognise (new-core/old-FFI skew) — consumers should surface
+// "unrecognised" rather than collapse into an existing phase.
 enum RoutingPhase {
     "ScoreUpdated",
     "Selected",
     "Switched",
     "Escalated",
+    "Unknown",
 };
 
 // Flat reason space for routing decisions (unifies legacy DorsReasonCode /
-// DorsEscalationReasonCode spaces).
+// DorsEscalationReasonCode spaces). `Unknown` follows the same semantics as
+// `RoutingPhase::Unknown`.
 enum RoutingReasonCode {
     "InitialSelection",
     "PrimarySelected",
@@ -447,6 +452,7 @@ enum RoutingReasonCode {
     "Congestion",
     "LowTtl",
     "LowSuccessRate",
+    "Unknown",
 };
 
 // Per-transport entry inside a MetricsFrame.
@@ -782,6 +788,11 @@ interface OfflineProtocol {
     
     sequence<string> get_active_transports();
     
+    // Legacy no-op retained only for source/ABI compat. Every field of
+    // `metrics` (including the 12 extended optional fields) is discarded.
+    // Read live data via `get_transport_metrics(...)` or install a
+    // `TelemetrySink` to observe push `MetricsFrame`s instead. Will be
+    // removed in a future major release.
     [Throws=ProtocolError]
     void update_transport_metrics(TransportType transport_type, TransportMetrics metrics);
     

@@ -1283,6 +1283,10 @@ export class OfflineProtocol {
    * Useful when an app prefers polling over push delivery. Requires a
    * prior `installTelemetrySink(...)` — records are only enqueued while a
    * sink is installed; polling before install always returns `null`.
+   *
+   * Throws if the native layer returns a malformed envelope — callers can
+   * then distinguish "queue empty" (`null`) from "bridge corruption"
+   * (thrown) and surface the latter in their own telemetry.
    */
   async pollTelemetry(): Promise<TelemetryRecord | null> {
     const json: string | null = await OfflineProtocolNativeModule.pollTelemetryFrame();
@@ -1292,8 +1296,9 @@ export class OfflineProtocol {
     try {
       return JSON.parse(json) as TelemetryRecord;
     } catch (error) {
-      console.error("Failed to parse telemetry poll envelope:", error);
-      return null;
+      throw new Error(
+        `pollTelemetry: malformed envelope from native bridge (${(error as Error).message})`
+      );
     }
   }
 
