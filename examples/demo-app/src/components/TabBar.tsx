@@ -13,6 +13,7 @@ const TABS: {key: TabName; label: string; icon: string}[] = [
   {key: 'chats', label: 'Chats', icon: '💬'},
   {key: 'groups', label: 'Groups', icon: '👨‍👩‍👧‍👦'},
   {key: 'services', label: 'Services', icon: '⚡'},
+  {key: 'diagnostics', label: 'Diagnostics', icon: '📊'},
 ];
 
 export function TabBar({activeTab, onTabChange, unreadChats}: TabBarProps) {

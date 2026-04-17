@@ -80,4 +80,4 @@ export interface ServiceLogEntry {
   timestamp: number;
 }
 
-export type TabName = 'people' | 'chats' | 'groups' | 'services';
+export type TabName = 'people' | 'chats' | 'groups' | 'services' | 'diagnostics';

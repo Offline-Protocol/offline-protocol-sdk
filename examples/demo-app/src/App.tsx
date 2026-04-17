@@ -8,6 +8,8 @@ import {PeopleScreen} from './screens/PeopleScreen';
 import {ChatsScreen} from './screens/ChatsScreen';
 import {GroupsScreen} from './screens/GroupsScreen';
 import {ServicesScreen} from './screens/ServicesScreen';
+import {DiagnosticsScreen} from './screens/DiagnosticsScreen';
+import {StatusPill} from './components/StatusPill';
 import type {TabName} from './types';
 import {formatUserId} from './utils';
 
@@ -44,7 +46,10 @@ function MainApp() {
 
       {/* Top Bar */}
       <View style={styles.topBar}>
-        <Text style={styles.topBarTitle}>Offline Demo</Text>
+        <View style={styles.topBarLeft}>
+          <Text style={styles.topBarTitle}>Offline Demo</Text>
+          <StatusPill onPress={() => setActiveTab('diagnostics')} />
+        </View>
         <View style={styles.topBarRight}>
           <Text style={styles.topBarUser}>{userName}</Text>
           <Text style={styles.topBarId}>{formatUserId(userId)}</Text>
@@ -64,6 +69,7 @@ function MainApp() {
         )}
         {activeTab === 'groups' && <GroupsScreen />}
         {activeTab === 'services' && <ServicesScreen />}
+        {activeTab === 'diagnostics' && <DiagnosticsScreen />}
       </View>
 
       {/* Bottom Tab Bar */}
@@ -100,6 +106,12 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#E5E5E5',
+  },
+  topBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flexShrink: 1,
   },
   topBarTitle: {
     fontSize: 18,

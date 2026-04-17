@@ -11,6 +11,13 @@ import {
   MeshServices,
   MessagePriority,
 } from '@offline-protocol/mesh-sdk';
+import type {
+  TelemetryRecord,
+  MetricsFrame,
+  TransportStateTelemetryEvent,
+  RoutingDecision,
+  DeviceCapabilitySnapshot,
+} from '@offline-protocol/mesh-sdk';
 import type {Contact, Neighbor, ConnectionRequest, ChatMessage, Chat, Group, GroupRole, DiscoveredService, ServiceLogEntry, ForwardInfo, PresenceStatus} from '../types';
 import {
   PRESENCE_BROADCAST_INTERVAL_MS,
@@ -39,6 +46,18 @@ interface ProtocolContextValue {
   /** Map of peerId → timestamp when they started typing */
   typingPeers: Map<string, number>;
 
+  // Telemetry state (populated by installed TelemetrySink).
+  // Shape is intentionally narrow: only fields that feed aggregate,
+  // anonymized visualizations in DiagnosticsScreen are persisted.
+  latestMetrics: MetricsFrame | null;
+  metricsHistory: MetricsFrame[];
+  transportTimeline: TransportStateTelemetryEvent[];
+  routingDecisions: RoutingDecision[];
+  deviceCapability: DeviceCapabilitySnapshot | null;
+  deviceCapabilityHistory: DeviceCapabilitySnapshot[];
+  /** Count of received/delivered messages keyed by observed hop_count. */
+  hopCountHistogram: Record<number, number>;
+
   // Actions
   initialize: (userId: string, userName: string) => Promise<void>;
   sendMessage: (recipientId: string, content: string, priority?: 'medium' | 'critical') => Promise<void>;
@@ -65,6 +84,30 @@ interface ProtocolContextValue {
   unblockUser: (peerId: string) => Promise<void>;
   sendTypingIndicator: (recipientId: string, isTyping: boolean) => Promise<void>;
 }
+
+// Bounded-buffer caps for telemetry streams. Hoisted to module scope so they
+// don't need to live in the `useCallback([])` dep array of `handleTelemetry`.
+//
+// Sizing rationale:
+// - METRICS_HISTORY: 60 frames × 2 s cadence = 120 s. Long enough that
+//   partition/transport-time distributions have signal but short enough to
+//   stay fresh on a phone.
+// - TIMELINE/DECISIONS: 50 is enough to compute stable link-flap and DORS
+//   driver aggregates without growing unbounded under flap storms.
+// - DEVICE_HISTORY: deviceCapability only emits on change; 60 samples covers
+//   an entire battery cycle comfortably.
+const MAX_METRICS_HISTORY = 60;
+const MAX_TIMELINE = 50;
+const MAX_DECISIONS = 50;
+const MAX_DEVICE_HISTORY = 60;
+const MAX_SERVICE_LOG = 100;
+
+// Protocol event types whose payload carries a final-delivery `hop_count` we
+// want to fold into the anonymized hop-count distribution.
+const HOP_COUNT_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'message_received',
+  'message_delivered',
+]);
 
 const ProtocolContext = createContext<ProtocolContextValue | null>(null);
 
@@ -94,7 +137,15 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const [serviceLog, setServiceLog] = useState<ServiceLogEntry[]>([]);
   const [typingPeers, setTypingPeers] = useState<Map<string, number>>(new Map());
 
-  const MAX_SERVICE_LOG = 100;
+  // ─── Telemetry state ──────────────────────────────────────
+  const [latestMetrics, setLatestMetrics] = useState<MetricsFrame | null>(null);
+  const [metricsHistory, setMetricsHistory] = useState<MetricsFrame[]>([]);
+  const [transportTimeline, setTransportTimeline] = useState<TransportStateTelemetryEvent[]>([]);
+  const [routingDecisions, setRoutingDecisions] = useState<RoutingDecision[]>([]);
+  const [deviceCapability, setDeviceCapability] = useState<DeviceCapabilitySnapshot | null>(null);
+  const [deviceCapabilityHistory, setDeviceCapabilityHistory] = useState<DeviceCapabilitySnapshot[]>([]);
+  const [hopCountHistogram, setHopCountHistogram] = useState<Record<number, number>>({});
+
   const appendServiceLog = useCallback((entry: ServiceLogEntry) => {
     setServiceLog(prev => {
       const next = [...prev, entry];
@@ -103,6 +154,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   }, []);
 
   const protocolRef = useRef<OfflineProtocol | null>(null);
+  const telemetryUnsubscribeRef = useRef<(() => void) | null>(null);
   const processedMessagesRef = useRef<Set<string>>(new Set());
   const contactsRef = useRef<Map<string, Contact>>(contacts);
   const neighborsRef = useRef<Map<string, Neighbor>>(neighbors);
@@ -824,6 +876,70 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     }
   }, []);
 
+  // ─── Telemetry handler ───────────────────────────────────
+
+  const handleTelemetry = useCallback((rec: TelemetryRecord) => {
+    switch (rec.category) {
+      case 'metricsFrame': {
+        setLatestMetrics(rec.frame);
+        setMetricsHistory(prev => {
+          const next = [...prev, rec.frame];
+          return next.length > MAX_METRICS_HISTORY ? next.slice(-MAX_METRICS_HISTORY) : next;
+        });
+        break;
+      }
+      case 'transportState': {
+        setTransportTimeline(prev => {
+          const next = [rec.event, ...prev];
+          return next.length > MAX_TIMELINE ? next.slice(0, MAX_TIMELINE) : next;
+        });
+        break;
+      }
+      case 'routingDecision': {
+        setRoutingDecisions(prev => {
+          const next = [rec.decision, ...prev];
+          return next.length > MAX_DECISIONS ? next.slice(0, MAX_DECISIONS) : next;
+        });
+        break;
+      }
+      case 'deviceCapability': {
+        setDeviceCapability(rec.snapshot);
+        setDeviceCapabilityHistory(prev => {
+          const next = [...prev, rec.snapshot];
+          return next.length > MAX_DEVICE_HISTORY ? next.slice(-MAX_DEVICE_HISTORY) : next;
+        });
+        break;
+      }
+      case 'protocol': {
+        // Only fold events that carry a final-delivery hop_count into the
+        // hop-distribution histogram — everything else is dropped here to
+        // avoid per-event context re-renders (every useProtocol() consumer
+        // would otherwise re-render on every message).
+        try {
+          const parsed = JSON.parse(rec.eventJson);
+          if (HOP_COUNT_EVENT_TYPES.has(parsed?.type)) {
+            const hop = parsed.hop_count;
+            if (typeof hop === 'number' && Number.isFinite(hop) && hop >= 0) {
+              const bucket = Math.min(Math.floor(hop), 15);
+              setHopCountHistogram(prev => ({
+                ...prev,
+                [bucket]: (prev[bucket] ?? 0) + 1,
+              }));
+            }
+          }
+        } catch {
+          /* malformed envelope — skip silently, not actionable in UI */
+        }
+        break;
+      }
+      case 'mls':
+      case 'extension':
+      default:
+        // Unused in aggregate diagnostics. Intentional no-op.
+        break;
+    }
+  }, []);
+
   // ─── Initialize Protocol ─────────────────────────────────
 
   const initialize = useCallback(async (uid: string, uname: string) => {
@@ -849,7 +965,30 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     // Initialize mesh services
     const svc = new MeshServices();
     setMeshServices(svc);
-  }, [handleEvent]);
+
+    // Install telemetry sink — push delivery, fast cadence, full DORS detail.
+    // routingDiagnostic gives per-transport score breakdowns the demo renders
+    // as bar charts; mls verbosity stays at 'lifecycle' so we get session ready
+    // / decryption-failed without per-op spam; pull queue disabled because we
+    // consume via callback only.
+    try {
+      // Capture the unsubscribe so cleanup can drop the JS-side listener —
+      // `uninstallTelemetrySink()` detaches the native sink but leaves
+      // listeners bound by design (see SDK docstring).
+      const unsubscribe = await proto.installTelemetrySink(
+        {
+          routingDiagnostic: true,
+          metricsCadenceMs: 2000,
+          mlsVerbosity: 'lifecycle',
+          enablePollQueue: false,
+        },
+        handleTelemetry,
+      );
+      telemetryUnsubscribeRef.current = unsubscribe;
+    } catch (err) {
+      console.warn('[ProtocolContext] installTelemetrySink failed:', err);
+    }
+  }, [handleEvent, handleTelemetry]);
 
   // ─── Presence Broadcasting ───────────────────────────────
 
@@ -935,6 +1074,9 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   useEffect(() => {
     return () => {
       if (protocolRef.current) {
+        telemetryUnsubscribeRef.current?.();
+        telemetryUnsubscribeRef.current = null;
+        protocolRef.current.uninstallTelemetrySink().catch(() => {});
         protocolRef.current.removeAllListeners();
         protocolRef.current.stop().catch(console.warn);
       }
@@ -1447,6 +1589,13 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     discoveredServices,
     serviceLog,
     typingPeers,
+    latestMetrics,
+    metricsHistory,
+    transportTimeline,
+    routingDecisions,
+    deviceCapability,
+    deviceCapabilityHistory,
+    hopCountHistogram,
     initialize,
     sendMessage,
     sendConnectionRequest: sendConnectionRequestAction,
