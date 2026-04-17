@@ -3825,10 +3825,10 @@ extension OfflineProtocolModule {
     // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
     // only emits camelCase keys — this parser matches that contract.
     //
-    // On unrecognised `mlsVerbosity` strings we log via RCTLogWarn and
-    // fall back to `nil` (Rust default). Silent fallback would have hid
-    // integrator typos behind "it just applies Lifecycle", which is
-    // indistinguishable from "my config took effect".
+    // On unrecognised `mlsVerbosity` strings we log a warning and fall back
+    // to `nil` (Rust default). Silent fallback would have hid integrator
+    // typos behind "it just applies Lifecycle", which is indistinguishable
+    // from "my config took effect".
     fileprivate func parseTelemetryConfig(_ dict: [String: Any]?) -> TelemetryConfig {
         guard let dict = dict else {
             return TelemetryConfig(
@@ -3844,7 +3844,7 @@ extension OfflineProtocolModule {
             case "diagnostic": verbosity = .diagnostic
             case "lifecycle": verbosity = .lifecycle
             default:
-                RCTLogWarn("OfflineProtocol telemetry: unknown mlsVerbosity '\(raw)' — expected 'off', 'lifecycle', or 'diagnostic'. Falling back to the Rust default (lifecycle).")
+                print("[OfflineProtocolModule] telemetry: unknown mlsVerbosity '\(raw)' — expected 'off', 'lifecycle', or 'diagnostic'. Falling back to the Rust default (lifecycle).")
                 verbosity = nil
             }
         } else {
