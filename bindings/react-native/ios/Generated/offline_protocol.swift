@@ -4845,14 +4845,16 @@ public struct TelemetryConfig: Equatable, Hashable {
     public var mlsVerbosity: MlsVerbosity?
     public var metricsCadenceMs: UInt64?
     public var routingDiagnostic: Bool?
+    public var enablePollQueue: Bool?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(scrubIds: Bool?, mlsVerbosity: MlsVerbosity?, metricsCadenceMs: UInt64?, routingDiagnostic: Bool?) {
+    public init(scrubIds: Bool?, mlsVerbosity: MlsVerbosity?, metricsCadenceMs: UInt64?, routingDiagnostic: Bool?, enablePollQueue: Bool?) {
         self.scrubIds = scrubIds
         self.mlsVerbosity = mlsVerbosity
         self.metricsCadenceMs = metricsCadenceMs
         self.routingDiagnostic = routingDiagnostic
+        self.enablePollQueue = enablePollQueue
     }
 
     
@@ -4872,7 +4874,8 @@ public struct FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer {
                 scrubIds: FfiConverterOptionBool.read(from: &buf), 
                 mlsVerbosity: FfiConverterOptionTypeMlsVerbosity.read(from: &buf), 
                 metricsCadenceMs: FfiConverterOptionUInt64.read(from: &buf), 
-                routingDiagnostic: FfiConverterOptionBool.read(from: &buf)
+                routingDiagnostic: FfiConverterOptionBool.read(from: &buf), 
+                enablePollQueue: FfiConverterOptionBool.read(from: &buf)
         )
     }
 
@@ -4881,6 +4884,7 @@ public struct FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer {
         FfiConverterOptionTypeMlsVerbosity.write(value.mlsVerbosity, into: &buf)
         FfiConverterOptionUInt64.write(value.metricsCadenceMs, into: &buf)
         FfiConverterOptionBool.write(value.routingDiagnostic, into: &buf)
+        FfiConverterOptionBool.write(value.enablePollQueue, into: &buf)
     }
 }
 

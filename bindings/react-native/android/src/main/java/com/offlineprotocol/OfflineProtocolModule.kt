@@ -597,6 +597,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
     // only emits camelCase keys — these parsers match that contract.
+    //
+    // Unrecognised `mlsVerbosity` strings fall back to null (Rust default)
+    // with a `Log.w` — silent fallback would have hid integrator typos
+    // behind a config that "just works" at Lifecycle.
     private fun parseTelemetryConfig(map: ReadableMap?): TelemetryConfig {
         if (map == null) {
             return TelemetryConfig(
@@ -604,24 +608,33 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 mlsVerbosity = null,
                 metricsCadenceMs = null,
                 routingDiagnostic = null,
+                enablePollQueue = null,
             )
         }
         val scrubIds = readOptionalBoolean(map, "scrubIds")
-        val verbosity = readOptionalString(map, "mlsVerbosity")?.let {
-            when (it.lowercase()) {
+        val verbosity = readOptionalString(map, "mlsVerbosity")?.let { raw ->
+            when (raw.lowercase()) {
                 "off" -> MlsVerbosity.OFF
                 "diagnostic" -> MlsVerbosity.DIAGNOSTIC
                 "lifecycle" -> MlsVerbosity.LIFECYCLE
-                else -> null
+                else -> {
+                    Log.w(
+                        NAME,
+                        "telemetry: unknown mlsVerbosity '$raw' — expected 'off', 'lifecycle', or 'diagnostic'. Falling back to the Rust default (lifecycle)."
+                    )
+                    null
+                }
             }
         }
-        val cadence = readOptionalLong(map, "metricsCadenceMs")?.toULong()
+        val cadence = readOptionalNonNegativeLong(map, "metricsCadenceMs")?.toULong()
         val routingDiag = readOptionalBoolean(map, "routingDiagnostic")
+        val enablePollQueue = readOptionalBoolean(map, "enablePollQueue")
         return TelemetryConfig(
             scrubIds = scrubIds,
             mlsVerbosity = verbosity,
             metricsCadenceMs = cadence,
             routingDiagnostic = routingDiag,
+            enablePollQueue = enablePollQueue,
         )
     }
 
@@ -631,11 +644,26 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private fun readOptionalString(map: ReadableMap, key: String): String? =
         if (map.hasKey(key) && !map.isNull(key)) map.getString(key) else null
 
-    // `metricsCadenceMs` is config-sized (cadences measured in ms fit in an
-    // f64's 53-bit mantissa with room to spare). Do NOT reuse this helper
-    // for counter fields like bytes-transferred that can exceed 2^53.
-    private fun readOptionalLong(map: ReadableMap, key: String): Long? =
-        if (map.hasKey(key) && !map.isNull(key)) map.getDouble(key).toLong() else null
+    // Non-negative u64-compatible parse: JS numbers are f64, so values above
+    // 2^53 lose precision — fine for config-sized fields (cadences in ms
+    // fit comfortably). Negative values would wrap to a huge u64 after
+    // `.toULong()`, so we explicitly warn-and-reject (returning null keeps
+    // the Rust-side default). Do NOT reuse this helper for counter fields
+    // that can exceed 2^53.
+    private fun readOptionalNonNegativeLong(map: ReadableMap, key: String): Long? {
+        if (!map.hasKey(key) || map.isNull(key)) {
+            return null
+        }
+        val value = map.getDouble(key).toLong()
+        if (value < 0L) {
+            Log.w(
+                NAME,
+                "telemetry: ignoring negative value for '$key' ($value) — expected a non-negative number. Falling back to the Rust default."
+            )
+            return null
+        }
+        return value
+    }
 
     /**
      * Forwards each typed TelemetryRecord variant into the RN bridge as a
@@ -720,6 +748,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     // ---- Telemetry encoders (UniFFI data classes -> WritableMap) ----
+    //
+    // IMPORTANT: every map produced below MUST be structurally identical
+    // to the JSON envelope the Rust adapter enqueues on the pull channel.
+    // The canonical contract is pinned by the `shape_parity_*_envelope`
+    // tests in `crates/offline-protocol-uniffi/src/lib.rs`. If those tests
+    // change, update the matching encoder here in lockstep — the TS
+    // `TelemetryRecord` discriminated union expects ONE shape regardless
+    // of whether a record arrived via `onTelemetry` (push) or
+    // `pollTelemetry` (pull).
 
     private fun encodeTransport(t: TransportType): String = when (t) {
         TransportType.INTERNET -> "internet"

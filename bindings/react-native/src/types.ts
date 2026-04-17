@@ -1533,18 +1533,28 @@ export type RoutingReasonCode =
  *   mlsVerbosity      = 'lifecycle'
  *   metricsCadenceMs  = 5000
  *   routingDiagnostic = false
+ *   enablePollQueue   = true
  *
  * Note: omitting `metricsCadenceMs` (or passing `undefined`) yields the
  * default cadence. There is currently no way to disable periodic emission
  * via this config — the single optional field cannot distinguish "use
  * default" from "disable" across the FFI. Track as a follow-up if disable
  * support is needed.
+ *
+ * `enablePollQueue` controls whether the Rust adapter builds the
+ * pull-channel JSON envelope on every emit. Leave it at the default
+ * (`true` / omitted) if you use `pollTelemetry()`; pass `false` for a
+ * push-only integration to skip the per-emit `serde_json` cost on the
+ * routing hot path. With `false`, `pollTelemetry()` returns `null` for
+ * records emitted under that config (previously enqueued records remain
+ * readable until drained).
  */
 export interface TelemetryConfig {
   scrubIds?: boolean;
   mlsVerbosity?: MlsVerbosity;
   metricsCadenceMs?: number;
   routingDiagnostic?: boolean;
+  enablePollQueue?: boolean;
 }
 
 /**

@@ -536,13 +536,27 @@ dictionary DeviceCapabilitySnapshot {
 
 // Runtime configuration for the telemetry subsystem. All fields are optional
 // on the foreign side; Rust applies the privacy-preserving defaults
-// (scrub_ids=true, mls_verbosity=Lifecycle, metrics_cadence_ms=5000) when a
-// field is null.
+// (scrub_ids=true, mls_verbosity=Lifecycle, metrics_cadence_ms=5000,
+// routing_diagnostic=false, enable_poll_queue=true) when a field is null.
+//
+// `metrics_cadence_ms` encodes the cadence of periodic `MetricsFrame`
+// emission in milliseconds. The single optional field cannot distinguish
+// "use the default" (null) from "disable periodic emission" today — any
+// explicit value overrides the default; null keeps it. If disable support
+// is needed, extend this dict with a dedicated flag.
+//
+// `enable_poll_queue` (default true) controls whether the adapter builds
+// the pull-channel JSON envelope on every emit. Push-only consumers should
+// set this to false to skip per-emit `serde_json` serialization — the
+// typed push callbacks still fire, but `poll_telemetry_frame` will always
+// return null for records emitted under that config. Flip back to true
+// (re-install the sink) to resume polling.
 dictionary TelemetryConfig {
     boolean? scrub_ids;
     MlsVerbosity? mls_verbosity;
     u64? metrics_cadence_ms;
     boolean? routing_diagnostic;
+    boolean? enable_poll_queue;
 };
 
 // Unified telemetry sink. Apps implement this to receive every typed
@@ -655,8 +669,20 @@ interface OfflineProtocol {
     //
     // Returns null when the queue is empty. The queue is bounded (1024
     // slots, drop-oldest on overflow). Records are only enqueued while a
-    // sink is installed — polling before `install_telemetry_sink` returns
-    // null.
+    // sink is installed with `enable_poll_queue` left at its default (or
+    // explicitly `true`). Polling before `install_telemetry_sink`, or
+    // while a push-only sink (`enable_poll_queue = false`) is live,
+    // returns null for new records — previously queued records remain
+    // readable.
+    //
+    // Queue retention across sink replacement: calling
+    // `install_telemetry_sink` a second time replaces the core-side sink
+    // but does NOT drain the queue. A consumer installed as Sink B and
+    // polling after a flurry of Sink A emits will see Sink A's records
+    // first (FIFO). This is intentional — the queue is a property of the
+    // FFI adapter, not of any individual sink. Apps that need a clean
+    // slate should drain `poll_telemetry_frame` in a loop until it
+    // returns null before installing the new sink.
     string? poll_telemetry_frame();
     
     // Messaging

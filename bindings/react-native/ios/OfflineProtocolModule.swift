@@ -3642,6 +3642,15 @@ class TelemetrySinkImpl: TelemetrySink, @unchecked Sendable {
     }
 
     // MARK: Encoders (UniFFI structs → JSON-safe dictionaries)
+    //
+    // IMPORTANT: every dict produced below MUST be structurally identical
+    // to the JSON envelope the Rust adapter enqueues on the pull channel.
+    // The canonical contract is pinned by the `shape_parity_*_envelope`
+    // tests in `crates/offline-protocol-uniffi/src/lib.rs`. If those tests
+    // change, update the matching encoder here in lockstep — the TS
+    // `TelemetryRecord` discriminated union expects ONE shape regardless
+    // of whether a record arrived via `onTelemetry` (push) or
+    // `pollTelemetry` (pull).
 
     fileprivate static func encode(metrics m: TransportMetrics) -> [String: Any] {
         var d: [String: Any] = [
@@ -3797,11 +3806,17 @@ class TelemetrySinkImpl: TelemetrySink, @unchecked Sendable {
 extension OfflineProtocolModule {
     // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
     // only emits camelCase keys — this parser matches that contract.
+    //
+    // On unrecognised `mlsVerbosity` strings we log via RCTLogWarn and
+    // fall back to `nil` (Rust default). Silent fallback would have hid
+    // integrator typos behind "it just applies Lifecycle", which is
+    // indistinguishable from "my config took effect".
     fileprivate func parseTelemetryConfig(_ dict: [String: Any]?) -> TelemetryConfig {
         guard let dict = dict else {
             return TelemetryConfig(
                 scrubIds: nil, mlsVerbosity: nil,
-                metricsCadenceMs: nil, routingDiagnostic: nil
+                metricsCadenceMs: nil, routingDiagnostic: nil,
+                enablePollQueue: nil
             )
         }
         let verbosity: MlsVerbosity?
@@ -3810,19 +3825,26 @@ extension OfflineProtocolModule {
             case "off": verbosity = .off
             case "diagnostic": verbosity = .diagnostic
             case "lifecycle": verbosity = .lifecycle
-            default: verbosity = nil
+            default:
+                RCTLogWarn("OfflineProtocol telemetry: unknown mlsVerbosity '\(raw)' — expected 'off', 'lifecycle', or 'diagnostic'. Falling back to the Rust default (lifecycle).")
+                verbosity = nil
             }
         } else {
             verbosity = nil
         }
         let scrubIds = dict["scrubIds"] as? Bool
+        // `metricsCadenceMs` is config-sized (cadence in ms fits comfortably
+        // in an f64's 53-bit mantissa). Don't reuse this cast for counter
+        // fields that can exceed 2^53.
         let cadence = (dict["metricsCadenceMs"] as? NSNumber)?.uint64Value
         let routingDiag = dict["routingDiagnostic"] as? Bool
+        let enablePollQueue = dict["enablePollQueue"] as? Bool
         return TelemetryConfig(
             scrubIds: scrubIds,
             mlsVerbosity: verbosity,
             metricsCadenceMs: cadence,
-            routingDiagnostic: routingDiag
+            routingDiagnostic: routingDiag,
+            enablePollQueue: enablePollQueue
         )
     }
 }

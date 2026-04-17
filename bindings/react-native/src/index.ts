@@ -1251,10 +1251,31 @@ export class OfflineProtocol {
    * Installs a unified telemetry sink. Replaces any previously installed
    * sink. Config fields left undefined fall back to the privacy-preserving
    * defaults on the Rust side (scrubIds=true, mlsVerbosity='lifecycle',
-   * metricsCadenceMs=5000, routingDiagnostic=false).
+   * metricsCadenceMs=5000, routingDiagnostic=false, enablePollQueue=true).
    *
    * Telemetry records are dispatched via `onTelemetry` (push) and buffered
    * for `pollTelemetry` (pull). The legacy `on(...)` event path is unaffected.
+   *
+   * **Ordering requirement**: register any `onTelemetry(listener)` BEFORE
+   * calling `installTelemetrySink(...)`. Records emitted between the
+   * install returning and the first listener registration are fanned out
+   * to an empty listener set and silently dropped on the push channel
+   * (they still reach the pull queue when `enablePollQueue` is true, but
+   * there is no way to discover that from `onTelemetry` alone). The
+   * bridge call is async, so "install first then add listener" is racy
+   * even within a single synchronous JS frame — always attach listeners
+   * first.
+   *
+   * **Poll queue opt-out**: push-only integrations should pass
+   * `{ enablePollQueue: false }` to skip the per-emit JSON envelope build
+   * inside the Rust adapter. `pollTelemetry()` will return null for any
+   * record emitted while the opt-out is in effect.
+   *
+   * **Queue retention across replacement**: calling this method a second
+   * time replaces the sink but does NOT drain the pull queue. A consumer
+   * polling immediately after replace will see the previous sink's
+   * buffered records first (FIFO). Drain `pollTelemetry()` in a loop
+   * until it returns null before re-installing if you need a clean slate.
    */
   async installTelemetrySink(config: TelemetryConfig = {}): Promise<void> {
     await OfflineProtocolNativeModule.installTelemetrySink(config);
@@ -1265,6 +1286,9 @@ export class OfflineProtocol {
    * SDK. Requires a prior `installTelemetrySink(...)` — without an installed
    * sink the Rust side emits nothing on either the push channel or the poll
    * buffer.
+   *
+   * **Register this BEFORE `installTelemetrySink(...)`.** See that method's
+   * docstring for the ordering rationale.
    *
    * @returns An unsubscribe function.
    */
@@ -1281,8 +1305,14 @@ export class OfflineProtocol {
    * drops the oldest entry.
    *
    * Useful when an app prefers polling over push delivery. Requires a
-   * prior `installTelemetrySink(...)` — records are only enqueued while a
-   * sink is installed; polling before install always returns `null`.
+   * prior `installTelemetrySink(...)` with `enablePollQueue` left at its
+   * default (`true` / omitted). With `enablePollQueue: false` the Rust
+   * adapter never enqueues, so this method always returns null for
+   * records emitted under that config.
+   *
+   * The pull queue survives sink replacement — records enqueued by a
+   * previous sink stay readable until drained. See
+   * `installTelemetrySink` for details.
    *
    * Throws if the native layer returns a malformed envelope — callers can
    * then distinguish "queue empty" (`null`) from "bridge corruption"

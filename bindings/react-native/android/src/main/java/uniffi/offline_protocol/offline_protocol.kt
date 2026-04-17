@@ -7314,6 +7314,8 @@ data class TelemetryConfig (
     var `metricsCadenceMs`: kotlin.ULong?
     , 
     var `routingDiagnostic`: kotlin.Boolean?
+    , 
+    var `enablePollQueue`: kotlin.Boolean?
     
 ){
     
@@ -7332,6 +7334,7 @@ public object FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer<TelemetryC
             FfiConverterOptionalTypeMlsVerbosity.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
         )
     }
 
@@ -7339,7 +7342,8 @@ public object FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer<TelemetryC
             FfiConverterOptionalBoolean.allocationSize(value.`scrubIds`) +
             FfiConverterOptionalTypeMlsVerbosity.allocationSize(value.`mlsVerbosity`) +
             FfiConverterOptionalULong.allocationSize(value.`metricsCadenceMs`) +
-            FfiConverterOptionalBoolean.allocationSize(value.`routingDiagnostic`)
+            FfiConverterOptionalBoolean.allocationSize(value.`routingDiagnostic`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`enablePollQueue`)
     )
 
     override fun write(value: TelemetryConfig, buf: ByteBuffer) {
@@ -7347,6 +7351,7 @@ public object FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer<TelemetryC
             FfiConverterOptionalTypeMlsVerbosity.write(value.`mlsVerbosity`, buf)
             FfiConverterOptionalULong.write(value.`metricsCadenceMs`, buf)
             FfiConverterOptionalBoolean.write(value.`routingDiagnostic`, buf)
+            FfiConverterOptionalBoolean.write(value.`enablePollQueue`, buf)
     }
 }
 
