@@ -37,6 +37,31 @@
 //!   [`Event::DorsScoreUpdated::scores`] fall here too (they're transport
 //!   names, not peer IDs).
 //!
+//! # Out of scope for `scrub_ids`
+//!
+//! Two classes of data are *deliberately* not touched by this scrubber and
+//! need to be handled by sink authors, not here:
+//!
+//! - **Cryptographic blobs that embed identity**: the `key_package` bytes
+//!   on [`Event::ConnectionRequestReceived`] and
+//!   [`Event::ConnectionAccepted`] carry MLS credentials whose leaf
+//!   identity encodes the raw `user_id`. A sink that logs these bytes
+//!   effectively logs an unscrubbed identifier, regardless of the
+//!   `scrub_ids` setting. Treat key packages as sensitive payload, not as
+//!   metadata.
+//!
+//! - **Free-form strings that may interpolate identifiers**: `reason` /
+//!   `reason_detail` fields are produced by upstream error paths. If an
+//!   author ever includes a peer ID in a reason string (e.g. "no session
+//!   for alice"), the identifier passes through unhashed. The SDK
+//!   currently avoids this, but the contract is one-way: sinks should
+//!   assume `reason` fields are free text and apply app-level redaction
+//!   if they ship logs off-device.
+//!
+//! If that ever needs to change globally it belongs behind a separate
+//! `emit_content` knob so the identifier-scrubbing and payload-scrubbing
+//! concerns don't get conflated.
+//!
 //! # Compile-time coverage
 //!
 //! [`event_variant_exhaustiveness_ward`] mirrors the pattern shipped in
@@ -57,9 +82,13 @@ use crate::telemetry::scrubber::Scrubber;
 /// Returns an event with all long-lived pseudonymous identifiers hashed,
 /// or a borrowed reference when `scrubber` is disabled.
 ///
-/// The borrowed path is zero-cost — apps that construct a
-/// [`crate::telemetry::TelemetryConfig`] with `with_scrub_ids(false)` pay no
-/// clone for the sink fan-out.
+/// The borrowed path skips the per-field hashing work and the `Event`
+/// clone performed by `scrub_in_place`. It is *not* zero-cost at the
+/// current sink call site: `SharedState::emit_event` needs owned data to
+/// construct [`crate::telemetry::TelemetryRecord::Protocol`] (which holds
+/// a `Box<Event>`), so that caller always pays a clone via
+/// [`Cow::into_owned`]. The `Cow` return still lets future callers that
+/// can tolerate a borrow (tests, in-process readers) avoid the clone.
 pub(crate) fn scrub_event<'a>(event: &'a Event, scrubber: &Scrubber) -> Cow<'a, Event> {
     if !scrubber.is_enabled() {
         return Cow::Borrowed(event);

@@ -43,6 +43,18 @@ impl OfflineProtocol {
             .unwrap_or(&self.telemetry_scrubber)
     }
 
+    /// Returns the effective MLS lifecycle verbosity tier.
+    ///
+    /// Defaults to [`MlsVerbosity::Lifecycle`] when no telemetry sink has
+    /// been installed, matching the always-on legacy-emitter behavior that
+    /// the retired `mls-observability` Cargo feature used to gate.
+    pub(super) fn mls_verbosity(&self) -> MlsVerbosity {
+        self.telemetry
+            .as_ref()
+            .map(|ctx| ctx.config.mls_verbosity())
+            .unwrap_or(MlsVerbosity::Lifecycle)
+    }
+
     /// Derives the opaque session identifier used to correlate MLS lifecycle
     /// events. The raw seed (`peer=<peer_id>|group=<group_id>`) couples two
     /// identifiers, so it is hashed unconditionally via
@@ -69,12 +81,7 @@ impl OfflineProtocol {
         // feature. Verbosity defaults to `Lifecycle` when no sink is
         // installed, matching today's always-on-when-feature-was-on
         // behavior for the legacy emitter path.
-        let verbosity = self
-            .telemetry
-            .as_ref()
-            .map(|ctx| ctx.config.mls_verbosity())
-            .unwrap_or(MlsVerbosity::Lifecycle);
-        if matches!(verbosity, MlsVerbosity::Off) {
+        if matches!(self.mls_verbosity(), MlsVerbosity::Off) {
             return;
         }
         if !self.mls_event_rate_limiter.should_emit(&event) {

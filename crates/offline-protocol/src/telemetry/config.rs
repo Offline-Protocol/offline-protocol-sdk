@@ -28,6 +28,15 @@ pub enum MlsVerbosity {
     Lifecycle,
     /// Emit the full lifecycle stream plus additional per-operation
     /// diagnostics intended for local debugging.
+    ///
+    /// # Current behavior
+    ///
+    /// As of this release, `Diagnostic` is accepted by the configuration
+    /// surface but produces the *same* event stream as [`Self::Lifecycle`]
+    /// — the additional per-operation diagnostics are introduced alongside
+    /// the extra emission sites they describe. Apps that select
+    /// `Diagnostic` today are forward-compatible with those follow-ups;
+    /// they will not need to reconfigure when the richer stream lands.
     Diagnostic,
 }
 

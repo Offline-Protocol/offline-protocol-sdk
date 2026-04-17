@@ -139,6 +139,15 @@ pub struct OfflineProtocol {
     /// `install_telemetry_sink` is called; thereafter shared with
     /// `SharedState` via `Arc` clone so both emit paths dispatch through the
     /// same configuration.
+    ///
+    /// The duplication with [`SharedState::telemetry`] is deliberate: MLS
+    /// lifecycle emission is driven from `&self` on `OfflineProtocol` and
+    /// does not hold the shared-state lock, while protocol-event emission
+    /// happens inside `SharedState::emit_event` under the lock. Each path
+    /// reads the context from whichever side it already has in hand, and
+    /// `install_telemetry_sink` is the single writer that keeps both copies
+    /// in sync (guaranteed atomic from the caller's perspective because
+    /// `&mut self` excludes concurrent calls).
     pub(crate) telemetry: Option<Arc<TelemetryContext>>,
 
     /// File transfer manager for chunking outbound and reassembling inbound media.
@@ -397,21 +406,39 @@ impl OfflineProtocol {
     /// [`crate::mls_observability::MlsLifecycleEvent::Initialized`] fired
     /// during `initialize_mls`) are not replayed to a sink installed later.
     ///
+    /// # Re-install semantics
+    ///
+    /// Calling this method a second time *replaces* the previously installed
+    /// sink and config — the old sink stops receiving records as soon as
+    /// this call returns. The per-instance fallback secret is preserved so
+    /// opaque identifiers stay stable across the swap when the new config
+    /// does not carry its own `scrub_secret`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the shared-state mutex is poisoned (indicating an
+    /// earlier panic in another thread while holding the lock). On error no
+    /// sink is installed, and the legacy emission paths are unaffected.
+    ///
     /// [`TelemetryRecord::Protocol`]: crate::telemetry::TelemetryRecord::Protocol
     /// [`TelemetryRecord::Mls`]: crate::telemetry::TelemetryRecord::Mls
     pub fn install_telemetry_sink(
         &mut self,
         sink: Arc<dyn TelemetrySink>,
         config: TelemetryConfig,
-    ) {
+    ) -> Result<()> {
         let ctx = TelemetryContext::new(sink, config, self.telemetry_fallback_secret);
-        let Ok(mut state) = lock_shared_state(&self.shared_state) else {
-            error!("Failed to lock shared state in install_telemetry_sink");
-            return;
-        };
+        let mut state = lock_shared_state(&self.shared_state).map_err(|err| {
+            error!(
+                error = %err,
+                "install_telemetry_sink: shared-state mutex poisoned; sink NOT installed",
+            );
+            err
+        })?;
         state.telemetry = Some(ctx.clone());
         drop(state);
         self.telemetry = Some(ctx);
+        Ok(())
     }
 
     /// Starts the protocol.
