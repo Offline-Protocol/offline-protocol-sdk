@@ -451,6 +451,18 @@ impl OfflineProtocol {
     /// window elapses. This is intentional: the dedupe is a property of
     /// the routing engine, not of the observer.
     ///
+    /// # Lifecycle
+    ///
+    /// Installing a sink wires the structured routing-decision callback
+    /// on the underlying [`TransportManager`]. The callback lives for the
+    /// life of the protocol instance or until another
+    /// `install_telemetry_sink` call replaces it — `start()` and `stop()`
+    /// do not toggle it. This means apps can install a sink before
+    /// `start()` and see routing records from the very first `send()`,
+    /// and a `stop() → start()` cycle preserves the wiring so no
+    /// re-install is needed. Conversely, apps that never install a sink
+    /// pay no per-`send()` routing-emission overhead.
+    ///
     /// # Errors
     ///
     /// Returns `Err` if the shared-state mutex is poisoned (indicating an
@@ -481,6 +493,27 @@ impl OfflineProtocol {
         state.telemetry = Some(ctx.clone());
         drop(state);
         self.telemetry = Some(ctx);
+
+        // Wire the structured routing-decision callback here so the
+        // `TransportManager` pays the per-`send()` emission cost only when
+        // a sink is actually installed, and so the wiring persists across
+        // `stop() → start()` cycles (the callback reads `s.telemetry` on
+        // every invocation and that field stays set). A subsequent
+        // `install_telemetry_sink` replaces the closure with one capturing
+        // the fresh `shared_routing` clone; both closures read the same
+        // `SharedState::telemetry` slot, so even a concurrent in-flight
+        // emission from the pre-replace closure would still resolve to
+        // the currently-installed sink.
+        let shared_routing = self.shared_state.clone();
+        self.transport_manager
+            .set_routing_decision_callback(Some(Arc::new(move |decision| {
+                if let Ok(s) = shared_routing.lock() {
+                    if let Some(ctx) = &s.telemetry {
+                        let record = TelemetryRecord::Routing(Box::new(decision));
+                        ctx.sink.emit(&record);
+                    }
+                }
+            })));
 
         // Rearm the per-tick diff snapshots so the first tick after install
         // reports honest transitions only. Without this, a sink installed
@@ -530,19 +563,10 @@ impl OfflineProtocol {
                 }
             })));
 
-        // Wire the structured routing-decision callback so telemetry sinks
-        // receive the richer shape alongside the flattened `Event::Dors*`
-        // stream. The legacy `EventCallback` fan-out is unaffected.
-        let shared_routing = self.shared_state.clone();
-        self.transport_manager
-            .set_routing_decision_callback(Some(Arc::new(move |decision| {
-                if let Ok(s) = shared_routing.lock() {
-                    if let Some(ctx) = &s.telemetry {
-                        let record = TelemetryRecord::Routing(Box::new(decision));
-                        ctx.sink.emit(&record);
-                    }
-                }
-            })));
+        // NOTE: the structured routing-decision callback is wired by
+        // `install_telemetry_sink`, not here. Its lifetime is tied to sink
+        // presence rather than protocol start/stop — see the docstring on
+        // `install_telemetry_sink` for the rationale.
 
         // Wire BLE fragment eviction callback so app receives FragmentAssemblyEvicted.
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
@@ -591,8 +615,12 @@ impl OfflineProtocol {
         self.flush_lamport_clock();
 
         // Clear event callbacks to release shared_state references.
+        // NOTE: the routing-decision callback is deliberately NOT cleared
+        // here. Its lifetime is sink-scoped (installed by
+        // `install_telemetry_sink`, replaced by a subsequent install),
+        // not protocol-running-scoped — so a `stop() → start()` cycle
+        // preserves the wiring without requiring the app to re-install.
         self.transport_manager.set_dors_event_callback(None);
-        self.transport_manager.set_routing_decision_callback(None);
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
             if let Ok(transport) = ble_arc.lock() {
                 if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
@@ -1329,6 +1357,16 @@ impl OfflineProtocol {
     /// skipped and telemetry emission for that interval is deferred to the
     /// next successful tick — the cadence guarantee relaxes under sustained
     /// partial failure.
+    ///
+    /// # Sink-panic semantics
+    ///
+    /// Each per-tick snapshot field is advanced *before* the emit call
+    /// that observes it. A panicking sink unwinds the rest of the tick
+    /// but leaves the aggregator's cursors at their new positions, so
+    /// the next tick does not re-emit the same transition / capability
+    /// change / metrics frame. At-most-once delivery on panic rather
+    /// than at-least-once with silent duplicates for consumers counting
+    /// transitions.
     fn tick_telemetry_categories(&mut self) {
         let Some(ctx) = self.telemetry.clone() else {
             return;
@@ -1343,26 +1381,29 @@ impl OfflineProtocol {
         let (current_statuses, available) = self.transport_manager.snapshot_status_and_available();
 
         // Transport-status diff: one record per changed transport.
+        // Advance the snapshot *before* emitting so a panicking sink does
+        // not cause re-delivery on the next tick — see the fn-level doc.
         let transitions =
             diff_transport_state(now_ms, &self.transport_status_snapshot, &current_statuses);
+        self.transport_status_snapshot = current_statuses;
         for event in transitions {
             ctx.sink.emit(&TelemetryRecord::TransportState(event));
         }
-        self.transport_status_snapshot = current_statuses;
 
-        // Device capability diff.
+        // Device capability diff. Same ordering discipline as above.
         let (battery_level, is_charging) =
             device_battery_from_available(self.transport_manager.current_transport(), &available);
         let relay_role = self.path_selector.current_relay_role();
         let device_now = DeviceSnap::from_parts(battery_level, is_charging, relay_role);
-        if let Some(snapshot) =
-            diff_device_capability(now_ms, self.device_capability_snapshot, device_now)
-        {
+        let device_change =
+            diff_device_capability(now_ms, self.device_capability_snapshot, device_now);
+        self.device_capability_snapshot = Some(device_now);
+        if let Some(snapshot) = device_change {
             ctx.sink.emit(&TelemetryRecord::Device(snapshot));
         }
-        self.device_capability_snapshot = Some(device_now);
 
-        // Periodic metrics snapshot.
+        // Periodic metrics snapshot. Rearm cadence before emit so a
+        // panicking sink doesn't cause an immediate retry next tick.
         if let Some(cadence) = ctx.config.metrics_cadence() {
             let due = match self.last_metrics_emit_at {
                 None => true,
@@ -1380,9 +1421,9 @@ impl OfflineProtocol {
                     self.known_peers.len(),
                     is_local_relay,
                 );
+                self.last_metrics_emit_at = Some(now);
                 ctx.sink
                     .emit(&TelemetryRecord::MetricsSnapshot(Box::new(frame)));
-                self.last_metrics_emit_at = Some(now);
             }
         }
     }

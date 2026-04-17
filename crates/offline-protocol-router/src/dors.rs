@@ -696,13 +696,37 @@ impl TransportSelector {
         message: &Message,
         available_transports: &HashMap<TransportType, TransportMetrics>,
     ) -> Vec<(TransportType, f32)> {
-        // Single source of truth: project the detailed breakdown to totals.
-        // Sort order (descending with Internet > WiFiDirect > BLE tie-break)
-        // is preserved by `score_and_rank_detailed`.
-        self.score_and_rank_detailed(message, available_transports)
-            .into_iter()
-            .map(|(t, s)| (t, s.total))
-            .collect()
+        // Single-allocation path: the non-diagnostic send() hot path calls
+        // this on every send, so we project scoring to totals directly
+        // rather than going through `score_and_rank_detailed` (which
+        // allocates a `Vec<(TransportType, TransportScore)>` that would
+        // then be mapped to totals — two vecs where one suffices).
+        let mut scored: Vec<(TransportType, f32)> = available_transports
+            .iter()
+            .map(|(transport_type, metrics)| {
+                let score = self.calculate_transport_score(message, *transport_type, metrics);
+                (*transport_type, score.total)
+            })
+            .collect();
+
+        // Contract: ranked by score (descending).
+        //
+        // Determinism: when scores are exactly equal (rare with floats, but
+        // can happen in tests or after rounding), apply the same priority
+        // tie-break used by selection: Internet > WiFiDirect > BLE. See
+        // `score_and_rank_detailed` — the two functions must agree on
+        // ordering, and a regression test (`test_score_and_rank_detailed_\
+        // matches_score_and_rank_order_and_totals`) pins that invariant.
+        scored.sort_by(|a, b| {
+            let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+            if ord == std::cmp::Ordering::Equal {
+                tie_break_priority(a.0).cmp(&tie_break_priority(b.0))
+            } else {
+                ord
+            }
+        });
+
+        scored
     }
 
     /// Diagnostic variant of [`Self::score_and_rank`] that returns the full
