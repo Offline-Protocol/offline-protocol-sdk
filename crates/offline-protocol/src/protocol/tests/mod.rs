@@ -2,7 +2,7 @@ use super::*;
 use crate::constants::ACK_FOR_KEY;
 use crate::events::{DecryptionFailureCode, PresenceStatus};
 #[cfg(feature = "mls-observability")]
-use crate::mls_observability::MlsLifecycleEvent;
+use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsLifecycleEvent};
 use chrono::Duration as ChronoDuration;
 use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{

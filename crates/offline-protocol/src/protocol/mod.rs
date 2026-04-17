@@ -119,12 +119,12 @@ pub struct OfflineProtocol {
     #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     mls_event_rate_limiter: MlsEventRateLimiter,
 
-    /// Scrubber for hashing long-lived pseudonymous identifiers (peer, group,
-    /// session) into non-reversible opaque telemetry IDs. Holds the
-    /// per-instance secret; constructed once at protocol creation and reused
-    /// by every emit site. Today only the MLS observability path consumes it;
-    /// additional emit sites land alongside the wiring follow-up.
-    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
+    /// Pre-install scrubber used by MLS emit sites before
+    /// `install_telemetry_sink` is called. Once a sink is installed, emit
+    /// sites read `self.telemetry.scrubber` instead via `current_scrubber()`.
+    /// Both scrubbers share `telemetry_fallback_secret` so opaque identifiers
+    /// observed by the legacy `MlsEventEmitter` stay consistent across the
+    /// install boundary.
     telemetry_scrubber: Scrubber,
 
     /// Per-instance fallback secret for identifier scrubbing. Random at
@@ -140,8 +140,7 @@ pub struct OfflineProtocol {
     /// `install_telemetry_sink` is called; thereafter shared with
     /// `SharedState` via `Arc` clone so both emit paths dispatch through the
     /// same configuration.
-    #[allow(dead_code)]
-    telemetry: Option<Arc<TelemetryContext>>,
+    pub(crate) telemetry: Option<Arc<TelemetryContext>>,
 
     /// File transfer manager for chunking outbound and reassembling inbound media.
     file_transfer_manager: FileTransferManager,

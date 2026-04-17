@@ -15,7 +15,6 @@ use super::sink::TelemetrySink;
 
 /// Installed telemetry surface. The sink, config, and scrubber reach every
 /// emit site through an `Arc<TelemetryContext>`.
-#[allow(dead_code)]
 pub(crate) struct TelemetryContext {
     pub(crate) sink: Arc<dyn TelemetrySink>,
     pub(crate) config: TelemetryConfig,

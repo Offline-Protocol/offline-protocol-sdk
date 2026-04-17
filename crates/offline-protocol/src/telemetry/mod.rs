@@ -13,6 +13,7 @@ pub mod config;
 pub(crate) mod context;
 pub mod record;
 pub mod sampling;
+pub(crate) mod scrub_event;
 pub(crate) mod scrubber;
 pub mod sink;
 
