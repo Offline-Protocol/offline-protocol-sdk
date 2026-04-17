@@ -42,9 +42,10 @@ mod dors_integration_tests;
 #[cfg(test)]
 mod group_mesh_tests;
 
-// Re-export reliability types for configuration
+// Re-export reliability types for configuration and telemetry frames
 pub use offline_protocol_reliability::{
     AckConfig, DeduplicatorConfig, DeduplicatorMode, DeduplicatorStats, RetryConfig,
+    RetryQueueStats,
 };
 
 // Re-export MLS types for end-to-end encryption

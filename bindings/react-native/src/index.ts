@@ -1262,8 +1262,9 @@ export class OfflineProtocol {
 
   /**
    * Registers a listener that receives every TelemetryRecord emitted by the
-   * SDK. Call `installTelemetrySink` first; without an installed sink, the
-   * Rust side only enqueues into the poll buffer and does not fan out.
+   * SDK. Requires a prior `installTelemetrySink(...)` — without an installed
+   * sink the Rust side emits nothing on either the push channel or the poll
+   * buffer.
    *
    * @returns An unsubscribe function.
    */
@@ -1276,10 +1277,12 @@ export class OfflineProtocol {
 
   /**
    * Polls the next buffered telemetry record. Returns `null` when the
-   * internal queue is empty. The queue is bounded; overflow drops oldest.
+   * internal queue is empty. The queue is bounded (1024 slots); overflow
+   * drops the oldest entry.
    *
-   * Useful when an app prefers polling over push delivery — the Rust side
-   * queues every emitted record regardless of whether a sink is installed.
+   * Useful when an app prefers polling over push delivery. Requires a
+   * prior `installTelemetrySink(...)` — records are only enqueued while a
+   * sink is installed; polling before install always returns `null`.
    */
   async pollTelemetry(): Promise<TelemetryRecord | null> {
     const json: string | null = await OfflineProtocolNativeModule.pollTelemetryFrame();

@@ -746,16 +746,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     private fun encodeMetrics(m: TransportMetrics): WritableMap = Arguments.createMap().apply {
-        putInt("packetsSent", m.packetsSent.toInt())
-        putInt("packetsReceived", m.packetsReceived.toInt())
-        putInt("bytesSent", m.bytesSent.toInt())
-        putInt("bytesReceived", m.bytesReceived.toInt())
+        // Counter fields (UInt/UInt32/UInt64 on the Rust side) go through
+        // putDouble to avoid Kotlin's signed-Int wrap at 2^31 — long-running
+        // relays accumulate byte/packet counts well past that boundary.
+        putDouble("packetsSent", m.packetsSent.toLong().toDouble())
+        putDouble("packetsReceived", m.packetsReceived.toLong().toDouble())
+        putDouble("bytesSent", m.bytesSent.toLong().toDouble())
+        putDouble("bytesReceived", m.bytesReceived.toLong().toDouble())
         putDouble("errorRate", m.errorRate.toDouble())
-        putInt("avgLatencyMs", m.avgLatencyMs.toInt())
+        putDouble("avgLatencyMs", m.avgLatencyMs.toLong().toDouble())
         m.rssi?.let { putInt("rssi", it.toInt()) }
-        m.bandwidthBps?.let { putDouble("bandwidthBps", it.toDouble()) }
+        m.bandwidthBps?.let { putDouble("bandwidthBps", it.toLong().toDouble()) }
         m.congestion?.let { putDouble("congestion", it.toDouble()) }
-        m.queueDepth?.let { putInt("queueDepth", it.toInt()) }
+        m.queueDepth?.let { putDouble("queueDepth", it.toLong().toDouble()) }
         m.batteryLevel?.let { putInt("batteryLevel", it.toInt()) }
         m.isCharging?.let { putBoolean("isCharging", it) }
         m.relayConnectionCount?.let { putInt("relayConnectionCount", it.toInt()) }

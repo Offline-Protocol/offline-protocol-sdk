@@ -1518,13 +1518,19 @@ export type RoutingReasonCode =
  * Defaults (applied on the Rust side when a field is omitted):
  *   scrubIds          = true
  *   mlsVerbosity      = 'lifecycle'
- *   metricsCadenceMs  = 5000   (pass `null` to disable periodic emission)
+ *   metricsCadenceMs  = 5000
  *   routingDiagnostic = false
+ *
+ * Note: omitting `metricsCadenceMs` (or passing `undefined`) yields the
+ * default cadence. There is currently no way to disable periodic emission
+ * via this config — the single optional field cannot distinguish "use
+ * default" from "disable" across the FFI. Track as a follow-up if disable
+ * support is needed.
  */
 export interface TelemetryConfig {
   scrubIds?: boolean;
   mlsVerbosity?: MlsVerbosity;
-  metricsCadenceMs?: number | null;
+  metricsCadenceMs?: number;
   routingDiagnostic?: boolean;
 }
 

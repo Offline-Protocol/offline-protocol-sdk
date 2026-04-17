@@ -36,6 +36,7 @@ use offline_protocol_transport::{
     TransportMetrics as CoreTransportMetrics, TransportStatus as CoreTransportStatus,
     TransportType as CoreTransportType,
 };
+use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
@@ -374,10 +375,12 @@ impl From<PresenceStatus> for CorePresenceStatus {
 }
 
 /// Transport types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum TransportType {
     Internet,
     Ble,
+    #[serde(rename = "wifiDirect")]
     WiFiDirect,
     Reticulum,
     Nostr,
@@ -410,7 +413,8 @@ pub struct PeerDevice {
 /// Transport metrics — legacy 6-field counters plus the ~12 optional fields
 /// from the richer Rust `TransportMetrics`. Same dict flows through the pull
 /// path (`get_transport_metrics`) and the push path (`MetricsFrame.transports`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransportMetrics {
     pub packets_sent: u32,
     pub packets_received: u32,
@@ -418,17 +422,29 @@ pub struct TransportMetrics {
     pub bytes_received: u32,
     pub error_rate: f32,
     pub avg_latency_ms: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rssi: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bandwidth_bps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub congestion: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub battery_level: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_charging: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_connection_count: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_active_relay: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery_ratio: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub drop_rate: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub average_hop_count: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub energy_cost: Option<f32>,
 }
 
@@ -445,7 +461,8 @@ pub enum MlsVerbosity {
 }
 
 /// Underlying connection status of a single transport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum TransportStatus {
     Available,
     Unavailable,
@@ -455,14 +472,16 @@ pub enum TransportStatus {
 }
 
 /// Local relay role reported by `DeviceCapabilitySnapshot`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RelayRole {
     Regular,
     Relay,
 }
 
 /// Which kind of routing decision a `RoutingDecision` record describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RoutingPhase {
     ScoreUpdated,
     Selected,
@@ -472,7 +491,8 @@ pub enum RoutingPhase {
 
 /// Flat reason space for routing decisions (unifies the legacy
 /// `DorsReasonCode` / `DorsEscalationReasonCode` enums).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RoutingReasonCode {
     InitialSelection,
     PrimarySelected,
@@ -488,14 +508,16 @@ pub enum RoutingReasonCode {
 }
 
 /// Per-transport entry inside a `MetricsFrame`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransportMetricsEntry {
     pub transport: TransportType,
     pub metrics: TransportMetrics,
 }
 
 /// Retry-queue statistics, mirror of `offline_protocol_reliability::RetryQueueStats`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RetryQueueStats {
     pub total_count: u64,
     pub ready_count: u64,
@@ -510,17 +532,20 @@ pub struct RetryQueueStats {
 /// UDL-level name is `DeduplicatorStatsFrame` to avoid colliding with the
 /// `DedupStats` dict already exposed by the legacy `get_dedup_stats` pull
 /// API (which has a different field shape).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeduplicatorStatsFrame {
     pub total_tracked: u64,
     pub recent_tracked: u64,
     pub capacity_used_percent: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub false_positive_rate: Option<f64>,
     pub mode: String,
 }
 
 /// Periodic snapshot of protocol-wide counters and per-transport metrics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricsFrame {
     pub timestamp_ms: i64,
     pub transports: Vec<TransportMetricsEntry>,
@@ -529,11 +554,13 @@ pub struct MetricsFrame {
     pub ack_pending: u64,
     pub neighbor_count: u64,
     pub is_local_relay: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub current_transport: Option<TransportType>,
 }
 
 /// A single `TransportStatus` transition observed by the protocol engine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransportStateEvent {
     pub timestamp_ms: i64,
     pub transport: TransportType,
@@ -543,7 +570,8 @@ pub struct TransportStateEvent {
 
 /// Per-transport score breakdown carried by `RoutingDecision` at the
 /// diagnostic verbosity tier.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RoutingScoreEntry {
     pub transport: TransportType,
     pub signal: f32,
@@ -557,21 +585,28 @@ pub struct RoutingScoreEntry {
 }
 
 /// A structured routing decision (superset of legacy `Event::Dors*` events).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RoutingDecision {
     pub timestamp_ms: i64,
     pub phase: RoutingPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<TransportType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<TransportType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub winning_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<RoutingReasonCode>,
     pub scores: Vec<RoutingScoreEntry>,
 }
 
 /// Snapshot of local device capability at the moment of emission.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceCapabilitySnapshot {
     pub timestamp_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub battery_level: Option<u8>,
     pub is_charging: bool,
     pub relay_role: RelayRole,
@@ -655,10 +690,17 @@ impl From<CoreRoutingPhase> for RoutingPhase {
             CoreRoutingPhase::Switched => RoutingPhase::Switched,
             CoreRoutingPhase::Escalated => RoutingPhase::Escalated,
             // `RoutingPhase` is `#[non_exhaustive]` on the core side; fall
-            // back to `ScoreUpdated` for forward-compat. The on_extension
-            // path is where entirely new record variants land; here we are
-            // just widening an existing field.
-            _ => RoutingPhase::ScoreUpdated,
+            // back to `ScoreUpdated` for forward-compat and log so drift is
+            // visible to operators (new-core/old-FFI skew). Entirely new
+            // record variants land on the `on_extension` path instead; here
+            // we are just widening an existing field.
+            other => {
+                tracing::warn!(
+                    variant = ?other,
+                    "telemetry: unknown CoreRoutingPhase variant; mapping to ScoreUpdated — FFI crate likely out of date",
+                );
+                RoutingPhase::ScoreUpdated
+            }
         }
     }
 }
@@ -677,7 +719,13 @@ impl From<CoreRoutingReasonCode> for RoutingReasonCode {
             CoreRoutingReasonCode::Congestion => RoutingReasonCode::Congestion,
             CoreRoutingReasonCode::LowTtl => RoutingReasonCode::LowTtl,
             CoreRoutingReasonCode::LowSuccessRate => RoutingReasonCode::LowSuccessRate,
-            _ => RoutingReasonCode::InitialSelection,
+            other => {
+                tracing::warn!(
+                    variant = ?other,
+                    "telemetry: unknown CoreRoutingReasonCode variant; mapping to InitialSelection — FFI crate likely out of date",
+                );
+                RoutingReasonCode::InitialSelection
+            }
         }
     }
 }
@@ -831,6 +879,12 @@ const TELEMETRY_POLL_QUEUE_CAP: usize = 1024;
 /// Adapts the foreign `TelemetrySink` trait to the core `TelemetrySink`
 /// trait, and incidentally populates a bounded poll queue so apps that
 /// prefer polling can pull records too.
+///
+/// Pull envelopes are the `TelemetryRecord` discriminated-union shape the
+/// TypeScript layer expects: exactly one typed payload field next to
+/// `category`. Each `push_*` helper builds the matching envelope, enqueues
+/// it, and fires the typed foreign callback in one place so the two
+/// channels cannot drift.
 struct TelemetrySinkAdapter {
     callback: Arc<dyn TelemetrySink>,
     queue: Arc<Mutex<VecDeque<String>>>,
@@ -845,40 +899,106 @@ impl TelemetrySinkAdapter {
         q.push_back(envelope);
     }
 
-    fn envelope(category: &str, payload: serde_json::Value) -> String {
-        // Best-effort — an empty object is a valid degenerate payload.
-        serde_json::to_string(&serde_json::json!({
-            "category": category,
-            "payload": payload,
-        }))
-        .unwrap_or_else(|_| format!("{{\"category\":\"{}\",\"payload\":{{}}}}", category))
+    /// Serializes an envelope built from `(category, payload_key, payload)`
+    /// pairs. Uses a `BTreeMap<&'static str, serde_json::Value>` so the
+    /// caller picks the payload field name (`frame`, `event`, `decision`,
+    /// etc.) that matches the TS `TelemetryRecord` union.
+    fn envelope(category: &str, fields: &[(&str, serde_json::Value)]) -> String {
+        let mut obj = serde_json::Map::with_capacity(fields.len() + 1);
+        obj.insert(
+            "category".to_string(),
+            serde_json::Value::String(category.to_string()),
+        );
+        for (k, v) in fields {
+            obj.insert((*k).to_string(), v.clone());
+        }
+        // `serde_json::to_string` on a `Value::Object` cannot fail for owned,
+        // finite values — an `.expect` here would only fire on OOM, which we
+        // cannot meaningfully recover from inside the telemetry path.
+        serde_json::to_string(&serde_json::Value::Object(obj))
+            .unwrap_or_else(|_| format!(r#"{{"category":"{}"}}"#, category))
+    }
+
+    /// Serializes `dto` to a JSON `Value`. On failure, logs and returns a
+    /// `null` so the envelope shape is still well-formed. Callers upstream
+    /// also fall back to `on_extension` so a downstream observer can count
+    /// the failure rather than silently miss the record.
+    fn to_value<T: Serialize>(dto: &T, category: &str) -> serde_json::Value {
+        match serde_json::to_value(dto) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    category,
+                    error = %err,
+                    "telemetry: DTO serialization failed; enqueueing null payload",
+                );
+                serde_json::Value::Null
+            }
+        }
+    }
+
+    /// Last-resort path for variants whose payload could not be serialized:
+    /// emit an `extension` envelope so the observer still gets a signal
+    /// (category + error message) instead of silent loss.
+    fn emit_serialization_failure(&self, name: &str, err: &dyn std::fmt::Display) {
+        let msg = format!("{}", err);
+        tracing::warn!(
+            record = name,
+            error = %err,
+            "telemetry: record serialization failed; dispatching via on_extension",
+        );
+        let payload_json = serde_json::json!({
+            "telemetry_error": "serialization_failed",
+            "record": name,
+            "message": msg,
+        })
+        .to_string();
+        self.enqueue(Self::envelope(
+            "extension",
+            &[
+                (
+                    "name",
+                    serde_json::Value::String(format!("telemetry.error.{name}")),
+                ),
+                (
+                    "payloadJson",
+                    serde_json::Value::String(payload_json.clone()),
+                ),
+            ],
+        ));
+        self.callback
+            .on_extension(format!("telemetry.error.{name}"), payload_json);
     }
 }
 
 impl CoreTelemetrySink for TelemetrySinkAdapter {
     fn emit(&self, record: &CoreTelemetryRecord) {
         match record {
-            CoreTelemetryRecord::Protocol(ev) => {
-                if let Ok(json) = ev.to_json() {
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
-                    self.enqueue(Self::envelope("protocol", parsed));
+            CoreTelemetryRecord::Protocol(ev) => match ev.to_json() {
+                Ok(json) => {
+                    self.enqueue(Self::envelope(
+                        "protocol",
+                        &[("eventJson", serde_json::Value::String(json.clone()))],
+                    ));
                     self.callback.on_protocol_event(json);
                 }
-            }
-            CoreTelemetryRecord::Mls(ev) => {
-                if let Ok(json) = serde_json::to_string(ev) {
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
-                    self.enqueue(Self::envelope("mls", parsed));
+                Err(err) => self.emit_serialization_failure("protocol", &err),
+            },
+            CoreTelemetryRecord::Mls(ev) => match serde_json::to_string(ev) {
+                Ok(json) => {
+                    self.enqueue(Self::envelope(
+                        "mls",
+                        &[("eventJson", serde_json::Value::String(json.clone()))],
+                    ));
                     self.callback.on_mls_event(json);
                 }
-            }
+                Err(err) => self.emit_serialization_failure("mls", &err),
+            },
             CoreTelemetryRecord::MetricsSnapshot(frame) => {
                 let dto = MetricsFrame::from(frame.as_ref());
                 self.enqueue(Self::envelope(
                     "metricsFrame",
-                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                    &[("frame", Self::to_value(&dto, "metricsFrame"))],
                 ));
                 self.callback.on_metrics_frame(dto);
             }
@@ -886,7 +1006,7 @@ impl CoreTelemetrySink for TelemetrySinkAdapter {
                 let dto = TransportStateEvent::from(event);
                 self.enqueue(Self::envelope(
                     "transportState",
-                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                    &[("event", Self::to_value(&dto, "transportState"))],
                 ));
                 self.callback.on_transport_state(dto);
             }
@@ -894,7 +1014,7 @@ impl CoreTelemetrySink for TelemetrySinkAdapter {
                 let dto = RoutingDecision::from(decision.as_ref());
                 self.enqueue(Self::envelope(
                     "routingDecision",
-                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                    &[("decision", Self::to_value(&dto, "routingDecision"))],
                 ));
                 self.callback.on_routing_decision(dto);
             }
@@ -902,21 +1022,27 @@ impl CoreTelemetrySink for TelemetrySinkAdapter {
                 let dto = DeviceCapabilitySnapshot::from(snapshot);
                 self.enqueue(Self::envelope(
                     "deviceCapability",
-                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                    &[("snapshot", Self::to_value(&dto, "deviceCapability"))],
                 ));
                 self.callback.on_device_capability(dto);
             }
             // Forward-compat: any variant added to CoreTelemetryRecord after
-            // this code was written lands here with its stable name.
+            // this code was written lands here with its stable name. The
+            // inner payload is not `Serialize` (`TelemetryRecord` docstring),
+            // so today we emit `{}`. New variants should be given their own
+            // arm in a follow-up before they ship to avoid losing data here.
             other => {
                 let name = other.name().to_string();
-                // Inner payload is not `Serialize` (record-level docstring);
-                // surface `{}` today — later PRs can serialize the specific
-                // inner type as new variants land.
                 let payload_json = "{}".to_string();
                 self.enqueue(Self::envelope(
                     "extension",
-                    serde_json::json!({"name": name, "payload": {}}),
+                    &[
+                        ("name", serde_json::Value::String(name.clone())),
+                        (
+                            "payloadJson",
+                            serde_json::Value::String(payload_json.clone()),
+                        ),
+                    ],
                 ));
                 self.callback.on_extension(name, payload_json);
             }
@@ -5765,13 +5891,20 @@ mod tests {
             .expect("poll should return the queued envelope");
         let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
         assert_eq!(parsed["category"], "protocol");
-        assert_eq!(parsed["payload"]["type"], "network_metrics");
+        // Envelope shape matches the TS `TelemetryRecord` union: protocol
+        // variants carry an `eventJson` string field, not a nested payload.
+        let event_json = parsed["eventJson"]
+            .as_str()
+            .expect("eventJson must be a string");
+        let event_parsed: serde_json::Value = serde_json::from_str(event_json).unwrap();
+        assert_eq!(event_parsed["type"], "network_metrics");
     }
 
     #[test]
     fn install_telemetry_sink_with_default_config_succeeds() {
         let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
         let sink = Arc::new(TestTelemetrySink::default());
+        #[allow(dead_code)]
         struct Forward(Arc<TestTelemetrySink>);
         impl TelemetrySink for Forward {
             fn on_protocol_event(&self, _: String) {}
@@ -5805,5 +5938,306 @@ mod tests {
             "is_charging should be populated from Rust TransportMetrics, got {:?}",
             metrics
         );
+    }
+
+    // ---- Poll-envelope payload-shape coverage ----
+    //
+    // These tests pin the wire contract between the Rust adapter and the
+    // TypeScript `TelemetryRecord` discriminated union (see
+    // `bindings/react-native/src/types.ts`). Each typed variant must enqueue
+    // the full payload under its variant-specific key (`frame`, `event`,
+    // `decision`, `snapshot`, `eventJson`) — not a truncated timestamp.
+
+    use offline_protocol::{DeduplicatorMode, DeduplicatorStats, RetryQueueStats};
+    use offline_protocol_router::{TransportScore, TransportScoreFactors};
+
+    fn sample_core_metrics_frame() -> CoreMetricsFrame {
+        CoreMetricsFrame {
+            timestamp_ms: 1_700_000_000_000,
+            transports: vec![(
+                CoreTransportType::BLE,
+                CoreTransportMetrics {
+                    rssi: Some(-60),
+                    latency_ms: Some(50),
+                    success_count: 10,
+                    failure_count: 1,
+                    battery_level: Some(80),
+                    is_charging: true,
+                    is_active_relay: false,
+                    ..Default::default()
+                },
+            )],
+            retry_queue: RetryQueueStats {
+                total_count: 3,
+                ready_count: 1,
+                critical_priority_count: 0,
+                high_priority_count: 1,
+                medium_priority_count: 1,
+                low_priority_count: 1,
+            },
+            dedup: DeduplicatorStats {
+                total_tracked: 100,
+                recent_tracked: 25,
+                capacity_used_percent: 12,
+                false_positive_rate: None,
+                mode: DeduplicatorMode::HashMap,
+            },
+            ack_pending: 2,
+            neighbor_count: 5,
+            is_local_relay: false,
+            current_transport: Some(CoreTransportType::BLE),
+        }
+    }
+
+    #[test]
+    fn adapter_metrics_frame_envelope_carries_full_frame() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        let record = CoreTelemetryRecord::MetricsSnapshot(Box::new(sample_core_metrics_frame()));
+        adapter.emit(&record);
+
+        // Push channel got a typed frame.
+        let frames = sink.metrics_frames.lock().unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].timestamp_ms, 1_700_000_000_000);
+        assert_eq!(frames[0].transports.len(), 1);
+
+        // Pull channel got the same frame, under the `frame` key, with full
+        // nested content — not just a timestamp.
+        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "metricsFrame");
+        let frame = &parsed["frame"];
+        assert!(
+            frame.is_object(),
+            "frame must be an object, got {:?}",
+            frame
+        );
+        assert_eq!(frame["timestampMs"], 1_700_000_000_000_i64);
+        assert_eq!(frame["ackPending"], 2);
+        assert_eq!(frame["neighborCount"], 5);
+        assert_eq!(frame["isLocalRelay"], false);
+        assert_eq!(frame["currentTransport"], "ble");
+        let transports = frame["transports"].as_array().expect("transports array");
+        assert_eq!(transports.len(), 1);
+        assert_eq!(transports[0]["transport"], "ble");
+        assert_eq!(transports[0]["metrics"]["rssi"], -60);
+        assert_eq!(transports[0]["metrics"]["batteryLevel"], 80);
+    }
+
+    #[test]
+    fn adapter_transport_state_envelope_carries_full_event() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        let record = CoreTelemetryRecord::TransportState(CoreTransportStateEvent {
+            timestamp_ms: 1_700_000_001_000,
+            transport: CoreTransportType::WiFiDirect,
+            previous: CoreTransportStatus::Available,
+            current: CoreTransportStatus::Connecting,
+        });
+        adapter.emit(&record);
+
+        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "transportState");
+        let event = &parsed["event"];
+        assert_eq!(event["timestampMs"], 1_700_000_001_000_i64);
+        assert_eq!(event["transport"], "wifiDirect");
+        assert_eq!(event["previous"], "available");
+        assert_eq!(event["current"], "connecting");
+    }
+
+    #[test]
+    fn adapter_routing_decision_envelope_carries_full_decision() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        let score = TransportScore::from_factors(TransportScoreFactors {
+            signal: 0.9,
+            proximity: 0.8,
+            bandwidth: 0.7,
+            congestion: 0.6,
+            energy: 0.5,
+            reliability: 0.95,
+            load: 0.4,
+            total: 0.82,
+        });
+        let decision = CoreRoutingDecision {
+            timestamp_ms: 1_700_000_002_000,
+            phase: CoreRoutingPhase::Switched,
+            from: Some(CoreTransportType::BLE),
+            to: Some(CoreTransportType::WiFiDirect),
+            winning_score: Some(0.82),
+            reason_code: Some(CoreRoutingReasonCode::PoorSignal),
+            scores: vec![(CoreTransportType::WiFiDirect, score)],
+        };
+        adapter.emit(&CoreTelemetryRecord::Routing(Box::new(decision)));
+
+        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "routingDecision");
+        let d = &parsed["decision"];
+        assert_eq!(d["timestampMs"], 1_700_000_002_000_i64);
+        assert_eq!(d["phase"], "switched");
+        assert_eq!(d["from"], "ble");
+        assert_eq!(d["to"], "wifiDirect");
+        assert_eq!(d["reasonCode"], "poorSignal");
+        let scores = d["scores"].as_array().expect("scores array");
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0]["transport"], "wifiDirect");
+        // Scores are f32 on the wire; compare with tolerance to avoid
+        // spurious failures from the f32→f64 JSON widen.
+        let signal = scores[0]["signal"].as_f64().unwrap();
+        let total = scores[0]["total"].as_f64().unwrap();
+        assert!((signal - 0.9).abs() < 1e-4, "signal={signal}");
+        assert!((total - 0.82).abs() < 1e-4, "total={total}");
+    }
+
+    #[test]
+    fn adapter_device_capability_envelope_carries_full_snapshot() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        let snapshot = CoreDeviceSnapshot {
+            timestamp_ms: 1_700_000_003_000,
+            battery_level: Some(42),
+            is_charging: true,
+            relay_role: CoreRelayRole::Relay,
+            changed_fields: 0b111,
+        };
+        adapter.emit(&CoreTelemetryRecord::Device(snapshot));
+
+        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "deviceCapability");
+        let s = &parsed["snapshot"];
+        assert_eq!(s["timestampMs"], 1_700_000_003_000_i64);
+        assert_eq!(s["batteryLevel"], 42);
+        assert_eq!(s["isCharging"], true);
+        assert_eq!(s["relayRole"], "relay");
+        assert_eq!(s["changedFields"], 0b111);
+    }
+
+    #[test]
+    fn adapter_protocol_event_envelope_has_event_json_string_field() {
+        // Complements the existing `adapter_forwards_protocol_event_...` test
+        // by pinning the field name the TS `TelemetryRecord` union expects
+        // (`eventJson`), so a future rename on either side fails loudly here.
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        let record = CoreTelemetryRecord::Protocol(Box::new(CoreEvent::NetworkMetrics {
+            neighbor_count: 3,
+            relay_count: 1,
+            delivery_ratio: 0.75,
+            avg_latency_ms: 10,
+        }));
+        adapter.emit(&record);
+
+        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "protocol");
+        assert!(
+            parsed.get("eventJson").and_then(|v| v.as_str()).is_some(),
+            "envelope must carry eventJson string (matches TS TelemetryRecord)"
+        );
+        // Must NOT carry the pre-fix `payload` key.
+        assert!(
+            parsed.get("payload").is_none(),
+            "legacy `payload` key must not appear: {envelope}"
+        );
+    }
+
+    #[test]
+    fn adapter_poll_queue_drops_oldest_at_capacity() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        // Push TELEMETRY_POLL_QUEUE_CAP + 5 records of two distinct shapes
+        // (device + transport-state) so we can identify which end was dropped.
+        for _ in 0..TELEMETRY_POLL_QUEUE_CAP {
+            adapter.emit(&CoreTelemetryRecord::Device(CoreDeviceSnapshot {
+                timestamp_ms: 0,
+                battery_level: Some(1),
+                is_charging: false,
+                relay_role: CoreRelayRole::Regular,
+                changed_fields: 0,
+            }));
+        }
+        for _ in 0..5 {
+            adapter.emit(&CoreTelemetryRecord::TransportState(
+                CoreTransportStateEvent {
+                    timestamp_ms: 0,
+                    transport: CoreTransportType::BLE,
+                    previous: CoreTransportStatus::Available,
+                    current: CoreTransportStatus::Disconnected,
+                },
+            ));
+        }
+
+        // Queue is capped, so the 5 newest (transportState) must be present
+        // and 5 oldest (device) must have been dropped.
+        let mut first_five_categories = Vec::with_capacity(5);
+        for _ in 0..5 {
+            let env = protocol.poll_telemetry_frame().expect("non-empty");
+            let parsed: serde_json::Value = serde_json::from_str(&env).unwrap();
+            first_five_categories.push(parsed["category"].as_str().unwrap().to_string());
+        }
+        // After popping 5, the last 5 remaining should be transportState.
+        for _ in 0..(TELEMETRY_POLL_QUEUE_CAP - 5 - 5) {
+            protocol.poll_telemetry_frame().expect("non-empty mid");
+        }
+        for _ in 0..5 {
+            let env = protocol.poll_telemetry_frame().expect("tail");
+            let parsed: serde_json::Value = serde_json::from_str(&env).unwrap();
+            assert_eq!(
+                parsed["category"], "transportState",
+                "tail must be the newly-pushed transportState records (drop-oldest semantics)"
+            );
+        }
+        assert!(protocol.poll_telemetry_frame().is_none(), "queue drained");
+    }
+
+    #[test]
+    fn adapter_protocol_serialization_failure_emits_extension_fallback() {
+        // Exercise `emit_serialization_failure` directly. The real Protocol
+        // and Mls arms only fall through when `to_json` / `to_string` fails,
+        // which is effectively unreachable for the stable `Event` shape; the
+        // fallback itself is still worth pinning to prove we no longer drop
+        // silently.
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        struct FakeErr;
+        impl std::fmt::Display for FakeErr {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "synthetic")
+            }
+        }
+        adapter.emit_serialization_failure("protocol", &FakeErr);
+
+        let extensions = sink.extensions.lock().unwrap();
+        assert_eq!(extensions.len(), 1);
+        let (name, payload_json) = &extensions[0];
+        assert_eq!(name, "telemetry.error.protocol");
+        let parsed_payload: serde_json::Value =
+            serde_json::from_str(payload_json).expect("payload_json must parse");
+        assert_eq!(parsed_payload["telemetry_error"], "serialization_failed");
+        assert_eq!(parsed_payload["record"], "protocol");
+
+        let envelope = protocol.poll_telemetry_frame().expect("envelope queued");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "extension");
+        assert_eq!(parsed["name"], "telemetry.error.protocol");
+        assert!(parsed["payloadJson"].is_string());
     }
 }
