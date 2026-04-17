@@ -10009,11 +10009,44 @@ fn test_process_skips_metrics_snapshot_when_cadence_is_none() {
 }
 
 #[test]
+fn test_install_seeds_transport_state_so_first_tick_emits_no_bootstrap() {
+    // Regression guard: a sink installed after start() must NOT observe a
+    // synthetic `Unavailable → Available` transition on the first tick for
+    // transports that were already running at install time. install_telemetry_sink
+    // seeds `transport_status_snapshot` from the live statuses so the
+    // first tick diff finds nothing changed.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    protocol.process().unwrap();
+
+    let records = sink.take();
+    let transitions: Vec<&TransportStateEvent> = records
+        .iter()
+        .filter_map(|r| match r {
+            TelemetryRecord::TransportState(e) => Some(e),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        transitions.is_empty(),
+        "install-after-start must not synthesise a bootstrap transition, got {transitions:?}",
+    );
+}
+
+#[test]
 fn test_process_emits_transport_state_on_status_transition() {
-    // Register a mock transport. start() flips it to Available; the first
-    // process() tick records that as the snapshot (emitting one
-    // Unavailable→Available transition). Then flip the mock to
-    // Disconnected and run process() again — expect exactly one
+    // After install seeds the snapshot, only genuine transitions fire.
+    // Flip the mock to Disconnected and verify exactly one
     // Available→Disconnected transition.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let mock = MockTransport::new(TransportType::BLE);
@@ -10021,15 +10054,14 @@ fn test_process_emits_transport_state_on_status_transition() {
     protocol
         .transport_manager_mut()
         .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
 
     let sink = RecordingTelemetrySink::default();
     protocol
         .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
         .unwrap();
-    protocol.start().unwrap();
 
-    // Drain the first-tick snapshot (which includes the Unavailable→Available
-    // transition bootstrap).
+    // First tick — should emit nothing transport-state-wise (seeded).
     protocol.process().unwrap();
     sink.take();
 
@@ -10055,15 +10087,17 @@ fn test_process_emits_transport_state_on_status_transition() {
 }
 
 #[test]
-fn test_process_emits_device_capability_on_first_tick() {
-    // First tick after install always emits a device record (prev == None
-    // is treated as "all fields changed").
+fn test_install_seeds_device_capability_so_first_tick_is_silent() {
+    // install_telemetry_sink seeds `device_capability_snapshot` so the first
+    // tick's diff against the seeded state yields no change record. Apps
+    // that want the current device state at install time pull it
+    // explicitly rather than relying on a bootstrap event.
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
     let sink = RecordingTelemetrySink::default();
+    protocol.start().unwrap();
     protocol
         .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
         .unwrap();
-    protocol.start().unwrap();
 
     protocol.process().unwrap();
 
@@ -10072,10 +10106,9 @@ fn test_process_emits_device_capability_on_first_tick() {
         .iter()
         .filter(|r| matches!(r, TelemetryRecord::Device(_)))
         .collect();
-    assert_eq!(
-        device.len(),
-        1,
-        "first tick must emit exactly one Device snapshot, got {records:?}",
+    assert!(
+        device.is_empty(),
+        "install seeds device snapshot; first tick must not re-emit it, got {records:?}",
     );
 }
 
@@ -10160,4 +10193,211 @@ fn test_process_skips_telemetry_tick_without_sink() {
     );
 }
 
+#[test]
+fn test_metrics_cadence_rate_limits_emission_across_ticks() {
+    // Install with a very long cadence so only the first tick after install
+    // is "due". Subsequent ticks within the cadence window must not emit.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(
+            Arc::new(sink.clone()),
+            TelemetryConfig::default().with_metrics_cadence(Some(Duration::from_secs(3600))),
+        )
+        .unwrap();
+    protocol.start().unwrap();
+
+    for _ in 0..3 {
+        protocol.process().unwrap();
+    }
+
+    let records = sink.take();
+    let snapshots: Vec<_> = records
+        .iter()
+        .filter(|r| matches!(r, TelemetryRecord::MetricsSnapshot(_)))
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "cadence must rate-limit: three ticks within the window produce exactly one snapshot, got {records:?}",
+    );
+}
+
+#[test]
+fn test_reinstall_rearms_diff_snapshots_and_reemits_metrics_frame() {
+    // Install a sink, tick once to burn the initial metrics snapshot, then
+    // install a second sink. The second install must rearm last_metrics_emit_at
+    // so the next tick emits a bootstrap metrics frame to the new sink,
+    // and must re-seed transport/device snapshots so no fake transition is
+    // reported against state the first sink already acknowledged.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let sink1 = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink1.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.process().unwrap();
+    let _ = sink1.take();
+
+    let sink2 = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink2.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.process().unwrap();
+
+    let records = sink2.take();
+    let snapshots: Vec<_> = records
+        .iter()
+        .filter(|r| matches!(r, TelemetryRecord::MetricsSnapshot(_)))
+        .collect();
+    let transitions: Vec<_> = records
+        .iter()
+        .filter(|r| matches!(r, TelemetryRecord::TransportState(_)))
+        .collect();
+    let devices: Vec<_> = records
+        .iter()
+        .filter(|r| matches!(r, TelemetryRecord::Device(_)))
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "re-installed sink receives a fresh metrics frame, got {records:?}",
+    );
+    assert!(
+        transitions.is_empty(),
+        "re-install must not synthesise transport transitions against seeded snapshot, got {records:?}",
+    );
+    assert!(
+        devices.is_empty(),
+        "re-install must not re-emit device snapshot against seeded snapshot, got {records:?}",
+    );
+}
+
+#[test]
+fn test_routing_diagnostic_populates_scores_when_enabled() {
+    // With routing_diagnostic=true, every RoutingDecision emitted from a
+    // send() must carry a populated scores vector (one entry per available
+    // transport). Default (false) leaves scores empty — exercised by
+    // test_legacy_dors_events_still_fire_with_routing_callback_wired.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(
+            Arc::new(sink.clone()),
+            TelemetryConfig::default().with_routing_diagnostic(true),
+        )
+        .unwrap();
+
+    let msg = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "ping",
+    );
+    protocol.transport_manager_mut().send(&msg).unwrap();
+
+    let records = sink.take();
+    let routings: Vec<&RoutingDecision> = records
+        .iter()
+        .filter_map(|r| match r {
+            TelemetryRecord::Routing(d) => Some(d.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !routings.is_empty(),
+        "routing records must fire on send, got {records:?}",
+    );
+    for decision in &routings {
+        assert!(
+            !decision.scores.is_empty(),
+            "routing_diagnostic=true must populate scores, got {decision:?}",
+        );
+        // BLE is registered, so it must appear in the breakdown.
+        assert!(
+            decision
+                .scores
+                .iter()
+                .any(|(t, _)| *t == TransportType::BLE),
+            "scores must include every available transport, got {:?}",
+            decision.scores,
+        );
+    }
+}
+
+#[test]
+fn test_routing_diagnostic_default_leaves_scores_empty() {
+    // Default TelemetryConfig has routing_diagnostic=false; the scores
+    // vector must stay empty even when the callback fires on every decision.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let msg = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "ping",
+    );
+    protocol.transport_manager_mut().send(&msg).unwrap();
+
+    let records = sink.take();
+    for r in &records {
+        if let TelemetryRecord::Routing(d) = r {
+            assert!(
+                d.scores.is_empty(),
+                "routing_diagnostic=false must leave scores empty, got {:?}",
+                d.scores,
+            );
+        }
+    }
+}
+
+#[test]
+fn test_metrics_frame_is_local_relay_matches_role() {
+    // Regression guard for the renamed field: is_local_relay must reflect
+    // RelayManager::current_role() and nothing else (no stale "peer count"
+    // semantics). Default role is Regular; the flag must be false.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.start().unwrap();
+    protocol.process().unwrap();
+
+    let records = sink.take();
+    let frame = records
+        .iter()
+        .find_map(|r| match r {
+            TelemetryRecord::MetricsSnapshot(f) => Some(f.as_ref()),
+            _ => None,
+        })
+        .expect("first tick emits a metrics frame");
+    assert!(
+        !frame.is_local_relay,
+        "default RelayRole::Regular ⇒ is_local_relay=false, got {frame:?}",
+    );
+}
+
+use crate::telemetry::routing::RoutingDecision;
 use crate::telemetry::transport_state::TransportStateEvent;

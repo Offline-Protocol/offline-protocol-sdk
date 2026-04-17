@@ -33,9 +33,9 @@ use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
-use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
+use offline_protocol_router::{PathSelector, RelayManager, RelayRole, TransportSelector};
 use offline_protocol_services::MeshServices;
-use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
+use offline_protocol_transport::{BleTransport, TransportMetrics, TransportStatus, TransportType};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -435,6 +435,14 @@ impl OfflineProtocol {
     /// opaque identifiers stay stable across the swap when the new config
     /// does not carry its own `scrub_secret`.
     ///
+    /// The per-tick diff snapshots (transport status, device capability,
+    /// metrics cadence) are **rearmed** on every install: the next
+    /// `process()` tick observes the current state as its baseline and emits
+    /// no synthetic transitions for transports that were already available
+    /// at install time. Apps that need the current transport statuses at
+    /// install time should pull them explicitly via
+    /// [`TransportManager::get_all_transport_statuses`].
+    ///
     /// # Errors
     ///
     /// Returns `Err` if the shared-state mutex is poisoned (indicating an
@@ -448,6 +456,12 @@ impl OfflineProtocol {
         sink: Arc<dyn TelemetrySink>,
         config: TelemetryConfig,
     ) -> Result<()> {
+        // Forward the routing-diagnostic preference to the TransportManager
+        // before wiring any callbacks so the very first routing decision
+        // post-install already reflects the requested tier.
+        self.transport_manager
+            .set_routing_diagnostic(config.routing_diagnostic());
+
         let ctx = TelemetryContext::new(sink, config, self.telemetry_fallback_secret);
         let mut state = lock_shared_state(&self.shared_state).map_err(|err| {
             error!(
@@ -459,6 +473,29 @@ impl OfflineProtocol {
         state.telemetry = Some(ctx.clone());
         drop(state);
         self.telemetry = Some(ctx);
+
+        // Rearm the per-tick diff snapshots so the first tick after install
+        // reports honest transitions only. Without this, a sink installed
+        // after start() would observe a synthetic `Unavailable → Available`
+        // transition for every already-running transport on the next tick.
+        self.transport_status_snapshot = self.transport_manager.get_all_transport_statuses();
+        let available = self.transport_manager.get_available_transports();
+        let (battery_level, is_charging) = Self::device_battery_from_available(
+            self.transport_manager.current_transport(),
+            &available,
+        );
+        let relay_role = self.path_selector.relay_manager().current_role();
+        self.device_capability_snapshot = Some(DeviceSnap::from_parts(
+            battery_level,
+            is_charging,
+            relay_role,
+        ));
+        // Leave `last_metrics_emit_at` at None so the first tick after
+        // install fires a fresh metrics snapshot — that is the bootstrap
+        // payload a new sink actually wants (full counter state in one
+        // record).
+        self.last_metrics_emit_at = None;
+
         Ok(())
     }
 
@@ -1279,12 +1316,17 @@ impl OfflineProtocol {
     ///
     /// Runs at the end of `process()` so reliability/queue state observed
     /// here is the same state the rest of the tick has already advanced.
+    /// Snapshots `get_available_transports()` exactly once per tick and
+    /// reuses the map across every downstream helper that needs it.
     fn tick_telemetry_categories(&mut self) {
         let Some(ctx) = self.telemetry.clone() else {
             return;
         };
         let now_ms = Utc::now().timestamp_millis();
         let now = Instant::now();
+
+        // Snapshot once per tick, reuse everywhere below.
+        let available = self.transport_manager.get_available_transports();
 
         // Transport-status diff: one record per changed transport.
         let current_statuses = self.transport_manager.get_all_transport_statuses();
@@ -1296,7 +1338,10 @@ impl OfflineProtocol {
         self.transport_status_snapshot = current_statuses;
 
         // Device capability diff.
-        let (battery_level, is_charging) = self.current_device_battery();
+        let (battery_level, is_charging) = Self::device_battery_from_available(
+            self.transport_manager.current_transport(),
+            &available,
+        );
         let relay_role = self.path_selector.relay_manager().current_role();
         let device_now = DeviceSnap::from_parts(battery_level, is_charging, relay_role);
         if let Some(snapshot) =
@@ -1313,14 +1358,16 @@ impl OfflineProtocol {
                 Some(prev) => now.saturating_duration_since(prev) >= cadence,
             };
             if due {
+                let is_local_relay = matches!(relay_role, RelayRole::Relay);
                 let frame = build_metrics_frame(
                     now_ms,
                     &self.transport_manager,
+                    &available,
                     &self.retry_queue,
                     &self.deduplicator,
                     &self.ack_manager,
                     self.known_peers.len(),
-                    self.relay_neighbor_count(),
+                    is_local_relay,
                 );
                 ctx.sink
                     .emit(&TelemetryRecord::MetricsSnapshot(Box::new(frame)));
@@ -1329,36 +1376,49 @@ impl OfflineProtocol {
         }
     }
 
-    /// Returns the battery level and charging state of the currently
-    /// selected transport, if any. Falls back to the first transport's
-    /// metrics when no current transport is selected (e.g. pre-start).
-    fn current_device_battery(&self) -> (Option<u8>, bool) {
-        let available = self.transport_manager.get_available_transports();
-        if let Some(current) = self.transport_manager.current_transport() {
+    /// Derives `(battery_level, is_charging)` for the local device from the
+    /// per-transport metrics map.
+    ///
+    /// Selection order:
+    ///   1. Currently selected transport, if it reports `Some(battery_level)`.
+    ///   2. First available transport that reports `Some(battery_level)`.
+    ///   3. `(None, is_charging)` where `is_charging` comes from the current
+    ///      transport if present, else `false`.
+    ///
+    /// Skipping past a current transport whose `battery_level` is `None` is
+    /// deliberate: every registered transport reports the hosting device's
+    /// battery, so any `Some` reading is more informative than the default
+    /// `None` on the selected one.
+    fn device_battery_from_available(
+        current: Option<TransportType>,
+        available: &HashMap<TransportType, TransportMetrics>,
+    ) -> (Option<u8>, bool) {
+        if let Some(current) = current {
             if let Some(metrics) = available.get(&current) {
-                return (metrics.battery_level, metrics.is_charging);
+                if metrics.battery_level.is_some() {
+                    return (metrics.battery_level, metrics.is_charging);
+                }
+                // Current transport has no battery reading; try any other.
+                if let Some((_, other)) = available
+                    .iter()
+                    .find(|(t, m)| **t != current && m.battery_level.is_some())
+                {
+                    return (other.battery_level, other.is_charging);
+                }
+                return (None, metrics.is_charging);
             }
         }
         available
             .values()
-            .next()
-            .map(|metrics| (metrics.battery_level, metrics.is_charging))
-            .unwrap_or((None, false))
-    }
-
-    /// Counts the number of known peers currently acting as relays on this
-    /// node. Today the SDK does not maintain a relay-peer registry separate
-    /// from `known_peers`; relay count falls back to 0 until a dedicated
-    /// accessor is introduced.
-    fn relay_neighbor_count(&self) -> usize {
-        if matches!(
-            self.path_selector.relay_manager().current_role(),
-            offline_protocol_router::RelayRole::Relay
-        ) {
-            1
-        } else {
-            0
-        }
+            .find(|m| m.battery_level.is_some())
+            .map(|m| (m.battery_level, m.is_charging))
+            .unwrap_or_else(|| {
+                available
+                    .values()
+                    .next()
+                    .map(|m| (None, m.is_charging))
+                    .unwrap_or((None, false))
+            })
     }
     /// Processes messages ready for retry from the retry queue.
     ///

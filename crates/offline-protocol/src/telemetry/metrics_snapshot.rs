@@ -31,8 +31,13 @@ pub struct MetricsFrame {
     pub ack_pending: usize,
     /// Number of currently known neighbors.
     pub neighbor_count: usize,
-    /// Number of currently known active relays.
-    pub relay_count: usize,
+    /// Whether this node is currently acting as a relay on the mesh.
+    ///
+    /// Reflects `RelayManager::current_role()` at the moment of emission.
+    /// Named deliberately — this is a local-role flag, not a peer count.
+    /// A future record with an explicit per-peer-relay registry may add a
+    /// `relay_peer_count` field alongside; those semantics are orthogonal.
+    pub is_local_relay: bool,
     /// Currently selected transport, if any.
     pub current_transport: Option<TransportType>,
 }
@@ -73,7 +78,7 @@ mod tests {
             },
             ack_pending: 0,
             neighbor_count: 0,
-            relay_count: 0,
+            is_local_relay: false,
             current_transport: None,
         }
     }

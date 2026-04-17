@@ -50,7 +50,7 @@ fn sample_metrics_frame() -> MetricsFrame {
         dedup: empty_dedup_stats(),
         ack_pending: 0,
         neighbor_count: 0,
-        relay_count: 0,
+        is_local_relay: false,
         current_transport: None,
     }
 }

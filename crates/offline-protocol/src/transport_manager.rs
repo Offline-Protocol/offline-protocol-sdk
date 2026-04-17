@@ -10,7 +10,9 @@ use crate::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode
 use crate::{Error, Result};
 use chrono::Utc;
 use offline_protocol_core::Message;
-use offline_protocol_router::{DorsConfig, EscalationTriggerReason, TransportSelector};
+use offline_protocol_router::{
+    DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
+};
 use offline_protocol_transport::{
     Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
 };
@@ -41,6 +43,12 @@ pub struct TransportManager {
     /// receives the richer `RoutingDecision` shape while `EventCallback`
     /// consumers continue to see the flattened `Event::Dors*` variants.
     routing_decision_callback: Option<Arc<dyn Fn(RoutingDecision) + Send + Sync>>,
+
+    /// When `true`, every emitted [`RoutingDecision`] carries the full
+    /// per-transport [`TransportScore`] breakdown in its `scores` field.
+    /// Mirrors `TelemetryConfig::routing_diagnostic` and is toggled by
+    /// `OfflineProtocol::install_telemetry_sink`.
+    routing_diagnostic: bool,
 
     /// Last escalation trigger event emitted (reason, time) for dedupe window.
     last_escalation_trigger_emitted: Option<(DorsEscalationReasonCode, std::time::Instant)>,
@@ -150,6 +158,7 @@ impl TransportManager {
             observations: HashMap::new(),
             dors_event_callback: None,
             routing_decision_callback: None,
+            routing_diagnostic: false,
             last_escalation_trigger_emitted: None,
         }
     }
@@ -171,15 +180,29 @@ impl TransportManager {
         self.routing_decision_callback = callback;
     }
 
+    /// Enables or disables the routing-diagnostic detail level.
+    ///
+    /// When `true`, [`RoutingDecision::scores`] is populated with the full
+    /// seven-factor [`TransportScore`] for every ranked transport on every
+    /// emission. When `false` (default), the vector is empty and the hot
+    /// path avoids the per-emission allocation. Mirrors
+    /// `TelemetryConfig::routing_diagnostic`.
+    pub fn set_routing_diagnostic(&mut self, enabled: bool) {
+        self.routing_diagnostic = enabled;
+    }
+
     fn emit_dors_event(&self, event: Event) {
         if let Some(ref cb) = self.dors_event_callback {
             cb(event);
         }
     }
 
-    fn emit_routing_decision(&self, decision: RoutingDecision) {
+    /// Lazy-emit a [`RoutingDecision`]. The `build` closure only runs when a
+    /// callback is actually installed, so the no-sink path pays only an
+    /// `Option::is_some` check — not a `Utc::now()` call and struct build.
+    fn emit_routing_decision<F: FnOnce() -> RoutingDecision>(&self, build: F) {
         if let Some(ref cb) = self.routing_decision_callback {
-            cb(decision);
+            cb(build());
         }
     }
 
@@ -215,13 +238,22 @@ impl TransportManager {
         }
     }
 
+    /// Builds a [`RoutingDecision`]. The `detailed_scores` slice is cloned
+    /// into `scores` when `routing_diagnostic` is enabled on the manager;
+    /// otherwise the vector stays empty (allocation-free).
     fn build_routing_decision(
+        &self,
         phase: RoutingPhase,
         from: Option<TransportType>,
         to: Option<TransportType>,
         winning_score: Option<f32>,
         reason_code: Option<RoutingReasonCode>,
+        detailed_scores: Option<&[(TransportType, TransportScore)]>,
     ) -> RoutingDecision {
+        let scores = match (self.routing_diagnostic, detailed_scores) {
+            (true, Some(detailed)) => detailed.to_vec(),
+            _ => Vec::new(),
+        };
         RoutingDecision {
             timestamp_ms: Utc::now().timestamp_millis(),
             phase,
@@ -229,12 +261,7 @@ impl TransportManager {
             to,
             winning_score,
             reason_code,
-            // Per-transport score breakdown is populated only when
-            // `TelemetryConfig::routing_diagnostic` is set; populating it
-            // requires a read-only detailed-scoring accessor on
-            // `TransportSelector` that is not yet exposed. Left empty here
-            // so default-verbosity emission remains allocation-free.
-            scores: Vec::new(),
+            scores,
             suppression: None,
         }
     }
@@ -243,9 +270,10 @@ impl TransportManager {
     fn emit_escalation_trigger_if_deduped(
         &mut self,
         reason_code: DorsEscalationReasonCode,
-        from: String,
-        to: String,
+        from: TransportType,
+        to: TransportType,
         reason_detail: Option<String>,
+        detailed_scores: Option<&[(TransportType, TransportScore)]>,
     ) {
         let now = std::time::Instant::now();
         let emit = match &self.last_escalation_trigger_emitted {
@@ -257,22 +285,23 @@ impl TransportManager {
         };
         if emit {
             self.last_escalation_trigger_emitted = Some((reason_code, now));
-            let routing_from = TransportType::from_label(&from);
-            let routing_to = TransportType::from_label(&to);
             self.emit_dors_event(Event::dors_escalation_triggered(
                 DorsEscalationPhase::Triggered,
-                from,
-                to,
+                from.to_string(),
+                to.to_string(),
                 reason_code,
                 reason_detail,
             ));
-            self.emit_routing_decision(Self::build_routing_decision(
-                RoutingPhase::Escalated,
-                Some(routing_from),
-                Some(routing_to),
-                None,
-                Some(Self::escalation_reason_code_to_routing(reason_code)),
-            ));
+            self.emit_routing_decision(|| {
+                self.build_routing_decision(
+                    RoutingPhase::Escalated,
+                    Some(from),
+                    Some(to),
+                    None,
+                    Some(Self::escalation_reason_code_to_routing(reason_code)),
+                    detailed_scores,
+                )
+            });
         }
     }
 
@@ -333,13 +362,29 @@ impl TransportManager {
         let scored = self.selector.score_and_rank(message, &available);
         let scores: Vec<(String, f32)> = scored.iter().map(|(t, s)| (t.to_string(), *s)).collect();
         self.emit_dors_event(Event::dors_score_updated(scores));
-        self.emit_routing_decision(Self::build_routing_decision(
-            RoutingPhase::ScoreUpdated,
-            previous,
-            None,
-            None,
-            None,
-        ));
+
+        // Compute the detailed per-transport score breakdown only when a
+        // consumer has (a) installed a routing_decision_callback AND
+        // (b) opted into the diagnostic tier. Without both, the breakdown
+        // is never materialised.
+        let detailed_scores: Option<Vec<(TransportType, TransportScore)>> =
+            if self.routing_diagnostic && self.routing_decision_callback.is_some() {
+                Some(self.selector.score_and_rank_detailed(message, &available))
+            } else {
+                None
+            };
+        let detailed_slice = detailed_scores.as_deref();
+
+        self.emit_routing_decision(|| {
+            self.build_routing_decision(
+                RoutingPhase::ScoreUpdated,
+                previous,
+                None,
+                None,
+                None,
+                detailed_slice,
+            )
+        });
         let primary_score = scored
             .iter()
             .find(|(t, _)| *t == primary)
@@ -356,13 +401,16 @@ impl TransportManager {
             selection_reason,
             primary_score,
         ));
-        self.emit_routing_decision(Self::build_routing_decision(
-            RoutingPhase::Selected,
-            previous,
-            Some(primary),
-            Some(primary_score),
-            Some(Self::dors_reason_code_to_routing(selection_reason)),
-        ));
+        self.emit_routing_decision(|| {
+            self.build_routing_decision(
+                RoutingPhase::Selected,
+                previous,
+                Some(primary),
+                Some(primary_score),
+                Some(Self::dors_reason_code_to_routing(selection_reason)),
+                detailed_slice,
+            )
+        });
 
         // Try the primary transport first.
         let primary_result = {
@@ -391,13 +439,16 @@ impl TransportManager {
                         reason_code,
                         None,
                     ));
-                    self.emit_routing_decision(Self::build_routing_decision(
-                        RoutingPhase::Switched,
-                        previous,
-                        Some(primary),
-                        Some(primary_score),
-                        Some(Self::dors_reason_code_to_routing(reason_code)),
-                    ));
+                    self.emit_routing_decision(|| {
+                        self.build_routing_decision(
+                            RoutingPhase::Switched,
+                            previous,
+                            Some(primary),
+                            Some(primary_score),
+                            Some(Self::dors_reason_code_to_routing(reason_code)),
+                            detailed_slice,
+                        )
+                    });
                 }
                 return Ok(());
             }
@@ -437,9 +488,10 @@ impl TransportManager {
                     let reason_code = Self::escalation_trigger_reason_to_code(trigger_reason);
                     self.emit_escalation_trigger_if_deduped(
                         reason_code,
-                        primary.to_string(),
-                        transport_type.to_string(),
+                        primary,
+                        *transport_type,
                         None,
+                        detailed_slice,
                     );
                 }
             }
@@ -478,13 +530,17 @@ impl TransportManager {
                             reason_code,
                             Some("primary send failed, fallback succeeded".to_string()),
                         ));
-                        self.emit_routing_decision(Self::build_routing_decision(
-                            RoutingPhase::Switched,
-                            previous,
-                            Some(*transport_type),
-                            None,
-                            Some(Self::dors_reason_code_to_routing(reason_code)),
-                        ));
+                        let fallback = *transport_type;
+                        self.emit_routing_decision(|| {
+                            self.build_routing_decision(
+                                RoutingPhase::Switched,
+                                previous,
+                                Some(fallback),
+                                None,
+                                Some(Self::dors_reason_code_to_routing(reason_code)),
+                                detailed_slice,
+                            )
+                        });
                     }
                     // Escalation applied only when BLE→WiFi fallback actually succeeded.
                     if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect
@@ -496,15 +552,19 @@ impl TransportManager {
                             DorsEscalationReasonCode::FallbackSuccess,
                             Some("primary BLE send failed, fallback to WiFi succeeded".to_string()),
                         ));
-                        self.emit_routing_decision(Self::build_routing_decision(
-                            RoutingPhase::Escalated,
-                            Some(primary),
-                            Some(*transport_type),
-                            None,
-                            Some(Self::escalation_reason_code_to_routing(
-                                DorsEscalationReasonCode::FallbackSuccess,
-                            )),
-                        ));
+                        let escalated = *transport_type;
+                        self.emit_routing_decision(|| {
+                            self.build_routing_decision(
+                                RoutingPhase::Escalated,
+                                Some(primary),
+                                Some(escalated),
+                                None,
+                                Some(Self::escalation_reason_code_to_routing(
+                                    DorsEscalationReasonCode::FallbackSuccess,
+                                )),
+                                detailed_slice,
+                            )
+                        });
                     }
                     return Ok(());
                 }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
 use offline_protocol_router::RelayRole;
-use offline_protocol_transport::{TransportStatus, TransportType};
+use offline_protocol_transport::{TransportMetrics, TransportStatus, TransportType};
 
 use crate::telemetry::device::{
     DeviceCapabilitySnapshot, CHANGED_BATTERY, CHANGED_CHARGING, CHANGED_RELAY_ROLE,
@@ -42,17 +42,25 @@ impl DeviceSnap {
 }
 
 /// Builds a single [`MetricsFrame`] from the supplied protocol components.
+///
+/// `available_transports` is borrowed — callers snapshot the map once per
+/// tick and reuse it across the telemetry helpers that need it, avoiding
+/// redundant locking and per-tick HashMap allocations.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_metrics_frame(
     now_ms: i64,
     transport_manager: &TransportManager,
+    available_transports: &HashMap<TransportType, TransportMetrics>,
     retry_queue: &RetryQueue,
     deduplicator: &Deduplicator,
     ack_manager: &AckManager,
     neighbor_count: usize,
-    relay_count: usize,
+    is_local_relay: bool,
 ) -> MetricsFrame {
-    let available = transport_manager.get_available_transports();
-    let transports: Vec<(TransportType, _)> = available.into_iter().collect();
+    let transports: Vec<(TransportType, TransportMetrics)> = available_transports
+        .iter()
+        .map(|(t, m)| (*t, m.clone()))
+        .collect();
     MetricsFrame {
         timestamp_ms: now_ms,
         transports,
@@ -60,7 +68,7 @@ pub(crate) fn build_metrics_frame(
         dedup: deduplicator.stats(),
         ack_pending: ack_manager.pending_count(),
         neighbor_count,
-        relay_count,
+        is_local_relay,
         current_transport: transport_manager.current_transport(),
     }
 }
