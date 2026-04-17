@@ -1477,3 +1477,175 @@ export interface MlsCommit {
   /** New epoch after commit */
   newEpoch: number;
 }
+
+// ============================================================================
+// TELEMETRY (unified observer surface — mirrors the UniFFI TelemetrySink)
+// ============================================================================
+
+/** MLS lifecycle verbosity tier for TelemetryConfig. */
+export type MlsVerbosity = 'off' | 'lifecycle' | 'diagnostic';
+
+/** Underlying connection status of a single transport. */
+export type TransportStatus =
+  | 'available'
+  | 'unavailable'
+  | 'connecting'
+  | 'disconnected'
+  | 'error';
+
+/** Local relay role reported by DeviceCapabilitySnapshot. */
+export type RelayRole = 'regular' | 'relay';
+
+/** Which kind of routing decision a RoutingDecision record describes. */
+export type RoutingPhase = 'scoreUpdated' | 'selected' | 'switched' | 'escalated';
+
+/** Flat reason space for routing decisions. */
+export type RoutingReasonCode =
+  | 'initialSelection'
+  | 'primarySelected'
+  | 'primarySuccess'
+  | 'fallbackSuccess'
+  | 'escalationApplied'
+  | 'currentUnavailable'
+  | 'retryThreshold'
+  | 'poorSignal'
+  | 'congestion'
+  | 'lowTtl'
+  | 'lowSuccessRate';
+
+/**
+ * Runtime configuration for the telemetry subsystem. All fields optional.
+ * Defaults (applied on the Rust side when a field is omitted):
+ *   scrubIds          = true
+ *   mlsVerbosity      = 'lifecycle'
+ *   metricsCadenceMs  = 5000   (pass `null` to disable periodic emission)
+ *   routingDiagnostic = false
+ */
+export interface TelemetryConfig {
+  scrubIds?: boolean;
+  mlsVerbosity?: MlsVerbosity;
+  metricsCadenceMs?: number | null;
+  routingDiagnostic?: boolean;
+}
+
+/**
+ * Per-transport metrics — same shape flows through getTransportMetrics (pull)
+ * and MetricsFrame.transports (push). The six legacy counters are always
+ * present; the remaining fields populate whenever a transport reports them.
+ */
+export interface TransportMetrics {
+  packetsSent: number;
+  packetsReceived: number;
+  bytesSent: number;
+  bytesReceived: number;
+  errorRate: number;
+  avgLatencyMs: number;
+  rssi?: number;
+  bandwidthBps?: number;
+  congestion?: number;
+  queueDepth?: number;
+  batteryLevel?: number;
+  isCharging?: boolean;
+  relayConnectionCount?: number;
+  isActiveRelay?: boolean;
+  deliveryRatio?: number;
+  dropRate?: number;
+  averageHopCount?: number;
+  energyCost?: number;
+}
+
+/** Per-transport entry inside a MetricsFrame. */
+export interface TransportMetricsEntry {
+  transport: TransportType;
+  metrics: TransportMetrics;
+}
+
+/** Retry-queue statistics frame entry. */
+export interface RetryQueueStatsFrame {
+  totalCount: number;
+  readyCount: number;
+  criticalPriorityCount: number;
+  highPriorityCount: number;
+  mediumPriorityCount: number;
+  lowPriorityCount: number;
+}
+
+/** Deduplicator statistics frame entry. */
+export interface DeduplicatorStatsFrame {
+  totalTracked: number;
+  recentTracked: number;
+  capacityUsedPercent: number;
+  falsePositiveRate?: number;
+  mode: string;
+}
+
+/** Periodic snapshot of protocol-wide counters and per-transport metrics. */
+export interface MetricsFrame {
+  timestampMs: number;
+  transports: TransportMetricsEntry[];
+  retryQueue: RetryQueueStatsFrame;
+  dedup: DeduplicatorStatsFrame;
+  ackPending: number;
+  neighborCount: number;
+  isLocalRelay: boolean;
+  currentTransport?: TransportType;
+}
+
+/** A single TransportStatus transition observed by the protocol engine. */
+export interface TransportStateTelemetryEvent {
+  timestampMs: number;
+  transport: TransportType;
+  previous: TransportStatus;
+  current: TransportStatus;
+}
+
+/** Per-transport score breakdown carried by RoutingDecision (diagnostic tier). */
+export interface RoutingScoreEntry {
+  transport: TransportType;
+  signal: number;
+  proximity: number;
+  bandwidth: number;
+  congestion: number;
+  energy: number;
+  reliability: number;
+  load: number;
+  total: number;
+}
+
+/** A structured routing decision (superset of legacy Event::Dors* events). */
+export interface RoutingDecision {
+  timestampMs: number;
+  phase: RoutingPhase;
+  from?: TransportType;
+  to?: TransportType;
+  winningScore?: number;
+  reasonCode?: RoutingReasonCode;
+  scores: RoutingScoreEntry[];
+}
+
+/** Snapshot of local device capability at the moment of emission. */
+export interface DeviceCapabilitySnapshot {
+  timestampMs: number;
+  batteryLevel?: number;
+  isCharging: boolean;
+  relayRole: RelayRole;
+  /** Bitmask: 0b001 battery, 0b010 charging, 0b100 relay-role. */
+  changedFields: number;
+}
+
+/**
+ * Discriminated union of every telemetry record the SDK emits. New variants
+ * land on `{ category: 'extension' }` at old client builds — regenerate
+ * bindings to pick up typed handling.
+ */
+export type TelemetryRecord =
+  | { category: 'protocol'; eventJson: string }
+  | { category: 'mls'; eventJson: string }
+  | { category: 'metricsFrame'; frame: MetricsFrame }
+  | { category: 'transportState'; event: TransportStateTelemetryEvent }
+  | { category: 'routingDecision'; decision: RoutingDecision }
+  | { category: 'deviceCapability'; snapshot: DeviceCapabilitySnapshot }
+  | { category: 'extension'; name: string; payloadJson: string };
+
+/** Listener type for onTelemetry. */
+export type TelemetryListener = (record: TelemetryRecord) => void;

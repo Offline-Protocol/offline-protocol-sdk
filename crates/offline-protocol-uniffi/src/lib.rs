@@ -7,10 +7,14 @@
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
 use offline_protocol::{
-    EstablishmentState as CoreEstablishmentState, Event as CoreEvent, NetworkVisualizer,
-    OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
+    DeviceCapabilitySnapshot as CoreDeviceSnapshot, EstablishmentState as CoreEstablishmentState,
+    Event as CoreEvent, MetricsFrame as CoreMetricsFrame, MlsVerbosity as CoreMlsVerbosity,
+    NetworkVisualizer, OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
     PendingQueueConfig as CorePendingQueueConfig, PresenceStatus as CorePresenceStatus,
-    ProtocolConfig as CoreConfig,
+    ProtocolConfig as CoreConfig, RoutingDecision as CoreRoutingDecision,
+    RoutingPhase as CoreRoutingPhase, RoutingReasonCode as CoreRoutingReasonCode,
+    TelemetryConfig as CoreTelemetryConfig, TelemetryRecord as CoreTelemetryRecord,
+    TelemetrySink as CoreTelemetrySink, TransportStateEvent as CoreTransportStateEvent,
 };
 use offline_protocol_core::{
     ContentType as CoreContentType, MediaMetadata as CoreMediaMetadata,
@@ -22,17 +26,19 @@ use offline_protocol_mls::{
     MlsStorage as CoreMlsStorage, StorageError as CoreStorageError,
     WelcomeMessage as CoreWelcomeMessage,
 };
+use offline_protocol_router::RelayRole as CoreRelayRole;
 use offline_protocol_router::{
     DorsConfig as CoreDorsConfig, GradientRoutingConfig as CoreGradientRoutingConfig, PathSelector,
 };
 use offline_protocol_transport::{
     ble::BleTransport, internet::InternetTransport, nostr::NostrTransport,
     reticulum::ReticulumTransport, wifi_direct::WifiDirectTransport, Transport,
+    TransportMetrics as CoreTransportMetrics, TransportStatus as CoreTransportStatus,
     TransportType as CoreTransportType,
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 // Include the UniFFI scaffolding
 uniffi::include_scaffolding!("offline_protocol");
@@ -401,8 +407,10 @@ pub struct PeerDevice {
     pub last_seen_ms: u64,
 }
 
-/// Transport metrics
-#[derive(Debug, Clone)]
+/// Transport metrics — legacy 6-field counters plus the ~12 optional fields
+/// from the richer Rust `TransportMetrics`. Same dict flows through the pull
+/// path (`get_transport_metrics`) and the push path (`MetricsFrame.transports`).
+#[derive(Debug, Clone, Default)]
 pub struct TransportMetrics {
     pub packets_sent: u32,
     pub packets_received: u32,
@@ -410,6 +418,510 @@ pub struct TransportMetrics {
     pub bytes_received: u32,
     pub error_rate: f32,
     pub avg_latency_ms: u32,
+    pub rssi: Option<i16>,
+    pub bandwidth_bps: Option<u64>,
+    pub congestion: Option<f32>,
+    pub queue_depth: Option<u32>,
+    pub battery_level: Option<u8>,
+    pub is_charging: Option<bool>,
+    pub relay_connection_count: Option<u8>,
+    pub is_active_relay: Option<bool>,
+    pub delivery_ratio: Option<f32>,
+    pub drop_rate: Option<f32>,
+    pub average_hop_count: Option<f32>,
+    pub energy_cost: Option<f32>,
+}
+
+// ============================================================================
+// TELEMETRY — FFI mirror types for `offline_protocol::telemetry::*`
+// ============================================================================
+
+/// MLS lifecycle verbosity tier, mirror of `offline_protocol::MlsVerbosity`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlsVerbosity {
+    Off,
+    Lifecycle,
+    Diagnostic,
+}
+
+/// Underlying connection status of a single transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportStatus {
+    Available,
+    Unavailable,
+    Connecting,
+    Disconnected,
+    Error,
+}
+
+/// Local relay role reported by `DeviceCapabilitySnapshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayRole {
+    Regular,
+    Relay,
+}
+
+/// Which kind of routing decision a `RoutingDecision` record describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingPhase {
+    ScoreUpdated,
+    Selected,
+    Switched,
+    Escalated,
+}
+
+/// Flat reason space for routing decisions (unifies the legacy
+/// `DorsReasonCode` / `DorsEscalationReasonCode` enums).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingReasonCode {
+    InitialSelection,
+    PrimarySelected,
+    PrimarySuccess,
+    FallbackSuccess,
+    EscalationApplied,
+    CurrentUnavailable,
+    RetryThreshold,
+    PoorSignal,
+    Congestion,
+    LowTtl,
+    LowSuccessRate,
+}
+
+/// Per-transport entry inside a `MetricsFrame`.
+#[derive(Debug, Clone)]
+pub struct TransportMetricsEntry {
+    pub transport: TransportType,
+    pub metrics: TransportMetrics,
+}
+
+/// Retry-queue statistics, mirror of `offline_protocol_reliability::RetryQueueStats`.
+#[derive(Debug, Clone, Default)]
+pub struct RetryQueueStats {
+    pub total_count: u64,
+    pub ready_count: u64,
+    pub critical_priority_count: u64,
+    pub high_priority_count: u64,
+    pub medium_priority_count: u64,
+    pub low_priority_count: u64,
+}
+
+/// Deduplicator statistics, mirror of `offline_protocol_reliability::DeduplicatorStats`.
+///
+/// UDL-level name is `DeduplicatorStatsFrame` to avoid colliding with the
+/// `DedupStats` dict already exposed by the legacy `get_dedup_stats` pull
+/// API (which has a different field shape).
+#[derive(Debug, Clone)]
+pub struct DeduplicatorStatsFrame {
+    pub total_tracked: u64,
+    pub recent_tracked: u64,
+    pub capacity_used_percent: u8,
+    pub false_positive_rate: Option<f64>,
+    pub mode: String,
+}
+
+/// Periodic snapshot of protocol-wide counters and per-transport metrics.
+#[derive(Debug, Clone)]
+pub struct MetricsFrame {
+    pub timestamp_ms: i64,
+    pub transports: Vec<TransportMetricsEntry>,
+    pub retry_queue: RetryQueueStats,
+    pub dedup: DeduplicatorStatsFrame,
+    pub ack_pending: u64,
+    pub neighbor_count: u64,
+    pub is_local_relay: bool,
+    pub current_transport: Option<TransportType>,
+}
+
+/// A single `TransportStatus` transition observed by the protocol engine.
+#[derive(Debug, Clone)]
+pub struct TransportStateEvent {
+    pub timestamp_ms: i64,
+    pub transport: TransportType,
+    pub previous: TransportStatus,
+    pub current: TransportStatus,
+}
+
+/// Per-transport score breakdown carried by `RoutingDecision` at the
+/// diagnostic verbosity tier.
+#[derive(Debug, Clone)]
+pub struct RoutingScoreEntry {
+    pub transport: TransportType,
+    pub signal: f32,
+    pub proximity: f32,
+    pub bandwidth: f32,
+    pub congestion: f32,
+    pub energy: f32,
+    pub reliability: f32,
+    pub load: f32,
+    pub total: f32,
+}
+
+/// A structured routing decision (superset of legacy `Event::Dors*` events).
+#[derive(Debug, Clone)]
+pub struct RoutingDecision {
+    pub timestamp_ms: i64,
+    pub phase: RoutingPhase,
+    pub from: Option<TransportType>,
+    pub to: Option<TransportType>,
+    pub winning_score: Option<f32>,
+    pub reason_code: Option<RoutingReasonCode>,
+    pub scores: Vec<RoutingScoreEntry>,
+}
+
+/// Snapshot of local device capability at the moment of emission.
+#[derive(Debug, Clone)]
+pub struct DeviceCapabilitySnapshot {
+    pub timestamp_ms: i64,
+    pub battery_level: Option<u8>,
+    pub is_charging: bool,
+    pub relay_role: RelayRole,
+    pub changed_fields: u8,
+}
+
+/// Runtime configuration for the telemetry subsystem. All fields are
+/// optional on the foreign side; the Rust adapter fills in the
+/// privacy-preserving defaults from `TelemetryConfig::default()` when a
+/// field is `None`.
+#[derive(Debug, Clone, Default)]
+pub struct TelemetryConfig {
+    pub scrub_ids: Option<bool>,
+    pub mls_verbosity: Option<MlsVerbosity>,
+    pub metrics_cadence_ms: Option<u64>,
+    pub routing_diagnostic: Option<bool>,
+}
+
+// ---- Conversions: core telemetry types → FFI dicts ----
+
+impl From<MlsVerbosity> for CoreMlsVerbosity {
+    fn from(v: MlsVerbosity) -> Self {
+        match v {
+            MlsVerbosity::Off => CoreMlsVerbosity::Off,
+            MlsVerbosity::Lifecycle => CoreMlsVerbosity::Lifecycle,
+            MlsVerbosity::Diagnostic => CoreMlsVerbosity::Diagnostic,
+        }
+    }
+}
+
+impl From<CoreTransportType> for TransportType {
+    fn from(t: CoreTransportType) -> Self {
+        match t {
+            CoreTransportType::Internet => TransportType::Internet,
+            CoreTransportType::BLE => TransportType::Ble,
+            CoreTransportType::WiFiDirect => TransportType::WiFiDirect,
+            CoreTransportType::Reticulum => TransportType::Reticulum,
+            CoreTransportType::Nostr => TransportType::Nostr,
+        }
+    }
+}
+
+impl From<TransportType> for CoreTransportType {
+    fn from(t: TransportType) -> Self {
+        match t {
+            TransportType::Internet => CoreTransportType::Internet,
+            TransportType::Ble => CoreTransportType::BLE,
+            TransportType::WiFiDirect => CoreTransportType::WiFiDirect,
+            TransportType::Reticulum => CoreTransportType::Reticulum,
+            TransportType::Nostr => CoreTransportType::Nostr,
+        }
+    }
+}
+
+impl From<CoreTransportStatus> for TransportStatus {
+    fn from(s: CoreTransportStatus) -> Self {
+        match s {
+            CoreTransportStatus::Available => TransportStatus::Available,
+            CoreTransportStatus::Unavailable => TransportStatus::Unavailable,
+            CoreTransportStatus::Connecting => TransportStatus::Connecting,
+            CoreTransportStatus::Disconnected => TransportStatus::Disconnected,
+            CoreTransportStatus::Error => TransportStatus::Error,
+        }
+    }
+}
+
+impl From<CoreRelayRole> for RelayRole {
+    fn from(r: CoreRelayRole) -> Self {
+        match r {
+            CoreRelayRole::Regular => RelayRole::Regular,
+            CoreRelayRole::Relay => RelayRole::Relay,
+        }
+    }
+}
+
+impl From<CoreRoutingPhase> for RoutingPhase {
+    fn from(p: CoreRoutingPhase) -> Self {
+        match p {
+            CoreRoutingPhase::ScoreUpdated => RoutingPhase::ScoreUpdated,
+            CoreRoutingPhase::Selected => RoutingPhase::Selected,
+            CoreRoutingPhase::Switched => RoutingPhase::Switched,
+            CoreRoutingPhase::Escalated => RoutingPhase::Escalated,
+            // `RoutingPhase` is `#[non_exhaustive]` on the core side; fall
+            // back to `ScoreUpdated` for forward-compat. The on_extension
+            // path is where entirely new record variants land; here we are
+            // just widening an existing field.
+            _ => RoutingPhase::ScoreUpdated,
+        }
+    }
+}
+
+impl From<CoreRoutingReasonCode> for RoutingReasonCode {
+    fn from(r: CoreRoutingReasonCode) -> Self {
+        match r {
+            CoreRoutingReasonCode::InitialSelection => RoutingReasonCode::InitialSelection,
+            CoreRoutingReasonCode::PrimarySelected => RoutingReasonCode::PrimarySelected,
+            CoreRoutingReasonCode::PrimarySuccess => RoutingReasonCode::PrimarySuccess,
+            CoreRoutingReasonCode::FallbackSuccess => RoutingReasonCode::FallbackSuccess,
+            CoreRoutingReasonCode::EscalationApplied => RoutingReasonCode::EscalationApplied,
+            CoreRoutingReasonCode::CurrentUnavailable => RoutingReasonCode::CurrentUnavailable,
+            CoreRoutingReasonCode::RetryThreshold => RoutingReasonCode::RetryThreshold,
+            CoreRoutingReasonCode::PoorSignal => RoutingReasonCode::PoorSignal,
+            CoreRoutingReasonCode::Congestion => RoutingReasonCode::Congestion,
+            CoreRoutingReasonCode::LowTtl => RoutingReasonCode::LowTtl,
+            CoreRoutingReasonCode::LowSuccessRate => RoutingReasonCode::LowSuccessRate,
+            _ => RoutingReasonCode::InitialSelection,
+        }
+    }
+}
+
+impl From<&CoreTransportMetrics> for TransportMetrics {
+    fn from(m: &CoreTransportMetrics) -> Self {
+        // Map legacy fields. The Rust `TransportMetrics` struct does not
+        // track packets_sent/received or bytes_sent/received — report 0 for
+        // back-compat. `error_rate` and `avg_latency_ms` are derived from
+        // the existing Rust fields so the pull shape carries real data.
+        let avg_latency_ms = m.latency_ms.unwrap_or(0);
+        let error_rate = m.effective_drop_ratio().unwrap_or(0.0);
+        TransportMetrics {
+            packets_sent: m.success_count.saturating_add(m.failure_count),
+            packets_received: 0,
+            bytes_sent: 0,
+            bytes_received: 0,
+            error_rate,
+            avg_latency_ms,
+            rssi: m.rssi,
+            bandwidth_bps: m.bandwidth_bps,
+            congestion: Some(m.congestion),
+            queue_depth: Some(m.queue_depth as u32),
+            battery_level: m.battery_level,
+            is_charging: Some(m.is_charging),
+            relay_connection_count: Some(m.relay_connection_count),
+            is_active_relay: Some(m.is_active_relay),
+            delivery_ratio: m.delivery_ratio,
+            drop_rate: m.drop_rate,
+            average_hop_count: m.average_hop_count,
+            energy_cost: m.energy_cost,
+        }
+    }
+}
+
+impl From<&CoreMetricsFrame> for MetricsFrame {
+    fn from(f: &CoreMetricsFrame) -> Self {
+        let transports = f
+            .transports
+            .iter()
+            .map(|(t, m)| TransportMetricsEntry {
+                transport: (*t).into(),
+                metrics: TransportMetrics::from(m),
+            })
+            .collect();
+        MetricsFrame {
+            timestamp_ms: f.timestamp_ms,
+            transports,
+            retry_queue: RetryQueueStats {
+                total_count: f.retry_queue.total_count as u64,
+                ready_count: f.retry_queue.ready_count as u64,
+                critical_priority_count: f.retry_queue.critical_priority_count as u64,
+                high_priority_count: f.retry_queue.high_priority_count as u64,
+                medium_priority_count: f.retry_queue.medium_priority_count as u64,
+                low_priority_count: f.retry_queue.low_priority_count as u64,
+            },
+            dedup: DeduplicatorStatsFrame {
+                total_tracked: f.dedup.total_tracked as u64,
+                recent_tracked: f.dedup.recent_tracked as u64,
+                capacity_used_percent: f.dedup.capacity_used_percent,
+                false_positive_rate: f.dedup.false_positive_rate,
+                mode: format!("{:?}", f.dedup.mode),
+            },
+            ack_pending: f.ack_pending as u64,
+            neighbor_count: f.neighbor_count as u64,
+            is_local_relay: f.is_local_relay,
+            current_transport: f.current_transport.map(Into::into),
+        }
+    }
+}
+
+impl From<&CoreTransportStateEvent> for TransportStateEvent {
+    fn from(e: &CoreTransportStateEvent) -> Self {
+        TransportStateEvent {
+            timestamp_ms: e.timestamp_ms,
+            transport: e.transport.into(),
+            previous: e.previous.into(),
+            current: e.current.into(),
+        }
+    }
+}
+
+impl From<&CoreRoutingDecision> for RoutingDecision {
+    fn from(d: &CoreRoutingDecision) -> Self {
+        let scores = d
+            .scores
+            .iter()
+            .map(|(t, s)| RoutingScoreEntry {
+                transport: (*t).into(),
+                signal: s.signal,
+                proximity: s.proximity,
+                bandwidth: s.bandwidth,
+                congestion: s.congestion,
+                energy: s.energy,
+                reliability: s.reliability,
+                load: s.load,
+                total: s.total,
+            })
+            .collect();
+        RoutingDecision {
+            timestamp_ms: d.timestamp_ms,
+            phase: d.phase.into(),
+            from: d.from.map(Into::into),
+            to: d.to.map(Into::into),
+            winning_score: d.winning_score,
+            reason_code: d.reason_code.map(Into::into),
+            scores,
+        }
+    }
+}
+
+impl From<&CoreDeviceSnapshot> for DeviceCapabilitySnapshot {
+    fn from(s: &CoreDeviceSnapshot) -> Self {
+        DeviceCapabilitySnapshot {
+            timestamp_ms: s.timestamp_ms,
+            battery_level: s.battery_level,
+            is_charging: s.is_charging,
+            relay_role: s.relay_role.into(),
+            changed_fields: s.changed_fields,
+        }
+    }
+}
+
+fn telemetry_config_into_core(cfg: TelemetryConfig) -> CoreTelemetryConfig {
+    let mut core = CoreTelemetryConfig::default();
+    if let Some(v) = cfg.scrub_ids {
+        core = core.with_scrub_ids(v);
+    }
+    if let Some(v) = cfg.mls_verbosity {
+        core = core.with_mls_verbosity(v.into());
+    }
+    // The foreign side passes `metrics_cadence_ms = None` to mean "accept
+    // the default". Disabling periodic emission is a distinct wire value we
+    // cannot currently express through the single `Option<u64>` field — if
+    // that becomes needed, extend the UDL dict with a dedicated flag. For
+    // now, any explicit value overrides the default; absence leaves it.
+    if let Some(ms) = cfg.metrics_cadence_ms {
+        core = core.with_metrics_cadence(Some(Duration::from_millis(ms)));
+    }
+    if let Some(v) = cfg.routing_diagnostic {
+        core = core.with_routing_diagnostic(v);
+    }
+    core
+}
+
+/// Bounded capacity for the telemetry poll queue. Sized for bursty emission
+/// (per-send routing decisions + 5 s metrics snapshots + event stream);
+/// overflow drops oldest.
+const TELEMETRY_POLL_QUEUE_CAP: usize = 1024;
+
+/// Adapts the foreign `TelemetrySink` trait to the core `TelemetrySink`
+/// trait, and incidentally populates a bounded poll queue so apps that
+/// prefer polling can pull records too.
+struct TelemetrySinkAdapter {
+    callback: Arc<dyn TelemetrySink>,
+    queue: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl TelemetrySinkAdapter {
+    fn enqueue(&self, envelope: String) {
+        let mut q = recover_mutex(&self.queue, "telemetry_queue");
+        if q.len() >= TELEMETRY_POLL_QUEUE_CAP {
+            q.pop_front();
+        }
+        q.push_back(envelope);
+    }
+
+    fn envelope(category: &str, payload: serde_json::Value) -> String {
+        // Best-effort — an empty object is a valid degenerate payload.
+        serde_json::to_string(&serde_json::json!({
+            "category": category,
+            "payload": payload,
+        }))
+        .unwrap_or_else(|_| format!("{{\"category\":\"{}\",\"payload\":{{}}}}", category))
+    }
+}
+
+impl CoreTelemetrySink for TelemetrySinkAdapter {
+    fn emit(&self, record: &CoreTelemetryRecord) {
+        match record {
+            CoreTelemetryRecord::Protocol(ev) => {
+                if let Ok(json) = ev.to_json() {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+                    self.enqueue(Self::envelope("protocol", parsed));
+                    self.callback.on_protocol_event(json);
+                }
+            }
+            CoreTelemetryRecord::Mls(ev) => {
+                if let Ok(json) = serde_json::to_string(ev) {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+                    self.enqueue(Self::envelope("mls", parsed));
+                    self.callback.on_mls_event(json);
+                }
+            }
+            CoreTelemetryRecord::MetricsSnapshot(frame) => {
+                let dto = MetricsFrame::from(frame.as_ref());
+                self.enqueue(Self::envelope(
+                    "metricsFrame",
+                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                ));
+                self.callback.on_metrics_frame(dto);
+            }
+            CoreTelemetryRecord::TransportState(event) => {
+                let dto = TransportStateEvent::from(event);
+                self.enqueue(Self::envelope(
+                    "transportState",
+                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                ));
+                self.callback.on_transport_state(dto);
+            }
+            CoreTelemetryRecord::Routing(decision) => {
+                let dto = RoutingDecision::from(decision.as_ref());
+                self.enqueue(Self::envelope(
+                    "routingDecision",
+                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                ));
+                self.callback.on_routing_decision(dto);
+            }
+            CoreTelemetryRecord::Device(snapshot) => {
+                let dto = DeviceCapabilitySnapshot::from(snapshot);
+                self.enqueue(Self::envelope(
+                    "deviceCapability",
+                    serde_json::Value::String(dto.timestamp_ms.to_string()),
+                ));
+                self.callback.on_device_capability(dto);
+            }
+            // Forward-compat: any variant added to CoreTelemetryRecord after
+            // this code was written lands here with its stable name.
+            other => {
+                let name = other.name().to_string();
+                // Inner payload is not `Serialize` (record-level docstring);
+                // surface `{}` today — later PRs can serialize the specific
+                // inner type as new variants land.
+                let payload_json = "{}".to_string();
+                self.enqueue(Self::envelope(
+                    "extension",
+                    serde_json::json!({"name": name, "payload": {}}),
+                ));
+                self.callback.on_extension(name, payload_json);
+            }
+        }
+    }
 }
 
 /// Content type for messages.
@@ -887,6 +1399,20 @@ pub trait EventCallback: Send + Sync {
     fn on_event(&self, event_json: String);
 }
 
+/// Unified telemetry sink — foreign counterpart of
+/// `offline_protocol::TelemetrySink`. Dispatches are synchronous; see the
+/// UDL-level comment on `callback interface TelemetrySink` for the thread
+/// and locking contract.
+pub trait TelemetrySink: Send + Sync {
+    fn on_protocol_event(&self, event_json: String);
+    fn on_mls_event(&self, event_json: String);
+    fn on_metrics_frame(&self, frame: MetricsFrame);
+    fn on_transport_state(&self, event: TransportStateEvent);
+    fn on_routing_decision(&self, decision: RoutingDecision);
+    fn on_device_capability(&self, snapshot: DeviceCapabilitySnapshot);
+    fn on_extension(&self, name: String, payload_json: String);
+}
+
 /// BLE transport callback trait — notifies platform when outgoing fragments are available.
 /// Replaces timer-based polling with event-driven sending.
 pub trait BleTransportCallback: Send + Sync {
@@ -1011,6 +1537,7 @@ pub struct OfflineProtocol {
     state: RwLock<ProtocolState>,
     event_callback: Arc<RwLock<Option<Arc<dyn EventCallback>>>>,
     event_queue: Arc<Mutex<VecDeque<String>>>,
+    telemetry_queue: Arc<Mutex<VecDeque<String>>>,
     ble_state: Mutex<BleState>,
     internet_state: Mutex<InternetState>,
     wifi_direct_state: Mutex<WifiDirectState>,
@@ -1116,6 +1643,7 @@ impl OfflineProtocol {
             state: RwLock::new(ProtocolState::Stopped),
             event_callback,
             event_queue,
+            telemetry_queue: Arc::new(Mutex::new(VecDeque::new())),
             ble_state: Mutex::new(BleState {
                 fragments: VecDeque::new(),
                 peer_count: 0,
@@ -1453,6 +1981,33 @@ impl OfflineProtocol {
             avg_latency_ms: 0,
         };
         self.emit_event(event);
+    }
+
+    /// Installs a unified telemetry sink. Replaces any previously installed
+    /// sink; a single adapter fans every `TelemetryRecord` out to the
+    /// foreign callback and, concurrently, into the bounded poll queue
+    /// backing `poll_telemetry_frame`.
+    pub fn install_telemetry_sink(
+        &self,
+        sink: Box<dyn TelemetrySink>,
+        config: TelemetryConfig,
+    ) -> Result<(), ProtocolError> {
+        let adapter = Arc::new(TelemetrySinkAdapter {
+            callback: Arc::from(sink),
+            queue: self.telemetry_queue.clone(),
+        });
+        let core_cfg = telemetry_config_into_core(config);
+        let mut protocol = self.lock_inner()?;
+        protocol
+            .install_telemetry_sink(adapter as Arc<dyn CoreTelemetrySink>, core_cfg)
+            .map_err(ProtocolError::from)
+    }
+
+    /// Polls the next buffered telemetry record as a JSON envelope of shape
+    /// `{"category": "<category>", "payload": <variant-specific JSON>}`.
+    /// Returns `None` when empty.
+    pub fn poll_telemetry_frame(&self) -> Option<String> {
+        recover_mutex(&self.telemetry_queue, "telemetry_queue").pop_front()
     }
 
     // ========================================================================
@@ -3235,22 +3790,18 @@ impl OfflineProtocol {
     // TRANSPORT METRICS
     // ========================================================================
 
-    /// Gets detailed metrics for a specific transport
-    pub fn get_transport_metrics(
-        &self,
-        _transport_type: TransportType,
-    ) -> Option<TransportMetrics> {
-        // Transport metrics are tracked internally by the transport implementations
-        // For now, return mock data based on transport type
-        // In production, this would query the actual transport
-        Some(TransportMetrics {
-            packets_sent: 0,
-            packets_received: 0,
-            bytes_sent: 0,
-            bytes_received: 0,
-            error_rate: 0.0,
-            avg_latency_ms: 0,
-        })
+    /// Gets detailed metrics for a specific transport. Pulls directly from
+    /// the underlying `Transport::metrics()`; the same `TransportMetrics`
+    /// shape also flows through the push path inside `MetricsFrame`.
+    pub fn get_transport_metrics(&self, transport_type: TransportType) -> Option<TransportMetrics> {
+        let protocol = self.lock_inner().ok()?;
+        let core_type: CoreTransportType = transport_type.into();
+        let transport_arc = protocol.transport_manager().get_transport(core_type)?;
+        let metrics = {
+            let transport = recover_mutex(&transport_arc, "transport");
+            transport.metrics()
+        };
+        Some(TransportMetrics::from(&metrics))
     }
 
     // ========================================================================
@@ -5111,5 +5662,148 @@ mod tests {
         let result = protocol.reticulum_message_received("some-sender".to_string(), vec![0u8; 32]);
         // The data is not valid message format, but it must not panic.
         let _ = result;
+    }
+
+    // ---- Telemetry sink adapter end-to-end wiring (step 7) ----
+
+    #[derive(Default)]
+    struct TestTelemetrySink {
+        protocol_events: Mutex<Vec<String>>,
+        metrics_frames: Mutex<Vec<MetricsFrame>>,
+        transport_states: Mutex<Vec<TransportStateEvent>>,
+        routing_decisions: Mutex<Vec<RoutingDecision>>,
+        device_snapshots: Mutex<Vec<DeviceCapabilitySnapshot>>,
+        extensions: Mutex<Vec<(String, String)>>,
+    }
+
+    impl TelemetrySink for TestTelemetrySink {
+        fn on_protocol_event(&self, event_json: String) {
+            self.protocol_events.lock().unwrap().push(event_json);
+        }
+        fn on_mls_event(&self, _event_json: String) {}
+        fn on_metrics_frame(&self, frame: MetricsFrame) {
+            self.metrics_frames.lock().unwrap().push(frame);
+        }
+        fn on_transport_state(&self, event: TransportStateEvent) {
+            self.transport_states.lock().unwrap().push(event);
+        }
+        fn on_routing_decision(&self, decision: RoutingDecision) {
+            self.routing_decisions.lock().unwrap().push(decision);
+        }
+        fn on_device_capability(&self, snapshot: DeviceCapabilitySnapshot) {
+            self.device_snapshots.lock().unwrap().push(snapshot);
+        }
+        fn on_extension(&self, name: String, payload_json: String) {
+            self.extensions.lock().unwrap().push((name, payload_json));
+        }
+    }
+
+    /// Exercise the adapter directly: build a `CoreTelemetryRecord`, feed it
+    /// through the adapter's `emit`, and assert both the typed foreign
+    /// callback fires *and* the poll queue captures a matching envelope.
+    /// This is a unit test of the adapter; end-to-end coverage (that the
+    /// core protocol's event emit path reaches the adapter) lives in the
+    /// `offline-protocol` crate's sink tests.
+    fn install_sink_via_adapter(
+        protocol: &OfflineProtocol,
+        sink: Arc<TestTelemetrySink>,
+    ) -> Arc<TelemetrySinkAdapter> {
+        struct Forward(Arc<TestTelemetrySink>);
+        impl TelemetrySink for Forward {
+            fn on_protocol_event(&self, j: String) {
+                self.0.on_protocol_event(j)
+            }
+            fn on_mls_event(&self, j: String) {
+                self.0.on_mls_event(j)
+            }
+            fn on_metrics_frame(&self, f: MetricsFrame) {
+                self.0.on_metrics_frame(f)
+            }
+            fn on_transport_state(&self, e: TransportStateEvent) {
+                self.0.on_transport_state(e)
+            }
+            fn on_routing_decision(&self, d: RoutingDecision) {
+                self.0.on_routing_decision(d)
+            }
+            fn on_device_capability(&self, s: DeviceCapabilitySnapshot) {
+                self.0.on_device_capability(s)
+            }
+            fn on_extension(&self, n: String, p: String) {
+                self.0.on_extension(n, p)
+            }
+        }
+        Arc::new(TelemetrySinkAdapter {
+            callback: Arc::new(Forward(sink)),
+            queue: protocol.telemetry_queue.clone(),
+        })
+    }
+
+    #[test]
+    fn adapter_forwards_protocol_event_to_typed_method_and_queue() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        let adapter = install_sink_via_adapter(&protocol, sink.clone());
+
+        let record = CoreTelemetryRecord::Protocol(Box::new(CoreEvent::NetworkMetrics {
+            neighbor_count: 1,
+            relay_count: 0,
+            delivery_ratio: 0.5,
+            avg_latency_ms: 42,
+        }));
+        adapter.emit(&record);
+
+        let events = sink.protocol_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].contains("\"type\":\"network_metrics\""),
+            "got {:?}",
+            events[0]
+        );
+
+        let envelope = protocol
+            .poll_telemetry_frame()
+            .expect("poll should return the queued envelope");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(parsed["category"], "protocol");
+        assert_eq!(parsed["payload"]["type"], "network_metrics");
+    }
+
+    #[test]
+    fn install_telemetry_sink_with_default_config_succeeds() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        let sink = Arc::new(TestTelemetrySink::default());
+        struct Forward(Arc<TestTelemetrySink>);
+        impl TelemetrySink for Forward {
+            fn on_protocol_event(&self, _: String) {}
+            fn on_mls_event(&self, _: String) {}
+            fn on_metrics_frame(&self, _: MetricsFrame) {}
+            fn on_transport_state(&self, _: TransportStateEvent) {}
+            fn on_routing_decision(&self, _: RoutingDecision) {}
+            fn on_device_capability(&self, _: DeviceCapabilitySnapshot) {}
+            fn on_extension(&self, _: String, _: String) {}
+        }
+        protocol
+            .install_telemetry_sink(Box::new(Forward(sink)), TelemetryConfig::default())
+            .expect("install must succeed with defaults");
+        // A fresh install enqueues a bootstrap metrics snapshot on the
+        // next tick — we do not call process() here, so the queue is empty.
+        assert!(protocol.poll_telemetry_frame().is_none());
+    }
+
+    #[test]
+    fn get_transport_metrics_returns_real_data_not_mock() {
+        let protocol = OfflineProtocol::new(create_ble_only_config()).unwrap();
+        protocol.start().unwrap();
+        // BLE is enabled — pull metrics must succeed and return a
+        // real-data shape (is_charging is non-optional on the Rust side and
+        // the BLE transport always reports a concrete boolean).
+        let metrics = protocol
+            .get_transport_metrics(TransportType::Ble)
+            .expect("BLE transport is enabled");
+        assert!(
+            metrics.is_charging.is_some(),
+            "is_charging should be populated from Rust TransportMetrics, got {:?}",
+            metrics
+        );
     }
 }

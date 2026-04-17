@@ -489,6 +489,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
     typealias FfiType = Float
     typealias SwiftType = Float
@@ -499,6 +515,22 @@ fileprivate struct FfiConverterFloat: FfiConverterPrimitive {
 
     public static func write(_ value: Float, into buf: inout [UInt8]) {
         writeFloat(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterDouble: FfiConverterPrimitive {
+    typealias FfiType = Double
+    typealias SwiftType = Double
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Double {
+        return try lift(readDouble(&buf))
+    }
+
+    public static func write(_ value: Double, into buf: inout [UInt8]) {
+        writeDouble(&buf, lower(value))
     }
 }
 
@@ -850,6 +882,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func initializeMls(storage: MlsStorageProvider) throws 
     
+    func installTelemetrySink(sink: TelemetrySink, config: TelemetryConfig) throws 
+    
     func internetConfirmSent(messageId: String) 
     
     func internetGetNextMessage()  -> InternetMessage?
@@ -927,6 +961,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func pause() throws 
     
     func pollEvent()  -> String?
+    
+    func pollTelemetryFrame()  -> String?
     
     func process() throws 
     
@@ -1541,6 +1577,15 @@ open func initializeMls(storage: MlsStorageProvider)throws   {try rustCallWithEr
 }
 }
     
+open func installTelemetrySink(sink: TelemetrySink, config: TelemetryConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink(
+            self.uniffiCloneHandle(),
+        FfiConverterCallbackInterfaceTelemetrySink_lower(sink),
+        FfiConverterTypeTelemetryConfig_lower(config),$0
+    )
+}
+}
+    
 open func internetConfirmSent(messageId: String)  {try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(
             self.uniffiCloneHandle(),
@@ -1868,6 +1913,14 @@ open func pause()throws   {try rustCallWithError(FfiConverterTypeProtocolError_l
 open func pollEvent() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func pollTelemetryFrame() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_telemetry_frame(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -2607,6 +2660,134 @@ public func FfiConverterTypeDedupStats_lower(_ value: DedupStats) -> RustBuffer 
 }
 
 
+public struct DeduplicatorStatsFrame: Equatable, Hashable {
+    public var totalTracked: UInt64
+    public var recentTracked: UInt64
+    public var capacityUsedPercent: UInt8
+    public var falsePositiveRate: Double?
+    public var mode: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(totalTracked: UInt64, recentTracked: UInt64, capacityUsedPercent: UInt8, falsePositiveRate: Double?, mode: String) {
+        self.totalTracked = totalTracked
+        self.recentTracked = recentTracked
+        self.capacityUsedPercent = capacityUsedPercent
+        self.falsePositiveRate = falsePositiveRate
+        self.mode = mode
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension DeduplicatorStatsFrame: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeduplicatorStatsFrame: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeduplicatorStatsFrame {
+        return
+            try DeduplicatorStatsFrame(
+                totalTracked: FfiConverterUInt64.read(from: &buf), 
+                recentTracked: FfiConverterUInt64.read(from: &buf), 
+                capacityUsedPercent: FfiConverterUInt8.read(from: &buf), 
+                falsePositiveRate: FfiConverterOptionDouble.read(from: &buf), 
+                mode: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeduplicatorStatsFrame, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.totalTracked, into: &buf)
+        FfiConverterUInt64.write(value.recentTracked, into: &buf)
+        FfiConverterUInt8.write(value.capacityUsedPercent, into: &buf)
+        FfiConverterOptionDouble.write(value.falsePositiveRate, into: &buf)
+        FfiConverterString.write(value.mode, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeduplicatorStatsFrame_lift(_ buf: RustBuffer) throws -> DeduplicatorStatsFrame {
+    return try FfiConverterTypeDeduplicatorStatsFrame.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeduplicatorStatsFrame_lower(_ value: DeduplicatorStatsFrame) -> RustBuffer {
+    return FfiConverterTypeDeduplicatorStatsFrame.lower(value)
+}
+
+
+public struct DeviceCapabilitySnapshot: Equatable, Hashable {
+    public var timestampMs: Int64
+    public var batteryLevel: UInt8?
+    public var isCharging: Bool
+    public var relayRole: RelayRole
+    public var changedFields: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(timestampMs: Int64, batteryLevel: UInt8?, isCharging: Bool, relayRole: RelayRole, changedFields: UInt8) {
+        self.timestampMs = timestampMs
+        self.batteryLevel = batteryLevel
+        self.isCharging = isCharging
+        self.relayRole = relayRole
+        self.changedFields = changedFields
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension DeviceCapabilitySnapshot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceCapabilitySnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceCapabilitySnapshot {
+        return
+            try DeviceCapabilitySnapshot(
+                timestampMs: FfiConverterInt64.read(from: &buf), 
+                batteryLevel: FfiConverterOptionUInt8.read(from: &buf), 
+                isCharging: FfiConverterBool.read(from: &buf), 
+                relayRole: FfiConverterTypeRelayRole.read(from: &buf), 
+                changedFields: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeviceCapabilitySnapshot, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.timestampMs, into: &buf)
+        FfiConverterOptionUInt8.write(value.batteryLevel, into: &buf)
+        FfiConverterBool.write(value.isCharging, into: &buf)
+        FfiConverterTypeRelayRole.write(value.relayRole, into: &buf)
+        FfiConverterUInt8.write(value.changedFields, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceCapabilitySnapshot_lift(_ buf: RustBuffer) throws -> DeviceCapabilitySnapshot {
+    return try FfiConverterTypeDeviceCapabilitySnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceCapabilitySnapshot_lower(_ value: DeviceCapabilitySnapshot) -> RustBuffer {
+    return FfiConverterTypeDeviceCapabilitySnapshot.lower(value)
+}
+
+
 public struct DorsConfig: Equatable, Hashable {
     public var preferOnline: Bool
     public var switchHysteresis: Float
@@ -3084,6 +3265,82 @@ public func FfiConverterTypeMessageStats_lift(_ buf: RustBuffer) throws -> Messa
 #endif
 public func FfiConverterTypeMessageStats_lower(_ value: MessageStats) -> RustBuffer {
     return FfiConverterTypeMessageStats.lower(value)
+}
+
+
+public struct MetricsFrame: Equatable, Hashable {
+    public var timestampMs: Int64
+    public var transports: [TransportMetricsEntry]
+    public var retryQueue: RetryQueueStats
+    public var dedup: DeduplicatorStatsFrame
+    public var ackPending: UInt64
+    public var neighborCount: UInt64
+    public var isLocalRelay: Bool
+    public var currentTransport: TransportType?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(timestampMs: Int64, transports: [TransportMetricsEntry], retryQueue: RetryQueueStats, dedup: DeduplicatorStatsFrame, ackPending: UInt64, neighborCount: UInt64, isLocalRelay: Bool, currentTransport: TransportType?) {
+        self.timestampMs = timestampMs
+        self.transports = transports
+        self.retryQueue = retryQueue
+        self.dedup = dedup
+        self.ackPending = ackPending
+        self.neighborCount = neighborCount
+        self.isLocalRelay = isLocalRelay
+        self.currentTransport = currentTransport
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension MetricsFrame: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMetricsFrame: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MetricsFrame {
+        return
+            try MetricsFrame(
+                timestampMs: FfiConverterInt64.read(from: &buf), 
+                transports: FfiConverterSequenceTypeTransportMetricsEntry.read(from: &buf), 
+                retryQueue: FfiConverterTypeRetryQueueStats.read(from: &buf), 
+                dedup: FfiConverterTypeDeduplicatorStatsFrame.read(from: &buf), 
+                ackPending: FfiConverterUInt64.read(from: &buf), 
+                neighborCount: FfiConverterUInt64.read(from: &buf), 
+                isLocalRelay: FfiConverterBool.read(from: &buf), 
+                currentTransport: FfiConverterOptionTypeTransportType.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MetricsFrame, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.timestampMs, into: &buf)
+        FfiConverterSequenceTypeTransportMetricsEntry.write(value.transports, into: &buf)
+        FfiConverterTypeRetryQueueStats.write(value.retryQueue, into: &buf)
+        FfiConverterTypeDeduplicatorStatsFrame.write(value.dedup, into: &buf)
+        FfiConverterUInt64.write(value.ackPending, into: &buf)
+        FfiConverterUInt64.write(value.neighborCount, into: &buf)
+        FfiConverterBool.write(value.isLocalRelay, into: &buf)
+        FfiConverterOptionTypeTransportType.write(value.currentTransport, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMetricsFrame_lift(_ buf: RustBuffer) throws -> MetricsFrame {
+    return try FfiConverterTypeMetricsFrame.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMetricsFrame_lower(_ value: MetricsFrame) -> RustBuffer {
+    return FfiConverterTypeMetricsFrame.lower(value)
 }
 
 
@@ -4251,6 +4508,74 @@ public func FfiConverterTypeRetryConfig_lower(_ value: RetryConfig) -> RustBuffe
 }
 
 
+public struct RetryQueueStats: Equatable, Hashable {
+    public var totalCount: UInt64
+    public var readyCount: UInt64
+    public var criticalPriorityCount: UInt64
+    public var highPriorityCount: UInt64
+    public var mediumPriorityCount: UInt64
+    public var lowPriorityCount: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(totalCount: UInt64, readyCount: UInt64, criticalPriorityCount: UInt64, highPriorityCount: UInt64, mediumPriorityCount: UInt64, lowPriorityCount: UInt64) {
+        self.totalCount = totalCount
+        self.readyCount = readyCount
+        self.criticalPriorityCount = criticalPriorityCount
+        self.highPriorityCount = highPriorityCount
+        self.mediumPriorityCount = mediumPriorityCount
+        self.lowPriorityCount = lowPriorityCount
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension RetryQueueStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRetryQueueStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RetryQueueStats {
+        return
+            try RetryQueueStats(
+                totalCount: FfiConverterUInt64.read(from: &buf), 
+                readyCount: FfiConverterUInt64.read(from: &buf), 
+                criticalPriorityCount: FfiConverterUInt64.read(from: &buf), 
+                highPriorityCount: FfiConverterUInt64.read(from: &buf), 
+                mediumPriorityCount: FfiConverterUInt64.read(from: &buf), 
+                lowPriorityCount: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RetryQueueStats, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.totalCount, into: &buf)
+        FfiConverterUInt64.write(value.readyCount, into: &buf)
+        FfiConverterUInt64.write(value.criticalPriorityCount, into: &buf)
+        FfiConverterUInt64.write(value.highPriorityCount, into: &buf)
+        FfiConverterUInt64.write(value.mediumPriorityCount, into: &buf)
+        FfiConverterUInt64.write(value.lowPriorityCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRetryQueueStats_lift(_ buf: RustBuffer) throws -> RetryQueueStats {
+    return try FfiConverterTypeRetryQueueStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRetryQueueStats_lower(_ value: RetryQueueStats) -> RustBuffer {
+    return FfiConverterTypeRetryQueueStats.lower(value)
+}
+
+
 public struct RouteEntry: Equatable, Hashable {
     public var nextHop: String
     public var hopCount: UInt8
@@ -4311,6 +4636,158 @@ public func FfiConverterTypeRouteEntry_lower(_ value: RouteEntry) -> RustBuffer 
 }
 
 
+public struct RoutingDecision: Equatable, Hashable {
+    public var timestampMs: Int64
+    public var phase: RoutingPhase
+    public var from: TransportType?
+    public var to: TransportType?
+    public var winningScore: Float?
+    public var reasonCode: RoutingReasonCode?
+    public var scores: [RoutingScoreEntry]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(timestampMs: Int64, phase: RoutingPhase, from: TransportType?, to: TransportType?, winningScore: Float?, reasonCode: RoutingReasonCode?, scores: [RoutingScoreEntry]) {
+        self.timestampMs = timestampMs
+        self.phase = phase
+        self.from = from
+        self.to = to
+        self.winningScore = winningScore
+        self.reasonCode = reasonCode
+        self.scores = scores
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension RoutingDecision: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRoutingDecision: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RoutingDecision {
+        return
+            try RoutingDecision(
+                timestampMs: FfiConverterInt64.read(from: &buf), 
+                phase: FfiConverterTypeRoutingPhase.read(from: &buf), 
+                from: FfiConverterOptionTypeTransportType.read(from: &buf), 
+                to: FfiConverterOptionTypeTransportType.read(from: &buf), 
+                winningScore: FfiConverterOptionFloat.read(from: &buf), 
+                reasonCode: FfiConverterOptionTypeRoutingReasonCode.read(from: &buf), 
+                scores: FfiConverterSequenceTypeRoutingScoreEntry.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RoutingDecision, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.timestampMs, into: &buf)
+        FfiConverterTypeRoutingPhase.write(value.phase, into: &buf)
+        FfiConverterOptionTypeTransportType.write(value.from, into: &buf)
+        FfiConverterOptionTypeTransportType.write(value.to, into: &buf)
+        FfiConverterOptionFloat.write(value.winningScore, into: &buf)
+        FfiConverterOptionTypeRoutingReasonCode.write(value.reasonCode, into: &buf)
+        FfiConverterSequenceTypeRoutingScoreEntry.write(value.scores, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingDecision_lift(_ buf: RustBuffer) throws -> RoutingDecision {
+    return try FfiConverterTypeRoutingDecision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingDecision_lower(_ value: RoutingDecision) -> RustBuffer {
+    return FfiConverterTypeRoutingDecision.lower(value)
+}
+
+
+public struct RoutingScoreEntry: Equatable, Hashable {
+    public var transport: TransportType
+    public var signal: Float
+    public var proximity: Float
+    public var bandwidth: Float
+    public var congestion: Float
+    public var energy: Float
+    public var reliability: Float
+    public var load: Float
+    public var total: Float
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(transport: TransportType, signal: Float, proximity: Float, bandwidth: Float, congestion: Float, energy: Float, reliability: Float, load: Float, total: Float) {
+        self.transport = transport
+        self.signal = signal
+        self.proximity = proximity
+        self.bandwidth = bandwidth
+        self.congestion = congestion
+        self.energy = energy
+        self.reliability = reliability
+        self.load = load
+        self.total = total
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension RoutingScoreEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRoutingScoreEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RoutingScoreEntry {
+        return
+            try RoutingScoreEntry(
+                transport: FfiConverterTypeTransportType.read(from: &buf), 
+                signal: FfiConverterFloat.read(from: &buf), 
+                proximity: FfiConverterFloat.read(from: &buf), 
+                bandwidth: FfiConverterFloat.read(from: &buf), 
+                congestion: FfiConverterFloat.read(from: &buf), 
+                energy: FfiConverterFloat.read(from: &buf), 
+                reliability: FfiConverterFloat.read(from: &buf), 
+                load: FfiConverterFloat.read(from: &buf), 
+                total: FfiConverterFloat.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RoutingScoreEntry, into buf: inout [UInt8]) {
+        FfiConverterTypeTransportType.write(value.transport, into: &buf)
+        FfiConverterFloat.write(value.signal, into: &buf)
+        FfiConverterFloat.write(value.proximity, into: &buf)
+        FfiConverterFloat.write(value.bandwidth, into: &buf)
+        FfiConverterFloat.write(value.congestion, into: &buf)
+        FfiConverterFloat.write(value.energy, into: &buf)
+        FfiConverterFloat.write(value.reliability, into: &buf)
+        FfiConverterFloat.write(value.load, into: &buf)
+        FfiConverterFloat.write(value.total, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingScoreEntry_lift(_ buf: RustBuffer) throws -> RoutingScoreEntry {
+    return try FfiConverterTypeRoutingScoreEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingScoreEntry_lower(_ value: RoutingScoreEntry) -> RustBuffer {
+    return FfiConverterTypeRoutingScoreEntry.lower(value)
+}
+
+
 public struct RoutingStats: Equatable, Hashable {
     public var destinationCount: UInt32
     public var routeCount: UInt32
@@ -4360,6 +4837,66 @@ public func FfiConverterTypeRoutingStats_lift(_ buf: RustBuffer) throws -> Routi
 #endif
 public func FfiConverterTypeRoutingStats_lower(_ value: RoutingStats) -> RustBuffer {
     return FfiConverterTypeRoutingStats.lower(value)
+}
+
+
+public struct TelemetryConfig: Equatable, Hashable {
+    public var scrubIds: Bool?
+    public var mlsVerbosity: MlsVerbosity?
+    public var metricsCadenceMs: UInt64?
+    public var routingDiagnostic: Bool?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(scrubIds: Bool?, mlsVerbosity: MlsVerbosity?, metricsCadenceMs: UInt64?, routingDiagnostic: Bool?) {
+        self.scrubIds = scrubIds
+        self.mlsVerbosity = mlsVerbosity
+        self.metricsCadenceMs = metricsCadenceMs
+        self.routingDiagnostic = routingDiagnostic
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension TelemetryConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TelemetryConfig {
+        return
+            try TelemetryConfig(
+                scrubIds: FfiConverterOptionBool.read(from: &buf), 
+                mlsVerbosity: FfiConverterOptionTypeMlsVerbosity.read(from: &buf), 
+                metricsCadenceMs: FfiConverterOptionUInt64.read(from: &buf), 
+                routingDiagnostic: FfiConverterOptionBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TelemetryConfig, into buf: inout [UInt8]) {
+        FfiConverterOptionBool.write(value.scrubIds, into: &buf)
+        FfiConverterOptionTypeMlsVerbosity.write(value.mlsVerbosity, into: &buf)
+        FfiConverterOptionUInt64.write(value.metricsCadenceMs, into: &buf)
+        FfiConverterOptionBool.write(value.routingDiagnostic, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTelemetryConfig_lift(_ buf: RustBuffer) throws -> TelemetryConfig {
+    return try FfiConverterTypeTelemetryConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTelemetryConfig_lower(_ value: TelemetryConfig) -> RustBuffer {
+    return FfiConverterTypeTelemetryConfig.lower(value)
 }
 
 
@@ -4434,16 +4971,40 @@ public struct TransportMetrics: Equatable, Hashable {
     public var bytesReceived: UInt32
     public var errorRate: Float
     public var avgLatencyMs: UInt32
+    public var rssi: Int16?
+    public var bandwidthBps: UInt64?
+    public var congestion: Float?
+    public var queueDepth: UInt32?
+    public var batteryLevel: UInt8?
+    public var isCharging: Bool?
+    public var relayConnectionCount: UInt8?
+    public var isActiveRelay: Bool?
+    public var deliveryRatio: Float?
+    public var dropRate: Float?
+    public var averageHopCount: Float?
+    public var energyCost: Float?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(packetsSent: UInt32, packetsReceived: UInt32, bytesSent: UInt32, bytesReceived: UInt32, errorRate: Float, avgLatencyMs: UInt32) {
+    public init(packetsSent: UInt32, packetsReceived: UInt32, bytesSent: UInt32, bytesReceived: UInt32, errorRate: Float, avgLatencyMs: UInt32, rssi: Int16?, bandwidthBps: UInt64?, congestion: Float?, queueDepth: UInt32?, batteryLevel: UInt8?, isCharging: Bool?, relayConnectionCount: UInt8?, isActiveRelay: Bool?, deliveryRatio: Float?, dropRate: Float?, averageHopCount: Float?, energyCost: Float?) {
         self.packetsSent = packetsSent
         self.packetsReceived = packetsReceived
         self.bytesSent = bytesSent
         self.bytesReceived = bytesReceived
         self.errorRate = errorRate
         self.avgLatencyMs = avgLatencyMs
+        self.rssi = rssi
+        self.bandwidthBps = bandwidthBps
+        self.congestion = congestion
+        self.queueDepth = queueDepth
+        self.batteryLevel = batteryLevel
+        self.isCharging = isCharging
+        self.relayConnectionCount = relayConnectionCount
+        self.isActiveRelay = isActiveRelay
+        self.deliveryRatio = deliveryRatio
+        self.dropRate = dropRate
+        self.averageHopCount = averageHopCount
+        self.energyCost = energyCost
     }
 
     
@@ -4465,7 +5026,19 @@ public struct FfiConverterTypeTransportMetrics: FfiConverterRustBuffer {
                 bytesSent: FfiConverterUInt32.read(from: &buf), 
                 bytesReceived: FfiConverterUInt32.read(from: &buf), 
                 errorRate: FfiConverterFloat.read(from: &buf), 
-                avgLatencyMs: FfiConverterUInt32.read(from: &buf)
+                avgLatencyMs: FfiConverterUInt32.read(from: &buf), 
+                rssi: FfiConverterOptionInt16.read(from: &buf), 
+                bandwidthBps: FfiConverterOptionUInt64.read(from: &buf), 
+                congestion: FfiConverterOptionFloat.read(from: &buf), 
+                queueDepth: FfiConverterOptionUInt32.read(from: &buf), 
+                batteryLevel: FfiConverterOptionUInt8.read(from: &buf), 
+                isCharging: FfiConverterOptionBool.read(from: &buf), 
+                relayConnectionCount: FfiConverterOptionUInt8.read(from: &buf), 
+                isActiveRelay: FfiConverterOptionBool.read(from: &buf), 
+                deliveryRatio: FfiConverterOptionFloat.read(from: &buf), 
+                dropRate: FfiConverterOptionFloat.read(from: &buf), 
+                averageHopCount: FfiConverterOptionFloat.read(from: &buf), 
+                energyCost: FfiConverterOptionFloat.read(from: &buf)
         )
     }
 
@@ -4476,6 +5049,18 @@ public struct FfiConverterTypeTransportMetrics: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.bytesReceived, into: &buf)
         FfiConverterFloat.write(value.errorRate, into: &buf)
         FfiConverterUInt32.write(value.avgLatencyMs, into: &buf)
+        FfiConverterOptionInt16.write(value.rssi, into: &buf)
+        FfiConverterOptionUInt64.write(value.bandwidthBps, into: &buf)
+        FfiConverterOptionFloat.write(value.congestion, into: &buf)
+        FfiConverterOptionUInt32.write(value.queueDepth, into: &buf)
+        FfiConverterOptionUInt8.write(value.batteryLevel, into: &buf)
+        FfiConverterOptionBool.write(value.isCharging, into: &buf)
+        FfiConverterOptionUInt8.write(value.relayConnectionCount, into: &buf)
+        FfiConverterOptionBool.write(value.isActiveRelay, into: &buf)
+        FfiConverterOptionFloat.write(value.deliveryRatio, into: &buf)
+        FfiConverterOptionFloat.write(value.dropRate, into: &buf)
+        FfiConverterOptionFloat.write(value.averageHopCount, into: &buf)
+        FfiConverterOptionFloat.write(value.energyCost, into: &buf)
     }
 }
 
@@ -4492,6 +5077,118 @@ public func FfiConverterTypeTransportMetrics_lift(_ buf: RustBuffer) throws -> T
 #endif
 public func FfiConverterTypeTransportMetrics_lower(_ value: TransportMetrics) -> RustBuffer {
     return FfiConverterTypeTransportMetrics.lower(value)
+}
+
+
+public struct TransportMetricsEntry: Equatable, Hashable {
+    public var transport: TransportType
+    public var metrics: TransportMetrics
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(transport: TransportType, metrics: TransportMetrics) {
+        self.transport = transport
+        self.metrics = metrics
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension TransportMetricsEntry: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTransportMetricsEntry: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportMetricsEntry {
+        return
+            try TransportMetricsEntry(
+                transport: FfiConverterTypeTransportType.read(from: &buf), 
+                metrics: FfiConverterTypeTransportMetrics.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TransportMetricsEntry, into buf: inout [UInt8]) {
+        FfiConverterTypeTransportType.write(value.transport, into: &buf)
+        FfiConverterTypeTransportMetrics.write(value.metrics, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportMetricsEntry_lift(_ buf: RustBuffer) throws -> TransportMetricsEntry {
+    return try FfiConverterTypeTransportMetricsEntry.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportMetricsEntry_lower(_ value: TransportMetricsEntry) -> RustBuffer {
+    return FfiConverterTypeTransportMetricsEntry.lower(value)
+}
+
+
+public struct TransportStateEvent: Equatable, Hashable {
+    public var timestampMs: Int64
+    public var transport: TransportType
+    public var previous: TransportStatus
+    public var current: TransportStatus
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(timestampMs: Int64, transport: TransportType, previous: TransportStatus, current: TransportStatus) {
+        self.timestampMs = timestampMs
+        self.transport = transport
+        self.previous = previous
+        self.current = current
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension TransportStateEvent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTransportStateEvent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportStateEvent {
+        return
+            try TransportStateEvent(
+                timestampMs: FfiConverterInt64.read(from: &buf), 
+                transport: FfiConverterTypeTransportType.read(from: &buf), 
+                previous: FfiConverterTypeTransportStatus.read(from: &buf), 
+                current: FfiConverterTypeTransportStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TransportStateEvent, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.timestampMs, into: &buf)
+        FfiConverterTypeTransportType.write(value.transport, into: &buf)
+        FfiConverterTypeTransportStatus.write(value.previous, into: &buf)
+        FfiConverterTypeTransportStatus.write(value.current, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportStateEvent_lift(_ buf: RustBuffer) throws -> TransportStateEvent {
+    return try FfiConverterTypeTransportStateEvent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportStateEvent_lower(_ value: TransportStateEvent) -> RustBuffer {
+    return FfiConverterTypeTransportStateEvent.lower(value)
 }
 
 
@@ -4914,6 +5611,78 @@ public func FfiConverterTypeMlsStorageError_lift(_ buf: RustBuffer) throws -> Ml
 public func FfiConverterTypeMlsStorageError_lower(_ value: MlsStorageError) -> RustBuffer {
     return FfiConverterTypeMlsStorageError.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum MlsVerbosity: Equatable, Hashable {
+    
+    case off
+    case lifecycle
+    case diagnostic
+
+
+
+}
+
+#if compiler(>=6)
+extension MlsVerbosity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMlsVerbosity: FfiConverterRustBuffer {
+    typealias SwiftType = MlsVerbosity
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MlsVerbosity {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .off
+        
+        case 2: return .lifecycle
+        
+        case 3: return .diagnostic
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MlsVerbosity, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .off:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .lifecycle:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .diagnostic:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsVerbosity_lift(_ buf: RustBuffer) throws -> MlsVerbosity {
+    return try FfiConverterTypeMlsVerbosity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMlsVerbosity_lower(_ value: MlsVerbosity) -> RustBuffer {
+    return FfiConverterTypeMlsVerbosity.lower(value)
+}
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -5361,6 +6130,364 @@ public func FfiConverterTypeRelayPriority_lift(_ buf: RustBuffer) throws -> Rela
 #endif
 public func FfiConverterTypeRelayPriority_lower(_ value: RelayPriority) -> RustBuffer {
     return FfiConverterTypeRelayPriority.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RelayRole: Equatable, Hashable {
+    
+    case regular
+    case relay
+
+
+
+}
+
+#if compiler(>=6)
+extension RelayRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRelayRole: FfiConverterRustBuffer {
+    typealias SwiftType = RelayRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RelayRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .regular
+        
+        case 2: return .relay
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RelayRole, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .regular:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .relay:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRelayRole_lift(_ buf: RustBuffer) throws -> RelayRole {
+    return try FfiConverterTypeRelayRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRelayRole_lower(_ value: RelayRole) -> RustBuffer {
+    return FfiConverterTypeRelayRole.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RoutingPhase: Equatable, Hashable {
+    
+    case scoreUpdated
+    case selected
+    case switched
+    case escalated
+
+
+
+}
+
+#if compiler(>=6)
+extension RoutingPhase: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRoutingPhase: FfiConverterRustBuffer {
+    typealias SwiftType = RoutingPhase
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RoutingPhase {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .scoreUpdated
+        
+        case 2: return .selected
+        
+        case 3: return .switched
+        
+        case 4: return .escalated
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RoutingPhase, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .scoreUpdated:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .selected:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .switched:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .escalated:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingPhase_lift(_ buf: RustBuffer) throws -> RoutingPhase {
+    return try FfiConverterTypeRoutingPhase.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingPhase_lower(_ value: RoutingPhase) -> RustBuffer {
+    return FfiConverterTypeRoutingPhase.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum RoutingReasonCode: Equatable, Hashable {
+    
+    case initialSelection
+    case primarySelected
+    case primarySuccess
+    case fallbackSuccess
+    case escalationApplied
+    case currentUnavailable
+    case retryThreshold
+    case poorSignal
+    case congestion
+    case lowTtl
+    case lowSuccessRate
+
+
+
+}
+
+#if compiler(>=6)
+extension RoutingReasonCode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRoutingReasonCode: FfiConverterRustBuffer {
+    typealias SwiftType = RoutingReasonCode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RoutingReasonCode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .initialSelection
+        
+        case 2: return .primarySelected
+        
+        case 3: return .primarySuccess
+        
+        case 4: return .fallbackSuccess
+        
+        case 5: return .escalationApplied
+        
+        case 6: return .currentUnavailable
+        
+        case 7: return .retryThreshold
+        
+        case 8: return .poorSignal
+        
+        case 9: return .congestion
+        
+        case 10: return .lowTtl
+        
+        case 11: return .lowSuccessRate
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RoutingReasonCode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .initialSelection:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .primarySelected:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .primarySuccess:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .fallbackSuccess:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .escalationApplied:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .currentUnavailable:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .retryThreshold:
+            writeInt(&buf, Int32(7))
+        
+        
+        case .poorSignal:
+            writeInt(&buf, Int32(8))
+        
+        
+        case .congestion:
+            writeInt(&buf, Int32(9))
+        
+        
+        case .lowTtl:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .lowSuccessRate:
+            writeInt(&buf, Int32(11))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingReasonCode_lift(_ buf: RustBuffer) throws -> RoutingReasonCode {
+    return try FfiConverterTypeRoutingReasonCode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRoutingReasonCode_lower(_ value: RoutingReasonCode) -> RustBuffer {
+    return FfiConverterTypeRoutingReasonCode.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum TransportStatus: Equatable, Hashable {
+    
+    case available
+    case unavailable
+    case connecting
+    case disconnected
+    case error
+
+
+
+}
+
+#if compiler(>=6)
+extension TransportStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTransportStatus: FfiConverterRustBuffer {
+    typealias SwiftType = TransportStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TransportStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .available
+        
+        case 2: return .unavailable
+        
+        case 3: return .connecting
+        
+        case 4: return .disconnected
+        
+        case 5: return .error
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TransportStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .available:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .unavailable:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .connecting:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .disconnected:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .error:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportStatus_lift(_ buf: RustBuffer) throws -> TransportStatus {
+    return try FfiConverterTypeTransportStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTransportStatus_lower(_ value: TransportStatus) -> RustBuffer {
+    return FfiConverterTypeTransportStatus.lower(value)
 }
 
 
@@ -6157,6 +7284,288 @@ public func FfiConverterCallbackInterfaceReticulumTransportCallback_lower(_ v: R
 
 
 
+public protocol TelemetrySink: AnyObject, Sendable {
+    
+    func onProtocolEvent(eventJson: String) 
+    
+    func onMlsEvent(eventJson: String) 
+    
+    func onMetricsFrame(frame: MetricsFrame) 
+    
+    func onTransportState(event: TransportStateEvent) 
+    
+    func onRoutingDecision(decision: RoutingDecision) 
+    
+    func onDeviceCapability(snapshot: DeviceCapabilitySnapshot) 
+    
+    func onExtension(name: String, payloadJson: String) 
+    
+}
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceTelemetrySink {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceTelemetrySink] = [UniffiVTableCallbackInterfaceTelemetrySink(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterCallbackInterfaceTelemetrySink.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface TelemetrySink: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterCallbackInterfaceTelemetrySink.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface TelemetrySink: handle missing in uniffiClone")
+            }
+        },
+        onProtocolEvent: { (
+            uniffiHandle: UInt64,
+            eventJson: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceTelemetrySink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onProtocolEvent(
+                     eventJson: try FfiConverterString.lift(eventJson)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onMlsEvent: { (
+            uniffiHandle: UInt64,
+            eventJson: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceTelemetrySink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onMlsEvent(
+                     eventJson: try FfiConverterString.lift(eventJson)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onMetricsFrame: { (
+            uniffiHandle: UInt64,
+            frame: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceTelemetrySink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onMetricsFrame(
+                     frame: try FfiConverterTypeMetricsFrame_lift(frame)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onTransportState: { (
+            uniffiHandle: UInt64,
+            event: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceTelemetrySink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onTransportState(
+                     event: try FfiConverterTypeTransportStateEvent_lift(event)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onRoutingDecision: { (
+            uniffiHandle: UInt64,
+            decision: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceTelemetrySink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onRoutingDecision(
+                     decision: try FfiConverterTypeRoutingDecision_lift(decision)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onDeviceCapability: { (
+            uniffiHandle: UInt64,
+            snapshot: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceTelemetrySink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onDeviceCapability(
+                     snapshot: try FfiConverterTypeDeviceCapabilitySnapshot_lift(snapshot)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onExtension: { (
+            uniffiHandle: UInt64,
+            name: RustBuffer,
+            payloadJson: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceTelemetrySink.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onExtension(
+                     name: try FfiConverterString.lift(name),
+                     payloadJson: try FfiConverterString.lift(payloadJson)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitTelemetrySink() {
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysink(UniffiCallbackInterfaceTelemetrySink.vtable)
+}
+
+// FfiConverter protocol for callback interfaces
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterCallbackInterfaceTelemetrySink {
+    fileprivate static let handleMap = UniffiHandleMap<TelemetrySink>()
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+extension FfiConverterCallbackInterfaceTelemetrySink : FfiConverter {
+    typealias SwiftType = TelemetrySink
+    typealias FfiType = UInt64
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lift(_ handle: UInt64) throws -> SwiftType {
+        try handleMap.get(handle: handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func lower(_ v: SwiftType) -> UInt64 {
+        return handleMap.insert(obj: v)
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public static func write(_ v: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(v))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceTelemetrySink_lift(_ handle: UInt64) throws -> TelemetrySink {
+    return try FfiConverterCallbackInterfaceTelemetrySink.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterCallbackInterfaceTelemetrySink_lower(_ v: TelemetrySink) -> UInt64 {
+    return FfiConverterCallbackInterfaceTelemetrySink.lower(v)
+}
+
+
+
+
 public protocol WifiDirectTransportCallback: AnyObject, Sendable {
     
     func onMessagesAvailable() 
@@ -6367,6 +7776,78 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionFloat: FfiConverterRustBuffer {
+    typealias SwiftType = Float?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterFloat.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterFloat.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionDouble: FfiConverterRustBuffer {
+    typealias SwiftType = Double?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterDouble.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterDouble.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -6687,6 +8168,78 @@ fileprivate struct FfiConverterOptionTypeMessagePriority: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeMlsVerbosity: FfiConverterRustBuffer {
+    typealias SwiftType = MlsVerbosity?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMlsVerbosity.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMlsVerbosity.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeRoutingReasonCode: FfiConverterRustBuffer {
+    typealias SwiftType = RoutingReasonCode?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeRoutingReasonCode.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeRoutingReasonCode.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeTransportType: FfiConverterRustBuffer {
+    typealias SwiftType = TransportType?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTransportType.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTransportType.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionSequenceUInt8: FfiConverterRustBuffer {
     typealias SwiftType = [UInt8]?
 
@@ -6878,6 +8431,56 @@ fileprivate struct FfiConverterSequenceTypeRouteEntry: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeRouteEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeRoutingScoreEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [RoutingScoreEntry]
+
+    public static func write(_ value: [RoutingScoreEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeRoutingScoreEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [RoutingScoreEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [RoutingScoreEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeRoutingScoreEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeTransportMetricsEntry: FfiConverterRustBuffer {
+    typealias SwiftType = [TransportMetricsEntry]
+
+    public static func write(_ value: [TransportMetricsEntry], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTransportMetricsEntry.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TransportMetricsEntry] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TransportMetricsEntry]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTransportMetricsEntry.read(from: &buf))
         }
         return seq
     }
@@ -7098,6 +8701,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 29008) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink() != 18166) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 10435) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7213,6 +8819,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 28496) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_telemetry_frame() != 41894) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 16160) {
@@ -7404,6 +9013,27 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 48810) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_protocol_event() != 21552) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_mls_event() != 43552) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_metrics_frame() != 1979) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_transport_state() != 17328) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_routing_decision() != 32476) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_device_capability() != 24847) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_extension() != 60536) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -7413,6 +9043,7 @@ private let initializationResult: InitializationResult = {
     uniffiCallbackInitMlsStorageProvider()
     uniffiCallbackInitNostrTransportCallback()
     uniffiCallbackInitReticulumTransportCallback()
+    uniffiCallbackInitTelemetrySink()
     uniffiCallbackInitWifiDirectTransportCallback()
     return InitializationResult.ok
 }()

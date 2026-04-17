@@ -41,6 +41,10 @@ import type {
   MlsSessionInfo,
   MlsGroupInfo,
   EstablishmentState,
+  TelemetryConfig,
+  TelemetryListener,
+  TelemetryRecord,
+  TransportMetrics,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
@@ -204,6 +208,8 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
 export class OfflineProtocol {
   private eventEmitter: NativeEventEmitter;
   private eventSubscription: EmitterSubscription | null = null;
+  private telemetrySubscription: EmitterSubscription | null = null;
+  private telemetryListeners: Set<TelemetryListener> = new Set();
   private eventListeners: Map<EventType | "all", Set<EventListener>> =
     new Map();
   private config: ProtocolConfig;
@@ -220,6 +226,7 @@ export class OfflineProtocol {
     this.config = config;
     this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
     this.setupEventSubscription();
+    this.setupTelemetrySubscription();
   }
 
   /**
@@ -472,6 +479,34 @@ export class OfflineProtocol {
         }
       }
     );
+  }
+
+  /**
+   * Sets up the native telemetry subscription. Telemetry events arrive with
+   * a `category` discriminator; this normalizes them to the TelemetryRecord
+   * union and fans them out to registered listeners.
+   */
+  private setupTelemetrySubscription(): void {
+    this.telemetrySubscription = this.eventEmitter.addListener(
+      "OfflineProtocol_Telemetry",
+      (data: unknown) => {
+        try {
+          this.dispatchTelemetry(data as TelemetryRecord);
+        } catch (error) {
+          console.error("Failed to dispatch telemetry record:", error);
+        }
+      }
+    );
+  }
+
+  private dispatchTelemetry(record: TelemetryRecord): void {
+    this.telemetryListeners.forEach((listener) => {
+      try {
+        listener(record);
+      } catch (error) {
+        console.error("Error in telemetry listener:", error);
+      }
+    });
   }
 
   /**
@@ -1208,15 +1243,55 @@ export class OfflineProtocol {
    * @param transportType - Transport type
    * @returns Transport metrics or null if not available
    */
-  async getTransportMetrics(transportType: TransportType): Promise<{
-    packetsSent: number;
-    packetsReceived: number;
-    bytesSent: number;
-    bytesReceived: number;
-    errorRate: number;
-    avgLatencyMs: number;
-  } | null> {
+  async getTransportMetrics(transportType: TransportType): Promise<TransportMetrics | null> {
     return await OfflineProtocolNativeModule.getTransportMetrics(transportType);
+  }
+
+  /**
+   * Installs a unified telemetry sink. Replaces any previously installed
+   * sink. Config fields left undefined fall back to the privacy-preserving
+   * defaults on the Rust side (scrubIds=true, mlsVerbosity='lifecycle',
+   * metricsCadenceMs=5000, routingDiagnostic=false).
+   *
+   * Telemetry records are dispatched via `onTelemetry` (push) and buffered
+   * for `pollTelemetry` (pull). The legacy `on(...)` event path is unaffected.
+   */
+  async installTelemetrySink(config: TelemetryConfig = {}): Promise<void> {
+    await OfflineProtocolNativeModule.installTelemetrySink(config);
+  }
+
+  /**
+   * Registers a listener that receives every TelemetryRecord emitted by the
+   * SDK. Call `installTelemetrySink` first; without an installed sink, the
+   * Rust side only enqueues into the poll buffer and does not fan out.
+   *
+   * @returns An unsubscribe function.
+   */
+  onTelemetry(listener: TelemetryListener): () => void {
+    this.telemetryListeners.add(listener);
+    return () => {
+      this.telemetryListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Polls the next buffered telemetry record. Returns `null` when the
+   * internal queue is empty. The queue is bounded; overflow drops oldest.
+   *
+   * Useful when an app prefers polling over push delivery — the Rust side
+   * queues every emitted record regardless of whether a sink is installed.
+   */
+  async pollTelemetry(): Promise<TelemetryRecord | null> {
+    const json: string | null = await OfflineProtocolNativeModule.pollTelemetryFrame();
+    if (!json) {
+      return null;
+    }
+    try {
+      return JSON.parse(json) as TelemetryRecord;
+    } catch (error) {
+      console.error("Failed to parse telemetry poll envelope:", error);
+      return null;
+    }
   }
 
   /**
@@ -2294,11 +2369,16 @@ export class OfflineProtocol {
   async destroy(): Promise<void> {
     // Remove all event listeners
     this.removeAllListeners();
+    this.telemetryListeners.clear();
 
     // Remove native event subscription
     if (this.eventSubscription) {
       this.eventSubscription.remove();
       this.eventSubscription = null;
+    }
+    if (this.telemetrySubscription) {
+      this.telemetrySubscription.remove();
+      this.telemetrySubscription = null;
     }
 
     // Destroy native protocol instance
