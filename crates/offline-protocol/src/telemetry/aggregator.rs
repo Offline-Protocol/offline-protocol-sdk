@@ -16,11 +16,13 @@ use crate::telemetry::device::{
 };
 use crate::telemetry::metrics_snapshot::MetricsFrame;
 use crate::telemetry::transport_state::TransportStateEvent;
-use crate::TransportManager;
 
 /// Deterministic walk order: honour the existing transport-priority
 /// (Internet > WiFiDirect > BLE > everything else) so any "first with X"
 /// selection is stable across ticks regardless of HashMap iteration order.
+///
+/// Also used as the stable ordering key for [`MetricsFrame::transports`] so
+/// sinks that index positionally see the same layout on every emission.
 const TRANSPORT_PRIORITY: &[TransportType] = &[
     TransportType::Internet,
     TransportType::WiFiDirect,
@@ -28,6 +30,18 @@ const TRANSPORT_PRIORITY: &[TransportType] = &[
     TransportType::Reticulum,
     TransportType::Nostr,
 ];
+
+/// Returns the priority index for `t`. Transports not present in
+/// [`TRANSPORT_PRIORITY`] sort after every listed transport (stable-sort
+/// ties then fall back to HashMap iteration order — currently impossible
+/// since every [`TransportType`] variant is listed, but future variants
+/// land at the tail without the helper breaking).
+fn priority_index(t: TransportType) -> usize {
+    TRANSPORT_PRIORITY
+        .iter()
+        .position(|p| *p == t)
+        .unwrap_or(TRANSPORT_PRIORITY.len())
+}
 
 /// Local snapshot of device capability fields. Used by the process-tick
 /// diff to decide whether a `DeviceCapabilitySnapshot` record needs to fire.
@@ -57,10 +71,14 @@ impl DeviceSnap {
 /// `available_transports` is borrowed — callers snapshot the map once per
 /// tick and reuse it across the telemetry helpers that need it, avoiding
 /// redundant locking and per-tick HashMap allocations.
+///
+/// The emitted `transports` vec is sorted by [`TRANSPORT_PRIORITY`] so
+/// sinks that index positionally see the same layout on every tick; HashMap
+/// iteration order does not leak into the record.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_metrics_frame(
     now_ms: i64,
-    transport_manager: &TransportManager,
+    current_transport: Option<TransportType>,
     available_transports: &HashMap<TransportType, TransportMetrics>,
     retry_queue: &RetryQueue,
     deduplicator: &Deduplicator,
@@ -68,10 +86,11 @@ pub(crate) fn build_metrics_frame(
     neighbor_count: usize,
     is_local_relay: bool,
 ) -> MetricsFrame {
-    let transports: Vec<(TransportType, TransportMetrics)> = available_transports
+    let mut transports: Vec<(TransportType, TransportMetrics)> = available_transports
         .iter()
         .map(|(t, m)| (*t, m.clone()))
         .collect();
+    transports.sort_by_key(|(t, _)| priority_index(*t));
     MetricsFrame {
         timestamp_ms: now_ms,
         transports,
@@ -80,7 +99,7 @@ pub(crate) fn build_metrics_frame(
         ack_pending: ack_manager.pending_count(),
         neighbor_count,
         is_local_relay,
-        current_transport: transport_manager.current_transport(),
+        current_transport,
     }
 }
 
@@ -358,5 +377,43 @@ mod tests {
         // is_charging anchors on the first priority-ordered transport
         // that exists in `available`.
         assert!(is_charging);
+    }
+
+    #[test]
+    fn build_metrics_frame_orders_transports_by_priority() {
+        // Regression guard: `MetricsFrame::transports` must be ordered by
+        // TRANSPORT_PRIORITY (Internet > WiFiDirect > BLE > ...) so sinks
+        // indexing positionally see a stable layout across ticks. Prior
+        // implementation let HashMap iteration order leak through.
+        use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
+        let mut available = HashMap::new();
+        available.insert(TransportType::BLE, metrics(None, false));
+        available.insert(TransportType::Internet, metrics(Some(50), true));
+        available.insert(TransportType::WiFiDirect, metrics(None, false));
+
+        let retry_queue = RetryQueue::new();
+        let deduplicator = Deduplicator::new();
+        let ack_manager = AckManager::new();
+        let frame = build_metrics_frame(
+            0,
+            Some(TransportType::BLE),
+            &available,
+            &retry_queue,
+            &deduplicator,
+            &ack_manager,
+            0,
+            false,
+        );
+        let order: Vec<TransportType> = frame.transports.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            order,
+            vec![
+                TransportType::Internet,
+                TransportType::WiFiDirect,
+                TransportType::BLE
+            ],
+            "metrics frame transports must be ordered by TRANSPORT_PRIORITY",
+        );
+        assert_eq!(frame.current_transport, Some(TransportType::BLE));
     }
 }

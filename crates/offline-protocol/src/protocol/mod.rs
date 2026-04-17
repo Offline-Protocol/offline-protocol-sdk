@@ -1360,13 +1360,19 @@ impl OfflineProtocol {
     ///
     /// # Sink-panic semantics
     ///
-    /// Each per-tick snapshot field is advanced *before* the emit call
-    /// that observes it. A panicking sink unwinds the rest of the tick
-    /// but leaves the aggregator's cursors at their new positions, so
-    /// the next tick does not re-emit the same transition / capability
-    /// change / metrics frame. At-most-once delivery on panic rather
-    /// than at-least-once with silent duplicates for consumers counting
-    /// transitions.
+    /// Each per-tick cursor is advanced *before* the emit call that
+    /// observes it, so a panicking sink does not cause re-delivery of the
+    /// record it panicked on. The transport-status path advances
+    /// **per-transport**: when multiple transitions fall in a single tick,
+    /// a panic on transition K commits K's entry (at-most-once for K) but
+    /// leaves entries L..N in `transport_status_snapshot` at their previous
+    /// values, so the next tick re-diffs and emits them fresh. This avoids
+    /// silent data loss for transitions that never reached the sink.
+    ///
+    /// The device-capability and metrics-frame paths emit at most one
+    /// record per tick each, so a simpler "advance then emit" discipline
+    /// suffices there: a panic advances the cursor and the same record is
+    /// not re-emitted on the next tick.
     fn tick_telemetry_categories(&mut self) {
         let Some(ctx) = self.telemetry.clone() else {
             return;
@@ -1380,17 +1386,27 @@ impl OfflineProtocol {
         // below.
         let (current_statuses, available) = self.transport_manager.snapshot_status_and_available();
 
-        // Transport-status diff: one record per changed transport.
-        // Advance the snapshot *before* emitting so a panicking sink does
-        // not cause re-delivery on the next tick — see the fn-level doc.
+        // Transport-status diff: one record per changed transport. Commit
+        // each transport's new snapshot entry *before* emitting its event
+        // so a panic on event K is at-most-once for K; untouched entries
+        // L..N stay at their previous values and get re-diffed next tick.
         let transitions =
             diff_transport_state(now_ms, &self.transport_status_snapshot, &current_statuses);
-        self.transport_status_snapshot = current_statuses;
         for event in transitions {
+            let transport = event.transport;
+            match current_statuses.get(&transport) {
+                Some(status) => {
+                    self.transport_status_snapshot.insert(transport, *status);
+                }
+                None => {
+                    self.transport_status_snapshot.remove(&transport);
+                }
+            }
             ctx.sink.emit(&TelemetryRecord::TransportState(event));
         }
 
-        // Device capability diff. Same ordering discipline as above.
+        // Device capability diff. At-most-one emission per tick, so the
+        // simple advance-before-emit pattern preserves at-most-once.
         let (battery_level, is_charging) =
             device_battery_from_available(self.transport_manager.current_transport(), &available);
         let relay_role = self.path_selector.current_relay_role();
@@ -1413,7 +1429,7 @@ impl OfflineProtocol {
                 let is_local_relay = matches!(relay_role, RelayRole::Relay);
                 let frame = build_metrics_frame(
                     now_ms,
-                    &self.transport_manager,
+                    self.transport_manager.current_transport(),
                     &available,
                     &self.retry_queue,
                     &self.deduplicator,

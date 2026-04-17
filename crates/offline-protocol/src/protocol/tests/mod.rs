@@ -10576,6 +10576,103 @@ fn test_sink_panic_advances_transport_snapshot_for_at_most_once_delivery() {
     );
 }
 
+#[test]
+fn test_sink_panic_does_not_drop_unemitted_transport_transitions() {
+    // Regression guard for multi-transition panic loss: when a tick
+    // produces multiple TransportState records and the sink panics on the
+    // first, the ONE transport the panic was observed for must be
+    // committed in `transport_status_snapshot` (at-most-once for that
+    // transition), and every OTHER pending transition must remain
+    // un-advanced so the next tick re-diffs and emits it. The old
+    // implementation committed the whole snapshot in a single assignment
+    // before the emit loop, silently dropping every post-panic transition.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    struct PanicOnFirstTransportState {
+        seen: StdMutex<Option<TransportType>>,
+        count: AtomicUsize,
+    }
+    impl TelemetrySink for PanicOnFirstTransportState {
+        fn emit(&self, record: &TelemetryRecord) {
+            if let TelemetryRecord::TransportState(e) = record {
+                let first = self.count.fetch_add(1, Ordering::SeqCst) == 0;
+                if first {
+                    *self.seen.lock().unwrap() = Some(e.transport);
+                    panic!("simulated transport-state sink panic");
+                }
+            }
+        }
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    let net = MockTransport::new(TransportType::Internet);
+    let ble_handle = ble.clone();
+    let net_handle = net.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(net));
+    protocol.start().unwrap();
+
+    let sink = Arc::new(PanicOnFirstTransportState {
+        seen: StdMutex::new(None),
+        count: AtomicUsize::new(0),
+    });
+    protocol
+        .install_telemetry_sink(sink.clone(), TelemetryConfig::default())
+        .unwrap();
+
+    // Flip both transports so the tick produces two TransportState
+    // transitions — iteration order through the diff's HashSet is
+    // unspecified, so either transport may be first.
+    ble_handle.set_status(TransportStatus::Disconnected);
+    net_handle.set_status(TransportStatus::Disconnected);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| protocol.process()));
+    assert!(
+        result.is_err(),
+        "sink panic must propagate out of process()",
+    );
+
+    let panicked_on = sink
+        .seen
+        .lock()
+        .unwrap()
+        .expect("sink recorded which transport it panicked on");
+    let other = if panicked_on == TransportType::BLE {
+        TransportType::Internet
+    } else {
+        TransportType::BLE
+    };
+
+    // The panicking transition must be committed to the snapshot so it
+    // is NOT re-delivered next tick (at-most-once for that entry).
+    assert_eq!(
+        protocol
+            .transport_status_snapshot
+            .get(&panicked_on)
+            .copied(),
+        Some(TransportStatus::Disconnected),
+        "snapshot entry for the panicking transition must be advanced, got {:?}",
+        protocol.transport_status_snapshot,
+    );
+
+    // The OTHER transition never reached the sink; its snapshot entry
+    // must be unchanged so the next tick re-diffs and emits it fresh.
+    // The old per-tick "commit-all-then-iterate" pattern would leave it
+    // at Disconnected here, silently dropping the transition.
+    assert_eq!(
+        protocol.transport_status_snapshot.get(&other).copied(),
+        Some(TransportStatus::Available),
+        "snapshot entry for the un-emitted transition must be preserved for redelivery, got {:?}",
+        protocol.transport_status_snapshot,
+    );
+}
+
 use crate::telemetry::routing::RoutingDecision;
 use crate::telemetry::transport_state::TransportStateEvent;
 
