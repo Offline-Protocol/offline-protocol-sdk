@@ -70,7 +70,7 @@ offline-protocol-bench         ← Criterion benchmarks
 - **DORS** (`crates/offline-protocol-router/src/dors.rs`): multi-factor scoring (RSSI, congestion, bandwidth, battery, reliability, capacity) with hysteresis, cooldown, and stability window to prevent transport flapping.
 - **Protocol control messages**: internal prefix convention (`__MLS_KEY_PKG__`, `__MLS_WELCOME__`, `__MLS_ENC__`, etc.) in `crates/offline-protocol/src/protocol.rs`. Service messages use `__SVC_DISC_Q__`, `__SVC_DISC_R__`, `__SVC_REQ__`, `__SVC_RESP__` prefixes in `crates/offline-protocol-services/src/payloads.rs`.
 - **Event-driven**: `OfflineProtocol` emits events (MessageReceived, PeerDiscovered, TransportChanged, etc.) via `EventCallback`.
-- **Feature flag**: `mls-observability` in `offline-protocol` crate enables detailed MLS lifecycle events.
+- **Runtime telemetry**: apps install a `TelemetrySink` via `OfflineProtocol::install_telemetry_sink(sink, config)`; `TelemetryConfig::mls_verbosity` (`Off` | `Lifecycle` (default) | `Diagnostic`) gates MLS lifecycle emission at runtime. Replaces the retired `mls-observability` Cargo feature. Identifier scrubbing is on by default via `TelemetryConfig::scrub_ids`.
 
 ### Safety Rules
 

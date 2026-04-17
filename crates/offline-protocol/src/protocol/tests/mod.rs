@@ -1,8 +1,10 @@
 use super::*;
 use crate::constants::ACK_FOR_KEY;
 use crate::events::{DecryptionFailureCode, PresenceStatus};
-#[cfg(feature = "mls-observability")]
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsLifecycleEvent};
+use crate::telemetry::{
+    MlsVerbosity, NoopTelemetrySink, TelemetryConfig, TelemetryRecord, TelemetrySink,
+};
 use chrono::Duration as ChronoDuration;
 use offline_protocol_core::{AppId, ContentType, MessagePriority, ServiceDescriptor, UserId};
 use offline_protocol_transport::{
@@ -20,23 +22,41 @@ pub(crate) fn create_test_config_for_user(user_id: &str) -> ProtocolConfig {
     ProtocolConfig::new("test-app", user_id)
 }
 
-#[cfg(feature = "mls-observability")]
 #[derive(Default, Clone)]
 struct RecordingMlsEmitter {
     events: Arc<Mutex<Vec<MlsLifecycleEvent>>>,
 }
 
-#[cfg(feature = "mls-observability")]
 impl MlsEventEmitter for RecordingMlsEmitter {
     fn emit(&self, event: MlsLifecycleEvent) {
         self.events.lock().unwrap().push(event);
     }
 }
 
-#[cfg(feature = "mls-observability")]
 impl RecordingMlsEmitter {
     fn take(&self) -> Vec<MlsLifecycleEvent> {
         let mut guard = self.events.lock().unwrap();
+        std::mem::take(&mut *guard)
+    }
+}
+
+/// Minimal [`TelemetrySink`] implementation that records every record it
+/// receives. Cloning the sink clones the shared backing vector, so a caller
+/// keeps a handle to the records after the sink is moved into `Arc`.
+#[derive(Default, Clone)]
+struct RecordingTelemetrySink {
+    records: Arc<Mutex<Vec<TelemetryRecord>>>,
+}
+
+impl TelemetrySink for RecordingTelemetrySink {
+    fn emit(&self, record: &TelemetryRecord) {
+        self.records.lock().unwrap().push(record.clone());
+    }
+}
+
+impl RecordingTelemetrySink {
+    fn take(&self) -> Vec<TelemetryRecord> {
+        let mut guard = self.records.lock().unwrap();
         std::mem::take(&mut *guard)
     }
 }
@@ -454,7 +474,6 @@ fn test_should_auto_encrypt_without_mls() {
     assert!(!protocol.is_mls_initialized());
 }
 
-#[cfg(feature = "mls-observability")]
 #[test]
 fn test_mls_observability_emits_initialized_event() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -473,7 +492,6 @@ fn test_mls_observability_emits_initialized_event() {
     );
 }
 
-#[cfg(feature = "mls-observability")]
 #[test]
 fn test_mls_observability_emits_session_missing_when_not_initialized() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -493,7 +511,6 @@ fn test_mls_observability_emits_session_missing_when_not_initialized() {
     )));
 }
 
-#[cfg(feature = "mls-observability")]
 #[test]
 fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -529,7 +546,6 @@ fn test_mls_observability_emits_encryption_used_for_successful_encrypt() {
         .any(|event| { matches!(event, MlsLifecycleEvent::EncryptionUsed { .. }) }));
 }
 
-#[cfg(feature = "mls-observability")]
 #[test]
 fn test_mls_observability_emits_decryption_failed_not_initialized() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -569,7 +585,6 @@ fn test_mls_observability_emits_decryption_failed_not_initialized() {
     )));
 }
 
-#[cfg(feature = "mls-observability")]
 #[test]
 fn test_mls_observability_no_encryption_event_on_aborted_encrypt() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -601,7 +616,6 @@ fn test_mls_observability_no_encryption_event_on_aborted_encrypt() {
     );
 }
 
-#[cfg(feature = "mls-observability")]
 #[test]
 fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -646,7 +660,6 @@ fn test_mls_observability_session_ready_emits_once_for_idempotent_confirm() {
     assert_eq!(ready_count, 1);
 }
 
-#[cfg(feature = "mls-observability")]
 #[test]
 fn test_mls_observability_uses_opaque_identifiers() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -665,6 +678,161 @@ fn test_mls_observability_uses_opaque_identifiers() {
         .unwrap();
     assert_ne!(initialized, "peer=none|group=none");
     assert_eq!(initialized.len(), 32);
+}
+
+// ===========================================================================
+// TelemetrySink integration (unified telemetry surface)
+// ===========================================================================
+
+#[test]
+fn test_telemetry_sink_receives_protocol_events() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol.install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default());
+
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+
+    let records = sink.take();
+    assert_eq!(records.len(), 1, "sink should have received one record");
+    match &records[0] {
+        TelemetryRecord::Protocol(event) => {
+            assert_eq!(event.telemetry_name(), "protocol.neighbor.lost");
+            match event.as_ref() {
+                crate::events::Event::NeighborLost { peer_id } => {
+                    // scrub_ids defaults to true — expect a 32-hex opaque ID.
+                    assert_ne!(peer_id, "alice", "peer_id must be scrubbed by default");
+                    assert_eq!(peer_id.len(), 32);
+                    assert!(peer_id.chars().all(|c| c.is_ascii_hexdigit()));
+                }
+                _ => panic!("unexpected inner variant"),
+            }
+        }
+        other => panic!("expected Protocol variant, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_telemetry_sink_receives_mls_events() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol.install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default());
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let records = sink.take();
+    assert!(
+        records.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Mls(MlsLifecycleEvent::Initialized { .. })
+        )),
+        "sink should observe mls.initialized, got {records:?}",
+    );
+}
+
+#[test]
+fn test_mls_verbosity_off_suppresses_both_sink_and_legacy_emitter() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let emitter = RecordingMlsEmitter::default();
+    protocol.set_mls_event_emitter(Arc::new(emitter.clone()));
+    let sink = RecordingTelemetrySink::default();
+    protocol.install_telemetry_sink(
+        Arc::new(sink.clone()),
+        TelemetryConfig::default().with_mls_verbosity(MlsVerbosity::Off),
+    );
+
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    protocol.initialize_mls(storage).unwrap();
+
+    let legacy = emitter.take();
+    let sink_records = sink.take();
+    assert!(
+        legacy.is_empty(),
+        "MlsVerbosity::Off must suppress the legacy emitter, got {legacy:?}",
+    );
+    assert!(
+        sink_records
+            .iter()
+            .all(|r| !matches!(r, TelemetryRecord::Mls(_))),
+        "MlsVerbosity::Off must suppress sink Mls records, got {sink_records:?}",
+    );
+}
+
+#[test]
+fn test_scrub_ids_false_passes_raw_peer_id_to_sink() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol.install_telemetry_sink(
+        Arc::new(sink.clone()),
+        TelemetryConfig::default().with_scrub_ids(false),
+    );
+
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice-raw".into()));
+
+    let records = sink.take();
+    assert_eq!(records.len(), 1);
+    match &records[0] {
+        TelemetryRecord::Protocol(event) => match event.as_ref() {
+            crate::events::Event::NeighborLost { peer_id } => {
+                assert_eq!(
+                    peer_id, "alice-raw",
+                    "scrub_ids(false) must pass raw identifier through",
+                );
+            }
+            _ => panic!("unexpected inner variant"),
+        },
+        other => panic!("expected Protocol variant, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_legacy_event_callback_still_fires_with_sink_installed() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let captured: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_handler = captured.clone();
+    protocol.on_event(move |event| {
+        captured_handler.lock().unwrap().push(event);
+    });
+
+    let sink = RecordingTelemetrySink::default();
+    protocol.install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default());
+
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+
+    // Legacy callback receives the raw event.
+    let legacy_events = captured.lock().unwrap().clone();
+    assert_eq!(legacy_events.len(), 1);
+    match &legacy_events[0] {
+        crate::events::Event::NeighborLost { peer_id } => assert_eq!(peer_id, "alice"),
+        _ => panic!("unexpected variant"),
+    }
+
+    // Sink receives the scrubbed event.
+    let sink_records = sink.take();
+    assert_eq!(sink_records.len(), 1);
+    match &sink_records[0] {
+        TelemetryRecord::Protocol(event) => match event.as_ref() {
+            crate::events::Event::NeighborLost { peer_id } => {
+                assert_ne!(peer_id, "alice", "sink should see scrubbed ID");
+                assert_eq!(peer_id.len(), 32);
+            }
+            _ => panic!("unexpected inner variant"),
+        },
+        other => panic!("expected Protocol variant, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_noop_telemetry_sink_installs_cleanly() {
+    // Guard against regressions where the install path depends on the sink
+    // actually receiving records. `NoopTelemetrySink` is the zero-cost
+    // default apps fall back to when they want install-path wiring without
+    // paying for emission.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.install_telemetry_sink(Arc::new(NoopTelemetrySink), TelemetryConfig::default());
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+    // If we got here, the install + emit path did not panic.
 }
 
 #[test]

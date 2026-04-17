@@ -10,23 +10,20 @@ use std::time::Duration;
 
 /// Verbosity tier for MLS lifecycle telemetry.
 ///
-/// Replaces the compile-time `mls-observability` feature flag with a runtime
-/// knob. The SDK emits MLS events at or below the configured tier; apps that
-/// want zero MLS telemetry install `Off`, apps that want the existing
-/// production-grade stream install `Lifecycle`, and apps that want verbose
-/// diagnostic output install `Diagnostic`.
+/// The SDK emits MLS events at or below the configured tier. Apps that want
+/// zero MLS telemetry install `Off`, apps that want the standard operational
+/// stream install `Lifecycle` (the default), and apps that want verbose
+/// per-operation diagnostics install `Diagnostic`. `Off` suppresses both the
+/// [`TelemetrySink`] fan-out and the legacy
+/// [`crate::mls_observability::MlsEventEmitter`] path.
+///
+/// [`TelemetrySink`]: crate::telemetry::TelemetrySink
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MlsVerbosity {
     /// Suppress all MLS lifecycle telemetry.
     Off,
-    /// Emit the standard lifecycle stream (initialization, session ready,
-    /// decryption failures, etc.) — matches the legacy `mls-observability`
-    /// feature-enabled behavior.
-    ///
-    /// No-op until emission wiring lands: in this release, MLS emit paths
-    /// remain gated by the compile-time `mls-observability` feature, so
-    /// setting this knob (or `Off`/`Diagnostic`) does not yet change what
-    /// the SDK actually emits.
+    /// Emit the standard lifecycle stream: initialization, session ready,
+    /// decryption failures, session missing, encryption used.
     #[default]
     Lifecycle,
     /// Emit the full lifecycle stream plus additional per-operation

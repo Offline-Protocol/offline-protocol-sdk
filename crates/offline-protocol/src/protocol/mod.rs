@@ -116,7 +116,6 @@ pub struct OfflineProtocol {
     mls_event_emitter: Arc<dyn MlsEventEmitter>,
 
     /// Rate limiting policy for MLS failure event floods.
-    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     mls_event_rate_limiter: MlsEventRateLimiter,
 
     /// Pre-install scrubber used by MLS emit sites before
