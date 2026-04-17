@@ -299,6 +299,55 @@ typedef void (*UniffiCallbackInterfaceReticulumTransportCallbackMethod0)(uint64_
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD0
+typedef void (*UniffiCallbackInterfaceTelemetrySinkMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD1
+typedef void (*UniffiCallbackInterfaceTelemetrySinkMethod1)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD2
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD2
+typedef void (*UniffiCallbackInterfaceTelemetrySinkMethod2)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD3
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD3
+typedef void (*UniffiCallbackInterfaceTelemetrySinkMethod3)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD4
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD4
+typedef void (*UniffiCallbackInterfaceTelemetrySinkMethod4)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD5
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD5
+typedef void (*UniffiCallbackInterfaceTelemetrySinkMethod5)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD6
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TELEMETRY_SINK_METHOD6
+typedef void (*UniffiCallbackInterfaceTelemetrySinkMethod6)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_WIFI_DIRECT_TRANSPORT_CALLBACK_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_WIFI_DIRECT_TRANSPORT_CALLBACK_METHOD0
 typedef void (*UniffiCallbackInterfaceWifiDirectTransportCallbackMethod0)(uint64_t, void* _Nonnull, 
@@ -352,6 +401,21 @@ typedef struct UniffiVTableCallbackInterfaceReticulumTransportCallback {
     UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceReticulumTransportCallbackMethod0 _Nonnull onMessagesAvailable;
 } UniffiVTableCallbackInterfaceReticulumTransportCallback;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_TELEMETRY_SINK
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_TELEMETRY_SINK
+typedef struct UniffiVTableCallbackInterfaceTelemetrySink {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceTelemetrySinkMethod0 _Nonnull onProtocolEvent;
+    UniffiCallbackInterfaceTelemetrySinkMethod1 _Nonnull onMlsEvent;
+    UniffiCallbackInterfaceTelemetrySinkMethod2 _Nonnull onMetricsFrame;
+    UniffiCallbackInterfaceTelemetrySinkMethod3 _Nonnull onTransportState;
+    UniffiCallbackInterfaceTelemetrySinkMethod4 _Nonnull onRoutingDecision;
+    UniffiCallbackInterfaceTelemetrySinkMethod5 _Nonnull onDeviceCapability;
+    UniffiCallbackInterfaceTelemetrySinkMethod6 _Nonnull onExtension;
+} UniffiVTableCallbackInterfaceTelemetrySink;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_WIFI_DIRECT_TRANSPORT_CALLBACK
@@ -683,6 +747,11 @@ int8_t uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_route(uint64
 void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(uint64_t ptr, uint64_t storage, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_INSTALL_TELEMETRY_SINK
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_INSTALL_TELEMETRY_SINK
+void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_install_telemetry_sink(uint64_t ptr, uint64_t sink, RustBuffer config, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_INTERNET_CONFIRM_SENT
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_INTERNET_CONFIRM_SENT
 void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(uint64_t ptr, RustBuffer message_id, RustCallStatus *_Nonnull out_status
@@ -876,6 +945,11 @@ void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(uint64_t ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_POLL_EVENT
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_POLL_EVENT
 RustBuffer uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_POLL_TELEMETRY_FRAME
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_POLL_TELEMETRY_FRAME
+RustBuffer uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_telemetry_frame(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_PROCESS
@@ -1078,6 +1152,11 @@ void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(uint64_t ptr,
 void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(uint64_t ptr, RustBuffer user_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_UNINSTALL_TELEMETRY_SINK
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_UNINSTALL_TELEMETRY_SINK
+void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_uninstall_telemetry_sink(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_UPDATE_ACK_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_METHOD_OFFLINEPROTOCOL_UPDATE_ACK_CONFIG
 void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(uint64_t ptr, RustBuffer config, RustCallStatus *_Nonnull out_status
@@ -1166,6 +1245,11 @@ void uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallba
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_RETICULUMTRANSPORTCALLBACK
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_RETICULUMTRANSPORTCALLBACK
 void uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(const UniffiVTableCallbackInterfaceReticulumTransportCallback* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_TELEMETRYSINK
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_TELEMETRYSINK
+void uniffi_offline_protocol_uniffi_fn_init_callback_vtable_telemetrysink(const UniffiVTableCallbackInterfaceTelemetrySink* _Nonnull vtable
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_FN_INIT_CALLBACK_VTABLE_WIFIDIRECTTRANSPORTCALLBACK
@@ -1781,6 +1865,12 @@ uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initiali
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_INSTALL_TELEMETRY_SINK
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_INSTALL_TELEMETRY_SINK
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_install_telemetry_sink(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_INTERNET_CONFIRM_SENT
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_INTERNET_CONFIRM_SENT
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent(void
@@ -2012,6 +2102,12 @@ uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause(vo
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_POLL_EVENT
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_POLL_EVENT
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_POLL_TELEMETRY_FRAME
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_POLL_TELEMETRY_FRAME
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_telemetry_frame(void
     
 );
 #endif
@@ -2255,6 +2351,12 @@ uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_UNINSTALL_TELEMETRY_SINK
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_UNINSTALL_TELEMETRY_SINK
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_uninstall_telemetry_sink(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_UPDATE_ACK_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_OFFLINEPROTOCOL_UPDATE_ACK_CONFIG
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config(void
@@ -2390,6 +2492,48 @@ uint16_t uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_o
 #ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_RETICULUMTRANSPORTCALLBACK_ON_MESSAGES_AVAILABLE
 #define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_RETICULUMTRANSPORTCALLBACK_ON_MESSAGES_AVAILABLE
 uint16_t uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_PROTOCOL_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_PROTOCOL_EVENT
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_protocol_event(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_MLS_EVENT
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_MLS_EVENT
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_mls_event(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_METRICS_FRAME
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_METRICS_FRAME
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_metrics_frame(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_TRANSPORT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_TRANSPORT_STATE
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_transport_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_ROUTING_DECISION
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_ROUTING_DECISION
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_routing_decision(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_DEVICE_CAPABILITY
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_DEVICE_CAPABILITY
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_device_capability(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_EXTENSION
+#define UNIFFI_FFIDEF_UNIFFI_OFFLINE_PROTOCOL_UNIFFI_CHECKSUM_METHOD_TELEMETRYSINK_ON_EXTENSION
+uint16_t uniffi_offline_protocol_uniffi_checksum_method_telemetrysink_on_extension(void
     
 );
 #endif

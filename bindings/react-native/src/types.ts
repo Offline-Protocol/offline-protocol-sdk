@@ -1477,3 +1477,215 @@ export interface MlsCommit {
   /** New epoch after commit */
   newEpoch: number;
 }
+
+// ============================================================================
+// TELEMETRY (unified observer surface — mirrors the UniFFI TelemetrySink)
+// ============================================================================
+
+/** MLS lifecycle verbosity tier for TelemetryConfig. */
+export type MlsVerbosity = 'off' | 'lifecycle' | 'diagnostic';
+
+/** Underlying connection status of a single transport. */
+export type TransportStatus =
+  | 'available'
+  | 'unavailable'
+  | 'connecting'
+  | 'disconnected'
+  | 'error';
+
+/** Local relay role reported by DeviceCapabilitySnapshot. */
+export type RelayRole = 'regular' | 'relay';
+
+/**
+ * Which kind of routing decision a RoutingDecision record describes.
+ * `'unknown'` signals new-core / old-FFI skew — consumers should surface it as
+ * "unrecognised" rather than folding it into an existing phase.
+ */
+export type RoutingPhase =
+  | 'scoreUpdated'
+  | 'selected'
+  | 'switched'
+  | 'escalated'
+  | 'unknown';
+
+/**
+ * Flat reason space for routing decisions. `'unknown'` carries the same
+ * new-core / old-FFI skew semantics as `RoutingPhase`'s `'unknown'`.
+ */
+export type RoutingReasonCode =
+  | 'initialSelection'
+  | 'primarySelected'
+  | 'primarySuccess'
+  | 'fallbackSuccess'
+  | 'escalationApplied'
+  | 'currentUnavailable'
+  | 'retryThreshold'
+  | 'poorSignal'
+  | 'congestion'
+  | 'lowTtl'
+  | 'lowSuccessRate'
+  | 'unknown';
+
+/**
+ * Runtime configuration for the telemetry subsystem. All fields optional.
+ * Defaults (applied on the Rust side when a field is omitted):
+ *   scrubIds          = true
+ *   mlsVerbosity      = 'lifecycle'
+ *   metricsCadenceMs  = 5000
+ *   routingDiagnostic = false
+ *   enablePollQueue   = true
+ *
+ * Note: omitting `metricsCadenceMs` (or passing `undefined`) yields the
+ * default cadence. There is currently no way to disable periodic emission
+ * via this config — the single optional field cannot distinguish "use
+ * default" from "disable" across the FFI. Track as a follow-up if disable
+ * support is needed.
+ *
+ * `enablePollQueue` controls whether the Rust adapter builds the
+ * pull-channel JSON envelope on every emit. Leave it at the default
+ * (`true` / omitted) if you use `pollTelemetry()`; pass `false` for a
+ * push-only integration to skip the per-emit `serde_json` cost on the
+ * routing hot path. With `false`, `pollTelemetry()` returns `null` for
+ * records emitted under that config (previously enqueued records remain
+ * readable until drained).
+ */
+export interface TelemetryConfig {
+  scrubIds?: boolean;
+  mlsVerbosity?: MlsVerbosity;
+  metricsCadenceMs?: number;
+  routingDiagnostic?: boolean;
+  enablePollQueue?: boolean;
+}
+
+/**
+ * Per-transport metrics — same shape flows through getTransportMetrics (pull)
+ * and MetricsFrame.transports (push). The six legacy counters are always
+ * present; the remaining fields populate whenever a transport reports them.
+ */
+export interface TransportMetrics {
+  packetsSent: number;
+  packetsReceived: number;
+  bytesSent: number;
+  bytesReceived: number;
+  errorRate: number;
+  avgLatencyMs: number;
+  rssi?: number;
+  bandwidthBps?: number;
+  congestion?: number;
+  queueDepth?: number;
+  batteryLevel?: number;
+  isCharging?: boolean;
+  relayConnectionCount?: number;
+  isActiveRelay?: boolean;
+  deliveryRatio?: number;
+  dropRate?: number;
+  averageHopCount?: number;
+  energyCost?: number;
+}
+
+/** Per-transport entry inside a MetricsFrame. */
+export interface TransportMetricsEntry {
+  transport: TransportType;
+  metrics: TransportMetrics;
+}
+
+/** Retry-queue statistics frame entry. */
+export interface RetryQueueStatsFrame {
+  totalCount: number;
+  readyCount: number;
+  criticalPriorityCount: number;
+  highPriorityCount: number;
+  mediumPriorityCount: number;
+  lowPriorityCount: number;
+}
+
+/** Deduplicator statistics frame entry. */
+export interface DeduplicatorStatsFrame {
+  totalTracked: number;
+  recentTracked: number;
+  capacityUsedPercent: number;
+  falsePositiveRate?: number;
+  mode: string;
+}
+
+/**
+ * Periodic snapshot of protocol-wide counters and per-transport metrics.
+ *
+ * Note on precision: the counter fields here (`ackPending`, `neighborCount`,
+ * every `RetryQueueStatsFrame.*Count`, `DeduplicatorStatsFrame.totalTracked`
+ * / `.recentTracked`, and the `TransportMetrics.{packetsSent,
+ * packetsReceived, bytesSent, bytesReceived, bandwidthBps}` fields) are
+ * `u64` on the Rust side but bridge as JS `number` (f64, 53-bit mantissa).
+ * Values above 2^53 silently lose precision. Realistic mobile deployments
+ * do not hit this, but long-running relays that tail byte counters for
+ * months should treat any single value above ~9 PB as approximate.
+ */
+export interface MetricsFrame {
+  timestampMs: number;
+  transports: TransportMetricsEntry[];
+  retryQueue: RetryQueueStatsFrame;
+  dedup: DeduplicatorStatsFrame;
+  ackPending: number;
+  neighborCount: number;
+  isLocalRelay: boolean;
+  currentTransport?: TransportType;
+}
+
+/** A single TransportStatus transition observed by the protocol engine. */
+export interface TransportStateTelemetryEvent {
+  timestampMs: number;
+  transport: TransportType;
+  previous: TransportStatus;
+  current: TransportStatus;
+}
+
+/** Per-transport score breakdown carried by RoutingDecision (diagnostic tier). */
+export interface RoutingScoreEntry {
+  transport: TransportType;
+  signal: number;
+  proximity: number;
+  bandwidth: number;
+  congestion: number;
+  energy: number;
+  reliability: number;
+  load: number;
+  total: number;
+}
+
+/** A structured routing decision (superset of legacy Event::Dors* events). */
+export interface RoutingDecision {
+  timestampMs: number;
+  phase: RoutingPhase;
+  from?: TransportType;
+  to?: TransportType;
+  winningScore?: number;
+  reasonCode?: RoutingReasonCode;
+  scores: RoutingScoreEntry[];
+}
+
+/** Snapshot of local device capability at the moment of emission. */
+export interface DeviceCapabilitySnapshot {
+  timestampMs: number;
+  batteryLevel?: number;
+  isCharging: boolean;
+  relayRole: RelayRole;
+  /** Bitmask: 0b001 battery, 0b010 charging, 0b100 relay-role. */
+  changedFields: number;
+}
+
+/**
+ * Discriminated union of every telemetry record the SDK emits. New variants
+ * land on `{ category: 'extension' }` at old client builds — regenerate
+ * bindings to pick up typed handling.
+ */
+export type TelemetryRecord =
+  | { category: 'protocol'; eventJson: string }
+  | { category: 'mls'; eventJson: string }
+  | { category: 'metricsFrame'; frame: MetricsFrame }
+  | { category: 'transportState'; event: TransportStateTelemetryEvent }
+  | { category: 'routingDecision'; decision: RoutingDecision }
+  | { category: 'deviceCapability'; snapshot: DeviceCapabilitySnapshot }
+  | { category: 'extension'; name: string; payloadJson: string };
+
+/** Listener type for onTelemetry. */
+export type TelemetryListener = (record: TelemetryRecord) => void;

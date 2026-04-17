@@ -151,7 +151,12 @@ dictionary PeerDevice {
     u64 last_seen_ms;
 };
 
-// BLE transport metrics
+// Per-transport metrics. The first six fields are the legacy shape preserved
+// for source-compatibility with existing iOS/Android/RN consumers of
+// `getTransportMetrics`; the remaining fields (all optional) mirror the
+// richer Rust `TransportMetrics` struct and populate whenever a transport
+// reports them. Same dictionary flows through both the pull path
+// (`get_transport_metrics`) and the push path (`MetricsFrame.transports`).
 dictionary TransportMetrics {
     u32 packets_sent;
     u32 packets_received;
@@ -159,6 +164,19 @@ dictionary TransportMetrics {
     u32 bytes_received;
     f32 error_rate;
     u32 avg_latency_ms;
+    // Extended fields — all optional so existing constructors still compile.
+    i16? rssi;
+    u64? bandwidth_bps;
+    f32? congestion;
+    u32? queue_depth;
+    u8? battery_level;
+    boolean? is_charging;
+    u8? relay_connection_count;
+    boolean? is_active_relay;
+    f32? delivery_ratio;
+    f32? drop_rate;
+    f32? average_hop_count;
+    f32? energy_cost;
 };
 
 // Content type for messages
@@ -380,6 +398,199 @@ dictionary ProtocolConfigExtended {
     u8 initial_ttl;
 };
 
+// ========================================================================
+// TELEMETRY (unified observer surface — step 7 of the telemetry workstream)
+// ========================================================================
+
+// MLS lifecycle verbosity tier for TelemetryConfig.
+enum MlsVerbosity {
+    "Off",
+    "Lifecycle",
+    "Diagnostic",
+};
+
+// Underlying connection status of a single transport (distinct from the
+// protocol-level selected transport reported via Event::TransportSwitched).
+enum TransportStatus {
+    "Available",
+    "Unavailable",
+    "Connecting",
+    "Disconnected",
+    "Error",
+};
+
+// Local relay role reported by DeviceCapabilitySnapshot.
+enum RelayRole {
+    "Regular",
+    "Relay",
+};
+
+// Which kind of routing decision a RoutingDecision record describes.
+// `Unknown` is emitted when the Rust core reports a variant this FFI build
+// does not recognise (new-core/old-FFI skew) — consumers should surface
+// "unrecognised" rather than collapse into an existing phase.
+enum RoutingPhase {
+    "ScoreUpdated",
+    "Selected",
+    "Switched",
+    "Escalated",
+    "Unknown",
+};
+
+// Flat reason space for routing decisions (unifies legacy DorsReasonCode /
+// DorsEscalationReasonCode spaces). `Unknown` follows the same semantics as
+// `RoutingPhase::Unknown`.
+enum RoutingReasonCode {
+    "InitialSelection",
+    "PrimarySelected",
+    "PrimarySuccess",
+    "FallbackSuccess",
+    "EscalationApplied",
+    "CurrentUnavailable",
+    "RetryThreshold",
+    "PoorSignal",
+    "Congestion",
+    "LowTtl",
+    "LowSuccessRate",
+    "Unknown",
+};
+
+// Per-transport entry inside a MetricsFrame.
+dictionary TransportMetricsEntry {
+    TransportType transport;
+    TransportMetrics metrics;
+};
+
+// Retry-queue statistics (mirrors offline_protocol_reliability::RetryQueueStats).
+dictionary RetryQueueStats {
+    u64 total_count;
+    u64 ready_count;
+    u64 critical_priority_count;
+    u64 high_priority_count;
+    u64 medium_priority_count;
+    u64 low_priority_count;
+};
+
+// Deduplicator statistics (mirrors offline_protocol_reliability::DeduplicatorStats).
+dictionary DeduplicatorStatsFrame {
+    u64 total_tracked;
+    u64 recent_tracked;
+    u8 capacity_used_percent;
+    f64? false_positive_rate;
+    string mode;
+};
+
+// Periodic snapshot of protocol-wide counters and per-transport metrics.
+dictionary MetricsFrame {
+    i64 timestamp_ms;
+    sequence<TransportMetricsEntry> transports;
+    RetryQueueStats retry_queue;
+    DeduplicatorStatsFrame dedup;
+    u64 ack_pending;
+    u64 neighbor_count;
+    boolean is_local_relay;
+    TransportType? current_transport;
+};
+
+// A single TransportStatus transition observed by the protocol engine.
+dictionary TransportStateEvent {
+    i64 timestamp_ms;
+    TransportType transport;
+    TransportStatus previous;
+    TransportStatus current;
+};
+
+// Per-transport score breakdown carried by RoutingDecision at the diagnostic
+// verbosity tier. Empty unless TelemetryConfig.routing_diagnostic is true.
+dictionary RoutingScoreEntry {
+    TransportType transport;
+    f32 signal;
+    f32 proximity;
+    f32 bandwidth;
+    f32 congestion;
+    f32 energy;
+    f32 reliability;
+    f32 load;
+    f32 total;
+};
+
+// A structured routing decision (superset of legacy Event::Dors* events).
+dictionary RoutingDecision {
+    i64 timestamp_ms;
+    RoutingPhase phase;
+    TransportType? from;
+    TransportType? to;
+    f32? winning_score;
+    RoutingReasonCode? reason_code;
+    sequence<RoutingScoreEntry> scores;
+};
+
+// Snapshot of local device capability at the moment of emission.
+dictionary DeviceCapabilitySnapshot {
+    i64 timestamp_ms;
+    u8? battery_level;
+    boolean is_charging;
+    RelayRole relay_role;
+    u8 changed_fields;
+};
+
+// Runtime configuration for the telemetry subsystem. All fields are optional
+// on the foreign side; Rust applies the privacy-preserving defaults
+// (scrub_ids=true, mls_verbosity=Lifecycle, metrics_cadence_ms=5000,
+// routing_diagnostic=false, enable_poll_queue=true) when a field is null.
+//
+// `metrics_cadence_ms` encodes the cadence of periodic `MetricsFrame`
+// emission in milliseconds. The single optional field cannot distinguish
+// "use the default" (null) from "disable periodic emission" today — any
+// explicit value overrides the default; null keeps it. If disable support
+// is needed, extend this dict with a dedicated flag.
+//
+// `enable_poll_queue` (default true) controls whether the adapter builds
+// the pull-channel JSON envelope on every emit. Push-only consumers should
+// set this to false to skip per-emit `serde_json` serialization — the
+// typed push callbacks still fire, but `poll_telemetry_frame` will always
+// return null for records emitted under that config. Flip back to true
+// (re-install the sink) to resume polling.
+dictionary TelemetryConfig {
+    boolean? scrub_ids;
+    MlsVerbosity? mls_verbosity;
+    u64? metrics_cadence_ms;
+    boolean? routing_diagnostic;
+    boolean? enable_poll_queue;
+};
+
+// Unified telemetry sink. Apps implement this to receive every typed
+// TelemetryRecord the SDK emits: protocol events, MLS lifecycle, periodic
+// metrics, transport state, routing decisions, device capability.
+//
+// Forward-compat: new TelemetryRecord variants added to the Rust enum that
+// do not yet have a typed method here dispatch through on_extension with the
+// record's stable snake.dot.case name and the inner payload as JSON.
+//
+// Failure semantics:
+//   - on_metrics_frame / on_transport_state / on_routing_decision /
+//     on_device_capability always fire — the DTOs are plain value types
+//     crossing the FFI boundary. If the pull-queue JSON envelope fails
+//     to serialize (e.g. NaN floats), only the pull channel gets a
+//     `telemetry.error.<variant>` extension envelope; the push callback
+//     is NOT re-fired through on_extension.
+//   - on_protocol_event / on_mls_event only fire when the inner event
+//     serializes. On failure, the typed callback is skipped and
+//     on_extension fires with `telemetry.error.<variant>` so consumers
+//     see exactly one record per emit.
+//
+// Implementations MUST NOT block, reenter the SDK, or panic — the emit path
+// may be called while the protocol holds internal locks.
+callback interface TelemetrySink {
+    void on_protocol_event(string event_json);
+    void on_mls_event(string event_json);
+    void on_metrics_frame(MetricsFrame frame);
+    void on_transport_state(TransportStateEvent event);
+    void on_routing_decision(RoutingDecision decision);
+    void on_device_capability(DeviceCapabilitySnapshot snapshot);
+    void on_extension(string name, string payload_json);
+};
+
 // Event callback interface
 callback interface EventCallback {
     void on_event(string event_json);
@@ -433,11 +644,57 @@ interface OfflineProtocol {
     
     // Event handling
     void set_event_callback(EventCallback callback);
-    
+
     string? poll_event();
-    
+
     void emit_test_event();
-    
+
+    // Install a unified telemetry sink. Replaces any previously installed
+    // sink. Config fields left null fall back to the Rust-side defaults
+    // (scrub_ids=true, mls_verbosity=Lifecycle, metrics_cadence_ms=5000,
+    // routing_diagnostic=false).
+    [Throws=ProtocolError]
+    void install_telemetry_sink(TelemetrySink sink, TelemetryConfig config);
+
+    // Poll the next buffered telemetry record as a JSON envelope. Every
+    // envelope carries a `category` discriminator plus variant-specific
+    // fields:
+    //   protocol         → { "category": "protocol",         "eventJson": <string> }
+    //   mls              → { "category": "mls",              "eventJson": <string> }
+    //   metricsFrame     → { "category": "metricsFrame",     "frame":     <MetricsFrame> }
+    //   transportState   → { "category": "transportState",   "event":     <TransportStateEvent> }
+    //   routingDecision  → { "category": "routingDecision",  "decision":  <RoutingDecision> }
+    //   deviceCapability → { "category": "deviceCapability", "snapshot":  <DeviceCapabilitySnapshot> }
+    //   extension        → { "category": "extension",        "name": <string>, "payloadJson": <string> }
+    //
+    // Returns null when the queue is empty. The queue is bounded (1024
+    // slots, drop-oldest on overflow). Records are only enqueued while a
+    // sink is installed with `enable_poll_queue` left at its default (or
+    // explicitly `true`). Polling before `install_telemetry_sink`, or
+    // while a push-only sink (`enable_poll_queue = false`) is live,
+    // returns null for new records — previously queued records remain
+    // readable.
+    //
+    // Queue retention across sink replacement: calling
+    // `install_telemetry_sink` a second time replaces the core-side sink
+    // but does NOT drain the queue. A consumer installed as Sink B and
+    // polling after a flurry of Sink A emits will see Sink A's records
+    // first (FIFO). This is intentional — the queue is a property of the
+    // FFI adapter, not of any individual sink. Apps that need a clean
+    // slate should drain `poll_telemetry_frame` in a loop until it
+    // returns null before installing the new sink, or call
+    // `uninstall_telemetry_sink()` which both detaches the sink and
+    // drains the queue in a single call.
+    string? poll_telemetry_frame();
+
+    // Detach the installed telemetry sink. Replaces the core-side sink
+    // with a no-op (so future emissions are discarded with zero overhead)
+    // and drains the pull queue so a subsequent
+    // `install_telemetry_sink(...)` starts with an empty queue. Idempotent
+    // — safe to call without a prior install.
+    [Throws=ProtocolError]
+    void uninstall_telemetry_sink();
+
     // Messaging
     [Throws=ProtocolError]
     string send_message(string recipient, string content, MessagePriority priority, string? reply_to_msg);
@@ -589,6 +846,11 @@ interface OfflineProtocol {
     
     sequence<string> get_active_transports();
     
+    // Legacy no-op retained only for source/ABI compat. Every field of
+    // `metrics` (including the 12 extended optional fields) is discarded.
+    // Read live data via `get_transport_metrics(...)` or install a
+    // `TelemetrySink` to observe push `MetricsFrame`s instead. Scheduled
+    // for removal in the v1.0 release.
     [Throws=ProtocolError]
     void update_transport_metrics(TransportType transport_type, TransportMetrics metrics);
     

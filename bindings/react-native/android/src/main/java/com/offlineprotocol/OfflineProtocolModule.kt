@@ -1,12 +1,14 @@
 package com.offlineprotocol
 
 import android.net.Uri
+import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
+import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -37,6 +39,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     companion object {
         const val NAME = "OfflineProtocolModule"
         const val EVENT_NAME = "OfflineProtocol_Event"
+        const val TELEMETRY_EVENT_NAME = "OfflineProtocol_Telemetry"
     }
     
     private object Constants {
@@ -565,6 +568,357 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             promise.reject("ERROR_TEST_EVENT", "Failed to emit test event: ${e.message}", e)
         }
+    }
+
+    @ReactMethod
+    fun installTelemetrySink(configMap: ReadableMap?, promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.reject("NOT_STARTED", "Protocol not created", null)
+            return
+        }
+        try {
+            val cfg = parseTelemetryConfig(configMap)
+            proto.installTelemetrySink(TelemetrySinkImpl(this), cfg)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_INSTALL", "Failed to install telemetry sink: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun pollTelemetryFrame(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.reject("NOT_STARTED", "Protocol not created", null)
+            return
+        }
+        try {
+            promise.resolve(proto.pollTelemetryFrame())
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_POLL", "Failed to poll telemetry frame: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun uninstallTelemetrySink(promise: Promise) {
+        val proto = protocol
+        if (proto == null) {
+            promise.reject("NOT_STARTED", "Protocol not created", null)
+            return
+        }
+        try {
+            proto.uninstallTelemetrySink()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_UNINSTALL", "Failed to uninstall telemetry sink: ${e.message}", e)
+        }
+    }
+
+    // The TS `TelemetryConfig` type (bindings/react-native/src/types.ts)
+    // only emits camelCase keys — these parsers match that contract.
+    //
+    // Unrecognised `mlsVerbosity` strings fall back to null (Rust default)
+    // with a `Log.w` — silent fallback would have hid integrator typos
+    // behind a config that "just works" at Lifecycle.
+    private fun parseTelemetryConfig(map: ReadableMap?): TelemetryConfig {
+        if (map == null) {
+            return TelemetryConfig(
+                scrubIds = null,
+                mlsVerbosity = null,
+                metricsCadenceMs = null,
+                routingDiagnostic = null,
+                enablePollQueue = null,
+            )
+        }
+        val scrubIds = readOptionalBoolean(map, "scrubIds")
+        val verbosity = readOptionalString(map, "mlsVerbosity")?.let { raw ->
+            when (raw.lowercase()) {
+                "off" -> MlsVerbosity.OFF
+                "diagnostic" -> MlsVerbosity.DIAGNOSTIC
+                "lifecycle" -> MlsVerbosity.LIFECYCLE
+                else -> {
+                    Log.w(
+                        NAME,
+                        "telemetry: unknown mlsVerbosity '$raw' — expected 'off', 'lifecycle', or 'diagnostic'. Falling back to the Rust default (lifecycle)."
+                    )
+                    null
+                }
+            }
+        }
+        val cadence = readOptionalNonNegativeLong(map, "metricsCadenceMs")?.toULong()
+        val routingDiag = readOptionalBoolean(map, "routingDiagnostic")
+        val enablePollQueue = readOptionalBoolean(map, "enablePollQueue")
+        return TelemetryConfig(
+            scrubIds = scrubIds,
+            mlsVerbosity = verbosity,
+            metricsCadenceMs = cadence,
+            routingDiagnostic = routingDiag,
+            enablePollQueue = enablePollQueue,
+        )
+    }
+
+    private fun readOptionalBoolean(map: ReadableMap, key: String): Boolean? =
+        if (map.hasKey(key) && !map.isNull(key)) map.getBoolean(key) else null
+
+    private fun readOptionalString(map: ReadableMap, key: String): String? =
+        if (map.hasKey(key) && !map.isNull(key)) map.getString(key) else null
+
+    // Non-negative u64-compatible parse: JS numbers are f64, so values above
+    // 2^53 lose precision — fine for config-sized fields (cadences in ms
+    // fit comfortably). Negative values would wrap to a huge u64 after
+    // `.toULong()`, so we explicitly warn-and-reject (returning null keeps
+    // the Rust-side default). Do NOT reuse this helper for counter fields
+    // that can exceed 2^53.
+    private fun readOptionalNonNegativeLong(map: ReadableMap, key: String): Long? {
+        if (!map.hasKey(key) || map.isNull(key)) {
+            return null
+        }
+        val value = map.getDouble(key).toLong()
+        if (value < 0L) {
+            Log.w(
+                NAME,
+                "telemetry: ignoring negative value for '$key' ($value) — expected a non-negative number. Falling back to the Rust default."
+            )
+            return null
+        }
+        return value
+    }
+
+    /**
+     * Forwards each typed TelemetryRecord variant into the RN bridge as a
+     * discriminated body keyed by `category`. Mirrors the iOS
+     * `TelemetrySinkImpl`. Must not block, reenter the SDK, or panic.
+     *
+     * Deliberately a nested (non-`inner`) class holding a
+     * `WeakReference<OfflineProtocolModule>` — if this were an inner class
+     * it would pin the enclosing module alive for as long as the Rust
+     * adapter kept the sink, defeating React Native's ability to GC a
+     * detached module (e.g. after a reload).
+     */
+    private class TelemetrySinkImpl(module: OfflineProtocolModule) : TelemetrySink {
+        private val moduleRef = WeakReference(module)
+
+        // Every callback is invoked synchronously from the Rust emit path.
+        // A thrown Kotlin exception here would cross the UniFFI boundary
+        // and crash the native caller, so we log-and-swallow anything the
+        // encoders or React bridge throw (e.g. detached ReactContext during
+        // app tear-down). If the weak reference has been GC'd we drop the
+        // record silently — the Rust side will eventually replace or free
+        // this sink.
+        private inline fun safeDispatch(build: (OfflineProtocolModule) -> WritableMap) {
+            val module = moduleRef.get() ?: return
+            try {
+                val params = build(module)
+                module.sendEvent(TELEMETRY_EVENT_NAME, params)
+            } catch (t: Throwable) {
+                Log.w(NAME, "telemetry dispatch failed; dropping record", t)
+            }
+        }
+
+        override fun onProtocolEvent(eventJson: String) = safeDispatch { _ ->
+            Arguments.createMap().apply {
+                putString("category", "protocol")
+                putString("eventJson", eventJson)
+            }
+        }
+
+        override fun onMlsEvent(eventJson: String) = safeDispatch { _ ->
+            Arguments.createMap().apply {
+                putString("category", "mls")
+                putString("eventJson", eventJson)
+            }
+        }
+
+        override fun onMetricsFrame(frame: MetricsFrame) = safeDispatch { m ->
+            Arguments.createMap().apply {
+                putString("category", "metricsFrame")
+                putMap("frame", m.encodeFrame(frame))
+            }
+        }
+
+        override fun onTransportState(event: TransportStateEvent) = safeDispatch { m ->
+            Arguments.createMap().apply {
+                putString("category", "transportState")
+                putMap("event", m.encodeTransportState(event))
+            }
+        }
+
+        override fun onRoutingDecision(decision: RoutingDecision) = safeDispatch { m ->
+            Arguments.createMap().apply {
+                putString("category", "routingDecision")
+                putMap("decision", m.encodeRouting(decision))
+            }
+        }
+
+        override fun onDeviceCapability(snapshot: DeviceCapabilitySnapshot) = safeDispatch { m ->
+            Arguments.createMap().apply {
+                putString("category", "deviceCapability")
+                putMap("snapshot", m.encodeDevice(snapshot))
+            }
+        }
+
+        override fun onExtension(name: String, payloadJson: String) = safeDispatch { _ ->
+            Arguments.createMap().apply {
+                putString("category", "extension")
+                putString("name", name)
+                putString("payloadJson", payloadJson)
+            }
+        }
+    }
+
+    // ---- Telemetry encoders (UniFFI data classes -> WritableMap) ----
+    //
+    // IMPORTANT: every map produced below MUST be structurally identical
+    // to the JSON envelope the Rust adapter enqueues on the pull channel.
+    // The canonical contract is pinned by the `shape_parity_*_envelope`
+    // tests in `crates/offline-protocol-uniffi/src/lib.rs`. If those tests
+    // change, update the matching encoder here in lockstep — the TS
+    // `TelemetryRecord` discriminated union expects ONE shape regardless
+    // of whether a record arrived via `onTelemetry` (push) or
+    // `pollTelemetry` (pull).
+
+    private fun encodeTransport(t: TransportType): String = when (t) {
+        TransportType.INTERNET -> "internet"
+        TransportType.BLE -> "ble"
+        TransportType.WI_FI_DIRECT -> "wifiDirect"
+        TransportType.RETICULUM -> "reticulum"
+        TransportType.NOSTR -> "nostr"
+    }
+
+    private fun encodeStatus(s: TransportStatus): String = when (s) {
+        TransportStatus.AVAILABLE -> "available"
+        TransportStatus.UNAVAILABLE -> "unavailable"
+        TransportStatus.CONNECTING -> "connecting"
+        TransportStatus.DISCONNECTED -> "disconnected"
+        TransportStatus.ERROR -> "error"
+    }
+
+    private fun encodePhase(p: RoutingPhase): String = when (p) {
+        RoutingPhase.SCORE_UPDATED -> "scoreUpdated"
+        RoutingPhase.SELECTED -> "selected"
+        RoutingPhase.SWITCHED -> "switched"
+        RoutingPhase.ESCALATED -> "escalated"
+        RoutingPhase.UNKNOWN -> "unknown"
+    }
+
+    private fun encodeReason(r: RoutingReasonCode): String = when (r) {
+        RoutingReasonCode.INITIAL_SELECTION -> "initialSelection"
+        RoutingReasonCode.PRIMARY_SELECTED -> "primarySelected"
+        RoutingReasonCode.PRIMARY_SUCCESS -> "primarySuccess"
+        RoutingReasonCode.FALLBACK_SUCCESS -> "fallbackSuccess"
+        RoutingReasonCode.ESCALATION_APPLIED -> "escalationApplied"
+        RoutingReasonCode.CURRENT_UNAVAILABLE -> "currentUnavailable"
+        RoutingReasonCode.RETRY_THRESHOLD -> "retryThreshold"
+        RoutingReasonCode.POOR_SIGNAL -> "poorSignal"
+        RoutingReasonCode.CONGESTION -> "congestion"
+        RoutingReasonCode.LOW_TTL -> "lowTtl"
+        RoutingReasonCode.LOW_SUCCESS_RATE -> "lowSuccessRate"
+        RoutingReasonCode.UNKNOWN -> "unknown"
+    }
+
+    private fun encodeMetrics(m: TransportMetrics): WritableMap = Arguments.createMap().apply {
+        // Counter fields (UInt/UInt32/UInt64 on the Rust side) go through
+        // putDouble to avoid Kotlin's signed-Int wrap at 2^31 — long-running
+        // relays accumulate byte/packet counts well past that boundary.
+        putDouble("packetsSent", m.packetsSent.toLong().toDouble())
+        putDouble("packetsReceived", m.packetsReceived.toLong().toDouble())
+        putDouble("bytesSent", m.bytesSent.toLong().toDouble())
+        putDouble("bytesReceived", m.bytesReceived.toLong().toDouble())
+        putDouble("errorRate", m.errorRate.toDouble())
+        putDouble("avgLatencyMs", m.avgLatencyMs.toLong().toDouble())
+        m.rssi?.let { putInt("rssi", it.toInt()) }
+        m.bandwidthBps?.let { putDouble("bandwidthBps", it.toLong().toDouble()) }
+        m.congestion?.let { putDouble("congestion", it.toDouble()) }
+        m.queueDepth?.let { putDouble("queueDepth", it.toLong().toDouble()) }
+        m.batteryLevel?.let { putInt("batteryLevel", it.toInt()) }
+        m.isCharging?.let { putBoolean("isCharging", it) }
+        m.relayConnectionCount?.let { putInt("relayConnectionCount", it.toInt()) }
+        m.isActiveRelay?.let { putBoolean("isActiveRelay", it) }
+        m.deliveryRatio?.let { putDouble("deliveryRatio", it.toDouble()) }
+        m.dropRate?.let { putDouble("dropRate", it.toDouble()) }
+        m.averageHopCount?.let { putDouble("averageHopCount", it.toDouble()) }
+        m.energyCost?.let { putDouble("energyCost", it.toDouble()) }
+    }
+
+    private fun encodeFrame(f: MetricsFrame): WritableMap = Arguments.createMap().apply {
+        putDouble("timestampMs", f.timestampMs.toDouble())
+        val transports = Arguments.createArray()
+        for (entry in f.transports) {
+            transports.pushMap(
+                Arguments.createMap().apply {
+                    putString("transport", encodeTransport(entry.transport))
+                    putMap("metrics", encodeMetrics(entry.metrics))
+                }
+            )
+        }
+        putArray("transports", transports)
+        putMap(
+            "retryQueue",
+            Arguments.createMap().apply {
+                putDouble("totalCount", f.retryQueue.totalCount.toDouble())
+                putDouble("readyCount", f.retryQueue.readyCount.toDouble())
+                putDouble("criticalPriorityCount", f.retryQueue.criticalPriorityCount.toDouble())
+                putDouble("highPriorityCount", f.retryQueue.highPriorityCount.toDouble())
+                putDouble("mediumPriorityCount", f.retryQueue.mediumPriorityCount.toDouble())
+                putDouble("lowPriorityCount", f.retryQueue.lowPriorityCount.toDouble())
+            }
+        )
+        putMap(
+            "dedup",
+            Arguments.createMap().apply {
+                putDouble("totalTracked", f.dedup.totalTracked.toDouble())
+                putDouble("recentTracked", f.dedup.recentTracked.toDouble())
+                putInt("capacityUsedPercent", f.dedup.capacityUsedPercent.toInt())
+                f.dedup.falsePositiveRate?.let { putDouble("falsePositiveRate", it) }
+                putString("mode", f.dedup.mode)
+            }
+        )
+        putDouble("ackPending", f.ackPending.toDouble())
+        putDouble("neighborCount", f.neighborCount.toDouble())
+        putBoolean("isLocalRelay", f.isLocalRelay)
+        f.currentTransport?.let { putString("currentTransport", encodeTransport(it)) }
+    }
+
+    private fun encodeTransportState(e: TransportStateEvent): WritableMap = Arguments.createMap().apply {
+        putDouble("timestampMs", e.timestampMs.toDouble())
+        putString("transport", encodeTransport(e.transport))
+        putString("previous", encodeStatus(e.previous))
+        putString("current", encodeStatus(e.current))
+    }
+
+    private fun encodeRouting(d: RoutingDecision): WritableMap = Arguments.createMap().apply {
+        putDouble("timestampMs", d.timestampMs.toDouble())
+        putString("phase", encodePhase(d.phase))
+        d.from?.let { putString("from", encodeTransport(it)) }
+        d.to?.let { putString("to", encodeTransport(it)) }
+        d.winningScore?.let { putDouble("winningScore", it.toDouble()) }
+        d.reasonCode?.let { putString("reasonCode", encodeReason(it)) }
+        val scores = Arguments.createArray()
+        for (s in d.scores) {
+            scores.pushMap(
+                Arguments.createMap().apply {
+                    putString("transport", encodeTransport(s.transport))
+                    putDouble("signal", s.signal.toDouble())
+                    putDouble("proximity", s.proximity.toDouble())
+                    putDouble("bandwidth", s.bandwidth.toDouble())
+                    putDouble("congestion", s.congestion.toDouble())
+                    putDouble("energy", s.energy.toDouble())
+                    putDouble("reliability", s.reliability.toDouble())
+                    putDouble("load", s.load.toDouble())
+                    putDouble("total", s.total.toDouble())
+                }
+            )
+        }
+        putArray("scores", scores)
+    }
+
+    private fun encodeDevice(s: DeviceCapabilitySnapshot): WritableMap = Arguments.createMap().apply {
+        putDouble("timestampMs", s.timestampMs.toDouble())
+        s.batteryLevel?.let { putInt("batteryLevel", it.toInt()) }
+        putBoolean("isCharging", s.isCharging)
+        putString("relayRole", if (s.relayRole == RelayRole.RELAY) "relay" else "regular")
+        putInt("changedFields", s.changedFields.toInt())
     }
 
     @ReactMethod

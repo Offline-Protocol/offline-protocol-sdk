@@ -41,6 +41,10 @@ import type {
   MlsSessionInfo,
   MlsGroupInfo,
   EstablishmentState,
+  TelemetryConfig,
+  TelemetryListener,
+  TelemetryRecord,
+  TransportMetrics,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
@@ -204,6 +208,8 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
 export class OfflineProtocol {
   private eventEmitter: NativeEventEmitter;
   private eventSubscription: EmitterSubscription | null = null;
+  private telemetrySubscription: EmitterSubscription | null = null;
+  private telemetryListeners: Set<TelemetryListener> = new Set();
   private eventListeners: Map<EventType | "all", Set<EventListener>> =
     new Map();
   private config: ProtocolConfig;
@@ -220,6 +226,7 @@ export class OfflineProtocol {
     this.config = config;
     this.eventEmitter = new NativeEventEmitter(OfflineProtocolNativeModule);
     this.setupEventSubscription();
+    this.setupTelemetrySubscription();
   }
 
   /**
@@ -472,6 +479,34 @@ export class OfflineProtocol {
         }
       }
     );
+  }
+
+  /**
+   * Sets up the native telemetry subscription. Telemetry events arrive with
+   * a `category` discriminator; this normalizes them to the TelemetryRecord
+   * union and fans them out to registered listeners.
+   */
+  private setupTelemetrySubscription(): void {
+    this.telemetrySubscription = this.eventEmitter.addListener(
+      "OfflineProtocol_Telemetry",
+      (data: unknown) => {
+        try {
+          this.dispatchTelemetry(data as TelemetryRecord);
+        } catch (error) {
+          console.error("Failed to dispatch telemetry record:", error);
+        }
+      }
+    );
+  }
+
+  private dispatchTelemetry(record: TelemetryRecord): void {
+    this.telemetryListeners.forEach((listener) => {
+      try {
+        listener(record);
+      } catch (error) {
+        console.error("Error in telemetry listener:", error);
+      }
+    });
   }
 
   /**
@@ -1208,15 +1243,140 @@ export class OfflineProtocol {
    * @param transportType - Transport type
    * @returns Transport metrics or null if not available
    */
-  async getTransportMetrics(transportType: TransportType): Promise<{
-    packetsSent: number;
-    packetsReceived: number;
-    bytesSent: number;
-    bytesReceived: number;
-    errorRate: number;
-    avgLatencyMs: number;
-  } | null> {
+  async getTransportMetrics(transportType: TransportType): Promise<TransportMetrics | null> {
     return await OfflineProtocolNativeModule.getTransportMetrics(transportType);
+  }
+
+  /**
+   * Installs a unified telemetry sink. Replaces any previously installed
+   * sink. Config fields left undefined fall back to the privacy-preserving
+   * defaults on the Rust side (scrubIds=true, mlsVerbosity='lifecycle',
+   * metricsCadenceMs=5000, routingDiagnostic=false, enablePollQueue=true).
+   *
+   * Telemetry records are dispatched via `onTelemetry` (push) and buffered
+   * for `pollTelemetry` (pull). The legacy `on(...)` event path is unaffected.
+   *
+   * **Listener race**: the bridge call is async, so registering an
+   * `onTelemetry(listener)` *after* `installTelemetrySink(...)` resolves
+   * leaves a window where records emitted in the gap are fanned out to an
+   * empty listener set and dropped on the push channel (they still reach
+   * the pull queue when `enablePollQueue` is true). To close the race,
+   * pass the listener directly to this call — it is registered
+   * synchronously *before* the underlying native install is dispatched,
+   * so no emission can slip through. The returned unsubscribe removes the
+   * listener; further listeners can still be added via `onTelemetry(...)`.
+   *
+   * **Poll queue opt-out**: push-only integrations should pass
+   * `{ enablePollQueue: false }` to skip the per-emit JSON envelope build
+   * inside the Rust adapter. `pollTelemetry()` will return null for any
+   * record emitted while the opt-out is in effect.
+   *
+   * **Queue retention across replacement**: calling this method a second
+   * time replaces the sink but does NOT drain the pull queue. A consumer
+   * polling immediately after replace will see the previous sink's
+   * buffered records first (FIFO). Drain `pollTelemetry()` in a loop
+   * until it returns null before re-installing if you need a clean slate,
+   * or call `uninstallTelemetrySink()` which atomically detaches the
+   * sink and drains the queue in one shot.
+   *
+   * @returns An unsubscribe function for the optional `listener`, or a
+   * no-op when no listener was provided.
+   */
+  async installTelemetrySink(
+    config: TelemetryConfig = {},
+    listener?: TelemetryListener
+  ): Promise<() => void> {
+    // Register the listener synchronously BEFORE awaiting the bridge so
+    // records emitted between native-side install completion and the next
+    // JS microtask cannot slip past an empty listener set.
+    let unsubscribe: () => void = () => {};
+    if (listener) {
+      unsubscribe = this.onTelemetry(listener);
+    }
+    try {
+      await OfflineProtocolNativeModule.installTelemetrySink(config);
+    } catch (err) {
+      // If the install failed, drop the pre-registered listener so a
+      // retrying caller doesn't accumulate dangling listeners.
+      unsubscribe();
+      throw err;
+    }
+    return unsubscribe;
+  }
+
+  /**
+   * Detaches the installed telemetry sink. After this resolves, no further
+   * telemetry records reach `onTelemetry` listeners or the pull queue —
+   * the Rust adapter replaces the core sink with a no-op and drains the
+   * pull queue in a single call, so a subsequent
+   * `installTelemetrySink(...)` starts with an empty queue.
+   *
+   * Idempotent — calling without a prior install is a no-op.
+   *
+   * Does NOT remove TS-side listeners registered via `onTelemetry(...)`
+   * or via the optional-listener form of `installTelemetrySink(...)`;
+   * they remain bound but will simply never fire again unless a new sink
+   * is installed. Drop them explicitly via their unsubscribe if that is
+   * the intent.
+   */
+  async uninstallTelemetrySink(): Promise<void> {
+    await OfflineProtocolNativeModule.uninstallTelemetrySink();
+  }
+
+  /**
+   * Registers a listener that receives every TelemetryRecord emitted by the
+   * SDK. Requires a prior `installTelemetrySink(...)` — without an installed
+   * sink the Rust side emits nothing on either the push channel or the poll
+   * buffer.
+   *
+   * To close the install→register race window, prefer passing the listener
+   * directly to `installTelemetrySink(config, listener)`; that form
+   * registers synchronously before the native install is dispatched.
+   *
+   * @returns An unsubscribe function.
+   */
+  onTelemetry(listener: TelemetryListener): () => void {
+    this.telemetryListeners.add(listener);
+    return () => {
+      this.telemetryListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Polls the next buffered telemetry record. Returns `null` when the
+   * internal queue is empty. The queue is bounded (1024 slots); overflow
+   * drops the oldest entry.
+   *
+   * Useful when an app prefers polling over push delivery. Requires a
+   * prior `installTelemetrySink(...)` with `enablePollQueue` left at its
+   * default (`true` / omitted). With `enablePollQueue: false` the Rust
+   * adapter never enqueues, so this method always returns null for
+   * records emitted under that config.
+   *
+   * The pull queue survives sink replacement — records enqueued by a
+   * previous sink stay readable until drained. See
+   * `installTelemetrySink` for details.
+   *
+   * Throws if the native layer returns a malformed envelope — callers can
+   * then distinguish "queue empty" (`null`) from "bridge corruption"
+   * (thrown) and surface the latter in their own telemetry.
+   */
+  async pollTelemetry(): Promise<TelemetryRecord | null> {
+    const json: string | null = await OfflineProtocolNativeModule.pollTelemetryFrame();
+    // Null/undefined is "queue empty". Anything else (including the empty
+    // string) would indicate a bridge bug — fall through to JSON.parse,
+    // which will then throw and let the caller distinguish corruption from
+    // "no data".
+    if (json === null || json === undefined) {
+      return null;
+    }
+    try {
+      return JSON.parse(json) as TelemetryRecord;
+    } catch (error) {
+      throw new Error(
+        `pollTelemetry: malformed envelope from native bridge (${(error as Error).message})`
+      );
+    }
   }
 
   /**
@@ -2294,11 +2454,16 @@ export class OfflineProtocol {
   async destroy(): Promise<void> {
     // Remove all event listeners
     this.removeAllListeners();
+    this.telemetryListeners.clear();
 
     // Remove native event subscription
     if (this.eventSubscription) {
       this.eventSubscription.remove();
       this.eventSubscription = null;
+    }
+    if (this.telemetrySubscription) {
+      this.telemetrySubscription.remove();
+      this.telemetrySubscription = null;
     }
 
     // Destroy native protocol instance
