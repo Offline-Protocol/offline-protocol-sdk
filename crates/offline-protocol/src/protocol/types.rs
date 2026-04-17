@@ -1,6 +1,7 @@
 //! Type definitions, constants, and shared state for the protocol engine.
 
 use crate::events::{Event, EventCallback, PresenceStatus};
+use crate::telemetry::{scrub_event, TelemetryContext, TelemetryRecord};
 use crate::Error;
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{
@@ -381,6 +382,12 @@ pub(crate) struct SharedState {
 
     /// Received messages queue.
     pub(crate) received_messages: VecDeque<Message>,
+
+    /// Installed telemetry context. When present, `emit_event` additionally
+    /// forwards every protocol event to `ctx.sink` as a
+    /// `TelemetryRecord::Protocol`, with identifier scrubbing applied per
+    /// `ctx.config`. Set via `OfflineProtocol::install_telemetry_sink`.
+    pub(crate) telemetry: Option<Arc<TelemetryContext>>,
 }
 
 impl SharedState {
@@ -389,12 +396,27 @@ impl SharedState {
             state: ProtocolState::Stopped,
             event_handlers: Vec::new(),
             received_messages: VecDeque::new(),
+            telemetry: None,
         }
     }
 
     pub(crate) fn emit_event(&self, event: Event) {
+        // Legacy `EventCallback` handlers run first and receive the raw
+        // event. This preserves the pre-telemetry contract — any app that
+        // relied on `on_event` sees exactly what it used to.
         for handler in &self.event_handlers {
             handler(event.clone());
+        }
+        // Sink fan-out runs after, gated on an installed context. Identifier
+        // fields are scrubbed per the installed config before crossing the
+        // sink boundary so long-lived pseudonyms don't leak to third-party
+        // sinks by default. When scrubbing is disabled
+        // (`TelemetryConfig::with_scrub_ids(false)`), `scrub_event` returns
+        // a borrowed reference and the sink sees the raw event.
+        if let Some(ctx) = &self.telemetry {
+            let scrubbed = scrub_event::scrub_event(&event, &ctx.scrubber);
+            let record = TelemetryRecord::Protocol(Box::new(scrubbed.into_owned()));
+            ctx.sink.emit(&record);
         }
     }
 }

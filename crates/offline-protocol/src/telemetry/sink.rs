@@ -15,6 +15,24 @@ use super::record::TelemetryRecord;
 /// expensive work (I/O, serialization to external formats) should be
 /// deferred to a background task owned by the implementor.
 ///
+/// # Reentrancy and locking contract
+///
+/// The SDK may invoke [`TelemetrySink::emit`] while holding internal locks
+/// (most notably the shared-state mutex on the `Protocol` fan-out path).
+/// Implementations MUST NOT:
+///
+/// - block on slow I/O (network, disk, logging sinks that fsync),
+/// - reenter SDK methods on the same `OfflineProtocol` instance, or
+/// - panic.
+///
+/// A blocking `emit` stalls every protocol operation that needs the lock;
+/// a panicking `emit` poisons the mutex and degrades the protocol to a
+/// silently-dropping state. Sinks that need to do real work should push
+/// the record onto a bounded channel and return immediately, leaving the
+/// heavy lifting to a background task owned by the implementor.
+///
+/// # Record passing
+///
 /// The record is passed by reference so implementations that only read fields
 /// do not incur a clone. Implementations that need ownership (for example to
 /// forward the record to another thread) should call [`Clone::clone`]

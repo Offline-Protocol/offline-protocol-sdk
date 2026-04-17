@@ -28,7 +28,6 @@ use crate::telemetry::config::TelemetryConfig;
 ///
 /// Crate-private: external callers use [`Scrubber::hash_id`] instead so
 /// there is a single public entry point to the hashing operation.
-#[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
 pub(crate) fn opaque_id(raw: &str, secret: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret);
@@ -52,7 +51,6 @@ pub(crate) fn opaque_id(raw: &str, secret: &[u8]) -> String {
 #[derive(Clone)]
 pub(crate) struct Scrubber {
     enabled: bool,
-    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     secret: [u8; 16],
 }
 
@@ -70,6 +68,13 @@ impl fmt::Debug for Scrubber {
 
 impl Scrubber {
     /// Constructs a scrubber with the given enabled flag and secret.
+    ///
+    /// Not currently called from production code — [`Scrubber::from_config`]
+    /// is the construction path the protocol engine uses. Kept crate-private
+    /// and `#[allow(dead_code)]` because the scrubber unit tests use it, and
+    /// because open-coding a scrubber with an explicit secret is the
+    /// shortest route to deterministic fixtures in future tests.
+    #[allow(dead_code)]
     pub fn new(enabled: bool, secret: [u8; 16]) -> Self {
         Self { enabled, secret }
     }
@@ -105,7 +110,6 @@ impl Scrubber {
     /// multiple raw identifiers — use [`Scrubber::hash_always`] instead, so
     /// that the composite cannot be disabled by a user-facing scrubbing
     /// preference.
-    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     pub fn hash_id<'a>(&self, raw: &'a str) -> Cow<'a, str> {
         if self.enabled {
             Cow::Owned(opaque_id(raw, &self.secret))
@@ -124,7 +128,6 @@ impl Scrubber {
     /// preference, because disabling scrubbing is a choice about leaf IDs
     /// the caller already controls, not about derived values the SDK
     /// constructs internally.
-    #[cfg_attr(not(feature = "mls-observability"), allow(dead_code))]
     pub fn hash_always(&self, raw: &str) -> String {
         opaque_id(raw, &self.secret)
     }
