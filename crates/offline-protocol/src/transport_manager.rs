@@ -6,9 +6,13 @@
 
 use crate::constants::{HOP_COUNT_EMA_ALPHA, LATENCY_EMA_ALPHA, OBSERVED_STATS_COMPACT_THRESHOLD};
 use crate::events::{DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCode, Event};
+use crate::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode};
 use crate::{Error, Result};
+use chrono::Utc;
 use offline_protocol_core::Message;
-use offline_protocol_router::{DorsConfig, EscalationTriggerReason, TransportSelector};
+use offline_protocol_router::{
+    DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
+};
 use offline_protocol_transport::{
     Error as TransportError, Transport, TransportMetrics, TransportStatus, TransportType,
 };
@@ -33,6 +37,18 @@ pub struct TransportManager {
 
     /// Optional callback for DORS lifecycle/decision events (OFF-258).
     dors_event_callback: Option<Arc<dyn Fn(Event) + Send + Sync>>,
+
+    /// Optional callback for structured routing decisions. Fires alongside
+    /// every legacy `dors_event_callback` emission so the telemetry sink
+    /// receives the richer `RoutingDecision` shape while `EventCallback`
+    /// consumers continue to see the flattened `Event::Dors*` variants.
+    routing_decision_callback: Option<Arc<dyn Fn(RoutingDecision) + Send + Sync>>,
+
+    /// When `true`, every emitted [`RoutingDecision`] carries the full
+    /// per-transport [`TransportScore`] breakdown in its `scores` field.
+    /// Mirrors `TelemetryConfig::routing_diagnostic` and is toggled by
+    /// `OfflineProtocol::install_telemetry_sink`.
+    routing_diagnostic: bool,
 
     /// Last escalation trigger event emitted (reason, time) for dedupe window.
     last_escalation_trigger_emitted: Option<(DorsEscalationReasonCode, std::time::Instant)>,
@@ -141,6 +157,8 @@ impl TransportManager {
             selector,
             observations: HashMap::new(),
             dors_event_callback: None,
+            routing_decision_callback: None,
+            routing_diagnostic: false,
             last_escalation_trigger_emitted: None,
         }
     }
@@ -150,9 +168,48 @@ impl TransportManager {
         self.dors_event_callback = callback;
     }
 
+    /// Sets the callback that receives structured
+    /// [`crate::telemetry::RoutingDecision`] records.
+    ///
+    /// Fires at the same sites as `dors_event_callback`, carrying a richer
+    /// shape suitable for the unified telemetry sink.
+    ///
+    /// Crate-private: apps must drive routing telemetry through
+    /// [`crate::OfflineProtocol::install_telemetry_sink`] rather than wiring
+    /// the callback directly. This keeps [`crate::telemetry::TelemetryConfig`]
+    /// the single source of truth for sink configuration.
+    pub(crate) fn set_routing_decision_callback(
+        &mut self,
+        callback: Option<Arc<dyn Fn(RoutingDecision) + Send + Sync>>,
+    ) {
+        self.routing_decision_callback = callback;
+    }
+
+    /// Enables or disables the routing-diagnostic detail level.
+    ///
+    /// When `true`, [`RoutingDecision::scores`] is populated with the full
+    /// seven-factor [`TransportScore`] for every ranked transport on every
+    /// emission. When `false` (default), the vector is empty and the hot
+    /// path avoids the per-emission allocation. Mirrors
+    /// `TelemetryConfig::routing_diagnostic`.
+    ///
+    /// Crate-private: see [`Self::set_routing_decision_callback`].
+    pub(crate) fn set_routing_diagnostic(&mut self, enabled: bool) {
+        self.routing_diagnostic = enabled;
+    }
+
     fn emit_dors_event(&self, event: Event) {
         if let Some(ref cb) = self.dors_event_callback {
             cb(event);
+        }
+    }
+
+    /// Lazy-emit a [`RoutingDecision`]. The `build` closure only runs when a
+    /// callback is actually installed, so the no-sink path pays only an
+    /// `Option::is_some` check — not a `Utc::now()` call and struct build.
+    fn emit_routing_decision<F: FnOnce() -> RoutingDecision>(&self, build: F) {
+        if let Some(ref cb) = self.routing_decision_callback {
+            cb(build());
         }
     }
 
@@ -166,13 +223,71 @@ impl TransportManager {
         }
     }
 
+    fn dors_reason_code_to_routing(code: DorsReasonCode) -> RoutingReasonCode {
+        match code {
+            DorsReasonCode::InitialSelection => RoutingReasonCode::InitialSelection,
+            DorsReasonCode::PrimarySelected => RoutingReasonCode::PrimarySelected,
+            DorsReasonCode::PrimarySuccess => RoutingReasonCode::PrimarySuccess,
+            DorsReasonCode::FallbackSuccess => RoutingReasonCode::FallbackSuccess,
+            DorsReasonCode::EscalationApplied => RoutingReasonCode::EscalationApplied,
+            DorsReasonCode::CurrentUnavailable => RoutingReasonCode::CurrentUnavailable,
+        }
+    }
+
+    fn escalation_reason_code_to_routing(code: DorsEscalationReasonCode) -> RoutingReasonCode {
+        match code {
+            DorsEscalationReasonCode::FallbackSuccess => RoutingReasonCode::FallbackSuccess,
+            DorsEscalationReasonCode::RetryThreshold => RoutingReasonCode::RetryThreshold,
+            DorsEscalationReasonCode::PoorSignal => RoutingReasonCode::PoorSignal,
+            DorsEscalationReasonCode::Congestion => RoutingReasonCode::Congestion,
+            DorsEscalationReasonCode::LowTtl => RoutingReasonCode::LowTtl,
+            DorsEscalationReasonCode::LowSuccessRate => RoutingReasonCode::LowSuccessRate,
+        }
+    }
+
+    /// Builds a [`RoutingDecision`]. The `detailed_scores` slice is cloned
+    /// into `scores` when `routing_diagnostic` is enabled on the manager;
+    /// otherwise the vector stays empty (allocation-free).
+    ///
+    /// Takes `now_ms` by argument rather than calling `Utc::now()` per
+    /// build so every decision emitted from a single `send()` cycle shares
+    /// one timestamp — easier to correlate downstream and saves three to
+    /// four syscalls on the send hot path.
+    #[allow(clippy::too_many_arguments)]
+    fn build_routing_decision(
+        &self,
+        now_ms: i64,
+        phase: RoutingPhase,
+        from: Option<TransportType>,
+        to: Option<TransportType>,
+        winning_score: Option<f32>,
+        reason_code: Option<RoutingReasonCode>,
+        detailed_scores: Option<&[(TransportType, TransportScore)]>,
+    ) -> RoutingDecision {
+        let scores = match (self.routing_diagnostic, detailed_scores) {
+            (true, Some(detailed)) => detailed.to_vec(),
+            _ => Vec::new(),
+        };
+        RoutingDecision {
+            timestamp_ms: now_ms,
+            phase,
+            from,
+            to,
+            winning_score,
+            reason_code,
+            scores,
+        }
+    }
+
     /// Emit dors_escalation_triggered at trigger boundary (typed reason), deduped by reason + time window.
     fn emit_escalation_trigger_if_deduped(
         &mut self,
+        now_ms: i64,
         reason_code: DorsEscalationReasonCode,
-        from: String,
-        to: String,
+        from: TransportType,
+        to: TransportType,
         reason_detail: Option<String>,
+        detailed_scores: Option<&[(TransportType, TransportScore)]>,
     ) {
         let now = std::time::Instant::now();
         let emit = match &self.last_escalation_trigger_emitted {
@@ -186,11 +301,22 @@ impl TransportManager {
             self.last_escalation_trigger_emitted = Some((reason_code, now));
             self.emit_dors_event(Event::dors_escalation_triggered(
                 DorsEscalationPhase::Triggered,
-                from,
-                to,
+                from.to_string(),
+                to.to_string(),
                 reason_code,
                 reason_detail,
             ));
+            self.emit_routing_decision(|| {
+                self.build_routing_decision(
+                    now_ms,
+                    RoutingPhase::Escalated,
+                    Some(from),
+                    Some(to),
+                    None,
+                    Some(Self::escalation_reason_code_to_routing(reason_code)),
+                    detailed_scores,
+                )
+            });
         }
     }
 
@@ -234,6 +360,11 @@ impl TransportManager {
             )));
         }
 
+        // Single timestamp shared by every RoutingDecision emitted from this
+        // send cycle — cheaper than per-emit `Utc::now()` and lets downstream
+        // consumers group decisions by timestamp.
+        let now_ms = Utc::now().timestamp_millis();
+
         let previous = self.current_transport;
 
         // DORS selects the primary transport (applies hysteresis/cooldown/stability).
@@ -247,10 +378,34 @@ impl TransportManager {
             })?;
 
         // Emit DORS observability: scores and selection (before send attempt).
-        // Compute once and reuse for both observability and fallback ordering.
-        let scored = self.selector.score_and_rank(message, &available);
+        // At the default (non-diagnostic) tier we project the detailed
+        // breakdown down to `(transport, total)` — a single scoring pass
+        // feeds both the legacy event and the routing record.
+        let detailed_scores: Option<Vec<(TransportType, TransportScore)>> =
+            if self.routing_diagnostic && self.routing_decision_callback.is_some() {
+                Some(self.selector.score_and_rank_detailed(message, &available))
+            } else {
+                None
+            };
+        let detailed_slice = detailed_scores.as_deref();
+        let scored: Vec<(TransportType, f32)> = match detailed_slice {
+            Some(d) => d.iter().map(|(t, s)| (*t, s.total)).collect(),
+            None => self.selector.score_and_rank(message, &available),
+        };
         let scores: Vec<(String, f32)> = scored.iter().map(|(t, s)| (t.to_string(), *s)).collect();
         self.emit_dors_event(Event::dors_score_updated(scores));
+
+        self.emit_routing_decision(|| {
+            self.build_routing_decision(
+                now_ms,
+                RoutingPhase::ScoreUpdated,
+                previous,
+                None,
+                None,
+                None,
+                detailed_slice,
+            )
+        });
         let primary_score = scored
             .iter()
             .find(|(t, _)| *t == primary)
@@ -267,6 +422,17 @@ impl TransportManager {
             selection_reason,
             primary_score,
         ));
+        self.emit_routing_decision(|| {
+            self.build_routing_decision(
+                now_ms,
+                RoutingPhase::Selected,
+                previous,
+                Some(primary),
+                Some(primary_score),
+                Some(Self::dors_reason_code_to_routing(selection_reason)),
+                detailed_slice,
+            )
+        });
 
         // Try the primary transport first.
         let primary_result = {
@@ -295,6 +461,17 @@ impl TransportManager {
                         reason_code,
                         None,
                     ));
+                    self.emit_routing_decision(|| {
+                        self.build_routing_decision(
+                            now_ms,
+                            RoutingPhase::Switched,
+                            previous,
+                            Some(primary),
+                            Some(primary_score),
+                            Some(Self::dors_reason_code_to_routing(reason_code)),
+                            detailed_slice,
+                        )
+                    });
                 }
                 return Ok(());
             }
@@ -333,10 +510,12 @@ impl TransportManager {
                 if let Some(trigger_reason) = self.selector.escalation_trigger_reason() {
                     let reason_code = Self::escalation_trigger_reason_to_code(trigger_reason);
                     self.emit_escalation_trigger_if_deduped(
+                        now_ms,
                         reason_code,
-                        primary.to_string(),
-                        transport_type.to_string(),
+                        primary,
+                        *transport_type,
                         None,
+                        detailed_slice,
                     );
                 }
             }
@@ -375,6 +554,18 @@ impl TransportManager {
                             reason_code,
                             Some("primary send failed, fallback succeeded".to_string()),
                         ));
+                        let fallback = *transport_type;
+                        self.emit_routing_decision(|| {
+                            self.build_routing_decision(
+                                now_ms,
+                                RoutingPhase::Switched,
+                                previous,
+                                Some(fallback),
+                                None,
+                                Some(Self::dors_reason_code_to_routing(reason_code)),
+                                detailed_slice,
+                            )
+                        });
                     }
                     // Escalation applied only when BLE→WiFi fallback actually succeeded.
                     if primary == TransportType::BLE && *transport_type == TransportType::WiFiDirect
@@ -386,6 +577,20 @@ impl TransportManager {
                             DorsEscalationReasonCode::FallbackSuccess,
                             Some("primary BLE send failed, fallback to WiFi succeeded".to_string()),
                         ));
+                        let escalated = *transport_type;
+                        self.emit_routing_decision(|| {
+                            self.build_routing_decision(
+                                now_ms,
+                                RoutingPhase::Escalated,
+                                Some(primary),
+                                Some(escalated),
+                                None,
+                                Some(Self::escalation_reason_code_to_routing(
+                                    DorsEscalationReasonCode::FallbackSuccess,
+                                )),
+                                detailed_slice,
+                            )
+                        });
                     }
                     return Ok(());
                 }
@@ -534,6 +739,72 @@ impl TransportManager {
     /// Gets the current active transport type.
     pub fn current_transport(&self) -> Option<TransportType> {
         self.current_transport
+    }
+
+    /// Returns the current status of every registered transport, including
+    /// those not currently [`TransportStatus::Available`].
+    ///
+    /// Used by the telemetry aggregator to detect state transitions; unlike
+    /// [`TransportManager::get_available_transports`], this does not take
+    /// per-transport metrics and therefore does a single lock per transport
+    /// with no downstream work under the guard.
+    pub fn get_all_transport_statuses(&self) -> HashMap<TransportType, TransportStatus> {
+        let mut out = HashMap::with_capacity(self.transports.len());
+        for (transport_type, transport) in &self.transports {
+            let status = match transport.lock() {
+                Ok(lock) => lock.status(),
+                Err(_) => {
+                    warn!(transport = ?transport_type, "Transport mutex poisoned, reporting Error");
+                    TransportStatus::Error
+                }
+            };
+            out.insert(*transport_type, status);
+        }
+        out
+    }
+
+    /// Returns the per-transport status map AND the available-only metrics
+    /// map in a single lock-per-transport pass.
+    ///
+    /// Equivalent to calling [`Self::get_all_transport_statuses`] and
+    /// [`Self::get_available_transports`] back-to-back, but takes each
+    /// transport's mutex once instead of twice. Used by the per-tick
+    /// telemetry aggregator.
+    pub fn snapshot_status_and_available(
+        &self,
+    ) -> (
+        HashMap<TransportType, TransportStatus>,
+        HashMap<TransportType, TransportMetrics>,
+    ) {
+        let mut statuses = HashMap::with_capacity(self.transports.len());
+        let mut available = HashMap::new();
+
+        for (transport_type, transport) in &self.transports {
+            let (status, metrics) = match transport.lock() {
+                Ok(lock) => {
+                    let status = lock.status();
+                    let metrics = if status == TransportStatus::Available {
+                        Some(lock.metrics())
+                    } else {
+                        None
+                    };
+                    (status, metrics)
+                }
+                Err(_) => {
+                    warn!(transport = ?transport_type, "Transport mutex poisoned, reporting Error");
+                    (TransportStatus::Error, None)
+                }
+            };
+            statuses.insert(*transport_type, status);
+            if let Some(mut metrics) = metrics {
+                if let Some(stats) = self.observations.get(transport_type) {
+                    stats.apply_to_metrics(&mut metrics);
+                }
+                available.insert(*transport_type, metrics);
+            }
+        }
+
+        (statuses, available)
     }
 
     /// Starts all transports.

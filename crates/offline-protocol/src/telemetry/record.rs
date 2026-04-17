@@ -22,6 +22,10 @@
 
 use crate::events::Event;
 use crate::mls_observability::MlsLifecycleEvent;
+use crate::telemetry::device::DeviceCapabilitySnapshot;
+use crate::telemetry::metrics_snapshot::MetricsFrame;
+use crate::telemetry::routing::RoutingDecision;
+use crate::telemetry::transport_state::TransportStateEvent;
 
 /// A single typed telemetry emission.
 ///
@@ -39,6 +43,21 @@ pub enum TelemetryRecord {
     Protocol(Box<Event>),
     /// An MLS lifecycle event — wraps the existing [`MlsLifecycleEvent`].
     Mls(MlsLifecycleEvent),
+    /// A periodic snapshot of protocol-wide counters and per-transport
+    /// metrics. Boxed to keep the enum footprint flat — the frame carries
+    /// inline `Vec`/stat structs that would otherwise dominate the enum
+    /// size and tax every non-snapshot variant.
+    MetricsSnapshot(Box<MetricsFrame>),
+    /// A single transport-status transition (per-transport, unlike the
+    /// protocol-level `Event::TransportSwitched`).
+    TransportState(TransportStateEvent),
+    /// A structured routing decision (supersets `Event::Dors*`).
+    ///
+    /// Boxed because the score-breakdown vector can carry per-transport
+    /// factor details at the `Diagnostic` verbosity tier.
+    Routing(Box<RoutingDecision>),
+    /// A snapshot of local device capability (battery, charging, relay role).
+    Device(DeviceCapabilitySnapshot),
 }
 
 impl TelemetryRecord {
@@ -48,6 +67,10 @@ impl TelemetryRecord {
         match self {
             TelemetryRecord::Protocol(event) => event.telemetry_name(),
             TelemetryRecord::Mls(event) => event.telemetry_name(),
+            TelemetryRecord::MetricsSnapshot(frame) => frame.telemetry_name(),
+            TelemetryRecord::TransportState(event) => event.telemetry_name(),
+            TelemetryRecord::Routing(decision) => decision.telemetry_name(),
+            TelemetryRecord::Device(snapshot) => snapshot.telemetry_name(),
         }
     }
 }
@@ -146,6 +169,18 @@ mod tests {
         "mls.decryption_failed",
         "mls.session_missing",
         "mls.session_ready",
+        // Non-Event, non-MLS TelemetryRecord variants.
+        //
+        // These names are not covered by the Event/MlsLifecycleEvent
+        // exhaustiveness wards above because their source types are simple
+        // structs — there is no multi-variant enum to stay in sync with.
+        // The dedicated coverage check below
+        // (`simple_record_variant_names_are_stable`) exercises each one's
+        // `telemetry_name()` against the value inlined here.
+        "protocol.metrics.snapshot",
+        "protocol.transport.state_changed",
+        "protocol.routing.decision",
+        "protocol.device.capability_changed",
     ];
 
     /// Returns `true` when `name` matches the documented grammar
@@ -673,6 +708,22 @@ mod tests {
         ]
     }
 
+    /// Names emitted by simple-struct telemetry records (non-enum inner
+    /// types). Extends the Event/MLS-derived name lists used by the
+    /// uniqueness and catalogue-match checks.
+    fn simple_record_names() -> Vec<&'static str> {
+        use crate::telemetry::device::DeviceCapabilitySnapshot;
+        use crate::telemetry::metrics_snapshot::MetricsFrame;
+        use crate::telemetry::routing::RoutingDecision;
+        use crate::telemetry::transport_state::TransportStateEvent;
+        vec![
+            MetricsFrame::NAME,
+            TransportStateEvent::NAME,
+            RoutingDecision::NAME,
+            DeviceCapabilitySnapshot::NAME,
+        ]
+    }
+
     /// Real implementation-level uniqueness check.
     ///
     /// Feeds every exemplar through [`Event::telemetry_name`] and
@@ -689,6 +740,7 @@ mod tests {
         for e in mls_lifecycle_exemplars() {
             names.push(e.telemetry_name());
         }
+        names.extend(simple_record_names());
         let unique: HashSet<&&'static str> = names.iter().collect();
         assert_eq!(
             unique.len(),
@@ -713,6 +765,7 @@ mod tests {
         for e in mls_lifecycle_exemplars() {
             impl_names.push(e.telemetry_name());
         }
+        impl_names.extend(simple_record_names());
 
         let impl_set: HashSet<&&'static str> = impl_names.iter().collect();
         let catalogue_set: HashSet<&&str> = ALL_TELEMETRY_NAMES.iter().collect();

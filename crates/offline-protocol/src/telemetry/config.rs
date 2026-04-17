@@ -58,6 +58,7 @@ pub struct TelemetryConfig {
     pub(crate) mls_verbosity: MlsVerbosity,
     pub(crate) metrics_cadence: Option<Duration>,
     pub(crate) scrub_secret: Option<[u8; 16]>,
+    pub(crate) routing_diagnostic: bool,
 }
 
 impl fmt::Debug for TelemetryConfig {
@@ -70,6 +71,7 @@ impl fmt::Debug for TelemetryConfig {
                 "scrub_secret",
                 &self.scrub_secret.as_ref().map(|_| "<redacted>"),
             )
+            .field("routing_diagnostic", &self.routing_diagnostic)
             .finish()
     }
 }
@@ -81,6 +83,7 @@ impl Default for TelemetryConfig {
             mls_verbosity: MlsVerbosity::Lifecycle,
             metrics_cadence: Some(Duration::from_secs(5)),
             scrub_secret: None,
+            routing_diagnostic: false,
         }
     }
 }
@@ -144,6 +147,28 @@ impl TelemetryConfig {
         self.metrics_cadence
     }
 
+    /// Sets whether `RoutingDecision` records should carry the full
+    /// per-transport score breakdown.
+    ///
+    /// When `true`, every emitted
+    /// [`crate::telemetry::RoutingDecision::scores`] is populated with the
+    /// seven-factor [`offline_protocol_router::TransportScore`] for each
+    /// ranked transport. When `false` (the default), `scores` is empty —
+    /// the hot path avoids the per-emission vector allocation and
+    /// `Diagnostic`-tier consumers simply see an empty vector.
+    ///
+    /// Leaf identifiers are not affected: this knob only gates the
+    /// scoring-factor detail, not identity fields.
+    pub fn with_routing_diagnostic(mut self, routing_diagnostic: bool) -> Self {
+        self.routing_diagnostic = routing_diagnostic;
+        self
+    }
+
+    /// Returns whether routing records should carry diagnostic score detail.
+    pub fn routing_diagnostic(&self) -> bool {
+        self.routing_diagnostic
+    }
+
     /// Returns the configured opaque-identifier hashing secret, if any.
     ///
     /// Crate-private: the secret feeds `Scrubber` construction and is not
@@ -169,6 +194,7 @@ mod tests {
         assert_eq!(cfg.mls_verbosity(), MlsVerbosity::Lifecycle);
         assert_eq!(cfg.metrics_cadence(), Some(Duration::from_secs(5)));
         assert!(cfg.scrub_secret().is_none());
+        assert!(!cfg.routing_diagnostic());
     }
 
     #[test]
@@ -177,11 +203,13 @@ mod tests {
             .with_scrub_ids(false)
             .with_mls_verbosity(MlsVerbosity::Off)
             .with_metrics_cadence(None)
-            .with_scrub_secret(Some([7; 16]));
+            .with_scrub_secret(Some([7; 16]))
+            .with_routing_diagnostic(true);
         assert!(!cfg.scrub_ids());
         assert_eq!(cfg.mls_verbosity(), MlsVerbosity::Off);
         assert!(cfg.metrics_cadence().is_none());
         assert_eq!(cfg.scrub_secret(), Some([7; 16]));
+        assert!(cfg.routing_diagnostic());
     }
 
     #[test]

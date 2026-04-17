@@ -5,7 +5,7 @@
 //! based on the number of visible peers to maintain constant message overhead.
 
 use crate::constants::*;
-use crate::relay::{RelayInfo, RelayManager};
+use crate::relay::{RelayInfo, RelayManager, RelayRole};
 use offline_protocol_core::Message;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -481,6 +481,15 @@ impl PathSelector {
     /// Sets the local device ID for deterministic gossip decisions.
     pub fn set_local_device_id(&mut self, device_id: impl Into<String>) {
         self.local_device_id = device_id.into();
+    }
+
+    /// Returns the current [`RelayRole`] from the internal [`RelayManager`].
+    ///
+    /// Exposed for read-only callers (e.g., the telemetry aggregator that
+    /// needs to know the current relay role without widening the surface
+    /// to the full [`RelayManager`] API).
+    pub fn current_relay_role(&self) -> RelayRole {
+        self.relay_manager.current_role()
     }
 
     /// Computes the forwarding probability based on visible peer count.

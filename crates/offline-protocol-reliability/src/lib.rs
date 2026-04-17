@@ -19,4 +19,4 @@ pub use ack_manager::{AckConfig, AckEvictionInfo, AckManager};
 pub use ack_optimization::{AckOptimizationConfig, AckOptimizer, AggregatedAck, PiggybackAckData};
 pub use deduplicator::{Deduplicator, DeduplicatorConfig, DeduplicatorMode, DeduplicatorStats};
 pub use error::{Error, Result};
-pub use retry_queue::{RetryConfig, RetryQueue};
+pub use retry_queue::{RetryConfig, RetryQueue, RetryQueueStats};

@@ -25,10 +25,16 @@ name = "ble_fragmentation"
 harness = false
 path = "../../benches/ble_fragmentation.rs"
 
+[[bench]]
+name = "telemetry_emission"
+harness = false
+path = "../../benches/telemetry_emission.rs"
+
 [dependencies]
 offline-protocol-core = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-router = { workspace = true }
+offline-protocol-reliability = { workspace = true }
 offline-protocol = { workspace = true }
 serde_json = { workspace = true }
 

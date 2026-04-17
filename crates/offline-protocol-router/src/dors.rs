@@ -201,6 +201,14 @@ struct EscalationEvaluation {
 }
 
 /// Score breakdown for transport selection.
+///
+/// `#[non_exhaustive]` so a future scoring factor can be added without a
+/// breaking-change bump. External callers that need to construct a value
+/// (benchmarks, tests, tooling) build a [`TransportScoreFactors`] literal
+/// and pass it to [`Self::from_factors`] — the factors struct uses named
+/// fields so adding a factor in the future does not silently misorder
+/// existing call sites.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct TransportScore {
     /// Signal strength score (0-100).
@@ -219,6 +227,50 @@ pub struct TransportScore {
     pub load: f32,
     /// Total weighted score.
     pub total: f32,
+}
+
+/// Named-field factors accepted by [`TransportScore::from_factors`].
+///
+/// Using named fields prevents the silent-misorder bug that an N-arg
+/// positional constructor would invite (every factor is `f32`).
+#[derive(Debug, Clone, Default)]
+pub struct TransportScoreFactors {
+    /// Signal strength score (0-100).
+    pub signal: f32,
+    /// Proximity/hop distance score (0-100).
+    pub proximity: f32,
+    /// Available bandwidth score (0-100).
+    pub bandwidth: f32,
+    /// Congestion score (0-100, higher is less congested).
+    pub congestion: f32,
+    /// Energy efficiency score (0-100).
+    pub energy: f32,
+    /// Reliability score (0-100).
+    pub reliability: f32,
+    /// Load score (0-100, higher = more capacity available).
+    pub load: f32,
+    /// Total weighted score.
+    pub total: f32,
+}
+
+impl TransportScore {
+    /// Constructs a score from explicit per-factor values.
+    ///
+    /// Intended for callers outside this crate (benchmarks, tooling). The
+    /// per-factor weighting is the selector's responsibility; this
+    /// constructor performs no validation or recomputation of `total`.
+    pub fn from_factors(factors: TransportScoreFactors) -> Self {
+        Self {
+            signal: factors.signal,
+            proximity: factors.proximity,
+            bandwidth: factors.bandwidth,
+            congestion: factors.congestion,
+            energy: factors.energy,
+            reliability: factors.reliability,
+            load: factors.load,
+            total: factors.total,
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -644,18 +696,27 @@ impl TransportSelector {
         message: &Message,
         available_transports: &HashMap<TransportType, TransportMetrics>,
     ) -> Vec<(TransportType, f32)> {
-        let mut scored: Vec<(TransportType, f32)> = Vec::new();
-
-        for (transport_type, metrics) in available_transports.iter() {
-            let score = self.calculate_transport_score(message, *transport_type, metrics);
-            scored.push((*transport_type, score.total));
-        }
+        // Single-allocation path: the non-diagnostic send() hot path calls
+        // this on every send, so we project scoring to totals directly
+        // rather than going through `score_and_rank_detailed` (which
+        // allocates a `Vec<(TransportType, TransportScore)>` that would
+        // then be mapped to totals — two vecs where one suffices).
+        let mut scored: Vec<(TransportType, f32)> = available_transports
+            .iter()
+            .map(|(transport_type, metrics)| {
+                let score = self.calculate_transport_score(message, *transport_type, metrics);
+                (*transport_type, score.total)
+            })
+            .collect();
 
         // Contract: ranked by score (descending).
         //
-        // Determinism: when scores are exactly equal (rare with floats, but can
-        // happen in tests or after rounding), apply the same priority tie-break
-        // used by selection: Internet > WiFiDirect > BLE.
+        // Determinism: when scores are exactly equal (rare with floats, but
+        // can happen in tests or after rounding), apply the same priority
+        // tie-break used by selection: Internet > WiFiDirect > BLE. See
+        // `score_and_rank_detailed` — the two functions must agree on
+        // ordering, and a regression test (`test_score_and_rank_detailed_\
+        // matches_score_and_rank_order_and_totals`) pins that invariant.
         scored.sort_by(|a, b| {
             let ord = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
             if ord == std::cmp::Ordering::Equal {
@@ -665,6 +726,39 @@ impl TransportSelector {
             }
         });
 
+        scored
+    }
+
+    /// Diagnostic variant of [`Self::score_and_rank`] that returns the full
+    /// seven-factor [`TransportScore`] per transport rather than just the
+    /// total. Used by telemetry consumers that opted into `routing_diagnostic`.
+    ///
+    /// Sorted descending by `total`; ties resolve via the same priority
+    /// (Internet > WiFiDirect > BLE) used by selection. Identical read-only
+    /// guarantees as `score_and_rank`.
+    pub fn score_and_rank_detailed(
+        &self,
+        message: &Message,
+        available_transports: &HashMap<TransportType, TransportMetrics>,
+    ) -> Vec<(TransportType, TransportScore)> {
+        let mut scored: Vec<(TransportType, TransportScore)> = available_transports
+            .iter()
+            .map(|(transport_type, metrics)| {
+                let score = self.calculate_transport_score(message, *transport_type, metrics);
+                (*transport_type, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            let ord =
+                b.1.total
+                    .partial_cmp(&a.1.total)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+            if ord == std::cmp::Ordering::Equal {
+                tie_break_priority(a.0).cmp(&tie_break_priority(b.0))
+            } else {
+                ord
+            }
+        });
         scored
     }
 
@@ -2022,6 +2116,50 @@ mod tests {
             s
         };
         assert_eq!(scores, sorted, "score_and_rank returns descending by score");
+    }
+
+    #[test]
+    fn test_score_and_rank_detailed_matches_score_and_rank_order_and_totals() {
+        // Contract: detailed and total variants agree on ordering and on the
+        // `total` field. The detailed variant simply adds the per-factor
+        // breakdown without changing ranking semantics.
+        let selector = TransportSelector::new();
+        let message = create_test_message();
+        let mut transports = HashMap::new();
+        transports.insert(TransportType::Internet, create_test_metrics(None, 0.0, 0));
+        transports.insert(TransportType::BLE, create_test_metrics(Some(-60), 0.2, 10));
+        transports.insert(
+            TransportType::WiFiDirect,
+            create_test_metrics(Some(-55), 0.1, 5),
+        );
+
+        let totals = selector.score_and_rank(&message, &transports);
+        let detailed = selector.score_and_rank_detailed(&message, &transports);
+
+        assert_eq!(totals.len(), detailed.len());
+        for ((t_total, score_total), (t_det, score_det)) in totals.iter().zip(detailed.iter()) {
+            assert_eq!(t_total, t_det, "ordering must match between variants");
+            assert!(
+                (*score_total - score_det.total).abs() < f32::EPSILON,
+                "totals must match: {} vs {}",
+                score_total,
+                score_det.total,
+            );
+            for (label, v) in [
+                ("signal", score_det.signal),
+                ("proximity", score_det.proximity),
+                ("bandwidth", score_det.bandwidth),
+                ("congestion", score_det.congestion),
+                ("energy", score_det.energy),
+                ("reliability", score_det.reliability),
+                ("load", score_det.load),
+            ] {
+                assert!(
+                    v.is_finite(),
+                    "{label} sub-score for {t_det:?} must be finite",
+                );
+            }
+        }
     }
 
     #[test]

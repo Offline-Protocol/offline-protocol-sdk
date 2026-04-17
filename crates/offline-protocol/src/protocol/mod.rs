@@ -22,15 +22,21 @@ pub(crate) use types::*;
 
 use crate::file_transfer::{FileTransferManager, OutboundTransferState};
 use crate::mls_observability::{MlsEventEmitter, MlsEventRateLimiter, NoopMlsEventEmitter};
-use crate::telemetry::{Scrubber, TelemetryConfig, TelemetryContext, TelemetrySink};
+use crate::telemetry::aggregator::{
+    build_metrics_frame, device_battery_from_available, diff_device_capability,
+    diff_transport_state, DeviceSnap,
+};
+use crate::telemetry::{
+    Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
+};
 use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
-use offline_protocol_router::{PathSelector, RelayManager, TransportSelector};
+use offline_protocol_router::{PathSelector, RelayManager, RelayRole, TransportSelector};
 use offline_protocol_services::MeshServices;
-use offline_protocol_transport::{BleTransport, TransportType};
+use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
@@ -190,6 +196,19 @@ pub struct OfflineProtocol {
     /// (list_sessions → Keychain/Keystore) on every process tick / receive poll.
     last_reconciliation_at: Option<Instant>,
 
+    /// Instant of the last periodic `MetricsFrame` emission, used to rate
+    /// the telemetry aggregator to `TelemetryConfig::metrics_cadence`.
+    last_metrics_emit_at: Option<Instant>,
+
+    /// Last observed per-transport status map, used by the telemetry
+    /// aggregator to diff against the current map and emit one
+    /// `TransportStateEvent` per transition.
+    transport_status_snapshot: HashMap<TransportType, TransportStatus>,
+
+    /// Last observed (battery, charging, relay_role) snapshot, used by the
+    /// telemetry aggregator to fire `DeviceCapabilitySnapshot` on change.
+    device_capability_snapshot: Option<DeviceSnap>,
+
     /// The Lamport clock value at the time of the last storage write.
     /// Used to debounce `persist_lamport_clock()` — only write when the
     /// in-memory value has advanced past this by `LAMPORT_PERSIST_INTERVAL`
@@ -283,6 +302,9 @@ impl OfflineProtocol {
             known_peer_public_keys: HashMap::new(),
             blocked_users: HashSet::new(),
             last_reconciliation_at: None,
+            last_metrics_emit_at: None,
+            transport_status_snapshot: HashMap::new(),
+            device_capability_snapshot: None,
             last_persisted_lamport: 0,
             config,
         })
@@ -414,6 +436,33 @@ impl OfflineProtocol {
     /// opaque identifiers stay stable across the swap when the new config
     /// does not carry its own `scrub_secret`.
     ///
+    /// The per-tick diff snapshots (transport status, device capability,
+    /// metrics cadence) are **rearmed** on every install: the next
+    /// `process()` tick observes the current state as its baseline and emits
+    /// no synthetic transitions for transports that were already available
+    /// at install time. Apps that need the current transport statuses at
+    /// install time should pull them explicitly via
+    /// [`TransportManager::get_all_transport_statuses`].
+    ///
+    /// The escalation-trigger dedupe window (`ESCALATION_TRIGGER_DEDUPE_SECS`
+    /// inside [`TransportManager`]) is **not** rearmed. A sink installed
+    /// within that window after an escalation event fired to a previous
+    /// sink may miss the next occurrence of the same reason until the
+    /// window elapses. This is intentional: the dedupe is a property of
+    /// the routing engine, not of the observer.
+    ///
+    /// # Lifecycle
+    ///
+    /// Installing a sink wires the structured routing-decision callback
+    /// on the underlying [`TransportManager`]. The callback lives for the
+    /// life of the protocol instance or until another
+    /// `install_telemetry_sink` call replaces it — `start()` and `stop()`
+    /// do not toggle it. This means apps can install a sink before
+    /// `start()` and see routing records from the very first `send()`,
+    /// and a `stop() → start()` cycle preserves the wiring so no
+    /// re-install is needed. Conversely, apps that never install a sink
+    /// pay no per-`send()` routing-emission overhead.
+    ///
     /// # Errors
     ///
     /// Returns `Err` if the shared-state mutex is poisoned (indicating an
@@ -427,6 +476,12 @@ impl OfflineProtocol {
         sink: Arc<dyn TelemetrySink>,
         config: TelemetryConfig,
     ) -> Result<()> {
+        // Forward the routing-diagnostic preference to the TransportManager
+        // before wiring any callbacks so the very first routing decision
+        // post-install already reflects the requested tier.
+        self.transport_manager
+            .set_routing_diagnostic(config.routing_diagnostic());
+
         let ctx = TelemetryContext::new(sink, config, self.telemetry_fallback_secret);
         let mut state = lock_shared_state(&self.shared_state).map_err(|err| {
             error!(
@@ -438,6 +493,48 @@ impl OfflineProtocol {
         state.telemetry = Some(ctx.clone());
         drop(state);
         self.telemetry = Some(ctx);
+
+        // Wire the structured routing-decision callback here so the
+        // `TransportManager` pays the per-`send()` emission cost only when
+        // a sink is actually installed, and so the wiring persists across
+        // `stop() → start()` cycles (the callback reads `s.telemetry` on
+        // every invocation and that field stays set). A subsequent
+        // `install_telemetry_sink` replaces the closure with one capturing
+        // the fresh `shared_routing` clone; both closures read the same
+        // `SharedState::telemetry` slot, so even a concurrent in-flight
+        // emission from the pre-replace closure would still resolve to
+        // the currently-installed sink.
+        let shared_routing = self.shared_state.clone();
+        self.transport_manager
+            .set_routing_decision_callback(Some(Arc::new(move |decision| {
+                if let Ok(s) = shared_routing.lock() {
+                    if let Some(ctx) = &s.telemetry {
+                        let record = TelemetryRecord::Routing(Box::new(decision));
+                        ctx.sink.emit(&record);
+                    }
+                }
+            })));
+
+        // Rearm the per-tick diff snapshots so the first tick after install
+        // reports honest transitions only. Without this, a sink installed
+        // after start() would observe a synthetic `Unavailable → Available`
+        // transition for every already-running transport on the next tick.
+        let (statuses, available) = self.transport_manager.snapshot_status_and_available();
+        self.transport_status_snapshot = statuses;
+        let (battery_level, is_charging) =
+            device_battery_from_available(self.transport_manager.current_transport(), &available);
+        let relay_role = self.path_selector.current_relay_role();
+        self.device_capability_snapshot = Some(DeviceSnap::from_parts(
+            battery_level,
+            is_charging,
+            relay_role,
+        ));
+        // Leave `last_metrics_emit_at` at None so the first tick after
+        // install fires a fresh metrics snapshot — that is the bootstrap
+        // payload a new sink actually wants (full counter state in one
+        // record).
+        self.last_metrics_emit_at = None;
+
         Ok(())
     }
 
@@ -465,6 +562,11 @@ impl OfflineProtocol {
                     s.emit_event(event);
                 }
             })));
+
+        // NOTE: the structured routing-decision callback is wired by
+        // `install_telemetry_sink`, not here. Its lifetime is tied to sink
+        // presence rather than protocol start/stop — see the docstring on
+        // `install_telemetry_sink` for the rationale.
 
         // Wire BLE fragment eviction callback so app receives FragmentAssemblyEvicted.
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
@@ -513,6 +615,11 @@ impl OfflineProtocol {
         self.flush_lamport_clock();
 
         // Clear event callbacks to release shared_state references.
+        // NOTE: the routing-decision callback is deliberately NOT cleared
+        // here. Its lifetime is sink-scoped (installed by
+        // `install_telemetry_sink`, replaced by a subsequent install),
+        // not protocol-running-scoped — so a `stop() → start()` cycle
+        // preserves the wiring without requiring the app to re-install.
         self.transport_manager.set_dors_event_callback(None);
         if let Some(ble_arc) = self.transport_manager.get_transport(TransportType::BLE) {
             if let Ok(transport) = ble_arc.lock() {
@@ -1232,9 +1339,111 @@ impl OfflineProtocol {
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.pump_media_transfers();
         self.cleanup_expired_entries();
+        self.tick_telemetry_categories();
 
         Ok(())
     }
+
+    /// Per-tick telemetry work: diff transport statuses, diff device
+    /// capability, and emit a `MetricsFrame` when `metrics_cadence` has
+    /// elapsed. No-ops unless a sink has been installed.
+    ///
+    /// Runs at the end of `process()` so reliability/queue state observed
+    /// here is the same state the rest of the tick has already advanced.
+    /// Snapshots `get_available_transports()` exactly once per tick and
+    /// reuses the map across every downstream helper that needs it.
+    ///
+    /// If an earlier step in `process()` returns `Err(...)`, this method is
+    /// skipped and telemetry emission for that interval is deferred to the
+    /// next successful tick — the cadence guarantee relaxes under sustained
+    /// partial failure.
+    ///
+    /// # Sink-panic semantics
+    ///
+    /// Each per-tick cursor is advanced *before* the emit call that
+    /// observes it, so a panicking sink does not cause re-delivery of the
+    /// record it panicked on. The transport-status path advances
+    /// **per-transport**: when multiple transitions fall in a single tick,
+    /// a panic on transition K commits K's entry (at-most-once for K) but
+    /// leaves entries L..N in `transport_status_snapshot` at their previous
+    /// values, so the next tick re-diffs and emits them fresh. This avoids
+    /// silent data loss for transitions that never reached the sink.
+    ///
+    /// The device-capability and metrics-frame paths emit at most one
+    /// record per tick each, so a simpler "advance then emit" discipline
+    /// suffices there: a panic advances the cursor and the same record is
+    /// not re-emitted on the next tick.
+    fn tick_telemetry_categories(&mut self) {
+        let Some(ctx) = self.telemetry.clone() else {
+            return;
+        };
+        let now_ms = Utc::now().timestamp_millis();
+        let now = Instant::now();
+
+        // One lock-per-transport pass: get statuses (for the transition
+        // diff) and the available-only metrics map (for the metrics frame
+        // and the device-capability diff). Reused across every helper
+        // below.
+        let (current_statuses, available) = self.transport_manager.snapshot_status_and_available();
+
+        // Transport-status diff: one record per changed transport. Commit
+        // each transport's new snapshot entry *before* emitting its event
+        // so a panic on event K is at-most-once for K; untouched entries
+        // L..N stay at their previous values and get re-diffed next tick.
+        let transitions =
+            diff_transport_state(now_ms, &self.transport_status_snapshot, &current_statuses);
+        for event in transitions {
+            let transport = event.transport;
+            match current_statuses.get(&transport) {
+                Some(status) => {
+                    self.transport_status_snapshot.insert(transport, *status);
+                }
+                None => {
+                    self.transport_status_snapshot.remove(&transport);
+                }
+            }
+            ctx.sink.emit(&TelemetryRecord::TransportState(event));
+        }
+
+        // Device capability diff. At-most-one emission per tick, so the
+        // simple advance-before-emit pattern preserves at-most-once.
+        let (battery_level, is_charging) =
+            device_battery_from_available(self.transport_manager.current_transport(), &available);
+        let relay_role = self.path_selector.current_relay_role();
+        let device_now = DeviceSnap::from_parts(battery_level, is_charging, relay_role);
+        let device_change =
+            diff_device_capability(now_ms, self.device_capability_snapshot, device_now);
+        self.device_capability_snapshot = Some(device_now);
+        if let Some(snapshot) = device_change {
+            ctx.sink.emit(&TelemetryRecord::Device(snapshot));
+        }
+
+        // Periodic metrics snapshot. Rearm cadence before emit so a
+        // panicking sink doesn't cause an immediate retry next tick.
+        if let Some(cadence) = ctx.config.metrics_cadence() {
+            let due = match self.last_metrics_emit_at {
+                None => true,
+                Some(prev) => now.saturating_duration_since(prev) >= cadence,
+            };
+            if due {
+                let is_local_relay = matches!(relay_role, RelayRole::Relay);
+                let frame = build_metrics_frame(
+                    now_ms,
+                    self.transport_manager.current_transport(),
+                    &available,
+                    &self.retry_queue,
+                    &self.deduplicator,
+                    &self.ack_manager,
+                    self.known_peers.len(),
+                    is_local_relay,
+                );
+                self.last_metrics_emit_at = Some(now);
+                ctx.sink
+                    .emit(&TelemetryRecord::MetricsSnapshot(Box::new(frame)));
+            }
+        }
+    }
+
     /// Processes messages ready for retry from the retry queue.
     ///
     /// EDGE CASE HANDLING:

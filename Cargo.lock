@@ -1253,6 +1253,7 @@ dependencies = [
  "criterion",
  "offline-protocol",
  "offline-protocol-core",
+ "offline-protocol-reliability",
  "offline-protocol-router",
  "offline-protocol-transport",
  "serde_json",
