@@ -69,6 +69,7 @@ async def main(user_id: str, server_url: str) -> None:
         wifi_direct_enabled=False,
         internet_enabled=True,
         reticulum_enabled=False,
+        nostr_enabled=False,
         prefer_online=True,
         initial_ttl=3,
         encryption_enabled=True,

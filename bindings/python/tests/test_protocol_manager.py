@@ -20,8 +20,9 @@ def _make_config(**overrides) -> ProtocolConfig:
         user_id="test-user",
         ble_enabled=False,
         wifi_direct_enabled=False,
-        internet_enabled=False,
+        internet_enabled=True,
         reticulum_enabled=False,
+        nostr_enabled=False,
         prefer_online=True,
         initial_ttl=3,
         encryption_enabled=False,
@@ -93,6 +94,7 @@ class TestProtocolManagerEvents:
         events = []
         pm = ProtocolManager(config, event_handler=events.append)
         await pm.start()
+        events.clear()  # drop anything the process loop delivered during start()
 
         # Manually invoke the callback to test routing
         pm._event_cb.on_event('{"type": "test_event", "data": 123}')
@@ -111,6 +113,7 @@ class TestProtocolManagerEvents:
         events_b = []
         pm = ProtocolManager(config, event_handler=events_a.append)
         await pm.start()
+        events_a.clear()
 
         pm.on_event(events_b.append)
         pm._event_cb.on_event('{"type": "after_swap"}')
@@ -127,6 +130,7 @@ class TestProtocolManagerEvents:
         events = []
         pm = ProtocolManager(config, event_handler=events.append)
         await pm.start()
+        events.clear()
 
         pm._event_cb.on_event("not json")
 
@@ -160,7 +164,7 @@ class TestProtocolManagerTransports:
         assert pm.internet is not None
 
     def test_internet_none_when_disabled(self):
-        config = _make_config(internet_enabled=False)
+        config = _make_config(internet_enabled=False, ble_enabled=True)
         from offline_protocol_sdk.protocol_manager import ProtocolManager
 
         pm = ProtocolManager(config)
@@ -184,6 +188,7 @@ class TestProtocolManagerMessageDrain:
         events = []
         pm = ProtocolManager(config, event_handler=events.append)
         await pm.start()
+        events.clear()
 
         # Simulate protocol returning a message then None
         msg_json = '{"sender": "alice", "content": "hi"}'
@@ -219,6 +224,7 @@ class TestProtocolManagerMessageDrain:
         events = []
         pm = ProtocolManager(config, event_handler=events.append)
         await pm.start()
+        events.clear()
 
         pm._protocol.receive_message = MagicMock(
             side_effect=["not-json", None]
@@ -239,6 +245,7 @@ class TestProtocolManagerMessageDrain:
         events = []
         pm = ProtocolManager(config, event_handler=events.append)
         await pm.start()
+        events.clear()
 
         # Return messages forever (more than the cap)
         pm._protocol.receive_message = MagicMock(return_value='{"type":"msg"}')
