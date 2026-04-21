@@ -296,6 +296,65 @@ class TestProtocolManagerConvenience:
         assert pm.protocol is pm._protocol
 
 
+class TestProtocolManagerBroadcast:
+    """Covers `send_message("*")` semantics — #3 in the PR review.
+
+    The previous behaviour silently passed "*" through to the Rust core
+    when no BLE peers were known; the core's BLE transport treats "*" as
+    a literal peer-ID lookup and fails downstream with no surfaced
+    error. We now raise ValueError so callers learn immediately.
+    """
+
+    @pytest.mark.asyncio
+    async def test_broadcast_with_no_peers_raises(self):
+        config = _make_config(ble_enabled=True)
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            pm._protocol.send_message = MagicMock(return_value="should-not-be-called")
+            with pytest.raises(ValueError, match="no BLE peers"):
+                pm.send_message("*", "hi")
+            pm._protocol.send_message.assert_not_called()
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_with_peers_fans_out(self):
+        config = _make_config(ble_enabled=True)
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            # Pre-populate the ble manager's peer map so _get_known_ble_peers
+            # returns deterministic results.
+            assert pm.ble is not None
+            with pm.ble._lock:
+                pm.ble._peer_device_ids.update({
+                    "addr-a": "peer-a",
+                    "addr-b": "peer-b",
+                })
+
+            call_ids = iter(["id-a", "id-b"])
+            pm._protocol.send_message = MagicMock(
+                side_effect=lambda **_: next(call_ids)
+            )
+
+            last_id = pm.send_message("*", "hi")
+            assert pm._protocol.send_message.call_count == 2
+            recipients = sorted(
+                c.kwargs["recipient"]
+                for c in pm._protocol.send_message.call_args_list
+            )
+            assert recipients == ["peer-a", "peer-b"]
+            # Returns the id from the final call.
+            assert last_id == "id-b"
+        finally:
+            await pm.stop()
+
+
 class TestProtocolManagerTransportCallbacks:
     @pytest.mark.asyncio
     async def test_nostr_and_reticulum_callbacks_registered_when_enabled(self):
