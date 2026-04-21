@@ -199,6 +199,172 @@ class TestInternetManagerConnectionClosedGuard:
             mgr._reconnect_handle.cancel()
 
 
+class TestInternetManagerLifecycle:
+    """Regression guards for the WS teardown path — #2 in the review.
+
+    Before the fix, `_handle_connection_closed` left `self._ws` open and
+    `self._recv_task` running; on reconnect `_connect` overwrote
+    `self._recv_task` with a new loop, leaving a zombie recv task reading
+    from the old socket.
+    """
+
+    @pytest.mark.asyncio
+    async def test_handle_connection_closed_closes_ws(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr._connected = True
+        mgr._authenticated = True
+        mgr._state = TransportState.RUNNING
+
+        ws = MagicMock()
+        ws.close = AsyncMock()
+        mgr._ws = ws
+
+        await mgr._handle_connection_closed(None)
+
+        ws.close.assert_awaited_once()
+        assert mgr._ws is None
+
+    @pytest.mark.asyncio
+    async def test_handle_connection_closed_cancels_recv_task(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr._connected = True
+        mgr._authenticated = True
+        mgr._state = TransportState.RUNNING
+
+        async def _stuck() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return
+
+        mgr._recv_task = asyncio.ensure_future(_stuck())
+        mgr._poll_task = asyncio.ensure_future(_stuck())
+        mgr._ping_task = asyncio.ensure_future(_stuck())
+
+        snapshot = (mgr._recv_task, mgr._poll_task, mgr._ping_task)
+
+        await mgr._handle_connection_closed(None)
+
+        # All three nulled out and cancelled.
+        assert mgr._recv_task is None
+        assert mgr._poll_task is None
+        assert mgr._ping_task is None
+        for t in snapshot:
+            # Give the loop a tick to propagate cancellation.
+            try:
+                await asyncio.wait_for(t, timeout=0.2)
+            except asyncio.CancelledError:
+                pass
+            assert t.done()
+
+    @pytest.mark.asyncio
+    async def test_handle_connection_closed_self_cancel_safe(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """When called from inside _recv_task, we must not cancel ourselves."""
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr._connected = True
+        mgr._authenticated = True
+        mgr._state = TransportState.RUNNING
+
+        caught_self_cancel = False
+
+        async def recv_like() -> None:
+            nonlocal caught_self_cancel
+            try:
+                # Simulate recv_loop catching ConnectionClosed and calling
+                # _handle_connection_closed from within itself.
+                await mgr._handle_connection_closed(None)
+            except asyncio.CancelledError:
+                caught_self_cancel = True
+                raise
+
+        task = asyncio.ensure_future(recv_like())
+        mgr._recv_task = task
+
+        await task
+
+        assert not caught_self_cancel
+        # recv_task is None by the time _handle_connection_closed finishes,
+        # even though we skipped cancelling it.
+        assert mgr._recv_task is None
+
+    @pytest.mark.asyncio
+    async def test_reconnect_does_not_accumulate_recv_tasks(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """Two disconnect+reconnect cycles should leave exactly one recv task."""
+        mgr = InternetManager(
+            mock_protocol, "dev-1",
+            server_url="ws://x.com",
+            auto_reconnect=True,
+        )
+        mgr._loop = asyncio.get_running_loop()
+        mgr._state = TransportState.RUNNING
+        mgr._connected = True
+        mgr._authenticated = True
+
+        # First disconnect: recv_task exists, should be cancelled+nulled.
+        async def _stuck() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return
+
+        mgr._recv_task = asyncio.ensure_future(_stuck())
+        first = mgr._recv_task
+        await mgr._handle_connection_closed(None)
+        assert mgr._recv_task is None
+        try:
+            await asyncio.wait_for(first, timeout=0.2)
+        except asyncio.CancelledError:
+            pass
+
+        # Simulate reconnect installing a fresh recv_task.
+        mgr._connected = True
+        mgr._recv_task = asyncio.ensure_future(_stuck())
+        second = mgr._recv_task
+        assert second is not first
+
+        # Second disconnect: same guarantees.
+        await mgr._handle_connection_closed(None)
+        assert mgr._recv_task is None
+        try:
+            await asyncio.wait_for(second, timeout=0.2)
+        except asyncio.CancelledError:
+            pass
+
+        if mgr._reconnect_handle is not None:
+            mgr._reconnect_handle.cancel()
+
+    @pytest.mark.asyncio
+    async def test_process_received_tasks_are_retained(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """AuthError / Authenticated dispatch must keep strong refs to tasks."""
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+
+        async def noop(*args, **kwargs) -> None:
+            await asyncio.sleep(0)
+
+        mgr._safe_handle_authenticated = noop  # type: ignore[assignment]
+        mgr._safe_handle_connection_closed = noop  # type: ignore[assignment]
+
+        mgr._process_received(json.dumps({"type": "Authenticated"}).encode())
+        assert len(mgr._process_tasks) == 1
+        mgr._process_received(json.dumps({"type": "AuthError"}).encode())
+        assert len(mgr._process_tasks) == 2
+
+        # Drain — done callbacks discard.
+        pending = list(mgr._process_tasks)
+        await asyncio.gather(*pending)
+        assert len(mgr._process_tasks) == 0
+
+
 class TestInternetManagerSendMessageTOCTOU:
     @pytest.mark.asyncio
     async def test_send_fails_gracefully_when_ws_becomes_none(

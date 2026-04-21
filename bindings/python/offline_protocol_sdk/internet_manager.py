@@ -104,6 +104,10 @@ class InternetManager(TransportManager):
         self._poll_task: asyncio.Task[None] | None = None
         self._ping_task: asyncio.Task[None] | None = None
         self._send_tasks: set[asyncio.Task[None]] = set()
+        # Fire-and-forget tasks scheduled from `_process_received` (auth /
+        # connection-closed fallouts). Retained here so the event loop's
+        # weak task table cannot GC them mid-execution.
+        self._process_tasks: set[asyncio.Task[None]] = set()
         self._send_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SENDS)
         self._reconnect_handle: asyncio.TimerHandle | None = None
 
@@ -176,6 +180,13 @@ class InternetManager(TransportManager):
         pending_sends = list(self._send_tasks)
         self._send_tasks.clear()
         for task in pending_sends:
+            if not task.done():
+                task.cancel()
+
+        # Cancel in-flight process-received tasks (auth / close fallouts).
+        pending_process = list(self._process_tasks)
+        self._process_tasks.clear()
+        for task in pending_process:
             if not task.done():
                 task.cancel()
 
@@ -312,11 +323,24 @@ class InternetManager(TransportManager):
         self._connected = False
         self._authenticated = False
 
-        # Cancel poll/ping tasks
-        for task in (self._poll_task, self._ping_task):
-            if task is not None and not task.done():
+        # Cancel recv/poll/ping tasks. Skip whichever (if any) is the task
+        # currently running this coroutine — `_handle_connection_closed` is
+        # invoked from inside `_receive_loop` (on ConnectionClosed) and
+        # `_ping_loop` (on repeated ping failure), and self-cancel would
+        # surface CancelledError mid-await. The running task exits naturally
+        # once this coroutine returns.
+        current = asyncio.current_task()
+        for attr in ("_recv_task", "_poll_task", "_ping_task"):
+            task = getattr(self, attr)
+            if task is not None and task is not current and not task.done():
                 task.cancel()
-        self._poll_task = self._ping_task = None
+            setattr(self, attr, None)
+
+        # Close the WebSocket now that no loop is reading from it. Without
+        # this, the old socket would stay open across a reconnect, and
+        # `_connect` would overwrite `self._recv_task` — leaving a zombie
+        # recv loop draining the previous connection.
+        await self._disconnect()
 
         if was_connected:
             try:
@@ -395,6 +419,17 @@ class InternetManager(TransportManager):
         except Exception as exc:
             await self._handle_connection_closed(exc)
 
+    def _spawn_process_task(self, coro: Any) -> None:
+        """Schedule a fire-and-forget coroutine and retain a strong ref.
+
+        asyncio only holds weak references to tasks, so an untracked
+        ``ensure_future`` can be GC'd mid-await. `_process_tasks` keeps the
+        reference alive until completion.
+        """
+        task = asyncio.ensure_future(coro)
+        self._process_tasks.add(task)
+        task.add_done_callback(self._process_tasks.discard)
+
     def _process_received(self, data: bytes) -> None:
         """Dispatch an incoming WebSocket frame to the protocol core."""
         try:
@@ -410,12 +445,14 @@ class InternetManager(TransportManager):
         if msg_type == "Authenticated":
             user_id = msg.get("user_id", self._device_id)
             username = msg.get("username", self._device_id)
-            asyncio.ensure_future(self._safe_handle_authenticated(user_id, username))
+            self._spawn_process_task(
+                self._safe_handle_authenticated(user_id, username)
+            )
 
         elif msg_type == "AuthError":
             reason = msg.get("reason", "Unknown")
             self._emit_diagnostic("error", f"Auth failed: {reason}")
-            asyncio.ensure_future(self._safe_handle_connection_closed(None))
+            self._spawn_process_task(self._safe_handle_connection_closed(None))
 
         elif msg_type == "MessageReceived":
             self._handle_incoming_message(msg)
