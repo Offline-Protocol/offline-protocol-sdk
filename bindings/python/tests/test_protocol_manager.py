@@ -15,6 +15,10 @@ from offline_protocol_sdk.offline_protocol import (
 
 
 def _make_config(**overrides) -> ProtocolConfig:
+    # `internet_enabled` defaults to True because the Rust-side validator
+    # (offline-protocol/src/config.rs::validate) rejects configs with all
+    # transports disabled. Tests that want internet off must enable another
+    # transport in the same call (see `test_internet_none_when_disabled`).
     defaults = dict(
         app_id="test-app",
         user_id="test-user",
@@ -558,3 +562,99 @@ class TestProtocolManagerTelemetry:
 
         pm._protocol.uninstall_telemetry_sink.assert_called_once()
         assert pm._telemetry_sink is None
+
+    @pytest.mark.asyncio
+    async def test_install_failure_preserves_prior_pin(self):
+        # Pin-ordering regression guard: if the Rust-side install raises,
+        # the previous sink must remain pinned (Rust still holds it) and
+        # the new sink must NOT be pinned (Rust never installed it).
+        from offline_protocol_sdk.offline_protocol import (
+            DeviceCapabilitySnapshot,
+            MetricsFrame,
+            ProtocolError,
+            RoutingDecision,
+            TelemetrySink,
+            TransportStateEvent,
+        )
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        class NoopSink(TelemetrySink):
+            def on_protocol_event(self, event_json: str) -> None: ...
+            def on_mls_event(self, event_json: str) -> None: ...
+            def on_metrics_frame(self, frame: MetricsFrame) -> None: ...
+            def on_transport_state(self, event: TransportStateEvent) -> None: ...
+            def on_routing_decision(self, decision: RoutingDecision) -> None: ...
+            def on_device_capability(
+                self, snapshot: DeviceCapabilitySnapshot
+            ) -> None: ...
+            def on_extension(self, name: str, payload_json: str) -> None: ...
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            prev_sink = NoopSink()
+            new_sink = NoopSink()
+
+            pm.install_telemetry_sink(prev_sink)
+            assert pm._telemetry_sink is prev_sink
+            assert prev_sink in pm._prevent_gc
+
+            pm._protocol.install_telemetry_sink = MagicMock(
+                side_effect=ProtocolError.LockPoisoned()
+            )
+            with pytest.raises(ProtocolError.LockPoisoned):
+                pm.install_telemetry_sink(new_sink)
+
+            # Previous sink stays the live one; new sink is unpinned.
+            assert pm._telemetry_sink is prev_sink
+            assert prev_sink in pm._prevent_gc
+            assert new_sink not in pm._prevent_gc
+        finally:
+            # Avoid invoking the mocked uninstall path during teardown.
+            pm._protocol.uninstall_telemetry_sink = MagicMock()
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_retains_pins_when_uninstall_raises(self):
+        # If Rust-side teardown reports an error, ProtocolManager must
+        # leave _prevent_gc populated — clearing it would drop the last
+        # strong reference to objects Rust may still hold pointers to.
+        from offline_protocol_sdk.offline_protocol import (
+            DeviceCapabilitySnapshot,
+            MetricsFrame,
+            ProtocolError,
+            RoutingDecision,
+            TelemetrySink,
+            TransportStateEvent,
+        )
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        class NoopSink(TelemetrySink):
+            def on_protocol_event(self, event_json: str) -> None: ...
+            def on_mls_event(self, event_json: str) -> None: ...
+            def on_metrics_frame(self, frame: MetricsFrame) -> None: ...
+            def on_transport_state(self, event: TransportStateEvent) -> None: ...
+            def on_routing_decision(self, decision: RoutingDecision) -> None: ...
+            def on_device_capability(
+                self, snapshot: DeviceCapabilitySnapshot
+            ) -> None: ...
+            def on_extension(self, name: str, payload_json: str) -> None: ...
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        sink = NoopSink()
+        pm.install_telemetry_sink(sink)
+        pinned_before = list(pm._prevent_gc)
+        assert sink in pinned_before
+
+        pm._protocol.uninstall_telemetry_sink = MagicMock(
+            side_effect=ProtocolError.LockPoisoned()
+        )
+
+        await pm.stop()
+
+        # Pins retained because Rust-side teardown didn't confirm release.
+        assert pm._prevent_gc == pinned_before
+        assert sink in pm._prevent_gc

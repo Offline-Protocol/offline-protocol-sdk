@@ -263,9 +263,11 @@ class ProtocolManager:
         # Rust retains the sink handle until this is called, so skipping
         # it would leak the sink for the lifetime of the manager.
         # Idempotent on the Rust side — safe to call without a prior install.
+        teardown_clean = True
         try:
             self.uninstall_telemetry_sink()
         except Exception:
+            teardown_clean = False
             logger.debug(
                 "uninstall_telemetry_sink raised during stop (non-fatal)",
                 exc_info=True,
@@ -275,10 +277,22 @@ class ProtocolManager:
         try:
             self._protocol.stop()
         except Exception:
+            teardown_clean = False
             logger.debug("protocol.stop() raised (non-fatal)", exc_info=True)
 
-        # Release GC-prevention references now that Rust no longer calls back.
-        self._prevent_gc.clear()
+        # Only release GC pins once Rust has confirmed it no longer holds
+        # callback handles. If either teardown step raised, Rust may still
+        # hold pointers to the pinned objects — dropping the last strong
+        # reference here would create a use-after-free risk on any future
+        # callback fire.
+        if teardown_clean:
+            self._prevent_gc.clear()
+        elif self._prevent_gc:
+            logger.warning(
+                "ProtocolManager stop() encountered errors; retaining %d GC "
+                "pins so Rust callbacks cannot dangle.",
+                len(self._prevent_gc),
+            )
 
         logger.info("ProtocolManager stopped")
 
@@ -386,25 +400,40 @@ class ProtocolManager:
         ``metrics_cadence_ms=5000``, ``routing_diagnostic=False``,
         ``enable_poll_queue=True``.
         """
-        effective = config or TelemetryConfig(
+        effective = config if config is not None else TelemetryConfig(
             scrub_ids=None,
             mls_verbosity=None,
             metrics_cadence_ms=None,
             routing_diagnostic=None,
             enable_poll_queue=None,
         )
-        # Rust drops the old sink handle inside install_telemetry_sink,
-        # so the prior Python pin is the only remaining strong reference.
-        # Release it before appending the new sink.
+        # Pin the new sink BEFORE the FFI call so a successful Rust-side
+        # swap never observes an unpinned new sink. If the FFI call raises
+        # the lock is acquired before the swap on the Rust side
+        # (lib.rs::install_telemetry_sink), so the previous sink is still
+        # the live one — unpin the new sink and let the caller see the
+        # exception with state unchanged.
+        self._prevent_gc.append(sink)
+        try:
+            self._protocol.install_telemetry_sink(sink, effective)
+        except Exception:
+            self._prevent_gc.remove(sink)
+            raise
+
+        # Rust has now dropped its handle on the prior sink; release the
+        # corresponding Python pin. ``list.remove`` drops the first match
+        # only, which correctly leaves the new pin in place even when the
+        # caller re-installs the same sink instance.
         prev = getattr(self, "_telemetry_sink", None)
         if prev is not None:
             try:
                 self._prevent_gc.remove(prev)
             except ValueError:
-                pass
+                logger.debug(
+                    "prior telemetry sink missing from _prevent_gc",
+                    exc_info=True,
+                )
         self._telemetry_sink = sink
-        self._prevent_gc.append(sink)
-        self._protocol.install_telemetry_sink(sink, effective)
 
     def uninstall_telemetry_sink(self) -> None:
         """Detach the currently-installed telemetry sink, if any.
@@ -426,11 +455,15 @@ class ProtocolManager:
         """Pull the next queued telemetry frame as JSON, or ``None`` if the
         queue is empty.
 
-        Returns ``None`` when no sink was ever installed, when the current
-        sink was installed with ``TelemetryConfig.enable_poll_queue=False``,
-        or when the bounded 1024-slot queue happens to be empty. Pair with
-        the typed ``TelemetrySink`` push callbacks if you need guaranteed
-        delivery.
+        New records only enter the queue while a sink is installed with
+        ``TelemetryConfig.enable_poll_queue`` left at its default (or
+        explicitly ``True``); after ``uninstall_telemetry_sink`` or under a
+        push-only sink, fresh emissions do not enqueue. Records queued
+        prior to a re-install remain readable in FIFO order — call
+        ``uninstall_telemetry_sink`` between sinks for a clean slate. The
+        queue is bounded at 1024 slots (drop-oldest on overflow). Pair
+        with the typed ``TelemetrySink`` push callbacks if you need
+        guaranteed delivery.
         """
         return self._protocol.poll_telemetry_frame()
 
