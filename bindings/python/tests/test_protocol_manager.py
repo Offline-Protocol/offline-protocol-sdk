@@ -290,3 +290,96 @@ class TestProtocolManagerConvenience:
 
         pm = ProtocolManager(config)
         assert pm.protocol is pm._protocol
+
+
+class TestProtocolManagerTransportCallbacks:
+    @pytest.mark.asyncio
+    async def test_nostr_and_reticulum_callbacks_registered(self):
+        config = _make_config()
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        pm._protocol.set_nostr_transport_callback = MagicMock()
+        pm._protocol.set_reticulum_transport_callback = MagicMock()
+        try:
+            await pm.start()
+            pm._protocol.set_nostr_transport_callback.assert_called_once_with(
+                pm._nostr_cb
+            )
+            pm._protocol.set_reticulum_transport_callback.assert_called_once_with(
+                pm._reticulum_cb
+            )
+            assert pm._nostr_cb in pm._prevent_gc
+            assert pm._reticulum_cb in pm._prevent_gc
+        finally:
+            await pm.stop()
+
+
+class TestProtocolManagerTelemetry:
+    @pytest.mark.asyncio
+    async def test_install_uninstall_telemetry_sink(self):
+        from offline_protocol_sdk.offline_protocol import (
+            DeviceCapabilitySnapshot,
+            MetricsFrame,
+            RoutingDecision,
+            TelemetryConfig,
+            TelemetrySink,
+            TransportStateEvent,
+        )
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        class RecordingSink(TelemetrySink):
+            def on_protocol_event(self, event_json: str) -> None: ...
+            def on_mls_event(self, event_json: str) -> None: ...
+            def on_metrics_frame(self, frame: MetricsFrame) -> None: ...
+            def on_transport_state(self, event: TransportStateEvent) -> None: ...
+            def on_routing_decision(self, decision: RoutingDecision) -> None: ...
+            def on_device_capability(
+                self, snapshot: DeviceCapabilitySnapshot
+            ) -> None: ...
+            def on_extension(self, name: str, payload_json: str) -> None: ...
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            sink = RecordingSink()
+            pm.install_telemetry_sink(sink)
+            assert sink in pm._prevent_gc
+            assert pm._telemetry_sink is sink
+
+            pm.uninstall_telemetry_sink()
+            assert sink not in pm._prevent_gc
+            assert pm._telemetry_sink is None
+
+            # Custom TelemetryConfig round-trip
+            pm.install_telemetry_sink(
+                sink,
+                TelemetryConfig(
+                    scrub_ids=False,
+                    mls_verbosity=None,
+                    metrics_cadence_ms=500,
+                    routing_diagnostic=True,
+                    enable_poll_queue=True,
+                ),
+            )
+            assert pm._telemetry_sink is sink
+            pm.uninstall_telemetry_sink()
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_poll_telemetry_frame_passes_through(self):
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            pm._protocol.poll_telemetry_frame = MagicMock(
+                return_value='{"kind":"metrics"}'
+            )
+            assert pm.poll_telemetry_frame() == '{"kind":"metrics"}'
+            pm._protocol.poll_telemetry_frame.assert_called_once()
+        finally:
+            await pm.stop()

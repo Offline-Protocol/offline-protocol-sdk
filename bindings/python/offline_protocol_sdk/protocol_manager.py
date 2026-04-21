@@ -16,8 +16,12 @@ from .offline_protocol import (
     BleTransportCallback,
     EventCallback,
     MessagePriority,
+    NostrTransportCallback,
     OfflineProtocol,
     ProtocolConfig,
+    ReticulumTransportCallback,
+    TelemetryConfig,
+    TelemetrySink,
     WifiDirectTransportCallback,
 )
 from .ble_manager import BleManager
@@ -77,6 +81,23 @@ class _BleTransportCallbackImpl(BleTransportCallback):
 
 class _WifiDirectTransportCallbackImpl(WifiDirectTransportCallback):
     """Stub — WiFi Direct is not implemented on desktop."""
+
+    def on_messages_available(self) -> None:
+        pass
+
+
+class _NostrTransportCallbackImpl(NostrTransportCallback):
+    """Stub — no desktop Nostr manager; apps driving Nostr manually must
+    call ``protocol.set_nostr_transport_callback()`` with their own impl."""
+
+    def on_messages_available(self) -> None:
+        pass
+
+
+class _ReticulumTransportCallbackImpl(ReticulumTransportCallback):
+    """Stub — no desktop Reticulum manager; apps driving Reticulum manually
+    must call ``protocol.set_reticulum_transport_callback()`` with their own
+    impl."""
 
     def on_messages_available(self) -> None:
         pass
@@ -171,6 +192,12 @@ class ProtocolManager:
         self._wifi_cb = _WifiDirectTransportCallbackImpl()
         self._protocol.set_wifi_direct_transport_callback(self._wifi_cb)
 
+        self._nostr_cb = _NostrTransportCallbackImpl()
+        self._protocol.set_nostr_transport_callback(self._nostr_cb)
+
+        self._reticulum_cb = _ReticulumTransportCallbackImpl()
+        self._protocol.set_reticulum_transport_callback(self._reticulum_cb)
+
         # Keep strong references to all objects passed to the Rust/UniFFI
         # side so that Python's GC cannot collect them while Rust holds
         # raw callback pointers.
@@ -178,6 +205,8 @@ class ProtocolManager:
             self._event_cb,
             self._ble_cb,
             self._wifi_cb,
+            self._nostr_cb,
+            self._reticulum_cb,
             self._storage,
         ]
 
@@ -224,7 +253,7 @@ class ProtocolManager:
         try:
             self._protocol.stop()
         except Exception:
-            pass
+            logger.debug("protocol.stop() raised (non-fatal)", exc_info=True)
 
         # Release GC-prevention references now that Rust no longer calls back.
         self._prevent_gc.clear()
@@ -300,18 +329,62 @@ class ProtocolManager:
             try:
                 with self.ble._lock:
                     peers.extend(self.ble._peer_device_ids.values())
-            except (AttributeError, Exception):
-                pass
+            except Exception:
+                logger.debug("ble peer lookup failed", exc_info=True)
         if self.ble_peripheral is not None:
             try:
-                peers.extend(self.ble_peripheral._central_to_user_id.values())
-            except (AttributeError, Exception):
-                pass
+                with self.ble_peripheral._lock:
+                    peers.extend(self.ble_peripheral._central_to_user_id.values())
+            except Exception:
+                logger.debug("ble_peripheral peer lookup failed", exc_info=True)
         return list(set(peers))
 
     def get_state(self) -> Any:
         """Return the current protocol state."""
         return self._protocol.get_state()
+
+    # -- telemetry ------------------------------------------------------------
+
+    def install_telemetry_sink(
+        self,
+        sink: TelemetrySink,
+        config: TelemetryConfig | None = None,
+    ) -> None:
+        """Install a ``TelemetrySink`` on the underlying protocol.
+
+        The sink reference is retained in ``_prevent_gc`` so Python's GC
+        cannot collect it while Rust holds a raw callback pointer. All
+        ``TelemetryConfig`` fields are optional — passing ``None`` uses the
+        Rust-side defaults (``scrub_ids=True``, ``mls_verbosity=Lifecycle``,
+        and so on).
+        """
+        effective = config or TelemetryConfig(
+            scrub_ids=None,
+            mls_verbosity=None,
+            metrics_cadence_ms=None,
+            routing_diagnostic=None,
+            enable_poll_queue=None,
+        )
+        self._telemetry_sink = sink
+        self._prevent_gc.append(sink)
+        self._protocol.install_telemetry_sink(sink, effective)
+
+    def uninstall_telemetry_sink(self) -> None:
+        """Detach the currently-installed telemetry sink, if any."""
+        self._protocol.uninstall_telemetry_sink()
+        sink = getattr(self, "_telemetry_sink", None)
+        if sink is not None:
+            try:
+                self._prevent_gc.remove(sink)
+            except ValueError:
+                pass
+            self._telemetry_sink = None
+
+    def poll_telemetry_frame(self) -> str | None:
+        """Pull the next queued telemetry frame as JSON, or ``None`` if the
+        queue is empty. Only populated when ``TelemetryConfig.enable_poll_queue``
+        was ``True`` at install time."""
+        return self._protocol.poll_telemetry_frame()
 
     # -- processing loop ------------------------------------------------------
 
