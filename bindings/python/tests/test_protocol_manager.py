@@ -294,8 +294,8 @@ class TestProtocolManagerConvenience:
 
 class TestProtocolManagerTransportCallbacks:
     @pytest.mark.asyncio
-    async def test_nostr_and_reticulum_callbacks_registered(self):
-        config = _make_config()
+    async def test_nostr_and_reticulum_callbacks_registered_when_enabled(self):
+        config = _make_config(nostr_enabled=True, reticulum_enabled=True)
         from offline_protocol_sdk.protocol_manager import ProtocolManager
 
         pm = ProtocolManager(config)
@@ -311,6 +311,26 @@ class TestProtocolManagerTransportCallbacks:
             )
             assert pm._nostr_cb in pm._prevent_gc
             assert pm._reticulum_cb in pm._prevent_gc
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_nostr_and_reticulum_callbacks_skipped_when_disabled(self):
+        # Matches the RN iOS/Android policy: stubs are not wired when the
+        # transport is disabled in config, so apps enabling these manually
+        # don't collide with a no-op stub holding the Rust-side slot.
+        config = _make_config(nostr_enabled=False, reticulum_enabled=False)
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        pm._protocol.set_nostr_transport_callback = MagicMock()
+        pm._protocol.set_reticulum_transport_callback = MagicMock()
+        try:
+            await pm.start()
+            pm._protocol.set_nostr_transport_callback.assert_not_called()
+            pm._protocol.set_reticulum_transport_callback.assert_not_called()
+            assert pm._nostr_cb is None
+            assert pm._reticulum_cb is None
         finally:
             await pm.stop()
 
@@ -383,3 +403,158 @@ class TestProtocolManagerTelemetry:
             pm._protocol.poll_telemetry_frame.assert_called_once()
         finally:
             await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_reinstall_releases_prior_sink_pin(self):
+        # Re-installing must not leave the previous sink pinned in
+        # _prevent_gc. Rust drops its old handle inside install_telemetry_sink,
+        # so the Python pin would be the only remaining strong reference.
+        from offline_protocol_sdk.offline_protocol import (
+            DeviceCapabilitySnapshot,
+            MetricsFrame,
+            RoutingDecision,
+            TelemetrySink,
+            TransportStateEvent,
+        )
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        class NoopSink(TelemetrySink):
+            def on_protocol_event(self, event_json: str) -> None: ...
+            def on_mls_event(self, event_json: str) -> None: ...
+            def on_metrics_frame(self, frame: MetricsFrame) -> None: ...
+            def on_transport_state(self, event: TransportStateEvent) -> None: ...
+            def on_routing_decision(self, decision: RoutingDecision) -> None: ...
+            def on_device_capability(
+                self, snapshot: DeviceCapabilitySnapshot
+            ) -> None: ...
+            def on_extension(self, name: str, payload_json: str) -> None: ...
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            sink_a = NoopSink()
+            sink_b = NoopSink()
+
+            pm.install_telemetry_sink(sink_a)
+            assert pm._telemetry_sink is sink_a
+            assert sink_a in pm._prevent_gc
+
+            pm.install_telemetry_sink(sink_b)
+            assert pm._telemetry_sink is sink_b
+            assert sink_b in pm._prevent_gc
+            assert sink_a not in pm._prevent_gc  # prior sink released
+
+            pm.uninstall_telemetry_sink()
+            assert pm._telemetry_sink is None
+            assert sink_a not in pm._prevent_gc
+            assert sink_b not in pm._prevent_gc
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_uninstall_is_idempotent(self):
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            # Uninstall with no prior install is a no-op.
+            pm.uninstall_telemetry_sink()
+            assert getattr(pm, "_telemetry_sink", None) is None
+
+            # Double uninstall after install is also a no-op on the second call.
+            pm._protocol.uninstall_telemetry_sink = MagicMock()
+            pm._telemetry_sink = object()  # stand-in; won't be passed to Rust
+            pm._prevent_gc.append(pm._telemetry_sink)
+
+            pm.uninstall_telemetry_sink()
+            assert pm._telemetry_sink is None
+            pm.uninstall_telemetry_sink()  # must not raise
+            assert pm._telemetry_sink is None
+            assert pm._protocol.uninstall_telemetry_sink.call_count == 2
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_enable_poll_queue_false_is_passed_through(self):
+        from offline_protocol_sdk.offline_protocol import (
+            DeviceCapabilitySnapshot,
+            MetricsFrame,
+            RoutingDecision,
+            TelemetryConfig,
+            TelemetrySink,
+            TransportStateEvent,
+        )
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        class NoopSink(TelemetrySink):
+            def on_protocol_event(self, event_json: str) -> None: ...
+            def on_mls_event(self, event_json: str) -> None: ...
+            def on_metrics_frame(self, frame: MetricsFrame) -> None: ...
+            def on_transport_state(self, event: TransportStateEvent) -> None: ...
+            def on_routing_decision(self, decision: RoutingDecision) -> None: ...
+            def on_device_capability(
+                self, snapshot: DeviceCapabilitySnapshot
+            ) -> None: ...
+            def on_extension(self, name: str, payload_json: str) -> None: ...
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            pm._protocol.install_telemetry_sink = MagicMock()
+            sink = NoopSink()
+            pm.install_telemetry_sink(
+                sink,
+                TelemetryConfig(
+                    scrub_ids=None,
+                    mls_verbosity=None,
+                    metrics_cadence_ms=None,
+                    routing_diagnostic=None,
+                    enable_poll_queue=False,
+                ),
+            )
+            pm._protocol.install_telemetry_sink.assert_called_once()
+            _, passed_config = pm._protocol.install_telemetry_sink.call_args.args
+            assert passed_config.enable_poll_queue is False
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_uninstalls_telemetry_sink(self):
+        # stop() must detach the sink so Rust drops its handle and the pull
+        # queue drains; otherwise the sink leaks for the lifetime of the
+        # ProtocolManager.
+        from offline_protocol_sdk.offline_protocol import (
+            DeviceCapabilitySnapshot,
+            MetricsFrame,
+            RoutingDecision,
+            TelemetrySink,
+            TransportStateEvent,
+        )
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        class NoopSink(TelemetrySink):
+            def on_protocol_event(self, event_json: str) -> None: ...
+            def on_mls_event(self, event_json: str) -> None: ...
+            def on_metrics_frame(self, frame: MetricsFrame) -> None: ...
+            def on_transport_state(self, event: TransportStateEvent) -> None: ...
+            def on_routing_decision(self, decision: RoutingDecision) -> None: ...
+            def on_device_capability(
+                self, snapshot: DeviceCapabilitySnapshot
+            ) -> None: ...
+            def on_extension(self, name: str, payload_json: str) -> None: ...
+
+        config = _make_config()
+        pm = ProtocolManager(config)
+        await pm.start()
+        sink = NoopSink()
+        pm.install_telemetry_sink(sink)
+        pm._protocol.uninstall_telemetry_sink = MagicMock()
+
+        await pm.stop()
+
+        pm._protocol.uninstall_telemetry_sink.assert_called_once()
+        assert pm._telemetry_sink is None

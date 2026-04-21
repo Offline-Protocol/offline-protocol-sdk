@@ -192,11 +192,19 @@ class ProtocolManager:
         self._wifi_cb = _WifiDirectTransportCallbackImpl()
         self._protocol.set_wifi_direct_transport_callback(self._wifi_cb)
 
-        self._nostr_cb = _NostrTransportCallbackImpl()
-        self._protocol.set_nostr_transport_callback(self._nostr_cb)
+        # Mirror the RN iOS/Android modules: only wire the nostr/reticulum
+        # callbacks when the transport is enabled in config. Installing a
+        # stub unconditionally would silently swallow `on_messages_available`
+        # on desktop apps that enable the transport but drive it themselves.
+        self._nostr_cb: _NostrTransportCallbackImpl | None = None
+        if getattr(self._config, "nostr_enabled", False):
+            self._nostr_cb = _NostrTransportCallbackImpl()
+            self._protocol.set_nostr_transport_callback(self._nostr_cb)
 
-        self._reticulum_cb = _ReticulumTransportCallbackImpl()
-        self._protocol.set_reticulum_transport_callback(self._reticulum_cb)
+        self._reticulum_cb: _ReticulumTransportCallbackImpl | None = None
+        if getattr(self._config, "reticulum_enabled", False):
+            self._reticulum_cb = _ReticulumTransportCallbackImpl()
+            self._protocol.set_reticulum_transport_callback(self._reticulum_cb)
 
         # Keep strong references to all objects passed to the Rust/UniFFI
         # side so that Python's GC cannot collect them while Rust holds
@@ -205,10 +213,12 @@ class ProtocolManager:
             self._event_cb,
             self._ble_cb,
             self._wifi_cb,
-            self._nostr_cb,
-            self._reticulum_cb,
             self._storage,
         ]
+        if self._nostr_cb is not None:
+            self._prevent_gc.append(self._nostr_cb)
+        if self._reticulum_cb is not None:
+            self._prevent_gc.append(self._reticulum_cb)
 
         # Initialise MLS encryption
         try:
@@ -248,6 +258,18 @@ class ProtocolManager:
             await self.ble_peripheral.stop()
         if self.internet is not None:
             await self.internet.stop()
+
+        # Detach any installed telemetry sink before we drop GC pins.
+        # Rust retains the sink handle until this is called, so skipping
+        # it would leak the sink for the lifetime of the manager.
+        # Idempotent on the Rust side — safe to call without a prior install.
+        try:
+            self.uninstall_telemetry_sink()
+        except Exception:
+            logger.debug(
+                "uninstall_telemetry_sink raised during stop (non-fatal)",
+                exc_info=True,
+            )
 
         # Stop protocol engine
         try:
@@ -353,10 +375,16 @@ class ProtocolManager:
         """Install a ``TelemetrySink`` on the underlying protocol.
 
         The sink reference is retained in ``_prevent_gc`` so Python's GC
-        cannot collect it while Rust holds a raw callback pointer. All
-        ``TelemetryConfig`` fields are optional — passing ``None`` uses the
-        Rust-side defaults (``scrub_ids=True``, ``mls_verbosity=Lifecycle``,
-        and so on).
+        cannot collect it while Rust holds a raw callback pointer.
+        Re-installing replaces the previous sink on the Rust side; the
+        prior sink's GC pin is released here so repeated installs do not
+        accumulate references.
+
+        All ``TelemetryConfig`` fields are optional — passing ``None`` (or
+        a field left as ``None``) uses the Rust-side defaults:
+        ``scrub_ids=True``, ``mls_verbosity=Lifecycle``,
+        ``metrics_cadence_ms=5000``, ``routing_diagnostic=False``,
+        ``enable_poll_queue=True``.
         """
         effective = config or TelemetryConfig(
             scrub_ids=None,
@@ -365,12 +393,26 @@ class ProtocolManager:
             routing_diagnostic=None,
             enable_poll_queue=None,
         )
+        # Rust drops the old sink handle inside install_telemetry_sink,
+        # so the prior Python pin is the only remaining strong reference.
+        # Release it before appending the new sink.
+        prev = getattr(self, "_telemetry_sink", None)
+        if prev is not None:
+            try:
+                self._prevent_gc.remove(prev)
+            except ValueError:
+                pass
         self._telemetry_sink = sink
         self._prevent_gc.append(sink)
         self._protocol.install_telemetry_sink(sink, effective)
 
     def uninstall_telemetry_sink(self) -> None:
-        """Detach the currently-installed telemetry sink, if any."""
+        """Detach the currently-installed telemetry sink, if any.
+
+        Idempotent — safe to call without a prior install. If the
+        underlying Rust call raises, the Python-side bookkeeping is left
+        untouched so a retry sees the same state.
+        """
         self._protocol.uninstall_telemetry_sink()
         sink = getattr(self, "_telemetry_sink", None)
         if sink is not None:
@@ -382,8 +424,14 @@ class ProtocolManager:
 
     def poll_telemetry_frame(self) -> str | None:
         """Pull the next queued telemetry frame as JSON, or ``None`` if the
-        queue is empty. Only populated when ``TelemetryConfig.enable_poll_queue``
-        was ``True`` at install time."""
+        queue is empty.
+
+        Returns ``None`` when no sink was ever installed, when the current
+        sink was installed with ``TelemetryConfig.enable_poll_queue=False``,
+        or when the bounded 1024-slot queue happens to be empty. Pair with
+        the typed ``TelemetrySink`` push callbacks if you need guaranteed
+        delivery.
+        """
         return self._protocol.poll_telemetry_frame()
 
     # -- processing loop ------------------------------------------------------
