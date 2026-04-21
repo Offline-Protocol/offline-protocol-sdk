@@ -1,5 +1,6 @@
-# Generated Python bindings (regenerated from UDL via uniffi-bindgen)
-offline_protocol_sdk/offline_protocol.py
+# offline_protocol.py is committed (like the RN Swift/Kotlin generated
+# files) so UDL changes surface as a reviewable diff. CI regenerates and
+# fails on drift. Rebuild locally with scripts/build-desktop.sh.
 
 # Native libraries (built from Rust source)
 offline_protocol_sdk/*.dylib

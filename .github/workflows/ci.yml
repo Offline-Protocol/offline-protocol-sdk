@@ -68,6 +68,44 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  python-bindings:
+    name: Python Bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-python-bindings
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: bindings/python/pyproject.toml
+
+      - name: Install uniffi-bindgen
+        run: cargo install uniffi --version 0.30.0 --features cli --locked
+
+      - name: Regenerate Python bindings
+        run: bash bindings/python/scripts/build-desktop.sh
+
+      - name: Fail on stale offline_protocol.py
+        run: |
+          if ! git diff --exit-code -- bindings/python/offline_protocol_sdk/offline_protocol.py; then
+            echo "::error::bindings/python/offline_protocol_sdk/offline_protocol.py is out of date."
+            echo "Run: bash bindings/python/scripts/build-desktop.sh and commit the regenerated file."
+            exit 1
+          fi
+
+      - name: Install Python binding
+        run: pip install -e 'bindings/python[dev]'
+
+      - name: Run pytest
+        run: pytest bindings/python/tests/ -v
+
   coverage:
     name: Code Coverage
     if: github.event_name == 'push'

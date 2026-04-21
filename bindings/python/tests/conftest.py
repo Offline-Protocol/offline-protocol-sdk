@@ -50,6 +50,20 @@ def in_memory_storage() -> InMemoryStorage:
     return InMemoryStorage()
 
 
+@pytest.fixture(autouse=True)
+def _stub_secure_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent tests from hitting the real platform keyring.
+
+    ``ProtocolManager`` instantiates ``SecureStorage()`` by default, which
+    on macOS prompts for the login-keychain password on every access.
+    Redirect the symbol imported by ``protocol_manager`` to an in-memory
+    stand-in so tests run unattended.
+    """
+    from offline_protocol_sdk import protocol_manager as pm_module
+
+    monkeypatch.setattr(pm_module, "SecureStorage", InMemoryStorage)
+
+
 @pytest.fixture
 def default_config() -> ProtocolConfig:
     """A minimal ProtocolConfig with only Internet enabled."""
@@ -60,6 +74,7 @@ def default_config() -> ProtocolConfig:
         wifi_direct_enabled=False,
         internet_enabled=True,
         reticulum_enabled=False,
+        nostr_enabled=False,
         prefer_online=True,
         initial_ttl=3,
         encryption_enabled=True,
