@@ -113,10 +113,20 @@ class BlePeripheral(TransportManager):
         # user_id so the Rust BLE transport can route outgoing messages.
         self._central_to_user_id: dict[str, str] = {}
 
+        # Sticky "last known" central for single-peer sender attribution —
+        # see _resolve_sender. Held to survive brief windows where the
+        # peer monitor loop has not yet populated _connected_centrals.
+        self._last_known_central: str | None = None
+
         # Event loop — captured in start() for thread-safe callback scheduling
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        # Lock protecting metrics — _on_write runs on bless's delegate thread
+        # Lock protecting state shared between bless's delegate thread
+        # (_on_write / _resolve_sender) and the asyncio event loop
+        # (_peer_monitor_loop, resolve_sender_identity, stop). Guards:
+        # metrics counters, _connected_centrals, _central_to_user_id,
+        # _last_known_central. Follow "snapshot under lock, FFI outside"
+        # so threading.Lock is never held across an await.
         self._lock = threading.Lock()
 
         # Metrics
@@ -216,20 +226,27 @@ class BlePeripheral(TransportManager):
             self._server = None
         self._is_advertising = False
 
-        # Notify protocol about all lost peers (both raw UUID and resolved user_id)
-        for central_uuid in list(self._connected_centrals):
+        # Snapshot under the lock so the delegate thread can't mutate
+        # these maps concurrently, then emit FFI notifications outside
+        # the lock (never hold threading.Lock across FFI).
+        with self._lock:
+            centrals_snapshot = list(self._connected_centrals.keys())
+            resolved_snapshot = dict(self._central_to_user_id)
+            self._connected_centrals.clear()
+            self._central_to_user_id.clear()
+            self._last_known_central = None
+
+        for central_uuid in centrals_snapshot:
             try:
                 self._protocol.ble_peer_lost(peer_id=central_uuid)
             except Exception:
                 logger.debug("ble_peer_lost failed for %s", central_uuid)
-            resolved_uid = self._central_to_user_id.get(central_uuid)
+            resolved_uid = resolved_snapshot.get(central_uuid)
             if resolved_uid:
                 try:
                     self._protocol.ble_peer_lost(peer_id=resolved_uid)
                 except Exception:
                     logger.debug("ble_peer_lost failed for resolved %s", resolved_uid)
-        self._connected_centrals.clear()
-        self._central_to_user_id.clear()
 
         try:
             self._protocol.ble_status_changed(is_available=False)
@@ -366,21 +383,22 @@ class BlePeripheral(TransportManager):
     def _resolve_sender(self) -> str:
         """Best-effort identification of the writing central.
 
-        Returns a stable sender ID so that the Rust core can group
-        fragments from the same source.  If the peer monitor hasn't
-        detected the subscription yet (``_connected_centrals`` is empty),
-        fall back to the last known central UUID.  This prevents the
-        sender flipping between ``"ble-peer"`` and a UUID within the
-        same message's fragments, which breaks reassembly.
+        Called from the bless delegate thread, so state reads/writes must
+        take `self._lock` — the asyncio `_peer_monitor_loop` mutates
+        `_connected_centrals` / `_last_known_central` from a different
+        thread. Returns a stable sender ID so the Rust core can group
+        fragments from the same source.
         """
-        if len(self._connected_centrals) == 1:
-            central = next(iter(self._connected_centrals))
-            self._last_known_central = central
-            return central
-        if len(self._connected_centrals) > 1:
-            return "ble-peer"
-        # No centrals currently tracked — use last known if available
-        return getattr(self, '_last_known_central', 'ble-peer')
+        with self._lock:
+            count = len(self._connected_centrals)
+            if count == 1:
+                central = next(iter(self._connected_centrals))
+                self._last_known_central = central
+                return central
+            if count > 1:
+                return "ble-peer"
+            # No centrals currently tracked — use last known if available.
+            return self._last_known_central or "ble-peer"
 
     def resolve_sender_identity(self, sender_user_id: str) -> None:
         """Associate a sender's user_id with the currently connected central.
@@ -395,25 +413,23 @@ class BlePeripheral(TransportManager):
         Rust core under its real user_id so that ``send_message(user_id, ...)``
         can route back through the BLE peripheral.
         """
-        if not self._connected_centrals:
-            return
+        with self._lock:
+            count = len(self._connected_centrals)
+            if count == 0:
+                return
+            if count != 1:
+                # With multiple centrals we can't attribute unambiguously.
+                logger.debug(
+                    "resolve_sender_identity: %d centrals connected, skipping",
+                    count,
+                )
+                return
+            central_uuid = next(iter(self._connected_centrals))
+            # Avoid redundant re-registration.
+            if self._central_to_user_id.get(central_uuid) == sender_user_id:
+                return
+            self._central_to_user_id[central_uuid] = sender_user_id
 
-        # With one central connected the mapping is unambiguous.
-        # With multiple, we can't reliably attribute — skip.
-        if len(self._connected_centrals) != 1:
-            logger.debug(
-                "resolve_sender_identity: %d centrals connected, skipping",
-                len(self._connected_centrals),
-            )
-            return
-
-        central_uuid = next(iter(self._connected_centrals))
-
-        # Avoid redundant re-registration
-        if self._central_to_user_id.get(central_uuid) == sender_user_id:
-            return
-
-        self._central_to_user_id[central_uuid] = sender_user_id
         logger.info(
             "Resolved central %s -> user_id %s — re-registering peer",
             central_uuid, sender_user_id,
@@ -527,17 +543,38 @@ class BlePeripheral(TransportManager):
                     )
                     continue
 
-                # New centrals
-                for central_uuid in current - known:
-                    if len(self._connected_centrals) >= self._max_connections:
-                        self._emit_diagnostic(
-                            "warning",
-                            f"Max connections ({self._max_connections}) reached, "
-                            f"ignoring {central_uuid}",
-                        )
-                        continue
+                # Classify under the lock (the delegate thread races us on
+                # _connected_centrals / _central_to_user_id). FFI + diagnostic
+                # notifications happen afterward, outside the lock.
+                now = time.monotonic()
+                added: list[str] = []
+                rejected: list[str] = []
+                removed: list[tuple[str, str | None]] = []
 
-                    self._connected_centrals[central_uuid] = time.monotonic()
+                with self._lock:
+                    capacity = self._max_connections
+                    for central_uuid in current - known:
+                        if len(self._connected_centrals) >= capacity:
+                            rejected.append(central_uuid)
+                            continue
+                        self._connected_centrals[central_uuid] = now
+                        added.append(central_uuid)
+
+                    for central_uuid in known - current:
+                        self._connected_centrals.pop(central_uuid, None)
+                        resolved_uid = self._central_to_user_id.pop(
+                            central_uuid, None
+                        )
+                        removed.append((central_uuid, resolved_uid))
+
+                for central_uuid in rejected:
+                    self._emit_diagnostic(
+                        "warning",
+                        f"Max connections ({self._max_connections}) reached, "
+                        f"ignoring {central_uuid}",
+                    )
+
+                for central_uuid in added:
                     try:
                         self._protocol.ble_peer_discovered(
                             peer_id=central_uuid, rssi=-50
@@ -548,13 +585,7 @@ class BlePeripheral(TransportManager):
                         "info", "Central connected", {"central": central_uuid}
                     )
 
-                # Lost centrals
-                for central_uuid in known - current:
-                    self._connected_centrals.pop(central_uuid, None)
-                    # Notify peer lost for both the raw UUID and the
-                    # resolved user_id (if any) so the Rust core removes
-                    # both routing entries.
-                    resolved_uid = self._central_to_user_id.pop(central_uuid, None)
+                for central_uuid, resolved_uid in removed:
                     try:
                         self._protocol.ble_peer_lost(peer_id=central_uuid)
                     except Exception:
@@ -563,7 +594,9 @@ class BlePeripheral(TransportManager):
                         try:
                             self._protocol.ble_peer_lost(peer_id=resolved_uid)
                         except Exception:
-                            logger.debug("ble_peer_lost failed for resolved %s", resolved_uid)
+                            logger.debug(
+                                "ble_peer_lost failed for resolved %s", resolved_uid
+                            )
                     self._emit_diagnostic(
                         "info", "Central disconnected", {"central": central_uuid}
                     )

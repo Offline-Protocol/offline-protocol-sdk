@@ -282,3 +282,124 @@ class TestPeerMonitoring:
             await task
         except asyncio.CancelledError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Thread-safety — #4 in the PR review.
+# `_on_write` / `_resolve_sender` run on bless's delegate thread while the
+# asyncio loop mutates the same state from `_peer_monitor_loop`,
+# `resolve_sender_identity`, and `stop`. Without the lock widening,
+# concurrent iteration could fail mid-loop or return stale reads.
+# ---------------------------------------------------------------------------
+
+class TestConcurrentAccess:
+    def test_resolve_sender_survives_concurrent_monitor_mutation(
+        self, peripheral, mock_protocol
+    ):
+        """Hammering _resolve_sender from a worker thread while the event
+        loop mutates _connected_centrals must not raise or return garbage."""
+        import threading
+
+        errors: list[BaseException] = []
+
+        def reader() -> None:
+            try:
+                for _ in range(500):
+                    peripheral._resolve_sender()
+            except BaseException as exc:
+                errors.append(exc)
+
+        def writer() -> None:
+            try:
+                for i in range(500):
+                    with peripheral._lock:
+                        peripheral._connected_centrals[f"c{i}"] = 0.0
+                    with peripheral._lock:
+                        peripheral._connected_centrals.pop(f"c{i}", None)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reader) for _ in range(3)] + [
+            threading.Thread(target=writer) for _ in range(3)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+
+    def test_resolve_sender_identity_holds_lock_around_mutations(
+        self, peripheral, mock_protocol
+    ):
+        """resolve_sender_identity must not leave _central_to_user_id in
+        an inconsistent state under concurrent callers."""
+        import threading
+
+        peripheral._connected_centrals["only-central"] = 0.0
+        errors: list[BaseException] = []
+
+        def caller(uid: str) -> None:
+            try:
+                for _ in range(200):
+                    peripheral.resolve_sender_identity(uid)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=caller, args=(f"user-{i}",))
+            for i in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        # Exactly one entry for the single central; value is whichever
+        # thread won the last write.
+        assert list(peripheral._central_to_user_id) == ["only-central"]
+
+    def test_stop_clears_maps_under_lock(self, peripheral, mock_protocol):
+        """stop() must snapshot-and-clear atomically: a delegate-thread
+        reader running concurrently must never see a partially-mutated dict."""
+        import threading
+
+        peripheral._connected_centrals.update(
+            {f"c{i}": 0.0 for i in range(50)}
+        )
+        peripheral._central_to_user_id.update(
+            {f"c{i}": f"u{i}" for i in range(50)}
+        )
+
+        # Force stop to take the running-state branch.
+        peripheral._state = TransportState.RUNNING
+        peripheral._server = None  # skip the server.stop path
+
+        errors: list[BaseException] = []
+        stop_raised = threading.Event()
+
+        def reader() -> None:
+            try:
+                while not stop_raised.is_set():
+                    peripheral._resolve_sender()
+            except BaseException as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=reader)
+        t.start()
+
+        # Run stop on a fresh loop — this test is sync so pytest-asyncio
+        # isn't driving an event loop for us.
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(peripheral.stop())
+        finally:
+            loop.close()
+
+        stop_raised.set()
+        t.join()
+
+        assert errors == []
+        assert peripheral._connected_centrals == {}
+        assert peripheral._central_to_user_id == {}
