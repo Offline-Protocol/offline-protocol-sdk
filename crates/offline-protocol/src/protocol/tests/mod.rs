@@ -10507,12 +10507,14 @@ fn test_routing_callback_persists_across_stop_start_cycle() {
 
 #[test]
 fn test_sink_panic_advances_transport_snapshot_for_at_most_once_delivery() {
-    // Regression guard for the post-review ordering fix in
-    // `tick_telemetry_categories`: each per-tick snapshot advances
-    // BEFORE the emit call that observes it. A panicking sink unwinds
-    // the rest of the tick, but the aggregator's cursors are already at
-    // the post-transition state — so the next tick must NOT re-emit
-    // the same transition. At-most-once over at-least-once.
+    // Regression guard for the per-tick snapshot ordering in
+    // `tick_telemetry_categories`: each transport's snapshot entry
+    // advances BEFORE the emit call that observes it. A panicking sink
+    // is now isolated by `dispatch_record` and the tick continues — but
+    // the at-most-once invariant we lock in here is independent of that
+    // isolation: even before the sink-panic isolation, the aggregator's
+    // cursors had to be at the post-transition state when the panic was
+    // observed so the next tick would NOT re-emit the same transition.
     #[derive(Default, Clone)]
     struct PanickingTransportStateSink;
     impl TelemetrySink for PanickingTransportStateSink {
@@ -10556,16 +10558,18 @@ fn test_sink_panic_advances_transport_snapshot_for_at_most_once_delivery() {
         .transport_manager_mut()
         .remove_transport(TransportType::BLE);
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| protocol.process()));
+    // `dispatch_record` isolates the sink panic, so `process()` returns
+    // normally even though the sink raised on the TransportState record.
+    let result = protocol.process();
     assert!(
-        result.is_err(),
-        "sink panic must propagate out of process()",
+        result.is_ok(),
+        "sink panic must be isolated by dispatch_record, got {result:?}",
     );
 
-    // The snapshot must have been advanced BEFORE the panic. If the
-    // ordering regressed (emit-then-assign), the snapshot would still
-    // contain BLE=Available and the next tick would re-emit the same
-    // transition to the next sink.
+    // The snapshot must have been advanced BEFORE the emit so the next
+    // tick does NOT re-emit the same transition to a freshly-installed
+    // sink. If the ordering regressed (emit-then-assign), the snapshot
+    // would still contain BLE=Available here.
     assert!(
         !protocol
             .transport_status_snapshot
@@ -10586,6 +10590,14 @@ fn test_sink_panic_does_not_drop_unemitted_transport_transitions() {
     // un-advanced so the next tick re-diffs and emits it. The old
     // implementation committed the whole snapshot in a single assignment
     // before the emit loop, silently dropping every post-panic transition.
+    //
+    // Sink-panic isolation via `dispatch_record` means a single panicking
+    // record no longer aborts the whole tick — every record after it in
+    // the same `for` loop is still attempted. The post-panic record runs
+    // a second time through the same sink: this test deliberately panics
+    // ONLY on the first call, so the second record reaches the sink
+    // (assertion below: the second transport's snapshot advances to
+    // Disconnected too).
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
 
@@ -10632,10 +10644,12 @@ fn test_sink_panic_does_not_drop_unemitted_transport_transitions() {
     ble_handle.set_status(TransportStatus::Disconnected);
     net_handle.set_status(TransportStatus::Disconnected);
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| protocol.process()));
+    // `dispatch_record` isolates the first-record panic, so the loop
+    // continues into the second record and `process()` returns normally.
+    let result = protocol.process();
     assert!(
-        result.is_err(),
-        "sink panic must propagate out of process()",
+        result.is_ok(),
+        "sink panic must be isolated by dispatch_record, got {result:?}",
     );
 
     let panicked_on = sink
@@ -10661,15 +10675,238 @@ fn test_sink_panic_does_not_drop_unemitted_transport_transitions() {
         protocol.transport_status_snapshot,
     );
 
-    // The OTHER transition never reached the sink; its snapshot entry
-    // must be unchanged so the next tick re-diffs and emits it fresh.
-    // The old per-tick "commit-all-then-iterate" pattern would leave it
-    // at Disconnected here, silently dropping the transition.
+    // With dispatch_record isolating the first panic, the second record
+    // in the same tick still reaches the sink (the count check inside
+    // `PanicOnFirstTransportState` only panics on the first call). Its
+    // snapshot must therefore also advance to Disconnected. The second
+    // record was actually emitted in this same tick — the count went
+    // from 1 to 2 — but it did not panic, so there is no observable side
+    // effect on `seen` to compare against. The snapshot advance is the
+    // load-bearing assertion.
     assert_eq!(
         protocol.transport_status_snapshot.get(&other).copied(),
-        Some(TransportStatus::Available),
-        "snapshot entry for the un-emitted transition must be preserved for redelivery, got {:?}",
+        Some(TransportStatus::Disconnected),
+        "snapshot entry for the post-panic transition must also advance \
+         because dispatch_record isolated the panic and the loop continued, \
+         got {:?}",
         protocol.transport_status_snapshot,
+    );
+    assert_eq!(
+        sink.count.load(Ordering::SeqCst),
+        2,
+        "sink must have been called for both transitions in the same tick \
+         after the first panicked",
+    );
+}
+
+#[test]
+fn test_sink_panic_in_protocol_event_does_not_poison_shared_state() {
+    // Regression guard for the structural panic-poisoning bug:
+    // `SharedState::emit_event` is called by callers that hold a live
+    // `MutexGuard<SharedState>` (e.g. `receive.rs`, `message_dispatch.rs`).
+    // Without `dispatch_record`'s `catch_unwind`, a panicking sink would
+    // unwind through the guard, poison the mutex on drop, and degrade
+    // every subsequent SDK operation that needs the lock. After the fix,
+    // the panic is isolated and a follow-up `emit_event` succeeds — proof
+    // the mutex was not poisoned.
+    #[derive(Default)]
+    struct PanicOnProtocolSink;
+    impl TelemetrySink for PanicOnProtocolSink {
+        fn emit(&self, record: &TelemetryRecord) {
+            if matches!(record, TelemetryRecord::Protocol(_)) {
+                panic!("simulated protocol-event sink panic");
+            }
+        }
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    // Register a legacy `on_event` handler. The legacy contract is that it
+    // sees every event regardless of sink behavior — verifying it after a
+    // sink panic proves the legacy fan-out wasn't damaged either.
+    let legacy: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let legacy_handler = legacy.clone();
+    protocol.on_event(move |event| legacy_handler.lock().unwrap().push(event));
+
+    protocol
+        .install_telemetry_sink(Arc::new(PanicOnProtocolSink), TelemetryConfig::default())
+        .unwrap();
+
+    // First emit: sink panics, must be isolated.
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+
+    // Second emit: lock must not be poisoned. If the panic had unwound
+    // through the live `MutexGuard`, this call would fail to acquire the
+    // lock and the legacy handler below would be missing the second event.
+    protocol.emit_event(crate::events::Event::neighbor_lost("bob".into()));
+
+    let legacy_events = legacy.lock().unwrap().clone();
+    assert_eq!(
+        legacy_events.len(),
+        2,
+        "legacy callback must have observed both events; missing one means \
+         the sink panic poisoned SharedState's mutex. got {legacy_events:?}",
+    );
+
+    // And the protocol's lock is observably healthy: emit a third event
+    // and verify it lands.
+    protocol.emit_event(crate::events::Event::neighbor_lost("carol".into()));
+    let post_count = legacy.lock().unwrap().len();
+    assert_eq!(
+        post_count, 3,
+        "post-panic emit must succeed; mutex must not be poisoned",
+    );
+}
+
+#[test]
+fn test_sink_panic_in_routing_decision_does_not_poison_shared_state() {
+    // The routing-decision callback installed by `install_telemetry_sink`
+    // locks `shared_routing` (a clone of `self.shared_state`) and then
+    // dispatches to the sink. A panic from the sink unwinds through the
+    // live `MutexGuard` from the closure-side `lock()` call. After the
+    // fix, dispatch is panic-isolated and the next `send()`/`emit_event`
+    // continues to acquire the lock cleanly.
+    #[derive(Default)]
+    struct PanicOnRoutingSink;
+    impl TelemetrySink for PanicOnRoutingSink {
+        fn emit(&self, record: &TelemetryRecord) {
+            if matches!(record, TelemetryRecord::Routing(_)) {
+                panic!("simulated routing-decision sink panic");
+            }
+        }
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock));
+    protocol.start().unwrap();
+
+    protocol
+        .install_telemetry_sink(Arc::new(PanicOnRoutingSink), TelemetryConfig::default())
+        .unwrap();
+
+    // Trigger a routing decision via send — the routing-decision callback
+    // fires inside `TransportManager::send`.
+    let msg = Message::new(
+        UserId::new("user123").unwrap(),
+        UserId::new("bob").unwrap(),
+        AppId::new("test-app").unwrap(),
+        "ping",
+    );
+    protocol.transport_manager_mut().send(&msg).unwrap();
+
+    // If the sink panic poisoned `SharedState`, this `emit_event` call
+    // would fail to acquire the lock and the legacy handler would never
+    // record the event. (Lock poisoning surfaces as `Err` from
+    // `lock_shared_state`; the public `emit_event` swallows that error
+    // silently, so we use a legacy handler as the observation point.)
+    let legacy: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let legacy_handler = legacy.clone();
+    protocol.on_event(move |event| legacy_handler.lock().unwrap().push(event));
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+
+    let count = legacy.lock().unwrap().len();
+    assert_eq!(
+        count, 1,
+        "post-routing-panic emit_event must reach the legacy handler; \
+         missing means the routing-callback panic poisoned SharedState",
+    );
+}
+
+#[test]
+fn test_sink_panic_in_mls_lifecycle_does_not_panic_protocol() {
+    // `OfflineProtocol::initialize_mls` calls `emit_mls_initialized`,
+    // which dispatches the lifecycle event through the sink. Before
+    // `dispatch_record`, a panicking sink would unwind through
+    // `initialize_mls` and the call would return via panic instead of
+    // `Result`. After the fix, `initialize_mls` returns `Ok(())` and the
+    // legacy MLS emitter still observes the event.
+    #[derive(Default)]
+    struct PanicOnMlsSink;
+    impl TelemetrySink for PanicOnMlsSink {
+        fn emit(&self, record: &TelemetryRecord) {
+            if matches!(record, TelemetryRecord::Mls(_)) {
+                panic!("simulated MLS-lifecycle sink panic");
+            }
+        }
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let legacy_emitter = RecordingMlsEmitter::default();
+    protocol.set_mls_event_emitter(Arc::new(legacy_emitter.clone()));
+
+    protocol
+        .install_telemetry_sink(Arc::new(PanicOnMlsSink), TelemetryConfig::default())
+        .unwrap();
+
+    // Drives `emit_mls_initialized`. With the fix, this returns Ok even
+    // though the sink raised. Without the fix, the panic would propagate
+    // and this test would fail with the propagated panic message instead
+    // of an assertion failure.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let result = protocol.initialize_mls(storage);
+    assert!(
+        result.is_ok(),
+        "initialize_mls must return Ok even when the sink panics on MLS records, got {result:?}",
+    );
+
+    let legacy_events = legacy_emitter.take();
+    assert!(
+        legacy_events
+            .iter()
+            .any(|e| matches!(e, MlsLifecycleEvent::Initialized { .. })),
+        "legacy MLS emitter must still observe Initialized; sink panic must not \
+         break the legacy fan-out, got {legacy_events:?}",
+    );
+}
+
+#[test]
+fn test_legacy_event_handler_panic_does_not_poison_shared_state() {
+    // Symmetry guard for the legacy `EventCallback` fan-out: handlers
+    // registered via `on_event` are also called from `SharedState::emit_event`
+    // while a `MutexGuard<SharedState>` is held by the caller. A panicking
+    // legacy handler would have the same mutex-poisoning effect as a
+    // panicking sink. The fan-out wraps each handler in `catch_unwind` for
+    // exactly this reason.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let panicked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let panicked_handle = panicked.clone();
+    protocol.on_event(move |_event| {
+        panicked_handle.store(true, std::sync::atomic::Ordering::SeqCst);
+        panic!("simulated legacy handler panic");
+    });
+
+    let surviving: Arc<Mutex<Vec<crate::events::Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let surviving_handle = surviving.clone();
+    protocol.on_event(move |event| surviving_handle.lock().unwrap().push(event));
+
+    // First emit triggers the panic from handler 1.
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".into()));
+
+    assert!(
+        panicked.load(std::sync::atomic::Ordering::SeqCst),
+        "first handler must have been invoked",
+    );
+
+    // Handler 2 must still have observed the same event despite handler 1
+    // panicking — proves the for-loop didn't unwind through the second
+    // handler.
+    let surviving_events = surviving.lock().unwrap().clone();
+    assert_eq!(
+        surviving_events.len(),
+        1,
+        "subsequent handler must run after a previous handler panicked, got {surviving_events:?}",
+    );
+
+    // Second emit proves the lock is not poisoned.
+    protocol.emit_event(crate::events::Event::neighbor_lost("bob".into()));
+    let post_count = surviving.lock().unwrap().len();
+    assert_eq!(
+        post_count, 2,
+        "post-panic emit must reach surviving handler; mutex must not be poisoned",
     );
 }
 

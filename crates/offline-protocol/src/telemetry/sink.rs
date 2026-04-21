@@ -21,15 +21,22 @@ use super::record::TelemetryRecord;
 /// (most notably the shared-state mutex on the `Protocol` fan-out path).
 /// Implementations MUST NOT:
 ///
-/// - block on slow I/O (network, disk, logging sinks that fsync),
-/// - reenter SDK methods on the same `OfflineProtocol` instance, or
-/// - panic.
+/// - block on slow I/O (network, disk, logging sinks that fsync), or
+/// - reenter SDK methods on the same `OfflineProtocol` instance.
 ///
-/// A blocking `emit` stalls every protocol operation that needs the lock;
-/// a panicking `emit` poisons the mutex and degrades the protocol to a
-/// silently-dropping state. Sinks that need to do real work should push
-/// the record onto a bounded channel and return immediately, leaving the
-/// heavy lifting to a background task owned by the implementor.
+/// A blocking `emit` stalls every protocol operation that needs the lock.
+/// Sinks that need to do real work should push the record onto a bounded
+/// channel and return immediately, leaving the heavy lifting to a
+/// background task owned by the implementor.
+///
+/// Implementations *should* also not panic, but the SDK defends against
+/// this: every internal dispatch to `emit` runs under `catch_unwind`, so a
+/// panicking sink is logged at `error!`, the offending record is dropped,
+/// and the protocol continues. A panicking sink therefore loses telemetry
+/// and degrades observability but does not corrupt SDK state. Panic
+/// isolation only applies under `panic = unwind` — release profiles that
+/// set `panic = abort` (including the `minisize` profile used for mobile)
+/// abort the process on any panic, including one from a sink.
 ///
 /// # Record passing
 ///

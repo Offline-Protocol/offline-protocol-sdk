@@ -27,7 +27,7 @@ use crate::telemetry::aggregator::{
     diff_transport_state, DeviceSnap,
 };
 use crate::telemetry::{
-    Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
+    dispatch_record, Scrubber, TelemetryConfig, TelemetryContext, TelemetryRecord, TelemetrySink,
 };
 use crate::{Error, EstablishmentState, Event, ProtocolConfig, Result, TransportManager};
 use chrono::{DateTime, Utc};
@@ -510,7 +510,10 @@ impl OfflineProtocol {
                 if let Ok(s) = shared_routing.lock() {
                     if let Some(ctx) = &s.telemetry {
                         let record = TelemetryRecord::Routing(Box::new(decision));
-                        ctx.sink.emit(&record);
+                        // Dispatch is panic-isolated so a sink that panics
+                        // here cannot unwind through the live `MutexGuard`
+                        // and poison `SharedState`.
+                        dispatch_record(&ctx.sink, &record);
                     }
                 }
             })));
@@ -1402,7 +1405,7 @@ impl OfflineProtocol {
                     self.transport_status_snapshot.remove(&transport);
                 }
             }
-            ctx.sink.emit(&TelemetryRecord::TransportState(event));
+            dispatch_record(&ctx.sink, &TelemetryRecord::TransportState(event));
         }
 
         // Device capability diff. At-most-one emission per tick, so the
@@ -1415,7 +1418,7 @@ impl OfflineProtocol {
             diff_device_capability(now_ms, self.device_capability_snapshot, device_now);
         self.device_capability_snapshot = Some(device_now);
         if let Some(snapshot) = device_change {
-            ctx.sink.emit(&TelemetryRecord::Device(snapshot));
+            dispatch_record(&ctx.sink, &TelemetryRecord::Device(snapshot));
         }
 
         // Periodic metrics snapshot. Rearm cadence before emit so a
@@ -1438,8 +1441,10 @@ impl OfflineProtocol {
                     is_local_relay,
                 );
                 self.last_metrics_emit_at = Some(now);
-                ctx.sink
-                    .emit(&TelemetryRecord::MetricsSnapshot(Box::new(frame)));
+                dispatch_record(
+                    &ctx.sink,
+                    &TelemetryRecord::MetricsSnapshot(Box::new(frame)),
+                );
             }
         }
     }

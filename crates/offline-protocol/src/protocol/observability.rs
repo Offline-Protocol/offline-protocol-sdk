@@ -25,7 +25,7 @@ use crate::mls_observability::{
     timestamp_now_ms, DecryptionFailureKind, MlsErrorCategory, MlsLifecycleEvent,
     MlsOperationContext,
 };
-use crate::telemetry::{MlsVerbosity, TelemetryRecord};
+use crate::telemetry::{dispatch_record, MlsVerbosity, TelemetryRecord};
 
 impl OfflineProtocol {
     /// Returns the current scrubber used by MLS emit sites.
@@ -92,7 +92,7 @@ impl OfflineProtocol {
         // is cheap — `MlsLifecycleEvent` is small and lives on the stack.
         if let Some(ctx) = &self.telemetry {
             self.mls_event_emitter.emit(event.clone());
-            ctx.sink.emit(&TelemetryRecord::Mls(event));
+            dispatch_record(&ctx.sink, &TelemetryRecord::Mls(event));
         } else {
             self.mls_event_emitter.emit(event);
         }
