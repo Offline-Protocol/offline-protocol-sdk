@@ -134,16 +134,29 @@ mkdir -p "$PKG_DIR"
 cp "$CDYLIB" "$PKG_DIR/$LIB_NAME"
 echo "Copied $LIB_NAME -> $PKG_DIR/"
 
-# Create a symlink with the name the generated Python bindings expect.
-# UniFFI's UDL-mode Python codegen loads "libuniffi.{dylib,so,dll}" — create
-# the appropriately named symlink pointing at the real library.
+# Stage a second copy with the name the generated Python bindings expect.
+# UniFFI's UDL-mode Python codegen loads "libuniffi.{dylib,so,dll}". On
+# macOS and Linux we use a symlink (cheap, space-saving). On Windows we
+# copy, because `ln -sf` under Git Bash / MSYS requires the
+# SeCreateSymbolicLink privilege (admin or Developer Mode) — otherwise
+# it either silently produces a broken file or a regular copy depending
+# on the MSYS2 winsymlinks setting, which CI and end users should not
+# have to configure.
 case "$TARGET" in
     *-apple-darwin)  SYMLINK_NAME="libuniffi.dylib" ;;
     *-linux-*)       SYMLINK_NAME="libuniffi.so" ;;
     *-windows-*)     SYMLINK_NAME="uniffi.dll" ;;
 esac
-(cd "$PKG_DIR" && ln -sf "$LIB_NAME" "$SYMLINK_NAME")
-echo "Symlinked $SYMLINK_NAME -> $LIB_NAME"
+case "$TARGET" in
+    *-windows-*)
+        (cd "$PKG_DIR" && cp -f "$LIB_NAME" "$SYMLINK_NAME")
+        echo "Copied $SYMLINK_NAME <- $LIB_NAME"
+        ;;
+    *)
+        (cd "$PKG_DIR" && ln -sf "$LIB_NAME" "$SYMLINK_NAME")
+        echo "Symlinked $SYMLINK_NAME -> $LIB_NAME"
+        ;;
+esac
 
 # Generate Python bindings
 echo ""
