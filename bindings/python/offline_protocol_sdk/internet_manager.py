@@ -683,7 +683,7 @@ class InternetManager(TransportManager):
                 break
 
             message_id = msg.message_id
-            recipient = msg.recipient
+            recipient = msg.recipient_id
             data = bytes(msg.data)
 
             task = asyncio.ensure_future(

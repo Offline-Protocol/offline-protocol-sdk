@@ -455,6 +455,92 @@ class TestInternetManagerLifecycle:
             mgr._reconnect_handle.cancel()
 
 
+class TestInternetManagerPollAndSend:
+    """Covers _poll_and_send_messages — regression guard for the attribute
+    drift that left msg.recipient in place after the UDL renamed the field
+    to recipient_id."""
+
+    def _make_outgoing(
+        self, message_id: str, recipient_id: str, data: bytes
+    ) -> MagicMock:
+        msg = MagicMock()
+        msg.message_id = message_id
+        msg.recipient_id = recipient_id
+        msg.data = list(data)
+        msg.reply_to_msg = None
+        return msg
+
+    @pytest.mark.asyncio
+    async def test_poll_and_send_dispatches(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        msg = self._make_outgoing("msg-1", "peer-1", b"hello")
+        mock_protocol.internet_get_next_message = MagicMock(
+            side_effect=[msg, None]
+        )
+        scheduled: list[tuple[str, str, bytes]] = []
+
+        async def fake_send(mid: str, rcpt: str, data: bytes) -> None:
+            scheduled.append((mid, rcpt, data))
+
+        mgr._send_message = fake_send  # type: ignore[assignment]
+
+        mgr._poll_and_send_messages()
+        pending = list(mgr._send_tasks)
+        assert len(pending) == 1
+        await asyncio.gather(*pending)
+        assert scheduled == [("msg-1", "peer-1", b"hello")]
+
+    @pytest.mark.asyncio
+    async def test_poll_and_send_stops_at_none(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mock_protocol.internet_get_next_message = MagicMock(return_value=None)
+
+        async def fake_send(mid: str, rcpt: str, data: bytes) -> None:
+            pass
+
+        mgr._send_message = fake_send  # type: ignore[assignment]
+        mgr._poll_and_send_messages()
+        assert not mgr._send_tasks
+
+    @pytest.mark.asyncio
+    async def test_poll_and_send_respects_concurrency_cap(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        from offline_protocol_sdk.internet_manager import _MAX_CONCURRENT_SENDS
+
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+
+        # Pre-fill _send_tasks to the cap with a never-completing task.
+        async def _stuck() -> None:
+            await asyncio.Event().wait()
+
+        try:
+            filler = [asyncio.ensure_future(_stuck()) for _ in range(_MAX_CONCURRENT_SENDS)]
+            mgr._send_tasks.update(filler)
+
+            mock_protocol.internet_get_next_message = MagicMock(
+                return_value=self._make_outgoing("msg-x", "peer-x", b"data")
+            )
+
+            async def fake_send(mid: str, rcpt: str, data: bytes) -> None:
+                pass
+
+            mgr._send_message = fake_send  # type: ignore[assignment]
+            mgr._poll_and_send_messages()
+
+            # No new tasks were added — the filler count is still the cap.
+            assert len(mgr._send_tasks) == _MAX_CONCURRENT_SENDS
+            assert mock_protocol.internet_get_next_message.call_count == 0
+        finally:
+            for t in filler:
+                t.cancel()
+            await asyncio.gather(*filler, return_exceptions=True)
+
+
 class TestInternetManagerSendMessageTOCTOU:
     @pytest.mark.asyncio
     async def test_send_fails_gracefully_when_ws_becomes_none(
