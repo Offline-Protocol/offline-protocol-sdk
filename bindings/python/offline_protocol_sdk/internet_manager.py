@@ -11,7 +11,7 @@ import asyncio
 import base64
 import json
 import logging
-from typing import Any
+from typing import Any, Coroutine
 
 import websockets
 from websockets.asyncio.client import ClientConnection
@@ -110,6 +110,14 @@ class InternetManager(TransportManager):
         self._process_tasks: set[asyncio.Task[None]] = set()
         self._send_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SENDS)
         self._reconnect_handle: asyncio.TimerHandle | None = None
+
+        # Re-entrancy guard for `_handle_connection_closed`. Set synchronously
+        # at the top of the coroutine so a second caller reaching it before
+        # the first returns (e.g. AuthError process-task + recv-loop
+        # ConnectionClosed both racing) deduplicates without relying on the
+        # state-machine guard, which does not fire during reconnect
+        # (state == STARTING).
+        self._teardown_in_progress: bool = False
 
     # -- configuration --------------------------------------------------------
 
@@ -313,52 +321,64 @@ class InternetManager(TransportManager):
         })
 
     async def _handle_connection_closed(self, error: Exception | None) -> None:
+        # Re-entrancy guard. On AuthError + WS-close, two paths race here:
+        # the fire-and-forget process-task from `_process_received` and the
+        # recv-loop's `except ConnectionClosed` branch. The state-machine
+        # guard below only fires when STOPPING/STOPPED, not during reconnect
+        # (STARTING). The flag is set synchronously before any await, so
+        # whichever caller gets here second returns immediately.
+        if self._teardown_in_progress:
+            return
         if (
             not self._connected
             and not self._authenticated
             and self._state in (TransportState.STOPPING, TransportState.STOPPED)
         ):
-            return  # already handled — guard against concurrent callers
-        was_connected = self._connected
-        self._connected = False
-        self._authenticated = False
+            return  # already handled post-stop
 
-        # Cancel recv/poll/ping tasks. Skip whichever (if any) is the task
-        # currently running this coroutine — `_handle_connection_closed` is
-        # invoked from inside `_receive_loop` (on ConnectionClosed) and
-        # `_ping_loop` (on repeated ping failure), and self-cancel would
-        # surface CancelledError mid-await. The running task exits naturally
-        # once this coroutine returns.
-        current = asyncio.current_task()
-        for attr in ("_recv_task", "_poll_task", "_ping_task"):
-            task = getattr(self, attr)
-            if task is not None and task is not current and not task.done():
-                task.cancel()
-            setattr(self, attr, None)
+        self._teardown_in_progress = True
+        try:
+            was_connected = self._connected
+            self._connected = False
+            self._authenticated = False
 
-        # Close the WebSocket now that no loop is reading from it. Without
-        # this, the old socket would stay open across a reconnect, and
-        # `_connect` would overwrite `self._recv_task` — leaving a zombie
-        # recv loop draining the previous connection.
-        await self._disconnect()
+            # Cancel recv/poll/ping tasks. Skip whichever (if any) is the
+            # task currently running this coroutine — any task in the cancel
+            # list can itself be the caller (recv-loop on ConnectionClosed,
+            # ping-loop on repeated failure, send task on repeated send
+            # failure). Self-cancel would surface CancelledError mid-await;
+            # the running task exits naturally once this coroutine returns.
+            current = asyncio.current_task()
+            for task in (self._recv_task, self._poll_task, self._ping_task):
+                if task is not None and task is not current and not task.done():
+                    task.cancel()
+            self._recv_task = self._poll_task = self._ping_task = None
 
-        if was_connected:
-            try:
-                self._protocol.internet_status_changed(is_connected=False)
-            except Exception:
-                logger.debug("internet_status_changed(False) failed", exc_info=True)
+            # Close the WebSocket now that no loop is reading from it.
+            # Without this, the old socket would stay open across a
+            # reconnect, and `_connect` would overwrite `self._recv_task` —
+            # leaving a zombie recv loop draining the previous connection.
+            await self._disconnect()
 
-        self._emit_diagnostic("warning", "WebSocket disconnected", {
-            "error": str(error) if error else "none",
-        })
+            if was_connected:
+                try:
+                    self._protocol.internet_status_changed(is_connected=False)
+                except Exception:
+                    logger.debug("internet_status_changed(False) failed", exc_info=True)
 
-        if (
-            self._auto_reconnect
-            and self._state not in (TransportState.STOPPING, TransportState.STOPPED)
-        ):
-            self._schedule_reconnect()
-        else:
-            self._update_state(TransportState.STOPPED)
+            self._emit_diagnostic("warning", "WebSocket disconnected", {
+                "error": str(error) if error else "none",
+            })
+
+            if (
+                self._auto_reconnect
+                and self._state not in (TransportState.STOPPING, TransportState.STOPPED)
+            ):
+                self._schedule_reconnect()
+            else:
+                self._update_state(TransportState.STOPPED)
+        finally:
+            self._teardown_in_progress = False
 
     def _schedule_reconnect(self) -> None:
         if not self._auto_reconnect:
@@ -393,6 +413,11 @@ class InternetManager(TransportManager):
             self._update_state(TransportState.STOPPED)
             return
 
+        # Cancel any prior handle before overwriting so concurrent
+        # `_schedule_reconnect` callers don't orphan a timer that would still
+        # fire and race a second `_connect()` against the first.
+        if self._reconnect_handle is not None:
+            self._reconnect_handle.cancel()
         self._reconnect_handle = loop.call_later(
             delay,
             lambda: asyncio.ensure_future(self._connect()),
@@ -419,7 +444,7 @@ class InternetManager(TransportManager):
         except Exception as exc:
             await self._handle_connection_closed(exc)
 
-    def _spawn_process_task(self, coro: Any) -> None:
+    def _spawn_process_task(self, coro: Coroutine[Any, Any, None]) -> None:
         """Schedule a fire-and-forget coroutine and retain a strong ref.
 
         asyncio only holds weak references to tasks, so an untracked

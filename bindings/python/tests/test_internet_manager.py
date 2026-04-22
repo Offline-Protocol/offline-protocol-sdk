@@ -364,6 +364,96 @@ class TestInternetManagerLifecycle:
         await asyncio.gather(*pending)
         assert len(mgr._process_tasks) == 0
 
+    @pytest.mark.asyncio
+    async def test_concurrent_teardown_callers_schedule_single_reconnect(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """AuthError process-task racing recv-loop ConnectionClosed must
+        produce exactly one reconnect, not two orphan timers.
+
+        Before the re-entrancy guard + stale-handle cancel, both callers
+        passed the state-machine guard (state == STARTING during reconnect)
+        and each called `_schedule_reconnect`, bumping `_reconnect_attempts`
+        twice and overwriting `_reconnect_handle` with the second timer
+        while the first kept firing.
+        """
+        mgr = InternetManager(
+            mock_protocol, "dev-1",
+            server_url="ws://x.com",
+            auto_reconnect=True,
+        )
+        mgr._loop = asyncio.get_running_loop()
+        mgr._state = TransportState.RUNNING
+        mgr._connected = True
+        mgr._authenticated = True
+
+        # `AsyncMock` returns without yielding to the event loop, which would
+        # let Task A run to completion before Task B even starts — masking
+        # the race. Use a real coroutine that awaits sleep(0) so teardown
+        # actually yields during the close, matching the production handshake.
+        close_calls = 0
+
+        async def fake_close() -> None:
+            nonlocal close_calls
+            close_calls += 1
+            await asyncio.sleep(0)
+
+        ws = MagicMock()
+        ws.close = fake_close
+        mgr._ws = ws
+
+        # Fire two teardown callers concurrently — simulates the
+        # AuthError-process-task + recv-loop-ConnectionClosed race.
+        await asyncio.gather(
+            mgr._handle_connection_closed(None),
+            mgr._handle_connection_closed(None),
+        )
+
+        # The second caller must bail on the re-entrancy flag, so close ran
+        # exactly once despite two concurrent callers.
+        assert close_calls == 1
+
+        # Exactly one reconnect scheduled, not two.
+        assert mgr._reconnect_attempts == 1
+        # And the close path ran exactly once — not double-notified.
+        mock_protocol.internet_status_changed.assert_called_once_with(
+            is_connected=False
+        )
+        # Re-entrancy flag clears after teardown finishes.
+        assert mgr._teardown_in_progress is False
+
+        if mgr._reconnect_handle is not None:
+            mgr._reconnect_handle.cancel()
+
+    @pytest.mark.asyncio
+    async def test_schedule_reconnect_cancels_stale_handle(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """Back-to-back `_schedule_reconnect` calls must cancel the prior
+        timer so it doesn't orphan-fire alongside the replacement.
+        """
+        mgr = InternetManager(
+            mock_protocol, "dev-1",
+            server_url="ws://x.com",
+            auto_reconnect=True,
+        )
+        mgr._loop = asyncio.get_running_loop()
+        mgr._state = TransportState.STARTING
+
+        mgr._schedule_reconnect()
+        first = mgr._reconnect_handle
+        assert first is not None
+
+        mgr._schedule_reconnect()
+        second = mgr._reconnect_handle
+        assert second is not None
+        assert second is not first
+        # The first timer must have been cancelled so only `second` will fire.
+        assert first.cancelled()
+
+        if mgr._reconnect_handle is not None:
+            mgr._reconnect_handle.cancel()
+
 
 class TestInternetManagerSendMessageTOCTOU:
     @pytest.mark.asyncio
