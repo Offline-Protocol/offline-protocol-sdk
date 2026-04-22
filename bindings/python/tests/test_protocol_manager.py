@@ -297,24 +297,47 @@ class TestProtocolManagerConvenience:
 
 
 class TestProtocolManagerBroadcast:
-    """Covers `send_message("*")` semantics — #3 in the PR review.
+    """`send_message("*")` is a BLE-only fan-out convenience.
 
-    The previous behaviour silently passed "*" through to the Rust core
-    when no BLE peers were known; the core's BLE transport treats "*" as
-    a literal peer-ID lookup and fails downstream with no surfaced
-    error. We now raise ValueError so callers learn immediately.
+    BLE rejects a literal "*" peer-ID at the transport layer, so the
+    Python wrapper expands "*" into one send per known BLE peer. An
+    empty BLE peer set raises ValueError regardless of whether other
+    transports are enabled — the wrapper does not attempt
+    cross-transport broadcast.
     """
 
     @pytest.mark.asyncio
     async def test_broadcast_with_no_peers_raises(self):
-        config = _make_config(ble_enabled=True)
+        config = _make_config(ble_enabled=True, internet_enabled=False)
         from offline_protocol_sdk.protocol_manager import ProtocolManager
 
         pm = ProtocolManager(config)
         await pm.start()
         try:
             pm._protocol.send_message = MagicMock(return_value="should-not-be-called")
-            with pytest.raises(ValueError, match="no BLE peers"):
+            with pytest.raises(ValueError, match="BLE peers"):
+                pm.send_message("*", "hi")
+            pm._protocol.send_message.assert_not_called()
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_raises_even_when_other_transports_enabled(self):
+        # Pins the BLE-only scope: even with Internet/Nostr enabled, the
+        # wrapper does not route "*" through them. Callers who want
+        # Internet or Nostr broadcast must drive those transports directly.
+        config = _make_config(
+            ble_enabled=True,
+            internet_enabled=True,
+            nostr_enabled=True,
+        )
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            pm._protocol.send_message = MagicMock(return_value="should-not-be-called")
+            with pytest.raises(ValueError, match="BLE peers"):
                 pm.send_message("*", "hi")
             pm._protocol.send_message.assert_not_called()
         finally:
@@ -328,8 +351,6 @@ class TestProtocolManagerBroadcast:
         pm = ProtocolManager(config)
         await pm.start()
         try:
-            # Pre-populate the ble manager's peer map so _get_known_ble_peers
-            # returns deterministic results.
             assert pm.ble is not None
             with pm.ble._lock:
                 pm.ble._peer_device_ids.update({
@@ -349,8 +370,42 @@ class TestProtocolManagerBroadcast:
                 for c in pm._protocol.send_message.call_args_list
             )
             assert recipients == ["peer-a", "peer-b"]
-            # Returns the id from the final call.
             assert last_id == "id-b"
+        finally:
+            await pm.stop()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_deduplicates_peers_across_central_and_peripheral(self):
+        # A peer reachable both as a BLE central (discovered by our
+        # scanner) and as a peripheral (connected to our advertised
+        # GATT) must receive the broadcast exactly once.
+        config = _make_config(ble_enabled=True)
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        await pm.start()
+        try:
+            assert pm.ble is not None
+            assert pm.ble_peripheral is not None
+            with pm.ble._lock:
+                pm.ble._peer_device_ids.update({
+                    "addr-a": "peer-shared",
+                    "addr-b": "peer-b",
+                })
+            with pm.ble_peripheral._lock:
+                pm.ble_peripheral._central_to_user_id.update({
+                    "central-1": "peer-shared",
+                    "central-2": "peer-c",
+                })
+
+            pm._protocol.send_message = MagicMock(return_value="msg")
+            pm.send_message("*", "hi")
+
+            recipients = sorted(
+                c.kwargs["recipient"]
+                for c in pm._protocol.send_message.call_args_list
+            )
+            assert recipients == ["peer-b", "peer-c", "peer-shared"]
         finally:
             await pm.stop()
 

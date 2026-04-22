@@ -332,28 +332,34 @@ class ProtocolManager:
     ) -> str:
         """Send a text message and return its message ID.
 
-        If *recipient* is ``"*"`` (broadcast), the message is fanned out
-        individually to every known BLE peer.  The Rust core's
+        ``recipient == "*"`` is a **BLE-only convenience** in this
+        wrapper: the message is fanned out one-per-peer to every known
+        BLE peer (``get_known_ble_peers``). The Rust core's
         ``BleTransport::send()`` treats ``"*"`` as a literal peer-ID
-        lookup which always fails; expanding here ensures broadcasts
-        reach all connected devices.
+        lookup which always fails, so the fan-out is required for BLE.
+
+        This wrapper does **not** attempt cross-transport broadcast:
+        other transports (Internet, Nostr, Reticulum, Wi-Fi Direct)
+        accept ``"*"`` into their send queue but their broadcast
+        semantics are platform-layer concerns and are not routed
+        automatically by ``send_message``. If you need Nostr or
+        Internet broadcast, drive those transports directly.
 
         Raises
         ------
         ValueError
             If ``recipient == "*"`` and no BLE peers are currently known.
-            The previous behaviour silently handed ``"*"`` to the Rust
-            core, where it was guaranteed to fail downstream with no
-            surfaced error — masking a real bug class. Callers that want
-            to tolerate an empty peer set should check
-            ``_get_known_ble_peers`` or catch this.
+            To tolerate an empty BLE peer set, query
+            ``get_known_ble_peers`` first or catch this exception.
         """
         if recipient == "*":
-            peers = self._get_known_ble_peers()
+            peers = self.get_known_ble_peers()
             if not peers:
                 raise ValueError(
-                    "Broadcast requested but no BLE peers are known; "
-                    "nothing to send."
+                    "ProtocolManager's '*' broadcast fans out over BLE "
+                    "peers only; no BLE peers are currently known. "
+                    "Use get_known_ble_peers() to check before sending, "
+                    "or address a specific peer directly."
                 )
             last_id = ""
             for peer_id in peers:
@@ -372,8 +378,14 @@ class ProtocolManager:
             reply_to_msg=reply_to,
         )
 
-    def _get_known_ble_peers(self) -> list[str]:
-        """Return user_ids of all BLE-discovered peers."""
+    def get_known_ble_peers(self) -> list[str]:
+        """Return user_ids of all BLE-discovered peers (deduplicated).
+
+        Public because ``send_message("*")`` documents it as the
+        escape hatch for callers that want to check before a broadcast.
+        Union of central-mode (``self.ble``) and peripheral-mode
+        (``self.ble_peripheral``) peer maps.
+        """
         peers: list[str] = []
         if self.ble is not None:
             try:
