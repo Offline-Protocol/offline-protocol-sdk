@@ -332,38 +332,24 @@ class ProtocolManager:
     ) -> str:
         """Send a text message and return its message ID.
 
-        If *recipient* is ``"*"`` (broadcast), the message is fanned out
+        If *recipient* is ``"*"`` (broadcast), the message is sent
         individually to every known BLE peer.  The Rust core's
         ``BleTransport::send()`` treats ``"*"`` as a literal peer-ID
         lookup which always fails; expanding here ensures broadcasts
         reach all connected devices.
-
-        Raises
-        ------
-        ValueError
-            If ``recipient == "*"`` and no BLE peers are currently known.
-            The previous behaviour silently handed ``"*"`` to the Rust
-            core, where it was guaranteed to fail downstream with no
-            surfaced error — masking a real bug class. Callers that want
-            to tolerate an empty peer set should check
-            ``_get_known_ble_peers`` or catch this.
         """
         if recipient == "*":
             peers = self._get_known_ble_peers()
-            if not peers:
-                raise ValueError(
-                    "Broadcast requested but no BLE peers are known; "
-                    "nothing to send."
-                )
-            last_id = ""
-            for peer_id in peers:
-                last_id = self._protocol.send_message(
-                    recipient=peer_id,
-                    content=content,
-                    priority=priority,
-                    reply_to_msg=reply_to,
-                )
-            return last_id
+            if peers:
+                last_id = ""
+                for peer_id in peers:
+                    last_id = self._protocol.send_message(
+                        recipient=peer_id,
+                        content=content,
+                        priority=priority,
+                        reply_to_msg=reply_to,
+                    )
+                return last_id
 
         return self._protocol.send_message(
             recipient=recipient,
