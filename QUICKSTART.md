@@ -156,6 +156,6 @@ Link against the Rust static library in Xcode Build Settings.
 - [React Native Example App](examples/react-native-app/README.md) - See complete implementation
 - [React Native Integration Guide](docs/react-native-integration.md) - Full SDK integration walkthrough
 - [Integration Guide](examples/react-native-app/INTEGRATION_GUIDE.md) - Step-by-step project setup
-- [GitHub Issues](https://github.com/offline-protocol/sdk/issues)
+- [GitHub Issues](https://github.com/Offline-Protocol/offline-protocol-sdk/issues)
 - [All Documentation](docs/)
 

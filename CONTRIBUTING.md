@@ -13,7 +13,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 ### Clone and Build
 
 ```bash
-git clone https://github.com/offline-protocol/sdk
+git clone https://github.com/Offline-Protocol/offline-protocol-sdk
 cd offline-protocol-sdk
 cargo build --workspace
 cargo test --workspace
@@ -205,8 +205,8 @@ When making significant changes:
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/offline-protocol/sdk/discussions)
-- Ask in [Issues](https://github.com/offline-protocol/sdk/issues)
+- Open a [Discussion](https://github.com/Offline-Protocol/offline-protocol-sdk/discussions)
+- Ask in [Issues](https://github.com/Offline-Protocol/offline-protocol-sdk/issues)
 
 ## License
 

@@ -130,7 +130,7 @@ Add to `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/offline-protocol/sdk", from: "0.1.0")
+    .package(url: "https://github.com/Offline-Protocol/offline-protocol-sdk", from: "0.1.0")
 ]
 ```
 

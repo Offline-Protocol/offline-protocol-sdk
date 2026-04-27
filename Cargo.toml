@@ -17,7 +17,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Offline Protocol Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/offline-protocol/sdk"
+repository = "https://github.com/Offline-Protocol/offline-protocol-sdk"
 rust-version = "1.70"
 
 [workspace.dependencies]
