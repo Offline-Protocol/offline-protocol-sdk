@@ -6,7 +6,7 @@ All notable changes to the Offline Protocol SDK.\n
 """
 body = """
 {%- macro remote_url() -%}
-  https://github.com/nickthecook/offline-protocol-sdk
+  https://github.com/Offline-Protocol/offline-protocol-sdk
 {%- endmacro -%}
 
 {% if version -%}
@@ -31,7 +31,7 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_preprocessors = [
-    { pattern = '\(#([0-9]+)\)', replace = '([#${1}](https://github.com/nickthecook/offline-protocol-sdk/pull/${1}))' },
+    { pattern = '\(#([0-9]+)\)', replace = '([#${1}](https://github.com/Offline-Protocol/offline-protocol-sdk/pull/${1}))' },
 ]
 commit_parsers = [
     { message = "^feat", group = "<!-- 0 -->Features" },
