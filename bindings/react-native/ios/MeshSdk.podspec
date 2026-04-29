@@ -11,7 +11,7 @@ Pod::Spec.new do |s|
   s.authors      = package["author"]
 
   s.platforms    = { :ios => "13.0" }
-  s.source       = { :git => "https://github.com/offline-protocol/offline-protocol-sdk.git", :tag => "#{s.version}" }
+  s.source       = { :git => "https://github.com/Offline-Protocol/offline-protocol-sdk.git", :tag => "#{s.version}" }
 
   # Source files
   s.source_files = [

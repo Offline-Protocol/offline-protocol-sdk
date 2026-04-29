@@ -50,12 +50,12 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "https://github.com/offline-protocol/offline-protocol-sdk",
+    "url": "https://github.com/Offline-Protocol/offline-protocol-sdk",
     "directory": "bindings/react-native"
   },
-  "homepage": "https://github.com/offline-protocol/offline-protocol-sdk#readme",
+  "homepage": "https://github.com/Offline-Protocol/offline-protocol-sdk#readme",
   "bugs": {
-    "url": "https://github.com/offline-protocol/offline-protocol-sdk/issues"
+    "url": "https://github.com/Offline-Protocol/offline-protocol-sdk/issues"
   },
   "peerDependencies": {
     "react": ">=16.8.0",
