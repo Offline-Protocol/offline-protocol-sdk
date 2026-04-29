@@ -41,9 +41,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/nicholasgasior/offline-protocol-sdk"
-Repository = "https://github.com/nicholasgasior/offline-protocol-sdk"
-Issues = "https://github.com/nicholasgasior/offline-protocol-sdk/issues"
+Homepage = "https://github.com/Offline-Protocol/offline-protocol-sdk"
+Repository = "https://github.com/Offline-Protocol/offline-protocol-sdk"
+Issues = "https://github.com/Offline-Protocol/offline-protocol-sdk/issues"
 
 [tool.setuptools.packages.find]
 include = ["offline_protocol_sdk*"]
