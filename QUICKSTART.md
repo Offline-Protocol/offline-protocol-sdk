@@ -132,6 +132,7 @@ let messageId = try protocol.sendMessage(
 - [API Reference](docs/api-reference.md)
 - [Configuration Guide](docs/configuration.md)
 - [Reticulum Transport](docs/reticulum.md)
+- [Nostr Transport](docs/nostr.md)
 - [Architecture Overview](docs/architecture.md)
 - [All Documentation](docs/)
 

@@ -27,6 +27,7 @@ pub enum TransportType {
     BLE,         // Bluetooth Low Energy mesh (50-100m)
     WiFiDirect,  // Wi-Fi Direct (100-200m, Android only)
     Reticulum,   // Reticulum mesh (LoRa, TCP, UDP, serial, I2P)
+    Nostr,       // Nostr relay (censorship-resistant WebSocket relays)
 }
 ```
 

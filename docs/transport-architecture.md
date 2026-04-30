@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Offline Protocol SDK uses an extensible transport architecture that allows multiple communication channels (BLE, WiFi Direct, Internet, Reticulum) to coexist and be managed independently. This document explains the architecture and how to add new transports.
+The Offline Protocol SDK uses an extensible transport architecture that allows multiple communication channels (BLE, WiFi Direct, Internet, Reticulum, Nostr) to coexist and be managed independently. This document explains the architecture and how to add new transports.
 
 ## Architecture Layers
 
@@ -50,7 +50,7 @@ The Offline Protocol SDK uses an extensible transport architecture that allows m
 │                                                     │
 │  ┌───────────────────────────────────────────────┐│
 │  │         Transport Abstraction Layer           ││
-│  │  (BLE, WiFi, Internet, Reticulum)             ││
+│  │  (BLE, WiFi, Internet, Reticulum, Nostr)      ││
 │  └───────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────┘
 ```
@@ -186,6 +186,31 @@ Device ←→ Platform Bridge ←→ Reticulum Stack ←→ LoRa/TCP/UDP/I2P ←
 - Connection timeout: 60 seconds (vs 30s for Internet)
 
 See the [Reticulum Transport Guide](reticulum.md) for full setup and integration details.
+
+### Nostr Relay
+
+**Status**: Implemented
+
+**Use Case**: Censorship-resistant, decentralized routing over public or private Nostr relays. Useful when local mesh and direct Internet endpoints are unreachable but WebSocket access to a relay is available.
+
+**Architecture**:
+```
+Device A ←→ WebSocket ←→ Nostr Relay(s) ←→ WebSocket ←→ Device B
+```
+
+**Files**:
+- iOS: `bindings/react-native/ios/NostrManager.swift` (URLSessionWebSocketTask)
+- Android: `bindings/react-native/android/.../NostrManager.kt` (OkHttp)
+
+**Send confirmation loop**: The platform drains pre-signed events from the SDK via `nostrGetNextMessage()`, publishes the `["EVENT", {...}]` JSON to N relays simultaneously, and reports the outcome via `nostrConfirmSent(messageId)` or `nostrSendFailed(messageId)` / `nostrSendFailedWithReason(messageId, reason)`. Confirmation is typically deferred to the relay's `["OK", event_id, true, ...]` response. The Rust side handles BIP-340 Schnorr signing (via `k256`) so platform code never touches secret keys.
+
+**Key characteristics**:
+- Disabled by default (`nostrEnabled: false`) — requires at least one relay URL
+- Relay-bandwidth limited (~1 MB/s practical, treated as Internet-class power draw)
+- DORS gives Nostr the lowest tie-break priority (4) — selected only when other transports are unavailable or censored
+- Per-message signing-failure retry capped at 3 attempts
+
+See the [Nostr Transport Guide](nostr.md) for full setup, relay configuration, and platform integration.
 
 ## Adding a New Transport
 
@@ -416,15 +441,17 @@ Update `AndroidManifest.xml` with required permissions.
 1. App calls sendMessage()
 2. DORS selects the best transport (with fallback on failure)
 3. Rust core creates message and stores in transport queue
-4. Native transport managers poll:
+4. Native transport managers drain (event-driven on `on_messages_available`, with optional polling fallback):
    - BLE: bleGetNextFragment()
    - Internet: internetGetNextMessage() → returns messageId + bytes
    - Reticulum: reticulumGetNextMessage() → returns messageId + bytes
+   - Nostr: nostrGetNextMessage() → returns messageId + signed event JSON
 5. Transport sends data over platform-specific channel
 6. Platform reports outcome:
    - BLE: implicit (fragment send is synchronous)
    - Internet: internetConfirmSent(messageId) or internetSendFailed(messageId)
    - Reticulum: reticulumConfirmSent(messageId) or reticulumSendFailed(messageId)
+   - Nostr: nostrConfirmSent(messageId) or nostrSendFailed(messageId) (driven by relay `["OK", ...]` responses)
 7. Remote device receives data and passes to Rust core
 8. Rust core delivers message and sends ACK
 ```
@@ -446,7 +473,7 @@ Update `AndroidManifest.xml` with required permissions.
 The Rust core uses the **Dynamic Opportunistic Routing Selection (DORS)** algorithm to choose the best transport for each message based on:
 
 - **Signal strength** (RSSI for BLE)
-- **Bandwidth** (Reticulum < BLE < WiFi Direct < Internet)
+- **Bandwidth** (Reticulum < BLE < Nostr ≈ WiFi Direct < Internet)
 - **Latency** (BLE ≈ WiFi Direct << Internet)
 - **Reliability** (historical delivery rates)
 - **Congestion** (queue depths)
@@ -526,5 +553,5 @@ The TransportManager pattern provides:
 - ✅ Consistent interface across transports
 - ✅ Independent lifecycle management
 
-This architecture makes it straightforward to add new transports without modifying existing code. Reticulum was added as the fourth transport following this exact pattern.
+This architecture makes it straightforward to add new transports without modifying existing code. Reticulum (4th) and Nostr (5th) were added following this exact pattern.
 

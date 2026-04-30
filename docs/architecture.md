@@ -31,7 +31,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Key Components**:
 - `Transport` trait (send, receive, status, metrics)
-- `TransportType` enum (BLE, WiFi Direct, Internet, Reticulum)
+- `TransportType` enum (BLE, WiFi Direct, Internet, Reticulum, Nostr)
 - `TransportMetrics` for monitoring
 - `MockTransport` for testing
 - Shared `common` module for cross-transport helper functions
@@ -51,7 +51,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Algorithms**:
 - Transport scoring: Signal + Proximity + Bandwidth + Congestion + Energy + Reliability + Load
-- Per-transport scoring profiles (BLE, WiFi Direct, Internet, Reticulum)
+- Per-transport scoring profiles (BLE, WiFi Direct, Internet, Reticulum, Nostr)
 - Hysteresis prevents flapping (15-point threshold)
 - Cooldown timer (20 seconds)
 - Stability window (8 seconds)
@@ -141,7 +141,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 See [DORS Deep Dive](dors.md) for the full scoring system and [DORS Configuration Guide](dors-configuration.md) for tuning parameters.
 
-**Summary**: DORS evaluates each transport (BLE, WiFi Direct, Internet, Reticulum) using seven weighted factors (signal, proximity, bandwidth, congestion, energy, reliability, capacity), applies hysteresis + cooldown + stability checks to prevent flapping, and supports automatic escalation from BLE to WiFi Direct when performance degrades. Reticulum is scored as a resilience fallback with lowest tie-break priority.
+**Summary**: DORS evaluates each transport (BLE, WiFi Direct, Internet, Reticulum, Nostr) using seven weighted factors (signal, proximity, bandwidth, congestion, energy, reliability, capacity), applies hysteresis + cooldown + stability checks to prevent flapping, and supports automatic escalation from BLE to WiFi Direct when performance degrades. Reticulum and Nostr are scored as fallbacks with the lowest tie-break priorities (Reticulum for off-grid resilience, Nostr for censorship-resistant routing).
 
 ## Relay System
 

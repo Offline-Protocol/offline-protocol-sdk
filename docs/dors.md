@@ -2,7 +2,7 @@
 
 ## Overview
 
-DORS is the intelligent transport selection engine at the heart of the Offline Protocol SDK. It automatically evaluates, selects, and switches between available transport layers — Internet, BLE Mesh, Wi-Fi Direct, and Reticulum — based on real-time network conditions. The goal is to ensure optimal message delivery while balancing performance, reliability, and energy consumption.
+DORS is the intelligent transport selection engine at the heart of the Offline Protocol SDK. It automatically evaluates, selects, and switches between available transport layers — Internet, BLE Mesh, Wi-Fi Direct, Reticulum, and Nostr relays — based on real-time network conditions. The goal is to ensure optimal message delivery while balancing performance, reliability, and energy consumption.
 
 ## How DORS Works
 
@@ -43,6 +43,7 @@ Measures the throughput capability of each transport. Higher bandwidth transport
 
 - Reticulum (LoRa): ~0.7 KB/s typical, ~2.7 KB/s peak (20 points default)
 - BLE: ~150 KB/s baseline (40 points default)
+- Nostr (relay-bounded): ~1 MB/s practical (40 points default)
 - Wi-Fi Direct: ~2 MB/s baseline (90 points default)
 - Internet: Assumed high bandwidth (100 points default)
 
@@ -129,7 +130,20 @@ Optimized for resilience and long-range delivery via LoRa and other Reticulum me
 | Signal | 5% |
 | Bandwidth | 5% |
 
-Reticulum has no base score bonus and receives the lowest tie-break priority (Internet > WiFi Direct > BLE > Reticulum). It is selected only when it genuinely outscores other transports or when they are unavailable. The low bandwidth weight reflects that Reticulum's LoRa medium is inherently low-throughput (~0.7 KB/s typical, ~2.7 KB/s peak at SF7/BW500kHz).
+Reticulum has no base score bonus and receives the third-lowest tie-break priority (Internet > WiFi Direct > BLE > Reticulum > Nostr). It is selected only when it genuinely outscores other transports or when they are unavailable. The low bandwidth weight reflects that Reticulum's LoRa medium is inherently low-throughput (~0.7 KB/s typical, ~2.7 KB/s peak at SF7/BW500kHz).
+
+### Nostr Relay Transport
+Optimized for censorship resistance and last-resort routing through public WebSocket relays. Acts as a fallback when other transports are unreachable or actively blocked.
+
+| Factor | Weight |
+|--------|--------|
+| Reliability | 35% |
+| Bandwidth | 20% |
+| Congestion | 20% |
+| Energy | 15% |
+| Load | 10% |
+
+Nostr has a modest base score (5 points, below Internet's preference bonus) and receives the lowest tie-break priority (Internet > WiFi Direct > BLE > Reticulum > Nostr). It is power-equivalent to Internet (uses the device radio), so battery-aware escalation rules apply. Unlike Reticulum, Nostr can carry media transfers (no media penalty); the bandwidth ceiling is treated as ~1 MB/s practical (relay-limited).
 
 ## Switching Safeguards
 

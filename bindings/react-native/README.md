@@ -1,6 +1,6 @@
 # @offline-protocol/mesh-sdk
 
-Offline-first mesh networking SDK for React Native. Enables peer-to-peer messaging over BLE, WiFi Direct, Internet, and Reticulum with intelligent transport switching.
+Offline-first mesh networking SDK for React Native. Enables peer-to-peer messaging over BLE, WiFi Direct, Internet, Reticulum, and Nostr relays with intelligent transport switching.
 
 ## Table of Contents
 
@@ -436,6 +436,14 @@ interface TransportsConfig {
   reticulum?: {
     enabled: boolean;           // default: false (requires external daemon)
   };
+  nostr?: {
+    enabled: boolean;           // default: false
+    relayUrls?: string[];       // wss:// relay URLs
+    connectionTimeout?: number; // seconds, default: 30
+    autoReconnect?: boolean;    // default: true
+    reconnectDelay?: number;    // ms, default: 1000
+    maxReconnectAttempts?: number; // default: 0 (infinite)
+  };
 }
 ```
 
@@ -565,7 +573,7 @@ enum MessagePriority {
 | `getTransportMetrics(type)` | `Promise<TransportMetrics \| null>` | Get transport statistics |
 
 ```typescript
-type TransportType = 'ble' | 'internet' | 'wifiDirect' | 'reticulum';
+type TransportType = 'ble' | 'internet' | 'wifiDirect' | 'reticulum' | 'nostr';
 
 interface TransportMetrics {
   packetsSent: number;
@@ -928,6 +936,9 @@ DORS automatically selects the optimal transport based on real-time conditions.
 
 **Reticulum**: Optimized for resilience and long-range fallback
 - Reliability: 30%, Energy: 25%, Proximity: 20%, Congestion: 15%, Signal: 5%, Bandwidth: 5%
+
+**Nostr**: Optimized for censorship-resistant fallback over WebSocket relays
+- Reliability: 35%, Bandwidth: 20%, Congestion: 20%, Energy: 15%, Load: 10%
 
 ### Switching Safeguards
 

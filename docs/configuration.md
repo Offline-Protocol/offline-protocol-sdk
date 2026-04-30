@@ -261,6 +261,12 @@ Complete guide to configuring the Offline Protocol SDK for different use cases.
 | `transports.wifiDirect.enabled` | boolean | true | Enable Wi-Fi Direct (Android only) |
 | `transports.internet.enabled` | boolean | true | Enable Internet |
 | `transports.reticulum.enabled` | boolean | false | Enable Reticulum mesh (requires external daemon) |
+| `transports.nostr.enabled` | boolean | false | Enable Nostr relay transport (requires `relayUrls`) |
+| `transports.nostr.relayUrls` | string[] | `[]` | Nostr relay WebSocket URLs (e.g. `["wss://relay.damus.io"]`) |
+| `transports.nostr.connectionTimeout` | number | 30 | Connection timeout in seconds |
+| `transports.nostr.autoReconnect` | boolean | true | Auto-reconnect on disconnect |
+| `transports.nostr.reconnectDelay` | number | 1000 | Reconnect delay in ms |
+| `transports.nostr.maxReconnectAttempts` | number | 0 | Max reconnect attempts per relay (0 = infinite) |
 
 ### Encryption Configuration
 
@@ -389,7 +395,7 @@ The SDK validates configuration on creation:
 
 ### Android
 
-**Available Transports**: Internet, BLE, Wi-Fi Direct, Reticulum
+**Available Transports**: Internet, BLE, Wi-Fi Direct, Reticulum, Nostr
 
 **Permissions Required**:
 - `BLUETOOTH`, `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`
@@ -398,7 +404,7 @@ The SDK validates configuration on creation:
 
 ### iOS
 
-**Available Transports**: Internet, BLE, Reticulum (no Wi-Fi Direct)
+**Available Transports**: Internet, BLE, Reticulum, Nostr (no Wi-Fi Direct)
 
 **Permissions Required**:
 - `NSBluetoothAlwaysUsageDescription`

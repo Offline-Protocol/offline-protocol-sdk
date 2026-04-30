@@ -30,6 +30,7 @@
 | [Telemetry](telemetry.md) | Wire up a telemetry sink for metrics, routing decisions, and MLS lifecycle |
 | [Transport Architecture](transport-architecture.md) | Transport abstraction layer and how to add new transports |
 | [Reticulum Transport](reticulum.md) | Reticulum mesh transport setup, architecture, and platform integration |
+| [Nostr Transport](nostr.md) | Nostr relay transport — censorship-resistant routing over WebSockets |
 
 ## Examples
 

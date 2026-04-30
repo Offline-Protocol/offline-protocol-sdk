@@ -4,7 +4,7 @@
 
 ## Features
 
-- **Multi-Transport**: Seamlessly switches between BLE, WiFi Direct, Internet, and Reticulum
+- **Multi-Transport**: Seamlessly switches between BLE, WiFi Direct, Internet, Reticulum, and Nostr relays
 - **Mesh Networking**: Automatic peer discovery and message relay
 - **End-to-End Encryption**: Automatic MLS encryption with forward secrecy (RFC 9420)
 - **Group Roles**: Admin/member role management with last-admin safety invariants
@@ -85,7 +85,7 @@ npm run generate:bindings
 The SDK consists of modular Rust crates:
 
 - **offline-protocol-core** - Core types and data structures
-- **offline-protocol-transport** - Multi-transport abstraction (BLE, WiFi, Internet, Reticulum)
+- **offline-protocol-transport** - Multi-transport abstraction (BLE, WiFi, Internet, Reticulum, Nostr)
 - **offline-protocol-router** - DORS routing and relay management
 - **offline-protocol-reliability** - ACKs, retries, deduplication
 - **offline-protocol-mls** - End-to-end encryption using MLS (RFC 9420)
@@ -95,7 +95,7 @@ The SDK consists of modular Rust crates:
 
 ## DORS: Dynamic Offline Relay Switch
 
-DORS automatically selects and switches between Internet, BLE Mesh, Wi-Fi Direct, and Reticulum based on real-time network conditions. It scores each transport on signal strength, proximity, bandwidth, congestion, energy efficiency, reliability, and available capacity, then applies hysteresis, cooldown, and stability checks to prevent flapping.
+DORS automatically selects and switches between Internet, BLE Mesh, Wi-Fi Direct, Reticulum, and Nostr based on real-time network conditions. It scores each transport on signal strength, proximity, bandwidth, congestion, energy efficiency, reliability, and available capacity, then applies hysteresis, cooldown, and stability checks to prevent flapping.
 
 For details, see the [DORS Deep Dive](docs/dors.md) and [DORS Configuration Guide](docs/dors-configuration.md).
 
@@ -118,7 +118,8 @@ See the [docs/](docs/) directory for detailed guides:
 - [Transport Architecture](docs/transport-architecture.md)
 - [Service Discovery](docs/service-discovery.md)
 - [React Native Integration](docs/react-native-integration.md)
-- [Reticulum Transport](docs/reticulum.md)
+- [Reticulum Transport](docs/reticulum.md) / [Nostr Transport](docs/nostr.md)
+- [Telemetry](docs/telemetry.md)
 - [iOS Integration](docs/ios-integration.md) / [Android Integration](docs/android-integration.md)
 
 ## Development
