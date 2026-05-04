@@ -7,8 +7,13 @@ on:
     types: [opened, closed, synchronize]
 
 # CLA Assistant Lite needs to comment on PRs and write to the
-# `cla-signatures` branch where signatures are recorded.
+# `cla-signatures` branch where signatures are recorded. `actions: write`
+# is required by contributor-assistant/github-action v2.x — without it the
+# job hits "Resource not accessible by integration" after recognising
+# signatures, leaving the PR check stuck on failure even though the CLA is
+# satisfied.
 permissions:
+  actions: write
   contents: write
   pull-requests: write
   statuses: write
