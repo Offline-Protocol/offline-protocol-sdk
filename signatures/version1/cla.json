@@ -1,3 +1,28 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "bahdotsh",
+      "id": 26796930,
+      "comment_id": 4372469929,
+      "created_at": "2026-05-04T15:51:49Z",
+      "repoId": 1086402187,
+      "pullRequestNo": 108
+    },
+    {
+      "name": "bahdotsh",
+      "id": 26796930,
+      "comment_id": 4372630855,
+      "created_at": "2026-05-04T16:19:06Z",
+      "repoId": 1086402187,
+      "pullRequestNo": 108
+    },
+    {
+      "name": "bahdotsh",
+      "id": 26796930,
+      "comment_id": 4372647882,
+      "created_at": "2026-05-04T16:22:05Z",
+      "repoId": 1086402187,
+      "pullRequestNo": 108
+    }
+  ]
 }
