@@ -210,5 +210,22 @@ When making significant changes:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under MIT OR Apache-2.0.
+This project is **dual-licensed** under the GNU Affero General Public License
+v3.0 (see [LICENSE](LICENSE)) **or** a separate Commercial License (see
+[LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)).
+
+By submitting a contribution (pull request, patch, or otherwise), you agree that:
+
+1. Your contribution is licensed to the project and its users under the
+   **AGPL-3.0-only**, the same terms as the rest of the codebase; **and**
+2. You grant the project maintainers a **perpetual, irrevocable, worldwide,
+   royalty-free license** to also distribute your contribution under the
+   Commercial License offered alongside the AGPL-3.0.
+
+This dual grant is what makes the dual-licensing model legally sound: without it,
+contributed code could not be included in commercially licensed distributions.
+
+If you are contributing on behalf of an employer, you confirm that you are
+authorized to grant these licenses on their behalf. If you cannot agree to these
+terms, please do not submit contributions.
 
