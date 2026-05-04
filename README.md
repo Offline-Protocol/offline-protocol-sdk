@@ -2,6 +2,8 @@
 
 > Offline-first messaging protocol with intelligent multi-transport switching, mesh networking, and automatic end-to-end encryption
 
+**License:** AGPL-3.0-only **or** [Commercial](LICENSE-COMMERCIAL.md) — pick one. AGPL-3.0 carries a network-use source-disclosure obligation (section 13); the commercial option exists for closed-source mobile apps, embedded firmware, and SaaS deployments. Full details in the [License](#license) section below.
+
 ## Features
 
 - **Multi-Transport**: Seamlessly switches between BLE, WiFi Direct, Internet, Reticulum, and Nostr relays

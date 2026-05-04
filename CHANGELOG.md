@@ -4,6 +4,10 @@ All notable changes to the Offline Protocol SDK are documented in this file. Thi
 
 ## [Unreleased]
 
+### Licensing
+
+- **Relicensed from `MIT OR Apache-2.0` to `AGPL-3.0-only` with a parallel commercial license.** All workspace crates, the React Native binding (`bindings/react-native/package.json`), and the Python binding (`bindings/python/pyproject.toml`) now ship under AGPL-3.0-only. The repo root gains a full `LICENSE` (the GNU AGPL-3.0 text) and a `LICENSE-COMMERCIAL.md` describing the alternative paid license for organizations that cannot comply with AGPL-3.0 section 13 (network-use source disclosure) — for example, closed-source mobile apps, embedded firmware, or SaaS deployments. Consumers may use the SDK under **either** license, not both. Contributions are accepted under AGPL-3.0-only **and** are dual-granted to the maintainers for inclusion in commercially licensed distributions; see `CONTRIBUTING.md` for the contributor terms and the required `Signed-off-by` (DCO) on every commit. Versions of the SDK published before this change remain available under their original `MIT OR Apache-2.0` terms.
+
 ### Breaking Changes
 
 - **`getTransportMetrics` returns real data (or `null`) instead of a zeroed mock** — The UniFFI method `get_transport_metrics(transportType)` (exposed as `getTransportMetrics` in Swift/Kotlin/TypeScript) previously always returned a `TransportMetrics` populated with zeros. It now pulls directly from `Transport::metrics()` and returns `null` when the requested transport is not registered with the `TransportManager`. Callers that relied on the non-null guarantee or zero-valued fields must add a null-check and treat absent transports as "metrics unavailable" rather than "all counters zero".

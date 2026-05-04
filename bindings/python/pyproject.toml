@@ -7,7 +7,7 @@ name = "offline-protocol-sdk"
 version = "0.1.0"
 description = "Python bindings for the Offline Protocol SDK — offline-first mesh networking with MLS encryption"
 readme = "README.md"
-license = { text = "MIT OR Apache-2.0" }
+license = { text = "AGPL-3.0-only" }
 requires-python = ">=3.10"
 authors = [{ name = "Offline Protocol Contributors" }]
 keywords = ["offline", "messaging", "p2p", "mesh", "ble", "mls", "encryption"]

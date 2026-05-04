@@ -229,3 +229,26 @@ If you are contributing on behalf of an employer, you confirm that you are
 authorized to grant these licenses on their behalf. If you cannot agree to these
 terms, please do not submit contributions.
 
+### Sign-off (DCO)
+
+Every commit must carry a `Signed-off-by` trailer. Adding the trailer asserts
+that you accept the [Developer Certificate of Origin](https://developercertificate.org)
+(version 1.1) for the contribution and the dual-license grant described above:
+you are the author of the contribution (or have permission to contribute it),
+and you license it under the terms of this project.
+
+Add the trailer automatically with `-s`:
+
+```bash
+git commit -s -m "feat(scope): your subject"
+```
+
+The trailer looks like:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+PRs without a sign-off on every commit will be asked to amend before merge.
+You can fix an existing branch with `git rebase --signoff main`.
+
