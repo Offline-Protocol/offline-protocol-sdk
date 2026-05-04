@@ -22,8 +22,7 @@ You only need **one** of the two licenses, not both.
 
 To request a quote or discuss commercial terms, contact:
 
-- **Email:** `<TODO: commercial license contact email>`
-- **Web:** `<TODO: commercial license contact URL>`
+- **Email:** legal@offlineprotocol.com
 
 Please include a brief description of your intended use (product, distribution
 model, expected scale) so we can scope the license appropriately.
