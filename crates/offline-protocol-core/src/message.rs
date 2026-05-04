@@ -168,7 +168,7 @@ impl ForwardInfo {
                 original_sender: existing.original_sender.clone(),
                 original_message_id: existing.original_message_id.clone(),
                 original_timestamp: existing.original_timestamp,
-                forward_count: existing.forward_count + 1,
+                forward_count: existing.forward_count.saturating_add(1),
             },
             None => ForwardInfo {
                 original_sender: message.sender.clone(),
@@ -719,5 +719,29 @@ mod tests {
         assert_eq!(second_forward.original_sender.as_str(), "alice");
         assert_eq!(second_forward.forward_count, 2);
         assert_eq!(second_forward.original_message_id, original_msg.id);
+    }
+
+    #[test]
+    fn test_forward_count_saturates_at_max() {
+        use crate::types::Timestamp;
+
+        let saturated = ForwardInfo {
+            original_sender: UserId::new("alice").unwrap(),
+            original_message_id: MessageId::new(),
+            original_timestamp: Timestamp::now(),
+            forward_count: u32::MAX,
+        };
+
+        let msg = Message::builder(
+            UserId::new("bob").unwrap(),
+            UserId::new("charlie").unwrap(),
+            AppId::new("test-app").unwrap(),
+        )
+        .content("Hello")
+        .forwarded_from(saturated)
+        .build();
+
+        let next = ForwardInfo::from_message(&msg);
+        assert_eq!(next.forward_count, u32::MAX);
     }
 }

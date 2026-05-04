@@ -9317,6 +9317,87 @@ fn test_forward_message_rejects_excessive_forward_count() {
 }
 
 #[test]
+fn test_forward_message_rejects_overflow_forward_count() {
+    use offline_protocol_core::ForwardInfo;
+
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let mut transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    // A peer-supplied forward_count of u32::MAX must not wrap past the cap.
+    // Pre-fix: `+ 1` wrapped to 0, slipping past `forward_count > MAX_FORWARD_COUNT`.
+    // Post-fix: `saturating_add(1)` clamps to u32::MAX, which the cap then rejects.
+    let forward_info = ForwardInfo {
+        original_sender: UserId::new("alice").unwrap(),
+        original_message_id: MessageId::new(),
+        original_timestamp: offline_protocol_core::Timestamp::now(),
+        forward_count: u32::MAX,
+    };
+    let original = offline_protocol_core::Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content("Hello")
+    .forwarded_from(forward_info)
+    .build();
+
+    let result = protocol.forward_message(&original, "charlie", None);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("exceeds maximum"),
+        "Expected forward count cap error, got: {}",
+        err_msg
+    );
+}
+
+#[test]
+fn test_forward_message_to_group_rejects_overflow_forward_count() {
+    use offline_protocol_core::ForwardInfo;
+
+    let config = create_test_config();
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let mut transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    // The group-forward path has its own cap check (group_mesh.rs:1620) that runs
+    // before any MLS work; an overflow seed must trip it before group_id is used.
+    let forward_info = ForwardInfo {
+        original_sender: UserId::new("alice").unwrap(),
+        original_message_id: MessageId::new(),
+        original_timestamp: offline_protocol_core::Timestamp::now(),
+        forward_count: u32::MAX,
+    };
+    let original = offline_protocol_core::Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content("Hello")
+    .forwarded_from(forward_info)
+    .build();
+
+    let result = protocol.forward_message_to_group(&original, "any-group", None);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("exceeds maximum"),
+        "Expected forward count cap error, got: {}",
+        err_msg
+    );
+}
+
+#[test]
 fn test_send_message_returns_ok_and_emits_deferred_when_transport_fails() {
     let mut config = create_test_config();
     config.reliability.retry.initial_delay_ms = 60_000; // long delay so nothing retries during test
