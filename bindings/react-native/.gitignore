@@ -26,6 +26,11 @@ Thumbs.db
 # Build artifacts
 *.tgz
 
+# License files staged at publish time by scripts/prepare-npm.sh — the
+# canonical copies live at the repo root.
+LICENSE
+LICENSE-COMMERCIAL.md
+
 # Android
 android/.gradle/
 android/build/

@@ -7,6 +7,18 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RN_DIR="$SCRIPT_DIR/.."
+REPO_ROOT="$(cd "$RN_DIR/../.." && pwd)"
+
+# Stage license texts inside the package so npm pack picks them up. The repo's
+# canonical copies live at the workspace root; the binding directory holds
+# build-time copies (gitignored). Without this, the published tarball would
+# declare AGPL-3.0-only but ship no license text — out of compliance with
+# AGPL §4 and confusing for downstream consumers.
+echo "Staging LICENSE files for npm package..."
+cp "$REPO_ROOT/LICENSE" "$RN_DIR/LICENSE"
+cp "$REPO_ROOT/LICENSE-COMMERCIAL.md" "$RN_DIR/LICENSE-COMMERCIAL.md"
+echo "✅ LICENSE files staged"
+echo ""
 
 echo "Validating pre-built binaries for npm package..."
 echo ""

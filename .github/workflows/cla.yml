@@ -9,7 +9,6 @@ on:
 # CLA Assistant Lite needs to comment on PRs and write to the
 # `cla-signatures` branch where signatures are recorded.
 permissions:
-  actions: write
   contents: write
   pull-requests: write
   statuses: write
@@ -20,7 +19,10 @@ jobs:
     steps:
       - name: "CLA Assistant"
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
-        uses: contributor-assistant/github-action@v2.6.1
+        # Pinned to the immutable SHA of v2.6.1. `pull_request_target` runs with
+        # the base repo's GITHUB_TOKEN, so a moved tag would be a repo-takeover
+        # vector. Bump by replacing the SHA and updating the trailing comment.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -28,5 +30,7 @@ jobs:
           path-to-document: "https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/CLA.md"
           # Signatures are committed to this branch — leave it unprotected.
           branch: "cla-signatures"
-          # Bot accounts that don't need to sign. Add new bots here as needed.
-          allowlist: dependabot[bot],renovate[bot],bot*
+          # Allowlist GitHub App bot accounts (they have a "[bot]" suffix on the
+          # login). Do NOT use a bare "bot*" glob — it matches any human user
+          # whose login starts with "bot" and would let them skip the CLA.
+          allowlist: dependabot[bot],renovate[bot]

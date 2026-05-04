@@ -8,6 +8,13 @@ version = "0.1.0"
 description = "Python bindings for the Offline Protocol SDK — offline-first mesh networking with MLS encryption"
 readme = "README.md"
 license = { text = "AGPL-3.0-only" }
+# LICENSE files are staged into bindings/python/ by scripts/build-desktop.sh
+# (they're gitignored copies of the workspace-root files). This ensures the
+# AGPL text and commercial-license offer ship inside every wheel — required
+# by AGPL §4 and necessary for downstream consumers to see the dual-license
+# offer. If `python -m build` errors on a missing LICENSE here, run
+# scripts/build-desktop.sh first to stage them.
+license-files = ["LICENSE", "LICENSE-COMMERCIAL.md"]
 requires-python = ">=3.10"
 authors = [{ name = "Offline Protocol Contributors" }]
 keywords = ["offline", "messaging", "p2p", "mesh", "ble", "mls", "encryption"]
