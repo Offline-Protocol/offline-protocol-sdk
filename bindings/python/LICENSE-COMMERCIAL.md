@@ -29,6 +29,10 @@ model, expected scale) so we can scope the license appropriately.
 
 ## Contributions
 
-Contributors grant the project the right to sublicense their contributions under
-this Commercial License alongside the AGPL-3.0. The full terms are in
-[`CLA.md`](CLA.md); see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the signing flow.
+By submitting a contribution to this repository (pull request, patch, or otherwise),
+you agree that your contribution is licensed under the AGPL-3.0 **and** you grant
+the project maintainers a perpetual, irrevocable, worldwide, royalty-free license
+to relicense your contribution under the commercial license offered alongside the
+AGPL-3.0. This dual grant is what makes the dual-licensing model legally sound;
+without it, contributed code could not be included in commercially licensed
+distributions. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for details.

@@ -16,14 +16,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 UNIFFI_DIR="$PROJECT_ROOT/crates/offline-protocol-uniffi"
 PKG_DIR="$SCRIPT_DIR/../offline_protocol_sdk"
-PY_DIR="$SCRIPT_DIR/.."
-
-# Stage LICENSE files into bindings/python/ so `python -m build` picks them up
-# via the `license-files` directive in pyproject.toml. Without this the wheel
-# would declare AGPL-3.0-only but ship no license text — out of compliance
-# with AGPL §4. The staged copies are gitignored.
-cp "$PROJECT_ROOT/LICENSE" "$PY_DIR/LICENSE"
-cp "$PROJECT_ROOT/LICENSE-COMMERCIAL.md" "$PY_DIR/LICENSE-COMMERCIAL.md"
 
 # Defaults
 TARGET=""

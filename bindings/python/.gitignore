@@ -31,8 +31,3 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
-
-# License files staged at build time by scripts/build-desktop.sh — the
-# canonical copies live at the repo root.
-LICENSE
-LICENSE-COMMERCIAL.md

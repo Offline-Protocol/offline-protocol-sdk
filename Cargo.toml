@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Offline Protocol Contributors"]
 # Dual-licensed: AGPL-3.0-only for open-source use, with a separate commercial

@@ -1,19 +1,14 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+# setuptools >=77 supports PEP 639 (SPDX `license` string + `license-files`).
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "offline-protocol-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python bindings for the Offline Protocol SDK — offline-first mesh networking with MLS encryption"
 readme = "README.md"
-license = { text = "AGPL-3.0-only" }
-# LICENSE files are staged into bindings/python/ by scripts/build-desktop.sh
-# (they're gitignored copies of the workspace-root files). This ensures the
-# AGPL text and commercial-license offer ship inside every wheel — required
-# by AGPL §4 and necessary for downstream consumers to see the dual-license
-# offer. If `python -m build` errors on a missing LICENSE here, run
-# scripts/build-desktop.sh first to stage them.
+license = "AGPL-3.0-only"
 license-files = ["LICENSE", "LICENSE-COMMERCIAL.md"]
 requires-python = ">=3.10"
 authors = [{ name = "Offline Protocol Contributors" }]

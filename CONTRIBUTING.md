@@ -208,47 +208,25 @@ When making significant changes:
 - Open a [Discussion](https://github.com/Offline-Protocol/offline-protocol-sdk/discussions)
 - Ask in [Issues](https://github.com/Offline-Protocol/offline-protocol-sdk/issues)
 
-## License
+## License & Contributor Agreement
 
 This project is **dual-licensed** under the GNU Affero General Public License
 v3.0 (see [LICENSE](LICENSE)) **or** a separate Commercial License (see
 [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)).
 
-By submitting a contribution (pull request, patch, or otherwise), you agree that:
+For the dual-licensing model to work, we need each contributor to grant the
+maintainers the right to sublicense contributed code under the Commercial
+License alongside the AGPL. That grant is collected via a Contributor License
+Agreement — see [CLA.md](CLA.md) for the full terms and the rationale.
 
-1. Your contribution is licensed to the project and its users under the
-   **AGPL-3.0-only**, the same terms as the rest of the codebase; **and**
-2. You grant the project maintainers a **perpetual, irrevocable, worldwide,
-   royalty-free license** to also distribute your contribution under the
-   Commercial License offered alongside the AGPL-3.0.
+**On your first PR**, our CLA bot will post a link back to `CLA.md` and ask you
+to comment, exactly:
 
-This dual grant is what makes the dual-licensing model legally sound: without it,
-contributed code could not be included in commercially licensed distributions.
+> I have read the CLA Document and I hereby sign the CLA
 
-If you are contributing on behalf of an employer, you confirm that you are
-authorized to grant these licenses on their behalf. If you cannot agree to these
-terms, please do not submit contributions.
+You only sign once; subsequent contributions are auto-recognized. PRs cannot be
+merged until the CLA check is green.
 
-### Sign-off (DCO)
-
-Every commit must carry a `Signed-off-by` trailer. Adding the trailer asserts
-that you accept the [Developer Certificate of Origin](https://developercertificate.org)
-(version 1.1) for the contribution and the dual-license grant described above:
-you are the author of the contribution (or have permission to contribute it),
-and you license it under the terms of this project.
-
-Add the trailer automatically with `-s`:
-
-```bash
-git commit -s -m "feat(scope): your subject"
-```
-
-The trailer looks like:
-
-```
-Signed-off-by: Your Name <your.email@example.com>
-```
-
-PRs without a sign-off on every commit will be asked to amend before merge.
-You can fix an existing branch with `git rebase --signoff main`.
+If you are contributing on behalf of an employer, confirm with them that you
+are authorized to grant these rights before signing.
 

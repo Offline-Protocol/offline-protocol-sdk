@@ -15,10 +15,15 @@ permissions:
 
 jobs:
   CLAAssistant:
+    # Job-level guard so `issue_comment` events that aren't the magic strings
+    # don't spin up a runner just to skip the only step.
+    if: |
+      github.event_name == 'pull_request_target' ||
+      github.event.comment.body == 'recheck' ||
+      github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
     runs-on: ubuntu-latest
     steps:
       - name: "CLA Assistant"
-        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
         # Pinned to the immutable SHA of v2.6.1. `pull_request_target` runs with
         # the base repo's GITHUB_TOKEN, so a moved tag would be a repo-takeover
         # vector. Bump by replacing the SHA and updating the trailing comment.
