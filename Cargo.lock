@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "offline-protocol",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1272,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-mls"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "bs58",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-reliability"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-router"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "offline-protocol-core",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-services"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "offline-protocol-core",
  "serde",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "hex",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "offline-protocol-uniffi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "offline-protocol",
  "offline-protocol-core",

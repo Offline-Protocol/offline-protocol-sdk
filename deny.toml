@@ -4,7 +4,12 @@ ignore = []
 
 [licenses]
 version = 2
+# AGPL-3.0-only is allowed because the workspace crates themselves are AGPL.
+# An AGPL *dependency* would force downstream consumers into AGPL even if they
+# took our commercial license, defeating the dual-license model — review any
+# new AGPL-licensed dependency carefully before adding it.
 allow = [
+    "AGPL-3.0-only",
     "MIT",
     "Apache-2.0",
     "BSD-2-Clause",

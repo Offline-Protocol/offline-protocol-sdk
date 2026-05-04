@@ -208,7 +208,25 @@ When making significant changes:
 - Open a [Discussion](https://github.com/Offline-Protocol/offline-protocol-sdk/discussions)
 - Ask in [Issues](https://github.com/Offline-Protocol/offline-protocol-sdk/issues)
 
-## License
+## License & Contributor Agreement
 
-By contributing, you agree that your contributions will be licensed under MIT OR Apache-2.0.
+This project is **dual-licensed** under the GNU Affero General Public License
+v3.0 (see [LICENSE](LICENSE)) **or** a separate Commercial License (see
+[LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)).
+
+For the dual-licensing model to work, we need each contributor to grant the
+maintainers the right to sublicense contributed code under the Commercial
+License alongside the AGPL. That grant is collected via a Contributor License
+Agreement — see [CLA.md](CLA.md) for the full terms and the rationale.
+
+**On your first PR**, our CLA bot will post a link back to `CLA.md` and ask you
+to comment, exactly:
+
+> I have read the CLA Document and I hereby sign the CLA
+
+You only sign once; subsequent contributions are auto-recognized. PRs cannot be
+merged until the CLA check is green.
+
+If you are contributing on behalf of an employer, confirm with them that you
+are authorized to grant these rights before signing.
 

@@ -1,0 +1,46 @@
+name: CLA Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+# CLA Assistant Lite needs to comment on PRs and write to the
+# `cla-signatures` branch where signatures are recorded.
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  CLAAssistant:
+    # Job-level guard so `issue_comment` events that aren't the magic strings
+    # don't spin up a runner just to skip the only step.
+    if: |
+      github.event_name == 'pull_request_target' ||
+      github.event.comment.body == 'recheck' ||
+      github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant"
+        # Pinned to the immutable SHA of v2.6.1. `pull_request_target` runs with
+        # the base repo's GITHUB_TOKEN, so a moved tag would be a repo-takeover
+        # vector. Bump by replacing the SHA and updating the trailing comment.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: "signatures/version1/cla.json"
+          # Pinned to the SHA of the commit that introduced CLA.md so signatures
+          # always reference an immutable copy of the agreed text. If you
+          # intentionally amend CLA.md, update this SHA in the same commit so
+          # new signatures sign against the new revision; existing signatures
+          # remain tied to whatever URL the bot showed them at signing time.
+          path-to-document: "https://github.com/Offline-Protocol/offline-protocol-sdk/blob/c11938638e3a505e13cde810355d06ac15eeb02e/CLA.md"
+          # Signatures are committed to this branch — leave it unprotected.
+          branch: "cla-signatures"
+          # Allowlist GitHub App bot accounts (they have a "[bot]" suffix on the
+          # login). Do NOT use a bare "bot*" glob — it matches any human user
+          # whose login starts with "bot" and would let them skip the CLA.
+          allowlist: dependabot[bot],renovate[bot]

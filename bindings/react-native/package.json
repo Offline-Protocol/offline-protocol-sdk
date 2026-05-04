@@ -1,6 +1,6 @@
 {
   "name": "@offline-protocol/mesh-sdk",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Offline-first mesh networking SDK with intelligent transport switching for React Native",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -19,7 +19,8 @@
     "scripts/",
     "react-native.config.js",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "LICENSE-COMMERCIAL.md"
   ],
   "scripts": {
     "prepare": "tsc",
@@ -47,7 +48,7 @@
     "offline-first"
   ],
   "author": "Offline Protocol Team",
-  "license": "ISC",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/Offline-Protocol/offline-protocol-sdk",

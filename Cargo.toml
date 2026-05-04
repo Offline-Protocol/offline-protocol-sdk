@@ -13,10 +13,15 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Offline Protocol Contributors"]
-license = "MIT OR Apache-2.0"
+# Dual-licensed: AGPL-3.0-only for open-source use, with a separate commercial
+# license offered out-of-band (see LICENSE-COMMERCIAL.md). The SPDX field carries
+# only the open-source identifier because the commercial offer is not an
+# SPDX-recognized license — do not change to "AGPL-3.0-only OR LicenseRef-..."
+# without confirming downstream cargo-deny configurations expect that form.
+license = "AGPL-3.0-only"
 repository = "https://github.com/Offline-Protocol/offline-protocol-sdk"
 rust-version = "1.70"
 

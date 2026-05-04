@@ -1,13 +1,15 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+# setuptools >=77 supports PEP 639 (SPDX `license` string + `license-files`).
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "offline-protocol-sdk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python bindings for the Offline Protocol SDK — offline-first mesh networking with MLS encryption"
 readme = "README.md"
-license = { text = "MIT OR Apache-2.0" }
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "LICENSE-COMMERCIAL.md"]
 requires-python = ">=3.10"
 authors = [{ name = "Offline Protocol Contributors" }]
 keywords = ["offline", "messaging", "p2p", "mesh", "ble", "mls", "encryption"]

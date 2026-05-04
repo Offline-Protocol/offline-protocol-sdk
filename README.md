@@ -2,6 +2,8 @@
 
 > Offline-first messaging protocol with intelligent multi-transport switching, mesh networking, and automatic end-to-end encryption
 
+**License:** AGPL-3.0-only **or** [Commercial](LICENSE-COMMERCIAL.md) — pick one. AGPL-3.0 carries a network-use source-disclosure obligation (section 13); the commercial option exists for closed-source mobile apps, embedded firmware, and SaaS deployments. Full details in the [License](#license) section below.
+
 ## Features
 
 - **Multi-Transport**: Seamlessly switches between BLE, WiFi Direct, Internet, Reticulum, and Nostr relays
@@ -132,3 +134,18 @@ cargo fmt --workspace              # Format
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines and [QUICKSTART.md](QUICKSTART.md) for platform-specific setup.
+
+## License
+
+The Offline Protocol SDK is **dual-licensed**:
+
+- **GNU Affero General Public License v3.0** (AGPL-3.0-only) — see [LICENSE](LICENSE).
+  Free for use in projects that comply with AGPL-3.0, including its network-use
+  source-disclosure requirement (section 13).
+- **Commercial License** — for organizations that cannot or do not wish to comply
+  with the AGPL (e.g., shipping the SDK inside a proprietary mobile app or SaaS
+  without releasing source). See [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md)
+  for terms and contact details.
+
+You may use the SDK under **either** license; you do not need both. Contributions
+are accepted under the terms described in [CONTRIBUTING.md](CONTRIBUTING.md).
