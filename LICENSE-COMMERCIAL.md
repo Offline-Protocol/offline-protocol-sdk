@@ -5,10 +5,12 @@ following licenses, at your option:
 
 1. **GNU Affero General Public License v3.0 (AGPL-3.0-only)** — the full text is in
    [`LICENSE`](LICENSE). This option is free of charge but carries strong copyleft
-   obligations, including the network-use source-disclosure requirement of section
-   13. Any derivative work, including software that links against this SDK or
-   communicates with users over a network using a modified version, must itself be
-   distributed under the AGPL-3.0 with corresponding source available to all users.
+   obligations: software that incorporates this SDK is generally a covered work
+   under the AGPL-3.0 (per section 5) and must be distributed under the same
+   license with corresponding source made available to recipients (per section 6).
+   If you operate a modified version that interacts with users over a network, you
+   must additionally offer those users the corresponding source — this is the
+   network-use clause specific to AGPL (section 13).
 
 2. **Commercial License** — for organizations that cannot or do not wish to comply
    with the AGPL-3.0 (for example, shipping the SDK inside a proprietary mobile
@@ -31,4 +33,6 @@ model, expected scale) so we can scope the license appropriately.
 
 Contributors grant the project the right to sublicense their contributions under
 this Commercial License alongside the AGPL-3.0. The full terms are in
-[`CLA.md`](CLA.md); see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the signing flow.
+[`CLA.md`](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/CLA.md);
+see [`CONTRIBUTING.md`](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/CONTRIBUTING.md)
+for the signing flow.

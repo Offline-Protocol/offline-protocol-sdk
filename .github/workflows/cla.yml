@@ -32,7 +32,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: "signatures/version1/cla.json"
-          path-to-document: "https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/CLA.md"
+          # Pinned to the SHA of the commit that introduced CLA.md so signatures
+          # always reference an immutable copy of the agreed text. If you
+          # intentionally amend CLA.md, update this SHA in the same commit so
+          # new signatures sign against the new revision; existing signatures
+          # remain tied to whatever URL the bot showed them at signing time.
+          path-to-document: "https://github.com/Offline-Protocol/offline-protocol-sdk/blob/c11938638e3a505e13cde810355d06ac15eeb02e/CLA.md"
           # Signatures are committed to this branch — leave it unprotected.
           branch: "cla-signatures"
           # Allowlist GitHub App bot accounts (they have a "[bot]" suffix on the
