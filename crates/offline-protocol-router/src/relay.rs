@@ -51,6 +51,35 @@ pub enum RelayRole {
     Relay,
 }
 
+/// Reason a device was demoted from relay role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayDemotionReason {
+    /// Active connection count fell below the relay threshold.
+    LowConnections,
+    /// Battery dropped below the level required to keep relaying.
+    LowBattery {
+        /// Minimum battery level required to remain a relay.
+        min_required: u8,
+    },
+}
+
+/// A relay-role transition produced by [`RelayManager::evaluate_transition`].
+///
+/// `None` from `evaluate_transition` means the role did not change; a `Some`
+/// value is emitted exactly once, at the tick the transition happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayTransition {
+    /// The device became a relay.
+    Promoted {
+        /// Active connection count at the time of promotion.
+        connection_count: usize,
+        /// Battery level at the time of promotion.
+        battery_level: u8,
+    },
+    /// The device stopped being a relay.
+    Demoted(RelayDemotionReason),
+}
+
 /// Information about a potential relay.
 #[derive(Debug, Clone)]
 pub struct RelayInfo {
@@ -154,11 +183,17 @@ impl RelayManager {
     ///
     /// * `connection_count` - Number of active connections
     /// * `battery_level` - Current battery level (0-100)
+    /// * `is_charging` - Whether the device is charging
     ///
     /// # Returns
     ///
     /// Returns `true` if the device should stop being a relay.
-    pub fn should_demote_from_relay(&self, connection_count: usize, battery_level: u8) -> bool {
+    pub fn should_demote_from_relay(
+        &self,
+        connection_count: usize,
+        battery_level: u8,
+        is_charging: bool,
+    ) -> bool {
         // If priority is Always, stay as relay unless critical battery
         if matches!(self.config.relay_priority, RelayPriority::Always) {
             return battery_level < 15;
@@ -169,12 +204,76 @@ impl RelayManager {
             return true;
         }
 
-        // Demote if battery is too low
-        if battery_level < self.config.min_battery_for_relay {
+        // Demote if battery is too low. A charging device is held to the same
+        // relaxed floor as `should_promote_to_relay` (which favors a charging
+        // device even below `min_battery_for_relay`): only a *critical* level
+        // forces demotion. Without this symmetry a charging device sitting just
+        // below the soft minimum would oscillate promote → demote every tick.
+        if battery_level < self.demotion_battery_floor(is_charging) {
             return true;
         }
 
         false
+    }
+
+    /// Battery level below which a relay must demote, given charging state.
+    ///
+    /// Mirrors the battery branches of [`should_demote_from_relay`] so the
+    /// transition classifier and the demotion decision never disagree.
+    fn demotion_battery_floor(&self, is_charging: bool) -> u8 {
+        if matches!(self.config.relay_priority, RelayPriority::Always) || is_charging {
+            15
+        } else {
+            self.config.min_battery_for_relay
+        }
+    }
+
+    /// Evaluates whether the relay role should change and, if so, applies the
+    /// change and returns the transition that occurred.
+    ///
+    /// This is the single entry point that mutates [`RelayRole`]: it compares
+    /// the promote/demote decision against the current role and only returns
+    /// `Some` when the role actually flips, so callers can emit a role-change
+    /// event exactly once per transition. A stable role returns `None`.
+    pub fn evaluate_transition(
+        &mut self,
+        connection_count: usize,
+        battery_level: u8,
+        is_charging: bool,
+    ) -> Option<RelayTransition> {
+        match self.current_role {
+            RelayRole::Regular => {
+                if self.should_promote_to_relay(connection_count, battery_level, is_charging) {
+                    self.set_role(RelayRole::Relay);
+                    Some(RelayTransition::Promoted {
+                        connection_count,
+                        battery_level,
+                    })
+                } else {
+                    None
+                }
+            }
+            RelayRole::Relay => {
+                if self.should_demote_from_relay(connection_count, battery_level, is_charging) {
+                    self.set_role(RelayRole::Regular);
+                    // Battery takes precedence: a relay that is both
+                    // connection-starved and battery-starved is reported as a
+                    // battery demotion, which is the signal the analytics
+                    // panel tracks distinctly.
+                    let floor = self.demotion_battery_floor(is_charging);
+                    let reason = if battery_level < floor {
+                        RelayDemotionReason::LowBattery {
+                            min_required: floor,
+                        }
+                    } else {
+                        RelayDemotionReason::LowConnections
+                    };
+                    Some(RelayTransition::Demoted(reason))
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Calculates a score for a potential relay.
@@ -295,13 +394,131 @@ mod tests {
         let manager = RelayManager::new();
 
         // Should demote if connections drop
-        assert!(manager.should_demote_from_relay(2, 80));
+        assert!(manager.should_demote_from_relay(2, 80, false));
 
         // Should demote if battery too low
-        assert!(manager.should_demote_from_relay(5, 25));
+        assert!(manager.should_demote_from_relay(5, 25, false));
 
         // Should stay as relay with good conditions
-        assert!(!manager.should_demote_from_relay(5, 80));
+        assert!(!manager.should_demote_from_relay(5, 80, false));
+    }
+
+    #[test]
+    fn test_should_demote_charging_exempt_from_soft_floor() {
+        let manager = RelayManager::new(); // min_battery_for_relay = 30
+
+        // Not charging, battery below the soft minimum -> demote.
+        assert!(manager.should_demote_from_relay(5, 25, false));
+
+        // Charging at the same level -> stay (mirrors promotion); only a
+        // critical battery level forces demotion while charging.
+        assert!(!manager.should_demote_from_relay(5, 25, true));
+        assert!(manager.should_demote_from_relay(5, 10, true));
+    }
+
+    #[test]
+    fn test_evaluate_transition_promote_then_idempotent() {
+        let mut manager = RelayManager::new();
+        assert_eq!(manager.current_role(), RelayRole::Regular);
+
+        // Good conditions promote, returning the transition exactly once.
+        assert_eq!(
+            manager.evaluate_transition(5, 80, false),
+            Some(RelayTransition::Promoted {
+                connection_count: 5,
+                battery_level: 80,
+            })
+        );
+        assert_eq!(manager.current_role(), RelayRole::Relay);
+
+        // Stable conditions on the next tick produce no transition.
+        assert_eq!(manager.evaluate_transition(5, 80, false), None);
+        assert_eq!(manager.current_role(), RelayRole::Relay);
+    }
+
+    #[test]
+    fn test_evaluate_transition_no_promote_stays_regular() {
+        let mut manager = RelayManager::new();
+        // Too few connections: no promotion, role unchanged.
+        assert_eq!(manager.evaluate_transition(1, 80, false), None);
+        assert_eq!(manager.current_role(), RelayRole::Regular);
+    }
+
+    #[test]
+    fn test_evaluate_transition_demote_low_connections() {
+        let mut manager = RelayManager::new();
+        manager.set_role(RelayRole::Relay);
+
+        // Battery healthy, connections collapsed -> connection demotion.
+        assert_eq!(
+            manager.evaluate_transition(1, 80, false),
+            Some(RelayTransition::Demoted(
+                RelayDemotionReason::LowConnections
+            ))
+        );
+        assert_eq!(manager.current_role(), RelayRole::Regular);
+    }
+
+    #[test]
+    fn test_evaluate_transition_demote_low_battery() {
+        let mut manager = RelayManager::new(); // min_battery_for_relay = 30
+        manager.set_role(RelayRole::Relay);
+
+        // Enough connections, battery below minimum -> battery demotion,
+        // reporting the soft floor as the required level.
+        assert_eq!(
+            manager.evaluate_transition(5, 25, false),
+            Some(RelayTransition::Demoted(RelayDemotionReason::LowBattery {
+                min_required: 30,
+            }))
+        );
+        assert_eq!(manager.current_role(), RelayRole::Regular);
+    }
+
+    #[test]
+    fn test_evaluate_transition_battery_precedence_over_connections() {
+        let mut manager = RelayManager::new();
+        manager.set_role(RelayRole::Relay);
+
+        // Both connection-starved and battery-starved: classified as battery.
+        assert_eq!(
+            manager.evaluate_transition(1, 10, false),
+            Some(RelayTransition::Demoted(RelayDemotionReason::LowBattery {
+                min_required: 30,
+            }))
+        );
+    }
+
+    #[test]
+    fn test_evaluate_transition_always_critical_battery_floor() {
+        let config = RelayConfig {
+            relay_priority: RelayPriority::Always,
+            ..Default::default()
+        };
+        let mut manager = RelayManager::with_config(config);
+        manager.set_role(RelayRole::Relay);
+
+        // Always priority demotes only at critical battery, reporting 15.
+        assert_eq!(
+            manager.evaluate_transition(1, 10, false),
+            Some(RelayTransition::Demoted(RelayDemotionReason::LowBattery {
+                min_required: 15,
+            }))
+        );
+    }
+
+    #[test]
+    fn test_evaluate_transition_no_flap_while_charging() {
+        let mut manager = RelayManager::new(); // min_battery_for_relay = 30
+
+        // Charging device just below the soft minimum: promotes, then holds
+        // (no promote → demote oscillation that would emit fake churn).
+        assert!(matches!(
+            manager.evaluate_transition(5, 25, true),
+            Some(RelayTransition::Promoted { .. })
+        ));
+        assert_eq!(manager.evaluate_transition(5, 25, true), None);
+        assert_eq!(manager.current_role(), RelayRole::Relay);
     }
 
     #[test]

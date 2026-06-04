@@ -34,7 +34,9 @@ use chrono::{DateTime, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
-use offline_protocol_router::{PathSelector, RelayManager, RelayRole, TransportSelector};
+use offline_protocol_router::{
+    PathSelector, RelayDemotionReason, RelayManager, RelayRole, RelayTransition, TransportSelector,
+};
 use offline_protocol_services::MeshServices;
 use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
 use std::collections::HashMap;
@@ -1342,9 +1344,54 @@ impl OfflineProtocol {
         let _ = self.prune_expired_pending_global_front(Instant::now(), 256);
         self.pump_media_transfers();
         self.cleanup_expired_entries();
+        self.evaluate_relay_role();
         self.tick_telemetry_categories();
 
         Ok(())
+    }
+
+    /// Re-evaluates the local relay role against current connectivity and
+    /// battery and emits the corresponding transition event when the role
+    /// actually changes (`RelayPromoted`, `RelayDemoted`, or
+    /// `RelayDemotedBattery`).
+    ///
+    /// Runs every tick independently of telemetry: these are app-facing
+    /// events delivered through the `EventCallback` channel, which is live
+    /// whether or not a telemetry sink is installed. Mutating the role here
+    /// also keeps the `DeviceCapabilitySnapshot.relay_role` signal honest,
+    /// since `tick_telemetry_categories` reads the role immediately after.
+    ///
+    /// Skipped when the battery level is unknown: the promote/demote policy
+    /// is battery-dependent, and transitioning on a phantom level would emit
+    /// dishonest churn.
+    fn evaluate_relay_role(&mut self) {
+        let (_statuses, available) = self.transport_manager.snapshot_status_and_available();
+        let (battery_level, is_charging) =
+            device_battery_from_available(self.transport_manager.current_transport(), &available);
+        let Some(battery_level) = battery_level else {
+            return;
+        };
+        let connection_count = self.known_peers.len();
+        let Some(transition) = self.path_selector.evaluate_relay_transition(
+            connection_count,
+            battery_level,
+            is_charging,
+        ) else {
+            return;
+        };
+        let event = match transition {
+            RelayTransition::Promoted {
+                connection_count,
+                battery_level,
+            } => Event::relay_promoted(connection_count, battery_level),
+            RelayTransition::Demoted(RelayDemotionReason::LowConnections) => {
+                Event::relay_demoted("connections below relay threshold".to_string())
+            }
+            RelayTransition::Demoted(RelayDemotionReason::LowBattery { min_required }) => {
+                Event::relay_demoted_battery(battery_level, min_required)
+            }
+        };
+        self.emit_event(event);
     }
 
     /// Per-tick telemetry work: diff transport statuses, diff device

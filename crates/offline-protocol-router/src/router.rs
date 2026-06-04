@@ -5,7 +5,7 @@
 //! based on the number of visible peers to maintain constant message overhead.
 
 use crate::constants::*;
-use crate::relay::{RelayInfo, RelayManager, RelayRole};
+use crate::relay::{RelayInfo, RelayManager, RelayRole, RelayTransition};
 use offline_protocol_core::Message;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -490,6 +490,21 @@ impl PathSelector {
     /// to the full [`RelayManager`] API).
     pub fn current_relay_role(&self) -> RelayRole {
         self.relay_manager.current_role()
+    }
+
+    /// Re-evaluates the local relay role against current connectivity and
+    /// battery, applying any change to the internal [`RelayManager`].
+    ///
+    /// Returns `Some(transition)` only when the role actually changes, so the
+    /// caller can emit a role-transition event exactly once per transition.
+    pub fn evaluate_relay_transition(
+        &mut self,
+        connection_count: usize,
+        battery_level: u8,
+        is_charging: bool,
+    ) -> Option<RelayTransition> {
+        self.relay_manager
+            .evaluate_transition(connection_count, battery_level, is_charging)
     }
 
     /// Computes the forwarding probability based on visible peer count.

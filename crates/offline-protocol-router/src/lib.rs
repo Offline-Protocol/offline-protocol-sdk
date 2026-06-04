@@ -21,7 +21,7 @@ pub use dors::{
     DorsConfig, EscalationTriggerReason, TransportScore, TransportScoreFactors, TransportSelector,
 };
 pub use error::{Error, Result};
-pub use relay::{RelayConfig, RelayManager, RelayRole};
+pub use relay::{RelayConfig, RelayDemotionReason, RelayManager, RelayRole, RelayTransition};
 pub use router::{
     ForwardingDecision, GossipConfig, GradientRoutingConfig, GradientRoutingTable, PathConfig,
     PathSelector, RouteEntry,
