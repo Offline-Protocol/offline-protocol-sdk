@@ -551,12 +551,18 @@ dictionary DeviceCapabilitySnapshot {
 // typed push callbacks still fire, but `poll_telemetry_frame` will always
 // return null for records emitted under that config. Flip back to true
 // (re-install the sink) to resume polling.
+//
+// `mls_sampling_bypass` (default false) opts a telemetry-grade sink out of the
+// fixed-window limiter on high-volume MLS lifecycle events (mls.decryption_failed,
+// mls.session_missing) so aggregate counts are not clipped to the per-window
+// ceiling. Only enable it for sinks that apply their own backpressure.
 dictionary TelemetryConfig {
     boolean? scrub_ids;
     MlsVerbosity? mls_verbosity;
     u64? metrics_cadence_ms;
     boolean? routing_diagnostic;
     boolean? enable_poll_queue;
+    boolean? mls_sampling_bypass;
 };
 
 // Unified telemetry sink. Apps implement this to receive every typed

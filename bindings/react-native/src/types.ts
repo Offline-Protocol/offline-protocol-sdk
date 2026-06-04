@@ -1548,6 +1548,12 @@ export type RoutingReasonCode =
  * routing hot path. With `false`, `pollTelemetry()` returns `null` for
  * records emitted under that config (previously enqueued records remain
  * readable until drained).
+ *
+ * `mlsSamplingBypass` (default false) opts a telemetry-grade sink out of the
+ * fixed-window rate limiter on high-volume MLS lifecycle events
+ * (`mls.decryption_failed`, `mls.session_missing`) so aggregate counts are not
+ * clipped to the per-window ceiling. Only enable it for sinks that apply their
+ * own backpressure (e.g. enqueue-and-drain on a background task).
  */
 export interface TelemetryConfig {
   scrubIds?: boolean;
@@ -1555,6 +1561,7 @@ export interface TelemetryConfig {
   metricsCadenceMs?: number;
   routingDiagnostic?: boolean;
   enablePollQueue?: boolean;
+  mlsSamplingBypass?: boolean;
 }
 
 /**

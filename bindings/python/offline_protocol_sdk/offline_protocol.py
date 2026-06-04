@@ -5943,18 +5943,19 @@ class _UniffiFfiConverterOptionalTypeMlsVerbosity(_UniffiConverterRustBuffer):
 
 @dataclass
 class TelemetryConfig:
-    def __init__(self, *, scrub_ids:typing.Optional[bool], mls_verbosity:typing.Optional[MlsVerbosity], metrics_cadence_ms:typing.Optional[int], routing_diagnostic:typing.Optional[bool], enable_poll_queue:typing.Optional[bool]):
+    def __init__(self, *, scrub_ids:typing.Optional[bool], mls_verbosity:typing.Optional[MlsVerbosity], metrics_cadence_ms:typing.Optional[int], routing_diagnostic:typing.Optional[bool], enable_poll_queue:typing.Optional[bool], mls_sampling_bypass:typing.Optional[bool]):
         self.scrub_ids = scrub_ids
         self.mls_verbosity = mls_verbosity
         self.metrics_cadence_ms = metrics_cadence_ms
         self.routing_diagnostic = routing_diagnostic
         self.enable_poll_queue = enable_poll_queue
+        self.mls_sampling_bypass = mls_sampling_bypass
         
         
 
     
     def __str__(self):
-        return "TelemetryConfig(scrub_ids={}, mls_verbosity={}, metrics_cadence_ms={}, routing_diagnostic={}, enable_poll_queue={})".format(self.scrub_ids, self.mls_verbosity, self.metrics_cadence_ms, self.routing_diagnostic, self.enable_poll_queue)
+        return "TelemetryConfig(scrub_ids={}, mls_verbosity={}, metrics_cadence_ms={}, routing_diagnostic={}, enable_poll_queue={}, mls_sampling_bypass={})".format(self.scrub_ids, self.mls_verbosity, self.metrics_cadence_ms, self.routing_diagnostic, self.enable_poll_queue, self.mls_sampling_bypass)
     def __eq__(self, other):
         if self.scrub_ids != other.scrub_ids:
             return False
@@ -5965,6 +5966,8 @@ class TelemetryConfig:
         if self.routing_diagnostic != other.routing_diagnostic:
             return False
         if self.enable_poll_queue != other.enable_poll_queue:
+            return False
+        if self.mls_sampling_bypass != other.mls_sampling_bypass:
             return False
         return True
 
@@ -5977,6 +5980,7 @@ class _UniffiFfiConverterTypeTelemetryConfig(_UniffiConverterRustBuffer):
             metrics_cadence_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
             routing_diagnostic=_UniffiFfiConverterOptionalBoolean.read(buf),
             enable_poll_queue=_UniffiFfiConverterOptionalBoolean.read(buf),
+            mls_sampling_bypass=_UniffiFfiConverterOptionalBoolean.read(buf),
         )
 
     @staticmethod
@@ -5986,6 +5990,7 @@ class _UniffiFfiConverterTypeTelemetryConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalUInt64.check_lower(value.metrics_cadence_ms)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.routing_diagnostic)
         _UniffiFfiConverterOptionalBoolean.check_lower(value.enable_poll_queue)
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.mls_sampling_bypass)
 
     @staticmethod
     def write(value, buf):
@@ -5994,6 +5999,7 @@ class _UniffiFfiConverterTypeTelemetryConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalUInt64.write(value.metrics_cadence_ms, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.routing_diagnostic, buf)
         _UniffiFfiConverterOptionalBoolean.write(value.enable_poll_queue, buf)
+        _UniffiFfiConverterOptionalBoolean.write(value.mls_sampling_bypass, buf)
 
 
 

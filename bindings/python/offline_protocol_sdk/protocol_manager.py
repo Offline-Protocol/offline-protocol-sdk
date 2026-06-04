@@ -424,7 +424,7 @@ class ProtocolManager:
         a field left as ``None``) uses the Rust-side defaults:
         ``scrub_ids=True``, ``mls_verbosity=Lifecycle``,
         ``metrics_cadence_ms=5000``, ``routing_diagnostic=False``,
-        ``enable_poll_queue=True``.
+        ``enable_poll_queue=True``, ``mls_sampling_bypass=False``.
         """
         effective = config if config is not None else TelemetryConfig(
             scrub_ids=None,
@@ -432,6 +432,7 @@ class ProtocolManager:
             metrics_cadence_ms=None,
             routing_diagnostic=None,
             enable_poll_queue=None,
+            mls_sampling_bypass=None,
         )
         # Pin the new sink BEFORE the FFI call so a successful Rust-side
         # swap never observes an unpinned new sink. If the FFI call raises

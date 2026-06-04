@@ -3834,7 +3834,7 @@ extension OfflineProtocolModule {
             return TelemetryConfig(
                 scrubIds: nil, mlsVerbosity: nil,
                 metricsCadenceMs: nil, routingDiagnostic: nil,
-                enablePollQueue: nil
+                enablePollQueue: nil, mlsSamplingBypass: nil
             )
         }
         let verbosity: MlsVerbosity?
@@ -3857,12 +3857,14 @@ extension OfflineProtocolModule {
         let cadence = (dict["metricsCadenceMs"] as? NSNumber)?.uint64Value
         let routingDiag = dict["routingDiagnostic"] as? Bool
         let enablePollQueue = dict["enablePollQueue"] as? Bool
+        let mlsSamplingBypass = dict["mlsSamplingBypass"] as? Bool
         return TelemetryConfig(
             scrubIds: scrubIds,
             mlsVerbosity: verbosity,
             metricsCadenceMs: cadence,
             routingDiagnostic: routingDiag,
-            enablePollQueue: enablePollQueue
+            enablePollQueue: enablePollQueue,
+            mlsSamplingBypass: mlsSamplingBypass
         )
     }
 }
