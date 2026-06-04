@@ -55,6 +55,19 @@ impl OfflineProtocol {
             .unwrap_or(MlsVerbosity::Lifecycle)
     }
 
+    /// Returns whether the installed sink opted out of MLS event rate
+    /// limiting.
+    ///
+    /// Defaults to `false` (rate limiting active) when no telemetry sink has
+    /// been installed, preserving the always-limited behavior the legacy
+    /// emitter path has always had.
+    fn mls_sampling_bypass(&self) -> bool {
+        self.telemetry
+            .as_ref()
+            .map(|ctx| ctx.config.mls_sampling_bypass())
+            .unwrap_or(false)
+    }
+
     /// Derives the opaque session identifier used to correlate MLS lifecycle
     /// events. The raw seed (`peer=<peer_id>|group=<group_id>`) couples two
     /// identifiers, so it is hashed unconditionally via
@@ -84,7 +97,11 @@ impl OfflineProtocol {
         if matches!(self.mls_verbosity(), MlsVerbosity::Off) {
             return;
         }
-        if !self.mls_event_rate_limiter.should_emit(&event) {
+        // Telemetry-grade sinks can opt out of the fixed-window limiter so
+        // aggregate counts are not clipped to the per-window ceiling. When
+        // bypass is on we skip `should_emit` entirely — its window counter is
+        // left untouched, so toggling bypass off later resumes clean limiting.
+        if !self.mls_sampling_bypass() && !self.mls_event_rate_limiter.should_emit(&event) {
             return;
         }
         // Legacy emitter consumes a value-typed event (its existing

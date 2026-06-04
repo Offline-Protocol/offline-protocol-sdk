@@ -59,6 +59,7 @@ pub struct TelemetryConfig {
     pub(crate) metrics_cadence: Option<Duration>,
     pub(crate) scrub_secret: Option<[u8; 16]>,
     pub(crate) routing_diagnostic: bool,
+    pub(crate) mls_sampling_bypass: bool,
 }
 
 impl fmt::Debug for TelemetryConfig {
@@ -72,6 +73,7 @@ impl fmt::Debug for TelemetryConfig {
                 &self.scrub_secret.as_ref().map(|_| "<redacted>"),
             )
             .field("routing_diagnostic", &self.routing_diagnostic)
+            .field("mls_sampling_bypass", &self.mls_sampling_bypass)
             .finish()
     }
 }
@@ -84,6 +86,7 @@ impl Default for TelemetryConfig {
             metrics_cadence: Some(Duration::from_secs(5)),
             scrub_secret: None,
             routing_diagnostic: false,
+            mls_sampling_bypass: false,
         }
     }
 }
@@ -180,6 +183,37 @@ impl TelemetryConfig {
         self.routing_diagnostic
     }
 
+    /// Opts the installed sink out of MLS lifecycle event rate limiting.
+    ///
+    /// By default (`false`), high-volume MLS lifecycle events
+    /// (`mls.decryption_failed`, `mls.session_missing`) pass through a
+    /// best-effort fixed-window limiter that caps emission per peer+kind. The
+    /// cap protects naïve sinks from event floods, but it also clips genuine
+    /// failure spikes to the per-window ceiling — an aggregating backend
+    /// cannot tell a real burst of N failures apart from the cap.
+    ///
+    /// Setting this to `true` disables that limiter so a **telemetry-grade**
+    /// sink receives every MLS lifecycle event un-sampled, and aggregate
+    /// counts reflect reality. Only enable it for sinks that apply their own
+    /// backpressure (for example, pushing onto a bounded channel and draining
+    /// on a background task per the [`TelemetrySink`] contract) — an
+    /// unbuffered sink that does real work inline can be overwhelmed by an
+    /// un-capped failure spike.
+    ///
+    /// This knob only affects MLS-event rate limiting; it does not change
+    /// identifier scrubbing, verbosity, or any other field.
+    ///
+    /// [`TelemetrySink`]: crate::telemetry::TelemetrySink
+    pub fn with_mls_sampling_bypass(mut self, mls_sampling_bypass: bool) -> Self {
+        self.mls_sampling_bypass = mls_sampling_bypass;
+        self
+    }
+
+    /// Returns whether MLS lifecycle event rate limiting is bypassed.
+    pub fn mls_sampling_bypass(&self) -> bool {
+        self.mls_sampling_bypass
+    }
+
     /// Returns the configured opaque-identifier hashing secret, if any.
     ///
     /// Crate-private: the secret feeds `Scrubber` construction and is not
@@ -206,6 +240,7 @@ mod tests {
         assert_eq!(cfg.metrics_cadence(), Some(Duration::from_secs(5)));
         assert!(cfg.scrub_secret().is_none());
         assert!(!cfg.routing_diagnostic());
+        assert!(!cfg.mls_sampling_bypass());
     }
 
     #[test]
@@ -215,12 +250,14 @@ mod tests {
             .with_mls_verbosity(MlsVerbosity::Off)
             .with_metrics_cadence(None)
             .with_scrub_secret(Some([7; 16]))
-            .with_routing_diagnostic(true);
+            .with_routing_diagnostic(true)
+            .with_mls_sampling_bypass(true);
         assert!(!cfg.scrub_ids());
         assert_eq!(cfg.mls_verbosity(), MlsVerbosity::Off);
         assert!(cfg.metrics_cadence().is_none());
         assert_eq!(cfg.scrub_secret(), Some([7; 16]));
         assert!(cfg.routing_diagnostic());
+        assert!(cfg.mls_sampling_bypass());
     }
 
     #[test]

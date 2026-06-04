@@ -766,6 +766,72 @@ fn test_mls_verbosity_off_suppresses_both_sink_and_legacy_emitter() {
     );
 }
 
+/// Counts the `mls.decryption_failed` records observed by the sink.
+fn count_decryption_failed(records: &[TelemetryRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                TelemetryRecord::Mls(MlsLifecycleEvent::DecryptionFailed { .. })
+            )
+        })
+        .count()
+}
+
+#[test]
+fn test_mls_sampling_default_caps_decryption_failed_flood() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    // 25 failures for the same sender+kind within one window. The default
+    // fixed-window limiter caps emission at 10 per peer+kind.
+    for _ in 0..25 {
+        protocol.emit_mls_decryption_failed(
+            "sender-a",
+            None,
+            DecryptionFailureKind::InvalidCiphertext,
+            MlsOperationContext::Receive,
+        );
+    }
+
+    let count = count_decryption_failed(&sink.take());
+    assert_eq!(
+        count, 10,
+        "default config must cap decryption_failed at the per-window ceiling, got {count}",
+    );
+}
+
+#[test]
+fn test_mls_sampling_bypass_delivers_unsampled_decryption_failed() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(
+            Arc::new(sink.clone()),
+            TelemetryConfig::default().with_mls_sampling_bypass(true),
+        )
+        .unwrap();
+
+    for _ in 0..25 {
+        protocol.emit_mls_decryption_failed(
+            "sender-a",
+            None,
+            DecryptionFailureKind::InvalidCiphertext,
+            MlsOperationContext::Receive,
+        );
+    }
+
+    let count = count_decryption_failed(&sink.take());
+    assert_eq!(
+        count, 25,
+        "mls_sampling_bypass must deliver every decryption_failed event un-sampled, got {count}",
+    );
+}
+
 #[test]
 fn test_scrub_ids_false_passes_raw_peer_id_to_sink() {
     let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();

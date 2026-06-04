@@ -7338,6 +7338,8 @@ data class TelemetryConfig (
     var `routingDiagnostic`: kotlin.Boolean?
     , 
     var `enablePollQueue`: kotlin.Boolean?
+    , 
+    var `mlsSamplingBypass`: kotlin.Boolean?
     
 ){
     
@@ -7357,6 +7359,7 @@ public object FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer<TelemetryC
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
         )
     }
 
@@ -7365,7 +7368,8 @@ public object FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer<TelemetryC
             FfiConverterOptionalTypeMlsVerbosity.allocationSize(value.`mlsVerbosity`) +
             FfiConverterOptionalULong.allocationSize(value.`metricsCadenceMs`) +
             FfiConverterOptionalBoolean.allocationSize(value.`routingDiagnostic`) +
-            FfiConverterOptionalBoolean.allocationSize(value.`enablePollQueue`)
+            FfiConverterOptionalBoolean.allocationSize(value.`enablePollQueue`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`mlsSamplingBypass`)
     )
 
     override fun write(value: TelemetryConfig, buf: ByteBuffer) {
@@ -7374,6 +7378,7 @@ public object FfiConverterTypeTelemetryConfig: FfiConverterRustBuffer<TelemetryC
             FfiConverterOptionalULong.write(value.`metricsCadenceMs`, buf)
             FfiConverterOptionalBoolean.write(value.`routingDiagnostic`, buf)
             FfiConverterOptionalBoolean.write(value.`enablePollQueue`, buf)
+            FfiConverterOptionalBoolean.write(value.`mlsSamplingBypass`, buf)
     }
 }
 

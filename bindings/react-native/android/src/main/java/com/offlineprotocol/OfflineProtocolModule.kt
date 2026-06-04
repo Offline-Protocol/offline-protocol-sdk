@@ -629,6 +629,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 metricsCadenceMs = null,
                 routingDiagnostic = null,
                 enablePollQueue = null,
+                mlsSamplingBypass = null,
             )
         }
         val scrubIds = readOptionalBoolean(map, "scrubIds")
@@ -649,12 +650,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         val cadence = readOptionalNonNegativeLong(map, "metricsCadenceMs")?.toULong()
         val routingDiag = readOptionalBoolean(map, "routingDiagnostic")
         val enablePollQueue = readOptionalBoolean(map, "enablePollQueue")
+        val mlsSamplingBypass = readOptionalBoolean(map, "mlsSamplingBypass")
         return TelemetryConfig(
             scrubIds = scrubIds,
             mlsVerbosity = verbosity,
             metricsCadenceMs = cadence,
             routingDiagnostic = routingDiag,
             enablePollQueue = enablePollQueue,
+            mlsSamplingBypass = mlsSamplingBypass,
         )
     }
 

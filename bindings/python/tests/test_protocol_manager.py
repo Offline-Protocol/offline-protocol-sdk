@@ -499,6 +499,7 @@ class TestProtocolManagerTelemetry:
                     metrics_cadence_ms=500,
                     routing_diagnostic=True,
                     enable_poll_queue=True,
+                    mls_sampling_bypass=None,
                 ),
             )
             assert pm._telemetry_sink is sink
@@ -632,6 +633,7 @@ class TestProtocolManagerTelemetry:
                     metrics_cadence_ms=None,
                     routing_diagnostic=None,
                     enable_poll_queue=False,
+                    mls_sampling_bypass=None,
                 ),
             )
             pm._protocol.install_telemetry_sink.assert_called_once()

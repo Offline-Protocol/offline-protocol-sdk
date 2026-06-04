@@ -642,6 +642,7 @@ pub struct TelemetryConfig {
     pub metrics_cadence_ms: Option<u64>,
     pub routing_diagnostic: Option<bool>,
     pub enable_poll_queue: Option<bool>,
+    pub mls_sampling_bypass: Option<bool>,
 }
 
 // ---- Conversions: core telemetry types → FFI dicts ----
@@ -909,6 +910,9 @@ fn telemetry_config_into_core(cfg: TelemetryConfig) -> CoreTelemetryConfig {
     }
     if let Some(v) = cfg.routing_diagnostic {
         core = core.with_routing_diagnostic(v);
+    }
+    if let Some(v) = cfg.mls_sampling_bypass {
+        core = core.with_mls_sampling_bypass(v);
     }
     core
 }
