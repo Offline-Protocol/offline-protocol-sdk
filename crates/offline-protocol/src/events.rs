@@ -286,9 +286,6 @@ pub enum Event {
         reason: String,
     },
 
-    // TODO: RelayPromoted, RelayDemoted, and RelayDemotedBattery are not yet
-    // emitted — wire RelayManager::should_promote_to_relay / should_demote_from_relay
-    // into the protocol engine so these fire on actual role transitions.
     /// This device was promoted to relay role.
     RelayPromoted {
         /// Number of connections when promoted.

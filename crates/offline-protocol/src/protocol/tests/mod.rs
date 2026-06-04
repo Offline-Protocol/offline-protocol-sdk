@@ -10506,6 +10506,80 @@ fn test_metrics_frame_is_local_relay_matches_role() {
     );
 }
 
+/// Drives a real `process()` tick with enough connections and healthy
+/// battery and asserts the engine emits `RelayPromoted` on the role
+/// transition, then `RelayDemotedBattery` once the battery falls below the
+/// relay minimum. Guards the OQ #12 wiring: the three relay-role events must
+/// fire on actual transitions, not just exist as unreachable variants.
+#[test]
+fn test_relay_role_transitions_emit_events() {
+    fn battery_metrics(level: u8) -> TransportMetrics {
+        TransportMetrics {
+            battery_level: Some(level),
+            is_charging: false,
+            ..TransportMetrics::default()
+        }
+    }
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock = MockTransport::new(TransportType::BLE);
+    mock.set_status(TransportStatus::Available);
+    mock.set_metrics(battery_metrics(80));
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock.clone()));
+
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol.start().unwrap();
+
+    // Default relay_threshold is 3; give it enough neighbors to promote.
+    for i in 0..3 {
+        protocol.on_neighbor_discovered(&format!("peer-{i}"));
+    }
+
+    protocol.process().unwrap();
+    let promoted = sink.take();
+    assert!(
+        promoted.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev)
+                if matches!(ev.as_ref(), Event::RelayPromoted { .. })
+        )),
+        "healthy battery + enough connections must emit RelayPromoted, got {promoted:?}",
+    );
+
+    // A second stable tick must NOT re-emit (transition fired once).
+    protocol.process().unwrap();
+    let stable = sink.take();
+    assert!(
+        !stable.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev) if matches!(ev.as_ref(), Event::RelayPromoted { .. })
+        )),
+        "a stable relay role must not re-emit RelayPromoted, got {stable:?}",
+    );
+
+    // Drop the battery below the relay minimum (default 30, not charging):
+    // the next tick must demote with the battery-specific event.
+    mock.set_metrics(battery_metrics(20));
+    protocol.process().unwrap();
+    let demoted = sink.take();
+    assert!(
+        demoted.iter().any(|r| matches!(
+            r,
+            TelemetryRecord::Protocol(ev)
+                if matches!(
+                    ev.as_ref(),
+                    Event::RelayDemotedBattery { battery_level: 20, min_required: 30 }
+                )
+        )),
+        "battery below minimum must emit RelayDemotedBattery{{20, 30}}, got {demoted:?}",
+    );
+}
+
 #[test]
 fn test_install_before_start_wires_routing_callback() {
     // Regression guard for the post-review lifecycle fix: the routing-
