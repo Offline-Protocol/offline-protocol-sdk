@@ -488,6 +488,95 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
+    // TELEMETRY SCRUB-SECRET PERSISTENCE
+    // ========================================================================
+
+    /// Loads (or, on first run, generates and persists) the per-install
+    /// telemetry scrub secret, then installs it as the fallback secret used
+    /// for opaque-identifier hashing when no explicit `scrub_secret` is set on
+    /// the installed `TelemetryConfig`.
+    ///
+    /// This makes opaque identifiers stable across process restarts so backend
+    /// telemetry can count distinct devices: the same device hashes to the same
+    /// opaque id every session. Until storage is available (or if storage is
+    /// never provided), the SDK keeps using the random per-instance fallback
+    /// generated at construction — so this is purely an upgrade over the
+    /// random fallback, never a regression.
+    ///
+    /// Secret precedence is unchanged: an explicit
+    /// [`crate::telemetry::TelemetryConfig::with_scrub_secret`] still wins over
+    /// this persistent fallback (see [`crate::telemetry::Scrubber::from_config`]).
+    ///
+    /// Idempotent across the two storage-entry paths (`initialize_mls` and
+    /// `enable_message_persistence`) via `telemetry_secret_persisted`. All
+    /// storage failures degrade gracefully to the in-memory random fallback —
+    /// telemetry pseudonymization must never block protocol initialization.
+    pub(crate) fn restore_or_init_scrub_secret(&mut self) {
+        if self.telemetry_secret_persisted {
+            return;
+        }
+        let Some(storage) = &self.message_storage else {
+            return;
+        };
+
+        let secret: [u8; 16] = match storage
+            .load(storage_keys::SCRUB_SECRET, storage_keys::SCRUB_SECRET_ID)
+        {
+            Ok(Some(bytes)) if bytes.len() == 16 => {
+                let mut secret = [0u8; 16];
+                secret.copy_from_slice(&bytes);
+                debug!("Restored persistent telemetry scrub secret from storage");
+                secret
+            }
+            Ok(other) => {
+                // Absent, or present but corrupt/wrong-length: generate a fresh
+                // secret and persist it. A wrong-length blob is overwritten so a
+                // single corrupt write does not pin every future session to the
+                // random fallback.
+                if other.is_some() {
+                    warn!("Persisted scrub secret had unexpected length; regenerating");
+                }
+                let fresh = *uuid::Uuid::new_v4().as_bytes();
+                if let Err(e) = storage.store(
+                    storage_keys::SCRUB_SECRET,
+                    storage_keys::SCRUB_SECRET_ID,
+                    &fresh,
+                ) {
+                    // Keep the in-memory secret for this session; next launch
+                    // will retry persistence. Opaque ids stay stable within
+                    // this process but may differ next session — strictly no
+                    // worse than the legacy random fallback.
+                    warn!(error = %e, "Failed to persist telemetry scrub secret; using session-local secret");
+                    return self.adopt_fallback_secret(fresh);
+                }
+                info!("Generated and persisted per-install telemetry scrub secret");
+                fresh
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load telemetry scrub secret; keeping random fallback");
+                return;
+            }
+        };
+
+        self.telemetry_secret_persisted = true;
+        self.adopt_fallback_secret(secret);
+    }
+
+    /// Installs `secret` as the telemetry fallback secret and rebuilds the
+    /// pre-install scrubber so the legacy MLS observability path also hashes
+    /// with the stable secret. Does not touch an already-installed
+    /// [`crate::telemetry::TelemetryContext`] (rebuilding a live context would
+    /// rotate opaque ids mid-run); apps that need stable ids should provide
+    /// storage before installing a telemetry sink.
+    fn adopt_fallback_secret(&mut self, secret: [u8; 16]) {
+        self.telemetry_fallback_secret = secret;
+        self.telemetry_scrubber = crate::telemetry::Scrubber::from_config(
+            &crate::telemetry::TelemetryConfig::default(),
+            secret,
+        );
+    }
+
+    // ========================================================================
     // LAMPORT CLOCK PERSISTENCE
     // ========================================================================
 

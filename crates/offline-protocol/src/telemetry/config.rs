@@ -116,17 +116,28 @@ impl TelemetryConfig {
 
     /// Sets the opaque-identifier hashing secret.
     ///
-    /// Supplying `Some(secret)` enables cross-session correlation of the
-    /// same peer in backend telemetry; supplying `None` (the default)
-    /// leaves the secret unset in the config, and the SDK falls back to a
-    /// random per-instance secret derived at protocol construction.
-    /// Install-time generation of a stable, per-install secret (so
-    /// correlation survives process restarts) lands with the emission-
-    /// wiring follow-up.
+    /// Supplying `Some(secret)` pins an explicit, caller-owned secret and
+    /// always takes precedence over the SDK-managed fallback below.
+    ///
+    /// Supplying `None` (the default) leaves the secret unset in the config.
+    /// In that case the SDK manages the fallback for you: the first time
+    /// secure storage is provided (via `OfflineProtocol::initialize_mls` or
+    /// `enable_message_persistence`), the SDK loads — or, on first run,
+    /// generates and persists — a stable **per-install** secret. This makes
+    /// opaque identifiers survive process restarts, so backend telemetry can
+    /// count distinct devices across sessions. Until storage is available (or
+    /// if storage is never provided), the SDK uses a random per-instance
+    /// secret derived at protocol construction.
+    ///
+    /// Precedence: explicit config secret > SDK-managed persistent secret >
+    /// random per-instance secret.
     ///
     /// **Do not share the secret across tenants, and do not rotate it
     /// mid-run** — rotation invalidates every previously emitted opaque
-    /// identifier and breaks correlation on the receiving side.
+    /// identifier and breaks correlation on the receiving side. For the
+    /// SDK-managed fallback this means: do not back two tenants with the same
+    /// storage, and do not clear the `scrub_secret` storage entry within a
+    /// measurement window.
     pub fn with_scrub_secret(mut self, secret: Option<[u8; 16]>) -> Self {
         self.scrub_secret = secret;
         self

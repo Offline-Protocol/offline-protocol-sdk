@@ -359,6 +359,10 @@ pub(crate) mod storage_keys {
     pub const TOFU_KEYS: &str = "tofu_keys";
     /// Key type for persisted blocked user entries.
     pub const BLOCKED_USERS: &str = "blocked_users";
+    /// Key type for the persistent per-install telemetry scrub secret.
+    pub const SCRUB_SECRET: &str = "scrub_secret";
+    /// Key ID for the single scrub-secret entry.
+    pub const SCRUB_SECRET_ID: &str = "current";
 }
 
 /// Protocol state.
