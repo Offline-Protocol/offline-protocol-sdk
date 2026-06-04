@@ -143,6 +143,14 @@ pub struct OfflineProtocol {
     /// after a sink is installed on the same protocol instance.
     telemetry_fallback_secret: [u8; 16],
 
+    /// Whether the persistent per-install scrub secret has been loaded from
+    /// (or initialized into) secure storage yet. Starts `false`; set `true`
+    /// the first time `restore_or_init_scrub_secret` succeeds so the load is
+    /// idempotent across the two storage-entry paths
+    /// (`initialize_mls` also enables persistence, which would otherwise
+    /// re-load and rebuild the scrubber a second time).
+    telemetry_secret_persisted: bool,
+
     /// Installed telemetry context (sink + config + scrubber). `None` until
     /// `install_telemetry_sink` is called; thereafter shared with
     /// `SharedState` via `Arc` clone so both emit paths dispatch through the
@@ -293,6 +301,7 @@ impl OfflineProtocol {
                 telemetry_fallback_secret,
             ),
             telemetry_fallback_secret,
+            telemetry_secret_persisted: false,
             telemetry: None,
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
@@ -350,6 +359,12 @@ impl OfflineProtocol {
         // Also use this storage for pending message persistence
         self.message_storage = Some(storage);
 
+        // Load the persistent scrub secret outside the transactional restore
+        // below: it is independent of MLS state, and a later MLS-restore
+        // rollback must not undo it (the secret is idempotent and reused on
+        // the next attempt).
+        self.restore_or_init_scrub_secret();
+
         // Restore state from previous session
         let restore_result = (|| {
             self.restore_pending_messages()?;
@@ -390,6 +405,7 @@ impl OfflineProtocol {
     /// automatically enabled using the same storage.
     pub fn enable_message_persistence(&mut self, storage: Arc<dyn MlsStorage>) -> Result<()> {
         self.message_storage = Some(storage);
+        self.restore_or_init_scrub_secret();
         self.restore_pending_messages()?;
         self.restore_lamport_clock();
         self.restore_tofu_keys();

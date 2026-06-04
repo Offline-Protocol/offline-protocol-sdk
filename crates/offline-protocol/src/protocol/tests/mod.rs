@@ -11071,3 +11071,110 @@ use crate::telemetry::transport_state::TransportStateEvent;
 // `device_battery_from_available` lives in `crate::telemetry::aggregator`
 // and is exercised by the unit tests in that module — including the
 // current-not-in-available fall-through path that was previously uncovered.
+
+// ============================================================================
+// PERSISTENT TELEMETRY SCRUB SECRET
+// ============================================================================
+
+#[test]
+fn scrub_secret_is_persisted_and_stable_across_instances() {
+    // Shared storage stands in for an app's secure store across two launches.
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+    let mut first = OfflineProtocol::new(create_test_config()).unwrap();
+    first.enable_message_persistence(storage.clone()).unwrap();
+    let first_secret = first.telemetry_fallback_secret;
+    assert!(first.telemetry_secret_persisted);
+
+    // The secret was written to storage under the documented key.
+    let stored = storage
+        .load(storage_keys::SCRUB_SECRET, storage_keys::SCRUB_SECRET_ID)
+        .unwrap()
+        .expect("scrub secret should be persisted");
+    assert_eq!(stored, first_secret.to_vec());
+
+    // A second instance backed by the same storage adopts the same secret, so
+    // the same raw identifier hashes to the same opaque id across sessions.
+    let mut second = OfflineProtocol::new(create_test_config()).unwrap();
+    second.enable_message_persistence(storage.clone()).unwrap();
+    assert_eq!(second.telemetry_fallback_secret, first_secret);
+    assert_eq!(
+        first.telemetry_scrubber.hash_id("peer:alice"),
+        second.telemetry_scrubber.hash_id("peer:alice"),
+    );
+}
+
+#[test]
+fn scrub_secret_load_is_idempotent_across_entry_paths() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+
+    // initialize_mls also enables persistence; a later explicit
+    // enable_message_persistence must not rotate or rewrite the secret.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.initialize_mls(storage.clone()).unwrap();
+    let secret_after_init = protocol.telemetry_fallback_secret;
+    assert!(protocol.telemetry_secret_persisted);
+
+    protocol.enable_message_persistence(storage).unwrap();
+    assert_eq!(protocol.telemetry_fallback_secret, secret_after_init);
+}
+
+#[test]
+fn corrupt_persisted_scrub_secret_is_regenerated() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    // Pre-seed a wrong-length blob to simulate corruption.
+    storage
+        .store(
+            storage_keys::SCRUB_SECRET,
+            storage_keys::SCRUB_SECRET_ID,
+            &[1, 2, 3],
+        )
+        .unwrap();
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence(storage.clone())
+        .unwrap();
+
+    // A fresh 16-byte secret replaces the corrupt entry rather than panicking
+    // or pinning every future session to the random fallback.
+    let stored = storage
+        .load(storage_keys::SCRUB_SECRET, storage_keys::SCRUB_SECRET_ID)
+        .unwrap()
+        .expect("corrupt secret should be overwritten");
+    assert_eq!(stored.len(), 16);
+    assert_eq!(stored, protocol.telemetry_fallback_secret.to_vec());
+    assert!(protocol.telemetry_secret_persisted);
+}
+
+#[test]
+fn explicit_config_secret_wins_over_persistent_fallback() {
+    let storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.enable_message_persistence(storage).unwrap();
+
+    // Installing a sink with an explicit scrub_secret must use that secret for
+    // opaque-id hashing, not the SDK-managed persistent fallback.
+    let explicit = [0xAB; 16];
+    let cfg = TelemetryConfig::default().with_scrub_secret(Some(explicit));
+    assert_ne!(explicit, protocol.telemetry_fallback_secret);
+    protocol
+        .install_telemetry_sink(Arc::new(NoopTelemetrySink), cfg)
+        .unwrap();
+
+    let installed = protocol.telemetry.as_ref().unwrap();
+    let expected = crate::telemetry::Scrubber::new(true, explicit)
+        .hash_id("peer:alice")
+        .into_owned();
+    assert_eq!(installed.scrubber.hash_id("peer:alice"), expected);
+}
+
+#[test]
+fn scrub_secret_without_storage_keeps_random_per_instance_fallback() {
+    // No storage provided: behavior is unchanged from the legacy random
+    // per-instance fallback — two instances differ and nothing is persisted.
+    let a = OfflineProtocol::new(create_test_config()).unwrap();
+    let b = OfflineProtocol::new(create_test_config()).unwrap();
+    assert!(!a.telemetry_secret_persisted);
+    assert_ne!(a.telemetry_fallback_secret, b.telemetry_fallback_secret);
+}
