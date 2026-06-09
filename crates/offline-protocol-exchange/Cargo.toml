@@ -1,0 +1,25 @@
+[package]
+name = "offline-protocol-exchange"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Capability exchange layer for the Offline Protocol: attested listings, metered invocations, signed usage receipts, prepaid settlement"
+
+[dependencies]
+offline-protocol-core = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
