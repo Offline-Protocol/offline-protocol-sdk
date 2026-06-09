@@ -446,6 +446,78 @@ RCT_EXTERN_METHOD(respondToServiceRequest:(NSString *)requestId
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+// Capability Exchange
+RCT_EXTERN_METHOD(publishListing:(NSString *)serviceId
+                  version:(NSString *)version
+                  capabilitiesJson:(NSString *)capabilitiesJson
+                  kind:(NSString *)kind
+                  termsJson:(NSString *)termsJson
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(publishAdapterListing:(NSString *)serviceId
+                  version:(NSString *)version
+                  capabilitiesJson:(NSString *)capabilitiesJson
+                  termsJson:(NSString *)termsJson
+                  baseModel:(NSString *)baseModel
+                  baseModelVersion:(NSString *)baseModelVersion
+                  artifactPath:(NSString *)artifactPath
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(unpublishListing:(NSString *)serviceId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(discoverListings:(NSString * _Nullable)serviceId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(discoveredListings:(NSString * _Nullable)filterJson
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(invokeListing:(NSString *)provider
+                  serviceId:(NSString *)serviceId
+                  method:(NSString *)method
+                  body:(NSString *)body
+                  maxUnits:(nonnull NSNumber *)maxUnits
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(declareInvocationUsage:(NSString *)requestId
+                  units:(nonnull NSNumber *)units
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(pullAdapter:(NSString *)provider
+                  serviceId:(NSString *)serviceId
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(creditExchangeBalance:(NSString *)currency
+                  amountMinor:(nonnull NSNumber *)amountMinor
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(getExchangeBalance:(NSString *)currency
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(getExchangeReceipts:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(pendingExchangeReceipts:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(markExchangeReceiptsSettled:(NSArray<NSString *> *)receiptIds
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(publisherReputation:(NSString *)publisher
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 // Mesh Group Management (Protocol-Level MLS Groups)
 RCT_EXTERN_METHOD(meshCreateGroup:(NSString *)groupName
                   resolver:(RCTPromiseResolveBlock)resolve

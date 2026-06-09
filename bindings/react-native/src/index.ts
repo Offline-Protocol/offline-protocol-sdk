@@ -45,6 +45,15 @@ import type {
   TelemetryListener,
   TelemetryRecord,
   TransportMetrics,
+  Listing,
+  ListingKind,
+  ListingFilter,
+  DiscoveredListing,
+  Terms,
+  ExchangeBalance,
+  StoredReceipt,
+  UsageReceipt,
+  ReputationRead,
 } from './types';
 import { ContentType, MessagePriority } from './types';
 import { LINKING_ERROR } from './constants';
@@ -2688,6 +2697,254 @@ export class MeshServices {
       status,
       body
     );
+  }
+}
+
+/**
+ * Capability exchange over the mesh: attested listings, metered invocations,
+ * signed usage receipts, prepaid balances, and content-addressed adapter
+ * pulls.
+ *
+ * Listings extend service discovery — publishing registers a normal service
+ * whose descriptor carries a signed listing envelope, so exchange-unaware
+ * peers interoperate untouched. Provenance is mandatory: publishing requires
+ * MLS to be initialized (the OfflineID identity key signs the listing), and
+ * consumers see the attestation status plus a local reputation read on every
+ * `listing_discovered` event.
+ *
+ * Priced invocations refuse to run without a confirmed MLS session with the
+ * provider and a prepaid balance covering `maxUnits`. Settlement is eventual:
+ * signed receipts are the durable claim, exported to a clearing backend when
+ * connectivity allows.
+ *
+ * @example
+ * ```typescript
+ * const protocol = new OfflineProtocol(config);
+ * await protocol.start();
+ * const exchange = new MeshExchange();
+ *
+ * // Provider: publish a priced listing
+ * await exchange.publishListing('weather.v1', '1.0', { format: 'json' }, 'service', {
+ *   price: { amount_minor: 5 },
+ *   unit: 'per_call',
+ *   currency: 'USD',
+ *   max_payload_kb: 64,
+ * });
+ *
+ * // Consumer: discover, fund, invoke
+ * await exchange.discoverListings();
+ * protocol.on('listing_discovered', async (event) => {
+ *   if (event.attestation_status === 'verified') {
+ *     await exchange.creditBalance('USD', 1000); // after clearing confirms funding
+ *     await exchange.invokeListing(
+ *       event.listing.publisher, event.listing.descriptor.service_id,
+ *       'get_forecast', JSON.stringify({ city: 'NYC' }), 1
+ *     );
+ *   }
+ * });
+ * ```
+ */
+export class MeshExchange {
+  /**
+   * Publishes an attested service listing. Requires MLS to be initialized —
+   * the listing is signed with this node's identity key.
+   *
+   * @param serviceId - Unique service identifier (e.g. "weather.v1")
+   * @param version - Service version string
+   * @param capabilities - Key-value map of advertisory capabilities
+   * @param kind - 'service' (request/response) or 'adapter' (use
+   *   {@link publishAdapterListing} for adapters)
+   * @param terms - Commercial terms (price, billing unit, currency)
+   * @returns The published listing (descriptor, terms, attestation)
+   */
+  async publishListing(
+    serviceId: string,
+    version: string,
+    capabilities: Record<string, string>,
+    kind: ListingKind,
+    terms: Terms
+  ): Promise<Listing> {
+    const json = await OfflineProtocolNativeModule.publishListing(
+      serviceId,
+      version,
+      JSON.stringify(capabilities),
+      kind,
+      JSON.stringify(terms)
+    );
+    return JSON.parse(json) as Listing;
+  }
+
+  /**
+   * Publishes an attested adapter listing from a local artifact file. The
+   * artifact's content hash is computed and signed into the attestation;
+   * incoming pulls are served automatically from the path.
+   *
+   * @param serviceId - Unique adapter identifier (e.g. "adapter.medical")
+   * @param version - Adapter version string
+   * @param capabilities - Key-value map of advertisory capabilities
+   * @param terms - Commercial terms (adapters are typically free)
+   * @param baseModel - The base model the adapter is welded to
+   * @param baseModelVersion - Version of the base model
+   * @param artifactPath - Local filesystem path of the adapter artifact
+   * @returns The published listing including its artifact reference
+   */
+  async publishAdapterListing(
+    serviceId: string,
+    version: string,
+    capabilities: Record<string, string>,
+    terms: Terms,
+    baseModel: string,
+    baseModelVersion: string,
+    artifactPath: string
+  ): Promise<Listing> {
+    const json = await OfflineProtocolNativeModule.publishAdapterListing(
+      serviceId,
+      version,
+      JSON.stringify(capabilities),
+      JSON.stringify(terms),
+      baseModel,
+      baseModelVersion,
+      artifactPath
+    );
+    return JSON.parse(json) as Listing;
+  }
+
+  /**
+   * Removes a published listing and unregisters its service.
+   *
+   * @returns true if the listing existed
+   */
+  async unpublishListing(serviceId: string): Promise<boolean> {
+    return await OfflineProtocolNativeModule.unpublishListing(serviceId);
+  }
+
+  /**
+   * Broadcasts a listing discovery query to the mesh. Results arrive
+   * asynchronously as `listing_discovered` events (and plain services as
+   * `service_discovered`).
+   *
+   * @param serviceId - Optional service ID filter (omit to discover all)
+   * @returns Query ID for correlating responses
+   */
+  async discoverListings(serviceId?: string): Promise<string> {
+    return await OfflineProtocolNativeModule.discoverListings(serviceId ?? null);
+  }
+
+  /**
+   * Returns cached discovered listings, most recently seen first.
+   *
+   * @param filter - Optional filter by kind, free-vs-paid, or service id
+   */
+  async discoveredListings(filter?: ListingFilter): Promise<DiscoveredListing[]> {
+    const json = await OfflineProtocolNativeModule.discoveredListings(
+      filter ? JSON.stringify(filter) : null
+    );
+    return JSON.parse(json) as DiscoveredListing[];
+  }
+
+  /**
+   * Invokes a discovered listing.
+   *
+   * Free listings behave like plain service requests. Priced listings
+   * require the listing's attestation to have verified, a **confirmed MLS
+   * session** with the provider (priced invocations never ride plaintext),
+   * and a prepaid balance covering `maxUnits` — which is held until the
+   * invocation completes, then debited for actual usage.
+   *
+   * @param provider - Peer ID of the provider (from discovery)
+   * @param serviceId - Listing service identifier
+   * @param method - Method name or action to invoke
+   * @param body - Request body (typically JSON)
+   * @param maxUnits - Maximum billable units this consumer agrees to pay for
+   * @returns Request ID correlating the `service_response_received` and
+   *   `exchange_receipt_issued` events
+   */
+  async invokeListing(
+    provider: string,
+    serviceId: string,
+    method: string,
+    body: string,
+    maxUnits: number = 1
+  ): Promise<string> {
+    return await OfflineProtocolNativeModule.invokeListing(
+      provider,
+      serviceId,
+      method,
+      body,
+      maxUnits
+    );
+  }
+
+  /**
+   * Declares the units consumed by a metered invocation this node is
+   * serving (per-token / per-second listings). Call **before**
+   * `respondToServiceRequest`; the declaration ships right after the
+   * response and the consumer bills the declared count (clamped to its
+   * agreed maximum).
+   */
+  async declareInvocationUsage(requestId: string, units: number): Promise<void> {
+    await OfflineProtocolNativeModule.declareInvocationUsage(requestId, units);
+  }
+
+  /**
+   * Pulls a discovered adapter's artifact from its provider. Pulls are free
+   * but the attestation must have verified. The artifact arrives over the
+   * media transfer path and is checked against the attested content hash: a
+   * match emits `adapter_pull_completed` with the verified bytes, a mismatch
+   * emits `adapter_pull_rejected` and the bytes are discarded.
+   *
+   * @returns Request ID correlating the pull events
+   */
+  async pullAdapter(provider: string, serviceId: string): Promise<string> {
+    return await OfflineProtocolNativeModule.pullAdapter(provider, serviceId);
+  }
+
+  /**
+   * Credits the prepaid balance after out-of-band funding (i.e. the
+   * clearing backend confirmed a payment).
+   *
+   * @param currency - Currency identifier (e.g. "USD")
+   * @param amountMinor - Amount in integer minor units
+   * @returns The new balance
+   */
+  async creditBalance(currency: string, amountMinor: number): Promise<ExchangeBalance> {
+    const json = await OfflineProtocolNativeModule.creditExchangeBalance(
+      currency,
+      amountMinor
+    );
+    return JSON.parse(json) as ExchangeBalance;
+  }
+
+  /** Returns the prepaid balance for a currency. */
+  async getBalance(currency: string): Promise<ExchangeBalance> {
+    const json = await OfflineProtocolNativeModule.getExchangeBalance(currency);
+    return JSON.parse(json) as ExchangeBalance;
+  }
+
+  /** Returns all stored usage receipts with their settlement status. */
+  async getReceipts(): Promise<StoredReceipt[]> {
+    const json = await OfflineProtocolNativeModule.getExchangeReceipts();
+    return JSON.parse(json) as StoredReceipt[];
+  }
+
+  /**
+   * Returns receipts awaiting settlement. Export these to the clearing
+   * backend, then confirm with {@link markReceiptsSettled}.
+   */
+  async pendingReceipts(): Promise<UsageReceipt[]> {
+    const json = await OfflineProtocolNativeModule.pendingExchangeReceipts();
+    return JSON.parse(json) as UsageReceipt[];
+  }
+
+  /** Marks receipts settled after the clearing backend confirms them. */
+  async markReceiptsSettled(receiptIds: string[]): Promise<void> {
+    await OfflineProtocolNativeModule.markExchangeReceiptsSettled(receiptIds);
+  }
+
+  /** Returns the local reputation read for a publisher. */
+  async publisherReputation(publisher: string): Promise<ReputationRead> {
+    const json = await OfflineProtocolNativeModule.publisherReputation(publisher);
+    return JSON.parse(json) as ReputationRead;
   }
 }
 

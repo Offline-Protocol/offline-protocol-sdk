@@ -988,6 +988,225 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
 }
 
 // ============================================================================
+// CAPABILITY EXCHANGE TYPES & EVENTS
+// ============================================================================
+
+/** What kind of capability a listing offers. */
+export type ListingKind = 'service' | 'adapter';
+
+/** The unit an invocation is billed in. */
+export type BillingUnit = 'per_call' | 'per_token' | 'per_second' | 'flat';
+
+/** Outcome of verifying a listing's attestation. */
+export type AttestationStatus = 'verified' | 'invalid' | 'unsigned';
+
+/** Coarse local trust level for a publisher. */
+export type ReputationLevel = 'unknown' | 'new' | 'established' | 'flagged';
+
+/** Price per billing unit, in integer minor units of the listing currency. */
+export interface Price {
+  amount_minor: number;
+}
+
+/** Commercial terms attached to a listing. */
+export interface Terms {
+  /** Price per billing unit. Null/absent means free to invoke. */
+  price?: Price | null;
+  /** The unit invocations are billed in. */
+  unit: BillingUnit;
+  /** Settlement currency identifier (e.g. "USD", "USDC"). */
+  currency: string;
+  /** Maximum request/response payload the provider accepts, in KB. */
+  max_payload_kb: number;
+}
+
+/** Transfer chunking metadata for adapter artifacts. */
+export interface ChunkPlan {
+  chunk_size_bytes: number;
+}
+
+/** Content-addressed reference to an adapter artifact. */
+export interface ArtifactRef {
+  /** SHA-256 of the artifact bytes, lowercase hex. */
+  content_hash: string;
+  /** Exact artifact size in bytes. */
+  size_bytes: number;
+  /** The base model this adapter is welded to. */
+  base_model: string;
+  /** Version of the base model. */
+  base_model_version: string;
+  /** Transfer chunking metadata. */
+  chunking: ChunkPlan;
+}
+
+/** Publisher signature over the listing contents. */
+export interface Attestation {
+  /** Publisher's Ed25519 public key, base64. */
+  public_key: string;
+  /** Signature over the canonical listing bytes, base64. */
+  signature: string;
+  /** Milliseconds since epoch when the attestation was produced. */
+  signed_at_ms: number;
+}
+
+/** A capability listing: descriptor plus terms, provenance, and artifact. */
+export interface Listing {
+  descriptor: {
+    service_id: string;
+    version: string;
+    capabilities: Record<string, string>;
+  };
+  kind: ListingKind;
+  terms: Terms;
+  artifact?: ArtifactRef | null;
+  /** Stable publisher identity (OfflineID user id). */
+  publisher: string;
+  attestation: Attestation;
+}
+
+/** The local reputation read surfaced with discovery results. */
+export interface ReputationRead {
+  level: ReputationLevel;
+  settled_receipts: number;
+  verified_listings: number;
+  invalid_attestations: number;
+  first_seen_ms: number;
+}
+
+/** A discovered listing with its verification outcome. */
+export interface DiscoveredListing {
+  listing: Listing;
+  attestation_status: AttestationStatus;
+  hop_count: number;
+  provider_peer_id: string;
+  last_seen_ms: number;
+}
+
+/** Filter for cached discovered listings. */
+export interface ListingFilter {
+  kind?: ListingKind;
+  /** true = only free listings, false = only paid listings. */
+  free?: boolean;
+  service_id?: string;
+}
+
+/** Settlement lifecycle of a stored receipt. */
+export type ReceiptStatus = 'pending_settlement' | 'settled' | 'rejected';
+
+/** A signed usage receipt — the durable settlement claim. */
+export interface UsageReceipt {
+  receipt_id: string;
+  request_id: string;
+  service_id: string;
+  listing_version: string;
+  unit: BillingUnit;
+  unit_count: number;
+  unit_price_minor: number;
+  total_minor: number;
+  currency: string;
+  consumer_id: string;
+  provider_id: string;
+  issued_at_ms: number;
+  consumer_public_key: string;
+  consumer_signature: string;
+  provider_public_key?: string;
+  provider_signature?: string;
+}
+
+/** A stored receipt with its local settlement status. */
+export interface StoredReceipt {
+  receipt: UsageReceipt;
+  status: ReceiptStatus;
+  /** Whether this node was the consumer (payer) on this receipt. */
+  local_role_consumer: boolean;
+}
+
+/** Prepaid balance for one currency, in minor units. */
+export interface ExchangeBalance {
+  available_minor: number;
+  held_minor: number;
+}
+
+/**
+ * An attested capability listing was discovered. Emitted alongside
+ * `service_discovered` when the descriptor carries a listing envelope.
+ * Check `attestation_status` and `reputation` before transacting.
+ */
+export interface ListingDiscoveredEvent extends BaseEvent {
+  type: 'listing_discovered';
+  query_id: string;
+  listing: Listing;
+  attestation_status: AttestationStatus;
+  reputation: ReputationRead;
+  hop_count: number;
+}
+
+/**
+ * This node (as consumer) issued and signed a usage receipt for a completed
+ * priced invocation. The prepaid balance was debited.
+ */
+export interface ExchangeReceiptIssuedEvent extends BaseEvent {
+  type: 'exchange_receipt_issued';
+  receipt: UsageReceipt;
+}
+
+/**
+ * This node (as provider) received, verified, and counter-signed a usage
+ * receipt for an invocation it served.
+ */
+export interface ExchangeReceiptReceivedEvent extends BaseEvent {
+  type: 'exchange_receipt_received';
+  receipt: UsageReceipt;
+}
+
+/** The provider counter-signed a receipt this node issued. */
+export interface ExchangeReceiptAcknowledgedEvent extends BaseEvent {
+  type: 'exchange_receipt_acknowledged';
+  receipt_id: string;
+}
+
+/** The prepaid exchange balance changed. */
+export interface ExchangeBalanceChangedEvent extends BaseEvent {
+  type: 'exchange_balance_changed';
+  currency: string;
+  available_minor: number;
+  held_minor: number;
+}
+
+/** A tracked exchange invocation failed; any hold was released. */
+export interface ExchangeInvocationFailedEvent extends BaseEvent {
+  type: 'exchange_invocation_failed';
+  request_id: string;
+  reason: string;
+}
+
+/**
+ * An adapter artifact arrived and passed signature + content-hash
+ * verification. `data` holds the verified artifact bytes, base64-encoded.
+ */
+export interface AdapterPullCompletedEvent extends BaseEvent {
+  type: 'adapter_pull_completed';
+  request_id: string;
+  service_id: string;
+  provider_peer_id: string;
+  size_bytes: number;
+  content_hash: string;
+  data: string;
+}
+
+/**
+ * An adapter artifact failed verification and was rejected. The bytes were
+ * discarded and must not be loaded.
+ */
+export interface AdapterPullRejectedEvent extends BaseEvent {
+  type: 'adapter_pull_rejected';
+  request_id: string;
+  service_id: string;
+  provider_peer_id: string;
+  reason: string;
+}
+
+// ============================================================================
 // PRESENCE, TYPING, READ RECEIPTS EVENTS
 // ============================================================================
 
@@ -1168,6 +1387,14 @@ export type ProtocolEvent =
   | ServiceDiscoveredEvent
   | ServiceRequestReceivedEvent
   | ServiceResponseReceivedEvent
+  | ListingDiscoveredEvent
+  | ExchangeReceiptIssuedEvent
+  | ExchangeReceiptReceivedEvent
+  | ExchangeReceiptAcknowledgedEvent
+  | ExchangeBalanceChangedEvent
+  | ExchangeInvocationFailedEvent
+  | AdapterPullCompletedEvent
+  | AdapterPullRejectedEvent
   | PresenceUpdatedEvent
   | TypingIndicatorReceivedEvent
   | ReadReceiptReceivedEvent

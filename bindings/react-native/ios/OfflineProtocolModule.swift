@@ -22,6 +22,7 @@ import React
 class OfflineProtocolModule: RCTEventEmitter {
     private var protocolInstance: OfflineProtocol?
     private var meshServicesInstance: MeshServices?
+    private var meshExchangeInstance: MeshExchange?
     private var bleManager: BleManager?
     private var internetManager: InternetManager?
     private var wifiDirectManager: WifiDirectManager?
@@ -368,6 +369,7 @@ class OfflineProtocolModule: RCTEventEmitter {
 
             protocolInstance = proto
             meshServicesInstance = try MeshServices(protocol: proto)
+            meshExchangeInstance = try MeshExchange(protocol: proto)
 
             // Initialize BLE manager if BLE is enabled
             if config.bleEnabled {
@@ -1062,6 +1064,212 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    // MARK: - Capability Exchange (via MeshExchange)
+
+    private func requireMeshExchange() throws -> MeshExchange {
+        guard let xchg = meshExchangeInstance else {
+            throw NSError(domain: "OfflineProtocol", code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "MeshExchange not initialized"])
+        }
+        return xchg
+    }
+
+    private func parseCapabilities(_ capabilitiesJson: String) -> [String: String] {
+        if let data = capabilitiesJson.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+            return parsed
+        }
+        return [:]
+    }
+
+    @objc func publishListing(_ serviceId: String,
+                              version: String,
+                              capabilitiesJson: String,
+                              kind: String,
+                              termsJson: String,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            let listingJson = try xchg.publishListing(serviceId: serviceId,
+                                                      version: version,
+                                                      capabilities: parseCapabilities(capabilitiesJson),
+                                                      kind: kind,
+                                                      termsJson: termsJson)
+            resolver(listingJson)
+        } catch {
+            rejecter("ERROR_PUBLISH_LISTING", "Failed to publish listing: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func publishAdapterListing(_ serviceId: String,
+                                     version: String,
+                                     capabilitiesJson: String,
+                                     termsJson: String,
+                                     baseModel: String,
+                                     baseModelVersion: String,
+                                     artifactPath: String,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            let listingJson = try xchg.publishAdapterListing(serviceId: serviceId,
+                                                             version: version,
+                                                             capabilities: parseCapabilities(capabilitiesJson),
+                                                             termsJson: termsJson,
+                                                             baseModel: baseModel,
+                                                             baseModelVersion: baseModelVersion,
+                                                             artifactPath: artifactPath)
+            resolver(listingJson)
+        } catch {
+            rejecter("ERROR_PUBLISH_ADAPTER", "Failed to publish adapter listing: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func unpublishListing(_ serviceId: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.unpublishListing(serviceId: serviceId))
+        } catch {
+            rejecter("ERROR_UNPUBLISH_LISTING", "Failed to unpublish listing: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func discoverListings(_ serviceId: String?,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.discoverListings(serviceId: serviceId))
+        } catch {
+            rejecter("ERROR_DISCOVER_LISTINGS", "Failed to discover listings: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func discoveredListings(_ filterJson: String?,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.discoveredListings(filterJson: filterJson))
+        } catch {
+            rejecter("ERROR_DISCOVERED_LISTINGS", "Failed to read discovered listings: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func invokeListing(_ provider: String,
+                             serviceId: String,
+                             method: String,
+                             body: String,
+                             maxUnits: NSNumber,
+                             resolver: @escaping RCTPromiseResolveBlock,
+                             rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            let requestId = try xchg.invokeListing(provider: provider,
+                                                   serviceId: serviceId,
+                                                   method: method,
+                                                   body: body,
+                                                   maxUnits: maxUnits.uint64Value)
+            resolver(requestId)
+        } catch {
+            rejecter("ERROR_INVOKE_LISTING", "Failed to invoke listing: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func declareInvocationUsage(_ requestId: String,
+                                      units: NSNumber,
+                                      resolver: @escaping RCTPromiseResolveBlock,
+                                      rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            try xchg.declareInvocationUsage(requestId: requestId, units: units.uint64Value)
+            resolver(NSNull())
+        } catch {
+            rejecter("ERROR_DECLARE_USAGE", "Failed to declare invocation usage: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func pullAdapter(_ provider: String,
+                           serviceId: String,
+                           resolver: @escaping RCTPromiseResolveBlock,
+                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.pullAdapter(provider: provider, serviceId: serviceId))
+        } catch {
+            rejecter("ERROR_PULL_ADAPTER", "Failed to pull adapter: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func creditExchangeBalance(_ currency: String,
+                                     amountMinor: NSNumber,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.creditBalance(currency: currency, amountMinor: amountMinor.uint64Value))
+        } catch {
+            rejecter("ERROR_CREDIT_BALANCE", "Failed to credit exchange balance: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func getExchangeBalance(_ currency: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.getBalance(currency: currency))
+        } catch {
+            rejecter("ERROR_GET_BALANCE", "Failed to get exchange balance: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func getExchangeReceipts(_ resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.getReceipts())
+        } catch {
+            rejecter("ERROR_GET_RECEIPTS", "Failed to get exchange receipts: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func pendingExchangeReceipts(_ resolver: @escaping RCTPromiseResolveBlock,
+                                       rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.pendingReceipts())
+        } catch {
+            rejecter("ERROR_PENDING_RECEIPTS", "Failed to get pending receipts: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func markExchangeReceiptsSettled(_ receiptIds: [String],
+                                           resolver: @escaping RCTPromiseResolveBlock,
+                                           rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            try xchg.markReceiptsSettled(receiptIds: receiptIds)
+            resolver(NSNull())
+        } catch {
+            rejecter("ERROR_MARK_SETTLED", "Failed to mark receipts settled: \(error.localizedDescription)", error)
+        }
+    }
+
+    @objc func publisherReputation(_ publisher: String,
+                                   resolver: @escaping RCTPromiseResolveBlock,
+                                   rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            let xchg = try requireMeshExchange()
+            resolver(try xchg.publisherReputation(publisher: publisher))
+        } catch {
+            rejecter("ERROR_PUBLISHER_REPUTATION", "Failed to read publisher reputation: \(error.localizedDescription)", error)
+        }
+    }
+
     // MARK: - User Blocking
 
     @objc func blockUser(_ userId: String,
@@ -1224,6 +1432,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         protocolInstance = nil
         meshServicesInstance = nil
+        meshExchangeInstance = nil
         currentConfig = nil
         resolver(nil)
     }

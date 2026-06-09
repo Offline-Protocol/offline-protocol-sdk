@@ -602,6 +602,282 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 
+public protocol MeshExchangeProtocol: AnyObject, Sendable {
+    
+    func creditBalance(currency: String, amountMinor: UInt64) throws  -> String
+    
+    func declareInvocationUsage(requestId: String, units: UInt64) throws 
+    
+    func discoverListings(serviceId: String?) throws  -> String
+    
+    func discoveredListings(filterJson: String?) throws  -> String
+    
+    func getBalance(currency: String) throws  -> String
+    
+    func getReceipts() throws  -> String
+    
+    func invokeListing(provider: String, serviceId: String, method: String, body: String, maxUnits: UInt64) throws  -> String
+    
+    func markReceiptsSettled(receiptIds: [String]) throws 
+    
+    func pendingReceipts() throws  -> String
+    
+    func publishAdapterListing(serviceId: String, version: String, capabilities: [String: String], termsJson: String, baseModel: String, baseModelVersion: String, artifactPath: String) throws  -> String
+    
+    func publishListing(serviceId: String, version: String, capabilities: [String: String], kind: String, termsJson: String) throws  -> String
+    
+    func publisherReputation(publisher: String) throws  -> String
+    
+    func pullAdapter(provider: String, serviceId: String) throws  -> String
+    
+    func unpublishListing(serviceId: String) throws  -> Bool
+    
+}
+open class MeshExchange: MeshExchangeProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_offline_protocol_uniffi_fn_clone_meshexchange(self.handle, $0) }
+    }
+public convenience init(`protocol`: OfflineProtocol)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_constructor_meshexchange_new(
+        FfiConverterTypeOfflineProtocol_lower(`protocol`),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        try! rustCall { uniffi_offline_protocol_uniffi_fn_free_meshexchange(handle, $0) }
+    }
+
+    
+
+    
+open func creditBalance(currency: String, amountMinor: UInt64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_credit_balance(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(currency),
+        FfiConverterUInt64.lower(amountMinor),$0
+    )
+})
+}
+    
+open func declareInvocationUsage(requestId: String, units: UInt64)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_declare_invocation_usage(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(requestId),
+        FfiConverterUInt64.lower(units),$0
+    )
+}
+}
+    
+open func discoverListings(serviceId: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_discover_listings(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(serviceId),$0
+    )
+})
+}
+    
+open func discoveredListings(filterJson: String?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_discovered_listings(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(filterJson),$0
+    )
+})
+}
+    
+open func getBalance(currency: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_get_balance(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(currency),$0
+    )
+})
+}
+    
+open func getReceipts()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_get_receipts(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func invokeListing(provider: String, serviceId: String, method: String, body: String, maxUnits: UInt64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_invoke_listing(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(provider),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(method),
+        FfiConverterString.lower(body),
+        FfiConverterUInt64.lower(maxUnits),$0
+    )
+})
+}
+    
+open func markReceiptsSettled(receiptIds: [String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_mark_receipts_settled(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceString.lower(receiptIds),$0
+    )
+}
+}
+    
+open func pendingReceipts()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_pending_receipts(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func publishAdapterListing(serviceId: String, version: String, capabilities: [String: String], termsJson: String, baseModel: String, baseModelVersion: String, artifactPath: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_publish_adapter_listing(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(version),
+        FfiConverterDictionaryStringString.lower(capabilities),
+        FfiConverterString.lower(termsJson),
+        FfiConverterString.lower(baseModel),
+        FfiConverterString.lower(baseModelVersion),
+        FfiConverterString.lower(artifactPath),$0
+    )
+})
+}
+    
+open func publishListing(serviceId: String, version: String, capabilities: [String: String], kind: String, termsJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_publish_listing(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),
+        FfiConverterString.lower(version),
+        FfiConverterDictionaryStringString.lower(capabilities),
+        FfiConverterString.lower(kind),
+        FfiConverterString.lower(termsJson),$0
+    )
+})
+}
+    
+open func publisherReputation(publisher: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_publisher_reputation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(publisher),$0
+    )
+})
+}
+    
+open func pullAdapter(provider: String, serviceId: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_pull_adapter(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(provider),
+        FfiConverterString.lower(serviceId),$0
+    )
+})
+}
+    
+open func unpublishListing(serviceId: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_meshexchange_unpublish_listing(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(serviceId),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMeshExchange: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MeshExchange
+
+    public static func lift(_ handle: UInt64) throws -> MeshExchange {
+        return MeshExchange(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MeshExchange) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MeshExchange {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MeshExchange, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshExchange_lift(_ handle: UInt64) throws -> MeshExchange {
+    return try FfiConverterTypeMeshExchange.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMeshExchange_lower(_ value: MeshExchange) -> UInt64 {
+    return FfiConverterTypeMeshExchange.lower(value)
+}
+
+
+
+
+
+
 public protocol MeshServicesProtocol: AnyObject, Sendable {
     
     func discoverServices(serviceId: String?) throws  -> String
@@ -8558,6 +8834,48 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_credit_balance() != 1595) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_declare_invocation_usage() != 63529) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_discover_listings() != 52341) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_discovered_listings() != 37124) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_get_balance() != 5230) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_get_receipts() != 4201) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_invoke_listing() != 59139) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_mark_receipts_settled() != 62669) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_pending_receipts() != 50492) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_publish_adapter_listing() != 37913) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_publish_listing() != 3452) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_publisher_reputation() != 34866) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_pull_adapter() != 61853) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshexchange_unpublish_listing() != 4751) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9015,6 +9333,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 35006) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_constructor_meshexchange_new() != 16465) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363) {

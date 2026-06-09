@@ -26,6 +26,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var protocol: OfflineProtocol? = null
     private var meshServices: MeshServices? = null
+    private var meshExchange: MeshExchange? = null
     private var bleTransport: BleTransportFacade? = null
     private var internetManager: InternetManager? = null
     private var wifiDirectManager: WifiDirectManager? = null
@@ -320,6 +321,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             protocol = proto
             meshServices = MeshServices(proto)
+            meshExchange = MeshExchange(proto)
 
             // Initialize BLE manager if BLE is enabled
             if (config.bleEnabled) {
@@ -1313,6 +1315,168 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // Capability Exchange (via MeshExchange)
+
+    private fun parseCapabilities(capabilitiesJson: String): Map<String, String> {
+        val capabilities = mutableMapOf<String, String>()
+        try {
+            val json = JSONObject(capabilitiesJson)
+            json.keys().forEach { key -> capabilities[key] = json.getString(key) }
+        } catch (parseErr: Exception) {
+            android.util.Log.w("OfflineProtocol", "Failed to parse capabilities JSON, using empty capabilities: ${parseErr.message}")
+        }
+        return capabilities
+    }
+
+    @ReactMethod
+    fun publishListing(serviceId: String, version: String, capabilitiesJson: String, kind: String, termsJson: String, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            val listingJson = xchg.publishListing(serviceId, version, parseCapabilities(capabilitiesJson), kind, termsJson)
+            promise.resolve(listingJson)
+        } catch (e: Exception) {
+            promise.reject("ERROR_PUBLISH_LISTING", "Failed to publish listing: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun publishAdapterListing(serviceId: String, version: String, capabilitiesJson: String, termsJson: String, baseModel: String, baseModelVersion: String, artifactPath: String, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            val listingJson = xchg.publishAdapterListing(serviceId, version, parseCapabilities(capabilitiesJson), termsJson, baseModel, baseModelVersion, artifactPath)
+            promise.resolve(listingJson)
+        } catch (e: Exception) {
+            promise.reject("ERROR_PUBLISH_ADAPTER", "Failed to publish adapter listing: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun unpublishListing(serviceId: String, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.unpublishListing(serviceId))
+        } catch (e: Exception) {
+            promise.reject("ERROR_UNPUBLISH_LISTING", "Failed to unpublish listing: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun discoverListings(serviceId: String?, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.discoverListings(serviceId))
+        } catch (e: Exception) {
+            promise.reject("ERROR_DISCOVER_LISTINGS", "Failed to discover listings: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun discoveredListings(filterJson: String?, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.discoveredListings(filterJson))
+        } catch (e: Exception) {
+            promise.reject("ERROR_DISCOVERED_LISTINGS", "Failed to read discovered listings: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun invokeListing(provider: String, serviceId: String, method: String, body: String, maxUnits: Double, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            val requestId = xchg.invokeListing(provider, serviceId, method, body, maxUnits.toLong().toULong())
+            promise.resolve(requestId)
+        } catch (e: Exception) {
+            promise.reject("ERROR_INVOKE_LISTING", "Failed to invoke listing: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun declareInvocationUsage(requestId: String, units: Double, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            xchg.declareInvocationUsage(requestId, units.toLong().toULong())
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_DECLARE_USAGE", "Failed to declare invocation usage: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun pullAdapter(provider: String, serviceId: String, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.pullAdapter(provider, serviceId))
+        } catch (e: Exception) {
+            promise.reject("ERROR_PULL_ADAPTER", "Failed to pull adapter: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun creditExchangeBalance(currency: String, amountMinor: Double, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.creditBalance(currency, amountMinor.toLong().toULong()))
+        } catch (e: Exception) {
+            promise.reject("ERROR_CREDIT_BALANCE", "Failed to credit exchange balance: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getExchangeBalance(currency: String, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.getBalance(currency))
+        } catch (e: Exception) {
+            promise.reject("ERROR_GET_BALANCE", "Failed to get exchange balance: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun getExchangeReceipts(promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.getReceipts())
+        } catch (e: Exception) {
+            promise.reject("ERROR_GET_RECEIPTS", "Failed to get exchange receipts: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun pendingExchangeReceipts(promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.pendingReceipts())
+        } catch (e: Exception) {
+            promise.reject("ERROR_PENDING_RECEIPTS", "Failed to get pending receipts: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun markExchangeReceiptsSettled(receiptIds: ReadableArray, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            val ids = mutableListOf<String>()
+            for (i in 0 until receiptIds.size()) {
+                receiptIds.getString(i)?.let { ids.add(it) }
+            }
+            xchg.markReceiptsSettled(ids)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("ERROR_MARK_SETTLED", "Failed to mark receipts settled: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun publisherReputation(publisher: String, promise: Promise) {
+        try {
+            val xchg = meshExchange ?: throw IllegalStateException("MeshExchange not initialized")
+            promise.resolve(xchg.publisherReputation(publisher))
+        } catch (e: Exception) {
+            promise.reject("ERROR_PUBLISHER_REPUTATION", "Failed to read publisher reputation: ${e.message}", e)
+        }
+    }
+
     @ReactMethod
     fun receiveMessage(promise: Promise) {
         val messageJson = protocol?.receiveMessage()
@@ -1342,6 +1506,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
             protocol = null
             meshServices = null
+            meshExchange = null
             listenerCount = 0
             currentConfig = null
             promise.resolve(null)
